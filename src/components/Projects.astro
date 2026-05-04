@@ -10,25 +10,42 @@ interface Props {
 const { featuredOnly = false } = Astro.props;
 
 // const allProjectsData = await augmentProjectsWithImages(projectsData as ProjectEntry[]);
-const allProjectsData = projectsData as ProjectEntry[];
+type ProjectCardEntry = ProjectEntry & { categories: string[] };
+
+const allProjectsData = (projectsData as ProjectEntry[]).map((project) => ({
+  ...project,
+  categories: Array.isArray(project.category) ? project.category : [project.category],
+})) as ProjectCardEntry[];
 const displayProjects = featuredOnly
   ? allProjectsData.filter((p) => p.sliderImage)
   : allProjectsData;
 
 // Filter values must match the `category` field used in projects.json entries.
 const filters = [
-  { label: 'Featured', value: 'featured' },
   { label: 'All', value: 'all' },
   { label: 'Computer Vision', value: 'computer_vision' },
-  { label: 'Web Dev', value: 'web' },
+  { label: 'Web', value: 'web' },
   { label: 'Image Processing', value: 'image_processing' },
+  { label: 'Deep Learning', value: 'deep_learning' },
 ];
+
+const categoryValueToLabel = Object.fromEntries(
+  filters.filter((f) => f.value !== 'featured' && f.value !== 'all').map((f) => [f.value, f.label])
+);
+
+function getProjectCategories(project: ProjectCardEntry) {
+  return project.categories.map((category) => category.trim().toLowerCase()).filter(Boolean);
+}
+
+function getCategoryLabel(value: string): string {
+  return categoryValueToLabel[value.toLowerCase()] || value;
+}
 
 const projectsJson = JSON.stringify(
   allProjectsData.map((p) => ({
     ...p,
     sliderImage: p.sliderImage ? withBase(p.sliderImage) : p.sliderImage,
-    backgroundImage: p.backgroundImage ? withBase(p.backgroundImage) : p.backgroundImage,
+    featuredImage: p.featuredImage ? withBase(p.featuredImage) : p.featuredImage,
     images: p.images ? p.images.map((img) => withBase(img)) : [],
     slides: p.slides ?? [],
   }))
@@ -48,7 +65,7 @@ const projectsJson = JSON.stringify(
           <button
             class="filter-btn"
             data-filter={f.value}
-            aria-pressed={f.value === 'featured' ? 'true' : 'false'}
+            aria-pressed={f.value === 'all' ? 'true' : 'false'}
           >
             {f.label}
             <span class="filter-count" data-count={f.value} />
@@ -65,7 +82,7 @@ const projectsJson = JSON.stringify(
         displayProjects.map((project, i) => (
           <div
             class="project-card reveal"
-            data-category={project.category}
+            data-categories={getProjectCategories(project).join('|')}
             data-featured={(project as any).featured ? 'true' : 'false'}
             data-index={i}
             style={`transition-delay: ${(i % 3) * 0.07}s;`}
@@ -74,10 +91,10 @@ const projectsJson = JSON.stringify(
             aria-label={`Open details for ${project.title}`}
           >
             <div class="project-card-inner">
-              {project.backgroundImage && (
+              {project.featuredImage && (
                 <div class="card-img-wrap" aria-hidden="true">
                   <img
-                    src={withBase(project.backgroundImage!)}
+                    src={withBase(project.featuredImage!)}
                     alt=""
                     loading="lazy"
                     width="600"
@@ -109,7 +126,9 @@ const projectsJson = JSON.stringify(
 
               <div class="project-footer">
                 <div class="footer-shimmer" aria-hidden="true" />
-                <span class="category-badge">{project.category}</span>
+                <span class="category-badge">
+                  {project.categories.map(getCategoryLabel).join(' · ')}
+                </span>
                 {/* {project.icon && icons[project.icon] && (
                   <div class="card-icon shrink-0">
                     <svg
@@ -278,7 +297,10 @@ const projectsJson = JSON.stringify(
 <!-- define:vars injects the server-rendered JSON blob as a JS variable in this inline script.
      is:inline is required alongside define:vars; without it Astro would bundle the script
      and the injected variable would not be in scope. -->
-<script is:inline define:vars={{ projectsJson, githubUser: personalData.github }}>
+<script
+  is:inline
+  define:vars={{ projectsJson, githubUser: personalData.github, categoryValueToLabel }}
+>
   const projects = JSON.parse(projectsJson);
 
   document.querySelectorAll('#projects .reveal').forEach((el) => {
@@ -295,33 +317,48 @@ const projectsJson = JSON.stringify(
   });
 
   const filterBtns = document.querySelectorAll('.filter-btn');
-  const cards = document.querySelectorAll('.project-card[data-category]');
+  const cards = document.querySelectorAll('.project-card[data-categories]');
   const empty = document.getElementById('projects-empty');
   let active = null;
 
+  function getCardCategories(card) {
+    return (card.dataset.categories || '')
+      .split('|')
+      .map((category) => category.trim().toLowerCase())
+      .filter(Boolean);
+  }
+
   document.querySelectorAll('.filter-count').forEach((el) => {
     const cat = el.dataset.count;
+    const filterKey = (cat || '').trim().toLowerCase();
     let n;
-    if (cat === 'all') n = cards.length;
-    else if (cat === 'featured') n = [...cards].filter((c) => c.dataset.featured === 'true').length;
-    else n = [...cards].filter((c) => c.dataset.category === cat).length;
+    if (filterKey === 'all') n = cards.length;
+    else if (filterKey === 'featured')
+      n = [...cards].filter((c) => c.dataset.featured === 'true').length;
+    else
+      n = [...cards].filter((c) => {
+        const categories = getCardCategories(c);
+        return categories.includes(filterKey);
+      }).length;
     el.textContent = `${n}`;
   });
 
   function applyFilter(filter) {
-    if (filter === active) return;
-    active = filter;
+    const filterKey = (filter || '').trim().toLowerCase();
+    if (filterKey === active) return;
+    active = filterKey;
     filterBtns.forEach((b) => {
-      const on = b.dataset.filter === filter;
+      const on = (b.dataset.filter || '').trim().toLowerCase() === filterKey;
       b.classList.toggle('filter-active', on);
       b.setAttribute('aria-pressed', String(on));
     });
     let visible = 0;
     cards.forEach((card) => {
+      const categories = getCardCategories(card);
       const matches =
-        filter === 'all' ||
-        (filter === 'featured' && card.dataset.featured === 'true') ||
-        card.dataset.category === filter;
+        filterKey === 'all' ||
+        (filterKey === 'featured' && card.dataset.featured === 'true') ||
+        categories.includes(filterKey);
       card.classList.remove('pf-enter');
       if (!matches) {
         card.classList.add('pf-hidden');
@@ -342,8 +379,8 @@ const projectsJson = JSON.stringify(
     btn.addEventListener('click', () => applyFilter(btn.dataset.filter));
   });
 
-  applyFilter('featured');
-  document.querySelector('[data-filter="featured"]')?.classList.add('filter-active');
+  applyFilter('all');
+  document.querySelector('[data-filter="all"]')?.classList.add('filter-active');
 
   const modal = document.getElementById('project-modal');
   const container = document.getElementById('modal-container');
@@ -384,8 +421,13 @@ const projectsJson = JSON.stringify(
   function openModal(idx) {
     const p = projects[idx];
     if (!p) return;
+    const categories = Array.isArray(p.categories)
+      ? p.categories
+      : Array.isArray(p.category)
+        ? p.category
+        : [p.category];
 
-    const img = p.backgroundImage || null;
+    const img = p.featuredImage || null;
     if (img) {
       modalHero.style.backgroundImage = `url('${img}')`;
       modalHero.style.display = '';
@@ -394,7 +436,8 @@ const projectsJson = JSON.stringify(
       modalHero.style.display = 'none';
     }
 
-    modalCat.textContent = p.category;
+    const categoryLabels = categories.map((cat) => categoryValueToLabel[cat] || cat);
+    modalCat.textContent = categoryLabels.join(' · ');
     modalTitle.textContent = p.title;
     modalCo.textContent = p.company;
     modalDesc.textContent = p.description;
