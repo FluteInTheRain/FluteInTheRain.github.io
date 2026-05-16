@@ -168,7 +168,7 @@ export interface ProjectEntry {
   sliderImage?: string;
   sliderOrder?: number;
   backgroundImage?: string;
-  link: string;
+  projectSite: string;
   colorIcon?: string;
   githubRepo?: string;
 }
