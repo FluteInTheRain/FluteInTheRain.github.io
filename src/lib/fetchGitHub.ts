@@ -163,7 +163,7 @@ export interface ProjectEntry {
   category: string;
   description: string;
   tags: string[];
-  icon: string;
+  icon?: string;
   featuredImage?: string;
   sliderImage?: string;
   sliderOrder?: number;
@@ -171,6 +171,8 @@ export interface ProjectEntry {
   projectSite: string;
   colorIcon?: string;
   githubRepo?: string;
+  images?: string[];
+  slides?: string[];
 }
 
 // Singleton promise: Astro evaluates Hero.astro and Projects.astro in the same build pass.
