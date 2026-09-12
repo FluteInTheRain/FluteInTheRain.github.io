@@ -79,7 +79,6 @@ function renderHero(data) {
     <section class="hero">
       <div class="container hero-grid">
         <div>
-          <p class="eyebrow hero-eyebrow">${esc(hero.eyebrow)}</p>
           <h1 class="hero-heading">${esc(hero.heading)}</h1>
           <p class="hero-bio">${esc(hero.bio)}</p>
           <div class="hero-cta-row">
