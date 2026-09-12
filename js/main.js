@@ -113,6 +113,13 @@ function renderHighlights(data) {
     </section>`;
 }
 
+function experienceBody(it) {
+  if (it.bullets && it.bullets.length) {
+    return `<ul class="t-bullets">${it.bullets.map((b) => `<li>${esc(b)}</li>`).join('')}</ul>`;
+  }
+  return `<p class="t-desc">${esc(it.desc)}</p>`;
+}
+
 function renderExperience(data) {
   const e = data.experience;
   const items = e.items.map((it, i) => `
@@ -125,7 +132,7 @@ function renderExperience(data) {
         <div class="t-head"><span class="t-date">${esc(it.dateRange)}</span></div>
         <h3 class="t-role">${esc(it.role)}</h3>
         <p class="t-org">${esc(it.org)}</p>
-        <p class="t-desc">${esc(it.desc)}</p>
+        ${experienceBody(it)}
       </div>
     </div>`).join('');
   return `
@@ -194,7 +201,7 @@ function renderSkills(data) {
       <div class="skill-tags">${g.items.map((i) => `<span class="tag">${esc(i)}</span>`).join('')}</div>
     </div>`).join('');
   return `
-    <section class="section alt-bg">
+    <section class="section alt-bg" id="skills">
       <div class="container">
         <p class="eyebrow">${esc(s.eyebrow)}</p>
         <h2 class="section-title">${esc(s.heading)}</h2>
