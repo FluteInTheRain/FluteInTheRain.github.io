@@ -60,7 +60,7 @@ function renderNav(data) {
         </a>
         <div class="nav-links" id="nav-links">${links}</div>
         <div class="nav-actions">
-          <a class="btn btn-outline-red" href="${esc(nav.resumeUrl)}">Resume</a>
+          <a class="btn btn-outline-red" href="${esc(nav.resumeUrl)}" target="_blank" rel="noopener">Resume</a>
           <button class="icon-btn" id="theme-toggle" type="button" aria-label="Toggle dark mode">${icon(currentTheme === 'dark' ? 'sun' : 'moon', 18)}</button>
           <button class="icon-btn nav-hamburger" id="nav-hamburger" type="button" aria-label="Toggle menu">${icon('hamburger', 18)}</button>
         </div>
@@ -83,7 +83,7 @@ function renderHero(data) {
           <p class="hero-bio">${esc(hero.bio)}</p>
           <div class="hero-cta-row">
             <a class="btn btn-primary" href="mailto:${esc(person.email)}">${esc(hero.ctaPrimary.label)}</a>
-            <a class="btn btn-outline" href="${esc(hero.ctaSecondary.href)}"${downloadAttr}>${esc(hero.ctaSecondary.label)}</a>
+            <a class="btn btn-outline" href="${esc(hero.ctaSecondary.href)}" target="_blank" rel="noopener"${downloadAttr}>${esc(hero.ctaSecondary.label)}</a>
           </div>
           <div class="hero-socials">${socials}</div>
         </div>
@@ -228,7 +228,7 @@ function projectBody(p) {
 function projectCard(p) {
   const tags = p.tags.map((t) => `<span class="tag">${esc(t)}</span>`).join('');
   const links = (p.links || []).length
-    ? `<div class="project-links">${p.links.map((l) => `<a class="project-link" href="${esc(l.href)}">${esc(l.label)} &rarr;</a>`).join('')}</div>`
+    ? `<div class="project-links">${p.links.map((l) => `<a class="project-link" href="${esc(l.href)}" target="_blank" rel="noopener">${esc(l.label)} &rarr;</a>`).join('')}</div>`
     : '';
   return `
     <div class="card project-card">
@@ -267,7 +267,7 @@ function renderResearch(data) {
   if (!r) return '';
   const pubs = r.publications.map((pub) => `
     <div class="card pub-card">
-      <a class="pub-title" href="${esc(pub.href)}">${esc(pub.title)}</a>
+      <a class="pub-title" href="${esc(pub.href)}" target="_blank" rel="noopener">${esc(pub.title)}</a>
       <div class="pub-meta">${esc(pub.venue)} &middot; ${esc(pub.year)}</div>
     </div>`).join('');
   return `
@@ -277,7 +277,7 @@ function renderResearch(data) {
         <h2 class="section-title">${esc(r.heading)}</h2>
         <p class="section-sub">${esc(r.subheading)}</p>
         <div class="pub-grid">${pubs}</div>
-        <a class="btn btn-outline-band" href="${esc(r.scholarLink)}">View All On Google Scholar &rarr;</a>
+        <a class="btn btn-outline-band" href="${esc(r.scholarLink)}" target="_blank" rel="noopener">View All On Google Scholar &rarr;</a>
       </div>
     </section>`;
 }
