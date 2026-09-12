@@ -376,7 +376,7 @@ function render(data) {
 async function init() {
   initTheme();
   try {
-    const res = await fetch('data/content.json');
+    const res = await fetch('data/content.json', { cache: 'no-store' });
     if (!res.ok) throw new Error(`Failed to load content.json (${res.status})`);
     const data = await res.json();
     render(data);
