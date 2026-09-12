@@ -182,15 +182,13 @@ function renderEducation(data) {
         <p class="eyebrow">${esc(ed.eyebrow)}</p>
         <h2 class="section-title">${esc(ed.heading)}</h2>
         <p class="section-sub">${esc(ed.subheading)}</p>
-        <div class="education-grid">
-          <div>
-            <p class="sub-label">Education</p>
-            <div class="credential-list">${degrees}</div>
-          </div>
-          <div>
-            <p class="sub-label">Certificates</p>
-            <div class="credential-list">${certs}</div>
-          </div>
+        <div>
+          <p class="sub-label">Education</p>
+          <div class="credential-list" style="margin-bottom: 44px;">${degrees}</div>
+        </div>
+        <div>
+          <p class="sub-label">Certificates</p>
+          <div class="credential-list">${certs}</div>
         </div>
       </div>
     </section>`;
