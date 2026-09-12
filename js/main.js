@@ -54,10 +54,10 @@ function renderNav(data) {
   return `
     <div class="nav">
       <div class="container nav-inner">
-        <div>
+        <a class="nav-brand" href="#">
           <div class="nav-name">${esc(person.name)}</div>
           <div class="nav-role">${esc(person.role)}</div>
-        </div>
+        </a>
         <div class="nav-links" id="nav-links">${links}</div>
         <div class="nav-actions">
           <a class="btn btn-outline-red" href="${esc(nav.resumeUrl)}">Resume</a>
@@ -154,8 +154,11 @@ function viewLink(url) {
 function credentialCard(item) {
   const meta = item.school
     ? `${esc(item.school)} &middot; ${esc(item.years)}`
-    : `${esc(item.issuer)} &middot; ${esc(item.year)}`;
-  const extra = item.gpa ? `<div class="credential-extra">GPA ${esc(item.gpa)}</div>` : '';
+    : [item.issuer, item.year].filter(Boolean).map(esc).join(' &middot; ');
+  const notes = [item.gpa ? `GPA ${item.gpa}` : null, item.note]
+    .filter(Boolean)
+    .map((n) => `<div class="credential-extra">${esc(n)}</div>`)
+    .join('');
   const title = item.degree || item.title;
   return `
     <div class="card credential-card">
@@ -163,7 +166,7 @@ function credentialCard(item) {
       <div class="credential-body">
         <div class="credential-title">${esc(title)}</div>
         <div class="credential-meta">${meta}</div>
-        ${extra}
+        ${notes}
         ${viewLink(item.url)}
       </div>
     </div>`;
@@ -211,6 +214,19 @@ function renderSkills(data) {
     </section>`;
 }
 
+function projectBody(p) {
+  const intro = p.desc ? `<p class="project-desc">${esc(p.desc)}</p>` : '';
+  if (p.bullets && p.bullets.length) {
+    const items = p.bullets.map((b) => (
+      b.label
+        ? `<li><strong>${esc(b.label)}:</strong> ${esc(b.text)}</li>`
+        : `<li>${esc(b.text || b)}</li>`
+    )).join('');
+    return `${intro}<ul class="project-bullets">${items}</ul>`;
+  }
+  return intro;
+}
+
 function projectCard(p) {
   const tags = p.tags.map((t) => `<span class="tag">${esc(t)}</span>`).join('');
   const links = (p.links || []).length
@@ -220,7 +236,7 @@ function projectCard(p) {
     <div class="card project-card">
       <h3 class="project-title">${esc(p.title)}</h3>
       <span class="project-org">${esc(p.org)}</span>
-      <p class="project-desc">${esc(p.desc)}</p>
+      ${projectBody(p)}
       <div class="project-tags">${tags}</div>
       ${links}
     </div>`;
