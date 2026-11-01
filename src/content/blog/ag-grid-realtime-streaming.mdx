@@ -1,0 +1,138 @@
+---
+title: "Keeping a real-time AG Grid table smooth: batching, delta updates, and cheap cells"
+description: "A live demo and four practical techniques for rendering thousands of streaming updates per second in AG Grid without freezing the UI."
+date: 2026-11-01
+category: "frontend"
+tags: ["ag-grid", "react", "performance", "real-time"]
+draft: true
+---
+
+import Callout from '../../components/mdx/Callout.astro';
+import DemoFrame from '../../components/mdx/DemoFrame.astro';
+import GridStreamingDemo from '../../components/demos/GridStreamingDemo.tsx';
+
+Price boards, order books, monitoring dashboards: they all show a table whose cells change many times per second. Libraries like AG Grid already virtualize rows, so a table with 10,000 rows only keeps a handful of them in the DOM. That head start is easy to waste. How you *feed* the grid usually matters more than the grid's own settings.
+
+This post walks through four changes that keep a streaming table smooth, and gives you a live demo to feel the difference yourself.
+
+## Try it first
+
+The demo below simulates a market-data feed. Both modes receive exactly the same stream of updates; only the way they hand it to the grid differs.
+
+<DemoFrame title="Naive vs. optimized streaming into AG Grid">
+  <GridStreamingDemo client:only="react" />
+</DemoFrame>
+
+<Callout type="tip" title="Can't see a difference?">
+On a fast desktop both modes can look fine. That is itself a lesson: your users are not all on your machine. Open DevTools → Performance → set **CPU: 6× slowdown**, then pick **10,000 rows** and **5,000 updates/s**. In a quick test I ran this way in Chrome, the naive version dropped to about 31 frames per second while the optimized one stayed at 60. Without throttling, both held 60. Your numbers will differ, so measure on your own hardware.
+</Callout>
+
+Watch the last stat card, **rows pushed to grid per second**. That number is the story: the naive mode hands the grid every row on every message, while the optimized mode sends only the rows that actually changed, a few times per second.
+
+## 1. Give every row a stable ID and send deltas
+
+The most common mistake is replacing the whole dataset whenever a message arrives:
+
+```ts
+// Anti-pattern: the grid has to diff (or rebuild) every row on every tick
+socket.onmessage = () => {
+  api.setGridOption('rowData', rows.map((r) => ({ ...r })));
+};
+```
+
+Without a way to identify rows, the grid treats each new array as brand-new data and rebuilds its row nodes. Tell it how to identify a row, then send only what changed:
+
+```ts
+<AgGridReact
+  getRowId={(p) => p.data.id}   // stable, unique key per row
+  rowData={initialRows}
+/>
+
+// later, for each batch of changes:
+api.applyTransaction({ update: changedRows });
+```
+
+`getRowId` matters twice. It lets the grid find the existing row for an update, and it keeps row identity stable so the DOM for unchanged rows is left alone. Without it, update transactions match rows by object reference, and the fresh objects coming off the wire would never match.
+
+## 2. Coalesce updates, then flush in batches
+
+Real feeds are bursty and often update the same instrument many times within a few milliseconds. Painting every intermediate value is wasted work: the human eye cannot see them, and the browser can only paint once per frame anyway.
+
+Keep a map of the **latest** value per row ID and flush it on a timer:
+
+```ts
+const pending = new Map<string, Row>();
+
+socket.onmessage = (msg) => {
+  const row = parse(msg);
+  pending.set(row.id, row); // latest wins
+};
+
+setInterval(() => {
+  if (pending.size === 0) return;
+  const batch = Array.from(pending.values());
+  pending.clear();
+  api.applyTransaction({ update: batch });
+}, 100);
+```
+
+A 100 ms flush interval means at most 10 grid updates per second, however fast the feed runs, and each update contains each changed row only once. That is how the demo turns thousands of incoming updates per second into a few thousand rows pushed, instead of tens or hundreds of thousands.
+
+<Callout type="note" title="Built-in alternative">
+AG Grid also offers `api.applyTransactionAsync()`, which queues transactions and applies them together after `asyncTransactionWaitMillis` (50 ms by default). It batches for you, but it does not coalesce multiple updates to the same row. Writing the small `Map` above gives you that, plus full control over the flush rate.
+</Callout>
+
+## 3. Keep cells cheap
+
+At thousands of updates per second, per-cell cost dominates. Two habits help:
+
+- **Prefer `valueFormatter` and `cellClassRules` over custom cell renderers.** A framework component per cell has a real mount and update cost. Formatting a number and toggling a CSS class does not.
+- **Be selective with `enableCellChangeFlash`.** The flash effect is lovely on a price column and distracting (and not free) on all six columns.
+
+```ts
+const columnDefs = [
+  { field: 'last', valueFormatter: fmtPrice, enableCellChangeFlash: true },
+  {
+    field: 'changePct',
+    valueFormatter: fmtChange,
+    // colour via a class instead of rendering a <span> in a component
+    cellClassRules: {
+      'up': (p) => p.value >= 0,
+      'down': (p) => p.value < 0,
+    },
+  },
+];
+```
+
+The naive mode in the demo uses a React cell renderer for the change column; the optimized mode uses the code above.
+
+## 4. Turn off what you are not using
+
+Some defaults are tuned for friendly, low-frequency data:
+
+- **`animateRows={false}`** for fast streams. Animating rows that move or update at high frequency only adds work.
+- **`deltaSort`** if the grid is sorted on a column that changes. With it enabled, the grid re-sorts only the changed rows instead of the entire dataset on every transaction.
+- **Leave `rowBuffer` alone** unless you have measured a reason. A larger buffer renders more rows outside the viewport, which is the opposite of what you want while streaming.
+
+## How to measure, not guess
+
+The stat cards in the demo are deliberately simple, and you can reproduce them in any app:
+
+1. **Frames per second:** count `requestAnimationFrame` callbacks per second. Below roughly 30, the UI feels laggy.
+2. **Longest frame:** track the largest gap between frames. A single 150 ms frame is a visible stutter even when the average looks healthy.
+3. **Chrome DevTools → Performance:** record a few seconds of streaming with CPU throttling on. Look for long tasks, and for scripting time spent in the grid's row creation versus your own code.
+
+<Callout type="warning" title="Don't skip the throttle">
+Optimizing on a fast development machine hides exactly the problem you are trying to fix. Always profile with CPU throttling, and on a real mid-range device if you can.
+</Callout>
+
+## Checklist
+
+- [ ] Every row has a stable `getRowId`.
+- [ ] Incoming messages are coalesced per row and flushed on an interval, not applied one by one.
+- [ ] Updates go through `applyTransaction`, never a full `rowData` replacement.
+- [ ] Cells use `valueFormatter` and `cellClassRules`, not heavy renderers.
+- [ ] `animateRows` is off, and flashing is limited to the columns that need it.
+- [ ] Performance was checked with CPU throttling.
+
+If you have a streaming table that still struggles after these, the next places to look are column count, expensive `valueGetter`s, and whether anything else on the page is competing for the main thread.
