@@ -62,4 +62,10 @@ cd ~/.claude/skills/excalidraw-diagram/references && uv sync && uv run playwrigh
 
 Check the renderer: `uv run python render_excalidraw.py <file>.excalidraw` (run inside `references/`) writes a PNG next to the file.
 
-Known issue: the renderer loads Excalidraw from esm.sh, and the latest version (0.18.1) was broken on 2026-11-15. In `~/.claude/skills/excalidraw-diagram/references/render_template.html`, pin the import to `@excalidraw/excalidraw@0.18.0?bundle`.
+Known issue: the renderer loads Excalidraw from esm.sh, and the latest version (0.18.1) was broken on 2026-11-15. Pin the import with this macOS command (on Linux drop the `''` after `-i`):
+
+```bash
+sed -i '' 's#https://esm.sh/@excalidraw/excalidraw[^"]*#https://esm.sh/@excalidraw/excalidraw@0.18.0?bundle#' ~/.claude/skills/excalidraw-diagram/references/render_template.html
+```
+
+The diagram colours come from the book-to-post style guide (`.claude/skills/book-to-post/style-guide.md`), so the skill's default palette file does not need editing.
