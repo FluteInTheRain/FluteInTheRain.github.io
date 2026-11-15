@@ -57,7 +57,7 @@ Send one proposal and **wait for Khang's OK** before writing:
 
 - **Title**: specific; says what the reader gets. No clickbait.
 - **Angle**: one sentence on the question the post answers and for whom. The post is built around this angle, Khang's answers and the research, not around the chapter's order. A chapter summary with the words shuffled is a failure.
-- **Category**: one of `CATEGORY_IDS` in `src/data/categories.ts` (read the file; today: frontend, backend, database, devops, ai, system-design, finance). If none fits, say so and propose adding one to `categories.ts` (and the category list comment in `src/content/blog/_TEMPLATE.md.txt`).
+- **Category**: one of `CATEGORY_IDS` in `src/data/categories.ts` (read the file; today: frontend, backend, database, devops, ai, system-design, finance). If none fits, say so and propose adding one (when you cannot ask, pick the closest and flag it in the hand-over) to `categories.ts` (and the category list comment in `src/content/blog/_TEMPLATE.md.txt`).
 - **Tags** and **post slug** (kebab-case; it becomes the URL `/blog/<post-slug>/`).
 - **Outline**: every `##` section with the visual planned for it (Excalidraw diagram, table, code block or `Callout`) and one line on what that visual shows. Include the TL;DR, "Key takeaways" and "Review questions".
 - **Sources**: the book (chapters) and the articles you plan to cite. Mention any book-vs-web conflict from Step 2.
@@ -118,19 +118,19 @@ If the renderer fails, stop and tell Khang with the error. Do not ship a post wi
 ## Step 7: Humanize the prose
 
 1. Copy the post first: `cp src/content/blog/<post-slug>.mdx "$TMPDIR/<post-slug>.before.mdx"`.
-2. Run `/humanizer:humanizer` in file mode on `src/content/blog/<post-slug>.mdx`. Tell it: change prose only; leave the frontmatter, `import` lines, code blocks, inline code, JSX tags (`<Figure … />`, `<Callout …>`, `</Callout>`), link targets and quotations untouched; keep every fact and number; keep the voice in `voice.md`. (If file mode misbehaves, give it the body paragraph by paragraph instead.)
-3. Confirm none of those changed. This must print `non-prose unchanged`:
+2. Run `/humanizer:humanizer` (invoke it through the Skill tool) in file mode on `src/content/blog/<post-slug>.mdx`. Tell it: change prose only; leave the frontmatter, `import` lines, code blocks, inline code, JSX tags (`<Figure … />`, `<Callout …>`, `</Callout>`; keep each `<Figure />` on one line and every code fence at column 0), link targets and quotations untouched; keep every fact and number; keep the voice in `voice.md`. (If file mode misbehaves, give it the body paragraph by paragraph instead.)
+3. Confirm none of those changed (the function reads stdin on purpose: a `$1` in a skill file gets replaced by the slash-command arguments). This must print `non-prose unchanged`:
 
 ```bash
-keep() { awk '/^---$/ && fm<2 {fm++; print; next} fm==1 {print; next} /^```/ {code=!code; print; next} code || /^import / || /^[[:space:]]*<\/?[A-Z]/ {print}' "$1"; }
-diff <(keep "$TMPDIR/<post-slug>.before.mdx") <(keep src/content/blog/<post-slug>.mdx) && echo "non-prose unchanged"
+keep() { awk '/^---$/ && fm<2 {fm++; print; next} fm==1 {print; next} /^```/ {code=!code; print; next} code || /^import / || /^[[:space:]]*<\/?[A-Z]/ {print}'; }
+diff <(keep < "$TMPDIR/<post-slug>.before.mdx") <(keep < src/content/blog/<post-slug>.mdx) && echo "non-prose unchanged"
 ```
 
    If anything differs, restore those lines from the copy. Also eyeball inline code and quotes in `diff "$TMPDIR/<post-slug>.before.mdx" src/content/blog/<post-slug>.mdx`.
 
 ## Step 8: Build and hand over
 
-1. Run `npm run build`. It must pass. Fix and re-run on failure (usual causes: description over 180 characters, a category not in `CATEGORY_IDS`, a bad `url`, `{` or `<` in prose, a wrong image path).
+1. Run `npm run build`. It must pass. Draft posts are skipped by the production build, so it only checks the frontmatter; also load the page on `npm run dev` (`http://localhost:4321/blog/<post-slug>/`) and confirm it returns 200 with the images showing, which catches MDX body errors and wrong image paths. Fix and re-run on failure (usual causes: description over 180 characters, a category not in `CATEGORY_IDS`, a bad `url`, `{` or `<` in prose, a wrong image path).
 2. Tell Khang:
    - the file path `src/content/blog/<post-slug>.mdx` and the diagrams in `src/assets/blog/<post-slug>/`;
    - how to preview: `npm run dev`, then open `http://localhost:4321/blog/<post-slug>/` (drafts show in dev only);
