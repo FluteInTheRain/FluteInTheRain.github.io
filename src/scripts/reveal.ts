@@ -1,6 +1,6 @@
 // Subtle section fade-in on scroll. CSS (style.css, html.js .section) hides sections
 // only when JS is running; without JS or when printing, everything stays visible.
-const targets = Array.from(document.querySelectorAll<HTMLElement>('.section, .cta-band'));
+const targets = Array.from(document.querySelectorAll<HTMLElement>('.section:not(main), .cta-band'));
 
 function show(el: HTMLElement, instant = false) {
   if (instant) el.classList.add('is-instant');
@@ -36,7 +36,7 @@ function init() {
           io.unobserve(e.target);
         }
       },
-      { threshold: 0.08 },
+      { threshold: 0, rootMargin: '0px 0px -10% 0px' },
     );
     // Sections already on screen at load skip the transition (class added before the reveal transition can run).
     const vh = window.innerHeight;
