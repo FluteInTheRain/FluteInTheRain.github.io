@@ -33,12 +33,11 @@ Three steps, in order:
 | 2. Study | `/<book-slug> ch05` | Asks the book skill about a chapter or topic. |
 | 3. Draft | `/book-to-post <book-slug> [chapter or topic]` | Writes a blog post draft from the book. |
 
-```mermaid
-flowchart LR
-    A[books/file.pdf] -->|/book-to-skill| B[Book skill]
-    B -->|/book-slug ch05| C[Study answers]
-    B -->|/book-to-post| D[Draft post]
-```
+In short, the order is:
+
+1. Put the book file in `books/`.
+2. Run `/book-to-skill` once to make the book skill.
+3. Use `/<book-slug>` to study, and `/book-to-post` to draft.
 
 ## Where the drafts go
 
