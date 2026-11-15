@@ -48,10 +48,17 @@ function initProjects(section: HTMLElement) {
       if (phone.matches) setOpen(item, false);
       return;
     }
+    // Closing an open item above this one shifts it up; browsers without CSS
+    // scroll anchoring (Safari) would leave it off-screen, so keep it in place.
+    const before = item.getBoundingClientRect().top;
     itemsOf(panel).forEach((other) => {
       if (other !== item) setOpen(other, false);
     });
     setOpen(item, true);
+    if (phone.matches) {
+      const shift = item.getBoundingClientRect().top - before;
+      if (shift) window.scrollBy({ top: shift, behavior: 'instant' });
+    }
   }
 
   section.classList.add('is-enhanced');
@@ -60,9 +67,12 @@ function initProjects(section: HTMLElement) {
   if (initialTab) selectTab(initialTab);
   else panels.forEach((panel) => panel.classList.add('is-active'));
 
+  // Phone starts fully collapsed so the visitor sees the whole list first;
+  // desktop keeps the server-selected first item open.
   panels.forEach((panel) => {
     itemsOf(panel).forEach((item) => {
-      if (item.getAttribute('aria-expanded') === 'true') setOpen(item, true);
+      if (phone.matches) setOpen(item, false);
+      else if (item.getAttribute('aria-expanded') === 'true') setOpen(item, true);
     });
   });
 
@@ -92,7 +102,8 @@ function initProjects(section: HTMLElement) {
         else return;
         e.preventDefault();
         if (next === i) return;
-        selectItem(items[next]);
+        // Arrow keys only move and open; they never collapse an already-open item.
+        if (items[next].getAttribute('aria-expanded') !== 'true') selectItem(items[next]);
         items[next].focus();
       });
     });
