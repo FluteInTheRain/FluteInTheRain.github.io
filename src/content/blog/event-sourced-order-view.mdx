@@ -1,0 +1,103 @@
+---
+title: "Stop re-reading the whole order book: an event-sourced view with cursor pagination"
+description: "How to show every order of the day without hammering the upstream system: monotonic writes, a merged event stream, an honest \"incomplete\" flag and cursor pages."
+date: 2026-11-15
+category: "system-design"
+tags: ["event-sourcing", "kafka", "postgresql", "pagination", "react"]
+draft: true
+---
+
+import Callout from '../../components/mdx/Callout.astro';
+
+A trading screen I worked on had a classic problem. The orders table showed only the first few hundred rows, because two layers each had a hard cap. Worse, every order event made each open browser tab re-read the **entire** order book from the upstream system that owns the orders. More traders, more tabs, more events: the read load on that upstream system grew with all three.
+
+The fix was not a bigger cap. It was to stop treating the upstream system as the place to read from, and to build our own view of the book from the events we were already receiving.
+
+This post walks through the four decisions that made that work. The stack was a Python service, a Go backend-for-frontend (BFF) and a React UI, with PostgreSQL and Kafka in between, but the ideas carry over to any stack.
+
+## 1. Store live state, and never let a late event move a row backwards
+
+The service that sends orders also receives every execution report for them: accepted, partially filled, filled, cancelled. Instead of only logging those reports, it now writes each order's **current** state into PostgreSQL.
+
+Events can arrive out of order. A "filled" report can be followed by a delayed "accepted" for the same order. If the write simply overwrites, the row goes back in time. So every row stores the event time it was built from, and an update only applies when the incoming event is newer:
+
+```sql
+INSERT INTO orders (order_id, status, filled_qty, avg_price, event_ns)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (order_id) DO UPDATE
+SET status     = EXCLUDED.status,
+    filled_qty = EXCLUDED.filled_qty,
+    avg_price  = EXCLUDED.avg_price,
+    event_ns   = EXCLUDED.event_ns
+WHERE orders.event_ns < EXCLUDED.event_ns;   -- older events are ignored
+```
+
+One more rule sits on top: **a finished order never reopens.** Once a row is filled, cancelled or rejected, later events can add detail but cannot set it back to a working status.
+
+<Callout type="tip" title="Degrade, don't crash">
+New code often ships before its database migration. If the new columns are missing, the writer logs one warning and skips the live-state write, instead of failing the whole order path.
+</Callout>
+
+## 2. Merge two sources with explicit rules
+
+The BFF builds the book from two sources:
+
+- **PostgreSQL**, which holds every order's last stored state, and
+- **an order-event stream from Kafka**, which carries the newest changes, sometimes before they reach the database.
+
+Merging two sources is where bugs hide, so the rules are written down and tested one by one:
+
+1. **The newer event time wins.** Same rule as the write path, so the two never disagree.
+2. **A finished order stays finished**, whichever source reports it first.
+3. **Match rows that do not have an upstream ID yet.** An order sent a moment ago may have only our own ID; it must not appear twice when the upstream ID arrives.
+
+```go
+func merge(stored, live Order) Order {
+	if isFinal(stored.Status) && !isFinal(live.Status) {
+		return stored // never reopen a finished order
+	}
+	if live.EventNs > stored.EventNs {
+		return live
+	}
+	return stored
+}
+```
+
+## 3. Say "incomplete" instead of returning a short list
+
+After a restart, the BFF has to read the event stream from the start of the day before its view is whole. During those seconds it could return a short list and look fine, which is exactly the kind of quiet wrong answer that erodes trust in a trading screen.
+
+Instead, every response carries a `complete` flag. While the stream is still catching up, the UI shows that the book is loading rather than presenting a partial book as the full one.
+
+```json
+{ "orders": [ ... ], "complete": false, "next_cursor": "..." }
+```
+
+## 4. Page with a cursor, not an offset
+
+With thousands of rows and new ones arriving all the time, `LIMIT/OFFSET` breaks down: a row inserted at the top shifts every page, so users see duplicates or miss rows. A cursor on a stable, unique sort key does not have that problem.
+
+```sql
+SELECT *
+FROM fills
+WHERE (ts, id) < ($1, $2)          -- the cursor: last row of the previous page
+ORDER BY ts DESC, id DESC
+LIMIT 200;
+```
+
+The `id` breaks ties between rows with the same timestamp, so no row is ever skipped or shown twice. Filtering moved into SQL too, instead of loading everything and filtering in memory.
+
+On the React side the table is **virtualized** (only visible rows are in the DOM) and **scroll-anchored**, so loading the next page or inserting a new row does not make the list jump under the reader's eyes. The UI reloads after a quiet period, on reconnect, or when the user asks, instead of on every single event.
+
+## What changed
+
+In local testing, repeated loads of the book made **zero** reads to the upstream system, a fill showed up immediately on its stored order, and after a BFF restart the book reported itself incomplete and then completed within seconds.
+
+Code review was worth it here. It caught four real problems before release: duplicate rows before an order was acknowledged, a final state being overwritten, a crash when the migration was missing, and a stream reader that could be lost on restart.
+
+## Takeaways
+
+- **Make ordering explicit.** Store event time and only write forward. Do not rely on arrival order.
+- **Write merge rules down and test each one.** "Newer wins" and "finished stays finished" are simple to state and easy to break.
+- **Be honest about incomplete data.** A `complete: false` flag is better than a confident, short answer.
+- **Use cursors for live lists.** Offsets and inserts do not mix.
