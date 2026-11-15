@@ -18,7 +18,7 @@ The reader is a developer new to the topic. They should understand each idea on 
   Example: "An idempotent operation (one you can run twice with the same result as once) …". Define the term in the same sentence, not three sections later.
 
 - [ ] **A one-paragraph "TL;DR" at the top; "Key takeaways" and "Review questions" at the end.**
-  - TL;DR: a `<Callout type="note" title="TL;DR">` right after the imports. One paragraph: the problem, the answer, why it matters.
+  - TL;DR: a `<Callout type="note" title="TL;DR">` right after the imports, with the open and close tags each on their own line. One paragraph: the problem, the answer, why it matters.
   - `## Key takeaways`: 3–5 bullets, each a full sentence a reader could act on.
   - `## Review questions`: 3–5 numbered questions that test understanding, not recall ("Why would…", "What breaks if…"). Name the section that answers each one.
 
@@ -27,7 +27,9 @@ The reader is a developer new to the topic. They should understand each idea on 
 ```
 frontmatter
 imports (Callout, Figure, each PNG)
-<Callout type="note" title="TL;DR"> … </Callout>
+<Callout type="note" title="TL;DR">
+One paragraph.
+</Callout>
 Opening: 1–2 short paragraphs. The problem, in concrete terms, and why the reader should care.
 ## One section per idea, in the order that answers the angle (not the chapter's order)
 ## Key takeaways

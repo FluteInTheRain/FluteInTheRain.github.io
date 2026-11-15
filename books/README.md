@@ -1,6 +1,6 @@
 # books/ — drop folder for source books
 
-Put book files here (PDF, EPUB, MOBI). Claude reads them so it can write blog posts from them.
+Put book files here (PDF, EPUB, MOBI/AZW; MOBI and AZW need Calibre: `brew install --cask calibre`). Claude reads them so it can write blog posts from them.
 
 **Never commit anything in this folder.** Books are copyrighted. `.gitignore` ignores everything in `books/` except this README.
 
@@ -29,7 +29,7 @@ Three steps, in order:
 
 | Step | Command | What it does |
 |------|---------|--------------|
-| 1. Import | `/book-to-skill books/<file> <book-slug>` | Turns the book into a study skill. When it asks to push to GitHub, answer **no**. |
+| 1. Import | `/book-to-skill books/<file> <book-slug>` | Turns the book into a study skill. When it asks to publish ("publish … (yes / skip)"), answer **skip**; it would default to private anyway. |
 | 2. Study | `/<book-slug> ch05` | Asks the book skill about a chapter or topic. |
 | 3. Draft | `/book-to-post <book-slug> [chapter or topic]` | Writes a blog post draft from the book. |
 
@@ -45,7 +45,7 @@ Drafts are saved to `src/content/blog/<post-slug>.mdx` with `draft: true`, so th
 
 ## Setup (once per machine)
 
-Install three user-level skills. Nothing is copied into this repo.
+Install `uv` first (`brew install uv`; the diagram renderer needs it), then three user-level skills. Nothing is copied into this repo.
 
 ```bash
 # 1. book-to-skill (imports a book as a skill into ~/.claude/skills/book-to-skill)
