@@ -1,0 +1,138 @@
+---
+name: book-to-post
+description: Draft a blog post for this site from a book Khang imported with /book-to-skill, plus web research, with Excalidraw diagrams and a human voice. Use for "/book-to-post <book-slug> [chapter or topic]", "write a post from <book>", "viết bài từ sách".
+---
+
+# book-to-post
+
+Turn a book chapter or topic into a draft post at `src/content/blog/<post-slug>.mdx` (`draft: true`), with diagrams in `src/assets/blog/<post-slug>/`.
+
+Usage: `/book-to-post <book-slug> [chapter or topic]`. No book slug given: ask for it.
+
+The post has to do three jobs: teach other readers, help Khang learn and review the topic, and show recruiters how he thinks. It must read as written by a person and explain with diagrams and tables, not walls of text.
+
+Do the 8 steps in order. Steps 3 and 4 wait for Khang. Do not skip ahead.
+
+## Never
+
+- Commit anything under `books/`, or copy a book skill (`~/.claude/skills/<book-slug>/`) into this repo. The repo is public and books are copyrighted.
+- Copy book text beyond short quotes (a sentence or two, in quotation marks, attributed). This includes the chapter files of the book skill: they are close to the book's wording.
+- Reproduce a figure or table from the book, even redrawn with the same layout and labels.
+- Use Mermaid. Every diagram is Excalidraw (Khang rejected Mermaid).
+- Set `draft: false`. Khang reads the post and flips it himself.
+- Invent Khang's experience, numbers or quotes. Use only what Khang said, the book, or a source you read.
+- Add a `## References` section by hand. The post page renders one from `sources`.
+- Touch files outside the post, its asset folder, and (with Khang's OK) `src/data/categories.ts`. No new dependencies.
+- Commit the post. Leave it uncommitted for Khang to review unless he asks.
+
+## Step 1: Read the book skill
+
+1. Find the book skill: `~/.claude/skills/<book-slug>/SKILL.md`. (`/book-to-skill` may store it in `~/.agents/skills/<book-slug>/` and symlink it here; either path is fine.)
+2. If neither exists, **stop**. Tell Khang the book is not imported and point him to `books/README.md` (`/book-to-skill books/<file> <book-slug>`, answer **no** to the GitHub push).
+3. Read the book skill's `SKILL.md`. Use its chapter table and topic index to pick the chapter files for the requested chapter or topic, then read those `chapters/ch<NN>-<slug>.md` files. Check `glossary.md` for terms you will define, and `patterns.md` / `cheatsheet.md` when the topic is a technique or a decision.
+4. No chapter or topic given: list the chapters with one line each and ask Khang which one.
+5. Note the book's exact title, author(s) and the chapter numbers you used. They go into `sources`.
+
+## Step 2: Research the web
+
+1. Use WebSearch to find 3–5 well-regarded articles on the same topic: official docs, specs, known engineering blogs, recognised authors. Skip SEO listicles, content farms and AI-written roundups.
+2. Read each one (WebFetch). Use them for extra facts, newer practice, examples, and how good writers explain the idea.
+3. Paraphrase only. Never copy sentences.
+4. Keep a list of the articles you actually use: title and `url` (and author when clear). Every one of them goes into `sources`; articles you read but did not use do not.
+5. Where an article disagrees with the book or shows the book is dated, note it for Step 4.
+
+## Step 3: Ask Khang (then wait)
+
+Ask 2–3 short questions in one message, then **wait for his answers**:
+
+- What stood out to you in this chapter or topic?
+- Where did it meet your own work? (a system, a bug, a decision)
+- What do you disagree with, or want to add from outside the book?
+
+If he has no answer to one, write without it. Never make up a personal story for him.
+
+## Step 4: Propose the plan (then wait)
+
+Send one proposal and **wait for Khang's OK** before writing:
+
+- **Title**: specific; says what the reader gets. No clickbait.
+- **Angle**: one sentence on the question the post answers and for whom. The post is built around this angle, Khang's answers and the research, not around the chapter's order. A chapter summary with the words shuffled is a failure.
+- **Category**: one of `CATEGORY_IDS` in `src/data/categories.ts` (read the file; today: frontend, backend, database, devops, ai, system-design, finance). If none fits, say so and propose adding one (in non-interactive `claude -p` runs where you cannot ask, pick the closest and flag it in the hand-over; interactive runs wait for an answer at Steps 3–4) to `categories.ts` (and the category list comment in `src/content/blog/_TEMPLATE.md.txt`).
+- **Tags** and **post slug** (kebab-case; it becomes the URL `/blog/<post-slug>/`).
+- **Outline**: every `##` section with the visual planned for it (Excalidraw diagram, table, code block or `Callout`) and one line on what that visual shows. Include the TL;DR, "Key takeaways" and "Review questions".
+- **Sources**: the book (chapters) and the articles you plan to cite. Mention any book-vs-web conflict from Step 2.
+
+Apply his changes. If he changes the angle a lot, re-propose.
+
+## Step 5: Write the MDX
+
+1. Read `.claude/skills/book-to-post/voice.md` and `.claude/skills/book-to-post/style-guide.md`. Follow both.
+2. Write `src/content/blog/<post-slug>.mdx` in English. Frontmatter must pass the `blog` schema in `src/content.config.ts`, or `npm run build` fails:
+
+```yaml
+---
+title: "…"
+description: "…"            # max 180 characters: count them
+date: YYYY-MM-DD            # today
+category: "system-design"   # one of CATEGORY_IDS
+tags: ["…", "…"]
+draft: true
+sources:
+  - { title: "Designing Data-Intensive Applications", author: "Martin Kleppmann", chapters: "Ch. 5, 7" }
+  - { title: "Exact article title", url: "https://…" }
+---
+```
+
+   - The book entry has `author` and `chapters`. Add a `url` only for the publisher's or the book's official page.
+   - Each web article you used has `title` and `url`.
+3. Quotes stay short: a sentence or two, in quotation marks, attributed in the text (for example "as Kleppmann puts it in chapter 5").
+4. MDX traps: `{`, `}` and `<` in prose are parsed as JSX, so put them in inline code or code blocks. HTML comments (`<!-- -->`) do not work; leave them out.
+5. Run the self-check at the end of `style-guide.md` and fix every miss before Step 7.
+
+## Step 6: Make the diagrams
+
+For each visual planned as Excalidraw:
+
+1. Use the `excalidraw-diagram` skill for the design method and its render-view-fix loop. **Colours:** use the "Diagram colours" section of `style-guide.md`, not that skill's `references/color-palette.md`.
+2. Draw from your own understanding, in Khang's words. Never reproduce a figure from the book.
+3. Save the source as `src/assets/blog/<post-slug>/<name>.excalidraw` (`mkdir -p` the folder first; `<name>` is kebab-case, e.g. `write-path`).
+4. Render it (needs network). Pass the absolute path:
+
+```bash
+cd ~/.claude/skills/excalidraw-diagram/references && uv run python render_excalidraw.py <absolute path to .excalidraw>
+```
+
+   This writes `<name>.png` beside the `.excalidraw` file. (That skill's own docs show a relative `.claude/skills/...` path; use the `~/.claude/skills/...` one above.)
+5. Read the PNG, fix what looks wrong, re-render. Repeat until it is clean.
+6. Embed it in the post, with the import at the top after the frontmatter and the `Figure` on **one line**:
+
+```mdx
+import Figure from '../../components/mdx/Figure.astro';
+import writePath from '../../assets/blog/<post-slug>/write-path.png';
+
+<Figure src={writePath} alt="What the diagram shows, in one sentence" caption="The one point the reader should take from it" />
+```
+
+If the renderer fails, stop and tell Khang with the error. Do not ship a post with a missing image. If the error is about loading Excalidraw from esm.sh, point him to the "Known issue" fix in `books/README.md`.
+
+## Step 7: Humanize the prose
+
+1. Copy the post first: `cp src/content/blog/<post-slug>.mdx "${TMPDIR:-/tmp}/<post-slug>.before.mdx"`.
+2. Run `/humanizer:humanizer` (invoke it through the Skill tool) in file mode on `src/content/blog/<post-slug>.mdx`. Tell it: change prose only; leave the frontmatter, `import` lines, code blocks, inline code, JSX tags (`<Figure … />`, `<Callout …>`, `</Callout>`; keep each `<Figure />` on one line and every code fence at column 0, and put Callout open/close tags on their own lines), link targets and quotations untouched; keep every fact and number; keep the voice in `voice.md`. (If file mode misbehaves, give it the body paragraph by paragraph instead.)
+3. Confirm none of those changed (the function reads stdin on purpose: a `$1` in a skill file gets replaced by the slash-command arguments). This must print `non-prose unchanged`:
+
+```bash
+keep() { awk '/^---$/ && fm<2 {fm++; print; next} fm==1 {print; next} /^```/ {code=!code; print; next} code || /^import / || /^[[:space:]]*<\/?[A-Z]/ {print}'; }
+diff <(keep < "${TMPDIR:-/tmp}/<post-slug>.before.mdx") <(keep < src/content/blog/<post-slug>.mdx) && echo "non-prose unchanged"
+```
+
+   If anything differs, restore those lines from the copy. Also eyeball inline code and quotes in `diff "${TMPDIR:-/tmp}/<post-slug>.before.mdx" src/content/blog/<post-slug>.mdx`.
+
+## Step 8: Build and hand over
+
+1. Run `npm run build`. It must pass. Draft posts are skipped by the production build, so it only checks the frontmatter; also start `npm run dev` in the background, load `http://localhost:4321/blog/<post-slug>/` and confirm it returns 200 with the images showing, then stop the server you started (do not leave port 4321 taken; if a server is already running on 4321, use it and leave it alone), which catches MDX body errors and wrong image paths. Fix and re-run on failure (usual causes: description over 180 characters, a category not in `CATEGORY_IDS`, a bad `url`, `{` or `<` in prose, a wrong image path).
+2. Tell Khang:
+   - the file path `src/content/blog/<post-slug>.mdx` and the diagrams in `src/assets/blog/<post-slug>/`;
+   - how to preview: `npm run dev`, then open `http://localhost:4321/blog/<post-slug>/` (drafts show in dev only);
+   - the sources used, and anything you were unsure about;
+   - that the post stays `draft: true` until **he** reads it and flips `draft` to `false`.
