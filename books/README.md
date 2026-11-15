@@ -1,0 +1,49 @@
+# books/ — drop folder for source books
+
+Put book files here (PDF, EPUB, MOBI). Claude reads them so it can write blog posts from them.
+
+**Never commit anything in this folder.** Books are copyrighted. `.gitignore` ignores everything in `books/` except this README.
+
+## Contents
+
+- [What this folder is for](#what-this-folder-is-for)
+- [The flow](#the-flow)
+- [Where the drafts go](#where-the-drafts-go)
+- [Setup (once per machine)](#setup-once-per-machine)
+
+## What this folder is for
+
+```
+books/
+├── README.md          <- this file (committed)
+├── ddia/
+│   └── DDIA.PDF       <- your book (never committed)
+└── b.epub             <- your book (never committed)
+```
+
+You can put files straight in `books/` or in a sub-folder. Use a short **book slug** (for example `ddia`) to refer to a book later.
+
+## The flow
+
+Three steps, in order:
+
+| Step | Command | What it does |
+|------|---------|--------------|
+| 1. Import | `/book-to-skill books/<file> <book-slug>` | Turns the book into a study skill. When it asks to push to GitHub, answer **no**. |
+| 2. Study | `/<book-slug> ch05` | Asks the book skill about a chapter or topic. |
+| 3. Draft | `/book-to-post <book-slug> [chapter or topic]` | Writes a blog post draft from the book. |
+
+```mermaid
+flowchart LR
+    A[books/file.pdf] -->|/book-to-skill| B[Book skill]
+    B -->|/book-slug ch05| C[Study answers]
+    B -->|/book-to-post| D[Draft post]
+```
+
+## Where the drafts go
+
+Drafts are saved to `src/content/blog/<post-slug>.mdx` with `draft: true`, so they do not show on the site until you turn that off. Each post lists the books it used in its `sources` frontmatter, shown as a **References** block.
+
+## Setup (once per machine)
+
+See below — filled in after the skills are installed.
