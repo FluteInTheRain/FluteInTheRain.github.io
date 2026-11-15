@@ -13,6 +13,16 @@ const blog = defineCollection({
     category: z.enum(CATEGORY_IDS),
     tags: z.array(z.string()).default([]),
     draft: z.boolean().default(false),
+    sources: z
+      .array(
+        z.object({
+          title: z.string(),
+          author: z.string().optional(),
+          chapters: z.string().optional(),
+          url: z.url().optional(),
+        }),
+      )
+      .default([]),
   }),
 });
 
