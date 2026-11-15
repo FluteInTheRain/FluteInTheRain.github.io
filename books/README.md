@@ -45,4 +45,21 @@ Drafts are saved to `src/content/blog/<post-slug>.mdx` with `draft: true`, so th
 
 ## Setup (once per machine)
 
-See below — filled in after the skills are installed.
+Install three user-level skills. Nothing is copied into this repo.
+
+```bash
+# 1. book-to-skill (imports a book as a skill into ~/.claude/skills/book-to-skill)
+npx skills add virgiliojr94/book-to-skill --global --agent claude-code -y
+
+# 2. humanizer (Claude Code plugin; the command is /humanizer:humanizer)
+claude plugin marketplace add blader/humanizer
+claude plugin install humanizer@humanizer
+
+# 3. excalidraw-diagram (diagrams + PNG renderer, needs uv)
+git clone https://github.com/coleam00/excalidraw-diagram-skill.git ~/.claude/skills/excalidraw-diagram
+cd ~/.claude/skills/excalidraw-diagram/references && uv sync && uv run playwright install chromium
+```
+
+Check the renderer: `uv run python render_excalidraw.py <file>.excalidraw` (run inside `references/`) writes a PNG next to the file.
+
+Known issue: the renderer loads Excalidraw from esm.sh, and the latest version (0.18.1) was broken on 2026-11-15. In `~/.claude/skills/excalidraw-diagram/references/render_template.html`, pin the import to `@excalidraw/excalidraw@0.18.0?bundle`.
