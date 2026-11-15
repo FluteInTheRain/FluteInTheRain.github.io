@@ -19,7 +19,7 @@ const blog = defineCollection({
           title: z.string(),
           author: z.string().optional(),
           chapters: z.string().optional(),
-          url: z.url().optional(),
+          url: z.url({ protocol: /^https?$/ }).optional(),
         }),
       )
       .default([]),
