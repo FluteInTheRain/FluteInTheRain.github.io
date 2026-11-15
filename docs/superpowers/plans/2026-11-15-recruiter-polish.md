@@ -135,3 +135,29 @@ content, page order and static layout (Hero, Experience, Skills, Blog, CTA). Tas
 
 - [ ] Whole-branch review of `git diff feat/projects-master-detail...HEAD`, then
   superpowers:finishing-a-development-branch. No push without Khang's OK.
+
+### Task 4: CV, OG image and profile README match the site (added 2026-11-15, Khang: "Cập nhật luôn cả CV")
+
+**Files:**
+- Modify: `src/data/content.json` (GPA only), `cv/Khang-Nguyen-CV.tex`; regenerate `cv/Khang-Nguyen-CV.pdf` and copy to `public/assets/Khang-Nguyen-CV.pdf` (byte-identical).
+- Regenerate: `public/assets/og-image.png` (1200×630).
+- Modify (separate repo, branch main): `/Users/nguyennhatkhang/Downloads/learning/FluteInTheRain/README.md`.
+
+**Source of truth:** the final `src/data/content.json` on this branch (hero, Kafi bullets, skills, aiWorkflow).
+
+**CV changes (only these):**
+- Header role line: `Full-stack Software Engineer`.
+- Summary: `Full-stack software engineer with nearly 3 years of experience building products end to end: React frontends, Node.js and Go services, and AWS infrastructure. Helped deliver 10+ online marketplace platforms; now building real-time trading systems at Kafi Securities while studying for a Master's in AI. Strong focus on reliability, performance and long-term maintainability.`
+- Core Skills rows: replace `AI & OpenAI API` with `AI \& LLM & OpenAI API, embeddings \& semantic search, RAG, QLoRA fine-tuning, vLLM, LLM evaluation`; add row `AI-assisted Eng. & Claude Code, multi-agent workflows, context engineering, MCP, agent hooks \& skills`; Tools: `Git, Sentry, Trello`.
+- Kafi entry: the stack line + the 4 Kafi bullets, text identical to `content.json` (LaTeX-escaped).
+- **Master's GPA update (Khang, 2026-11-15, new transcript):** `9.07/10` → `8.71/10` everywhere it appears — CV education line (`Current average: 8.71/10`), `content.json` `education.degrees[0].gpa` and the hero stat label (`GPA 8.71/10, in progress`), README Education. (8.71 = credit-weighted average of the 8 major courses, 278.8 / 32 credits, Philosophy excluded per Khang.) Grep the whole repo and the README for `9.07` afterwards — zero hits.
+- Nothing else changes. **Must stay 1 page.** If it overflows: first tighten spacing (`\sect` vspace, itemsep, `\linespread`, margins by ≤0.05in); if still 2 pages, stop and report BLOCKED with the overflow amount — do not cut content on your own.
+
+**OG image:** same look as today (dark navy background, round avatar from `public/assets/avatar.webp`, name, role, location), role text `Full-stack Software Engineer`. Render an HTML template with Playwright at 1200×630 (template and script in the scratchpad, not the repo).
+
+**README (other repo):** mirror the CV changes: title/role line, Summary, Core Skills (AI & LLM badges plain where no Simple Icons logo, new AI-assisted Engineering group, Claude moves there; check every `logo=` slug renders with `curl -s "https://img.shields.io/badge/x-black?logo=<slug>" | grep -c '<image'`), Kafi experience bullets. Commit there separately.
+
+- [ ] **Step 1:** Implement CV, build PDF in the scratchpad (`latexmk -pdf -outdir=$SCRATCH/cv`), copy to both paths.
+- [ ] **Step 2: Verify:** `pdfinfo` Pages: 1; `pdftotext` contains the new role, summary, AI rows and all 4 Kafi bullets; `pdfinfo -url` still lists the 3 links; `cmp` of the two PDFs silent; view a PNG render of the PDF (`pdftoppm -png -r 80`) and the new OG image with Read.
+- [ ] **Step 3: Commit** in the portfolio repo: `cv: full-stack positioning, Kafi highlights, AI skills; refresh OG image`.
+- [ ] **Step 4:** README: write, check links (200; LinkedIn may be blocked) and badge logos, grep that no stale `Fullstack|Robotics|YOUR_PORTFOLIO` text exists; commit `docs: sync profile README with updated CV`.
