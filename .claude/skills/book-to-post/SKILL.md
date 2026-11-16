@@ -37,9 +37,17 @@ Do the 8 steps in order. Steps 3 and 4 wait for Khang. Do not skip ahead.
 
 1. Use WebSearch to find 3–5 well-regarded articles on the same topic: official docs, specs, known engineering blogs, recognised authors. Skip SEO listicles, content farms and AI-written roundups.
 2. Read each one (WebFetch). Use them for extra facts, newer practice, examples, and how good writers explain the idea.
-3. Paraphrase only. Never copy sentences.
-4. Keep a list of the articles you actually use: title and `url` (and author when clear). Every one of them goes into `sources`; articles you read but did not use do not.
-5. Where an article disagrees with the book or shows the book is dated, note it for Step 4.
+3. Also scan for **real-world visuals, YouTube talks, and engineering artifacts** using `.claude/skills/enrich-post/scripts/`:
+   ```bash
+   uv run --project ~/.claude/skills/excalidraw-diagram/references python .claude/skills/enrich-post/scripts/fetch_real_image.py extract "<article-url>"
+   python3 .claude/skills/enrich-post/scripts/youtube_helper.py search "<topic> conference talk" --limit 5
+   python3 .claude/skills/enrich-post/scripts/youtube_helper.py transcript "<video-id>" --query "<keyword>"
+   python3 .claude/skills/enrich-post/scripts/artifact_helper.py hn-search "<topic>" --limit 5
+   ```
+   Or search web/Wikimedia images (`fetch_real_image.py search`), fetch real open-source examples (`artifact_helper.py github-snippet`), or run a local micro-benchmark for `<TerminalOutput />`. Note 1–2 strong real-world visuals, talk segments, or authentic artifacts (with `sourceTitle` and `sourceUrl`) to propose in Step 4 alongside Excalidraw diagrams.
+4. Paraphrase prose only. Never copy sentences.
+5. Keep a list of the articles you actually use: title and `url` (and author when clear). Every one of them goes into `sources`; articles you read but did not use do not.
+6. Where an article disagrees with the book or shows the book is dated, note it for Step 4.
 
 ## Step 3: Ask Khang (then wait)
 
@@ -59,7 +67,7 @@ Send one proposal and **wait for Khang's OK** before writing:
 - **Angle**: one sentence on the question the post answers and for whom. The post is built around this angle, Khang's answers and the research, not around the chapter's order. A chapter summary with the words shuffled is a failure.
 - **Category**: one of `CATEGORY_IDS` in `src/data/categories.ts` (read the file; today: frontend, backend, database, devops, ai, system-design, finance). If none fits, say so and propose adding one (in non-interactive `claude -p` runs where you cannot ask, pick the closest and flag it in the hand-over; interactive runs wait for an answer at Steps 3–4) to `categories.ts` (and the category list comment in `src/content/blog/_TEMPLATE.md.txt`).
 - **Tags** and **post slug** (kebab-case; it becomes the URL `/blog/<post-slug>/`).
-- **Outline**: every `##` section with the visual planned for it (Excalidraw diagram, table, code block or `Callout`) and one line on what that visual shows. Include the TL;DR, "Key takeaways" and "Review questions".
+- **Outline**: every `##` section with the visual/artifact planned for it (Excalidraw diagram, Real-world image / screenshot with its source, Timestamped `<YouTube />` talk or short `<Video />` clip, `<GitHubCode />`, `<QuoteCard />`, `<LinkCard />`, `<TerminalOutput />`, table, code block or `Callout`) and one line on what it shows. Aim to include at least 1–2 real-world sourced artifacts alongside Excalidraw diagrams so the post does not feel 100% AI-generated. Include the TL;DR, "Key takeaways" and "Review questions".
 - **Sources**: the book (chapters) and the articles you plan to cite. Mention any book-vs-web conflict from Step 2.
 
 Apply his changes. If he changes the angle a lot, re-propose.
@@ -89,7 +97,38 @@ sources:
 4. MDX traps: `{`, `}` and `<` in prose are parsed as JSX, so put them in inline code or code blocks. HTML comments (`<!-- -->`) do not work; leave them out.
 5. Run the self-check at the end of `style-guide.md` and fix every miss before Step 7.
 
-## Step 6: Make the diagrams
+## Step 6: Make the diagrams and fetch real-world images / videos
+
+### A. Real-world images, screenshots & YouTube clips (from web articles, docs, Wikimedia, or talks)
+
+For each visual planned as a real-world image, screenshot, or video:
+
+1. **Images & screenshots** — use `.claude/skills/enrich-post/scripts/fetch_real_image.py` (see `.claude/skills/enrich-post/SKILL.md` for `extract`, `search`, `download`, `screenshot`):
+   ```bash
+   uv run --project ~/.claude/skills/excalidraw-diagram/references python .claude/skills/enrich-post/scripts/fetch_real_image.py download "<imageUrl>" --referer "<pageUrl>" --out "src/assets/blog/<post-slug>/<name>.png"
+   # or capture a live screenshot of official docs / interactive page:
+   uv run --project ~/.claude/skills/excalidraw-diagram/references python .claude/skills/enrich-post/scripts/fetch_real_image.py screenshot "<pageUrl>" --selector "<css>" --out "src/assets/blog/<post-slug>/<name>.png"
+   ```
+   **Open every downloaded or screenshotted PNG with `Read`** to confirm it is sharp, legible, and relevant. Never copy figures from the copyrighted book in `books/`.
+   Embed on **one single line** with `sourceTitle` and `sourceUrl` attribution, and list the source page in frontmatter `sources`:
+   ```mdx
+   <Figure src={realChart} alt="What the image shows, in one sentence" caption="The one point the reader should take from it" sourceTitle="Article or Site Title" sourceUrl="https://…" />
+   ```
+
+2. **YouTube talks & short video clips** — use `.claude/skills/enrich-post/scripts/youtube_helper.py`:
+   - For longer explanations (`30s–5min`), embed a timestamped YouTube facade (keeps repo lightweight):
+     ```mdx
+     <YouTube id="VIDEO_ID" title="Talk title" start={125} end={210} caption="What the speaker explains here" sourceTitle="Channel — Talk Title" />
+     ```
+   - For short visual demos (`5–15s`, `< 2MB`), cut a silent looping `.mp4` + poster into `public/assets/blog/<post-slug>/` via `youtube_helper.py clip` and inspect the poster with `Read`:
+     ```mdx
+     <Video src="/assets/blog/<post-slug>/clip.mp4" poster="/assets/blog/<post-slug>/clip-poster.jpg" autoplay loop caption="What the demo clip shows" sourceTitle="Channel — Talk Title" sourceUrl="https://www.youtube.com/watch?v=VIDEO_ID&t=125s" />
+     ```
+   - Keep `<YouTube />` and `<Video />` on **one single line**, and add the video's URL to frontmatter `sources`.
+
+3. **Authentic engineering artifacts & live benchmarks** — use `.claude/skills/enrich-post/scripts/artifact_helper.py` (or run a local benchmark script) for `<GitHubCode />`, `<QuoteCard />`, `<LinkCard />`, and `<TerminalOutput />`, or add an interactive React mini-playground under `src/components/demos/<Name>Demo.tsx` inside `<DemoFrame title="...">` reusing `.sd-*` classes (see `.claude/skills/enrich-post/SKILL.md` for syntax). Keep `<LinkCard />` on one single line, and put opening/closing tags of `<GitHubCode>`, `<QuoteCard>`, `<TerminalOutput>`, and `<DemoFrame>` on their own lines.
+
+### B. Excalidraw diagrams (for mental models, custom flows, and sequences)
 
 For each visual planned as Excalidraw:
 
@@ -118,7 +157,7 @@ If the renderer fails, stop and tell Khang with the error. Do not ship a post wi
 ## Step 7: Humanize the prose
 
 1. Copy the post first: `cp src/content/blog/<post-slug>.mdx "${TMPDIR:-/tmp}/<post-slug>.before.mdx"`.
-2. Run `/humanizer:humanizer` (invoke it through the Skill tool) in file mode on `src/content/blog/<post-slug>.mdx`. Tell it: change prose only; leave the frontmatter, `import` lines, code blocks, inline code, JSX tags (`<Figure … />`, `<Callout …>`, `</Callout>`; keep each `<Figure />` on one line and every code fence at column 0, and put Callout open/close tags on their own lines), link targets and quotations untouched; keep every fact and number; keep the voice in `voice.md`. (If file mode misbehaves, give it the body paragraph by paragraph instead.)
+2. Run `/humanizer:humanizer` (invoke it through the Skill tool) in file mode on `src/content/blog/<post-slug>.mdx`. Tell it: change prose only; leave the frontmatter, `import` lines, code blocks, inline code, JSX tags (`<Figure … />`, `<YouTube … />`, `<Video … />`, `<LinkCard … />`, `<GitHubCode …>`, `<QuoteCard …>`, `<TerminalOutput …>`, `<Callout …>`, and closing tags; keep self-closing tags on one line, wrapper open/close tags on their own lines, and every code fence at column 0), link targets and quotations untouched; keep every fact and number; keep the voice in `voice.md`. (If file mode misbehaves, give it the body paragraph by paragraph instead.)
 3. Confirm none of those changed (the function reads stdin on purpose: a `$1` in a skill file gets replaced by the slash-command arguments). This must print `non-prose unchanged`:
 
 ```bash

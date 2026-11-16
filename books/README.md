@@ -31,7 +31,8 @@ Three steps, in order:
 |------|---------|--------------|
 | 1. Import | `/book-to-skill books/<file> <book-slug>` | Turns the book into a study skill. When it asks to publish ("publish … (yes / skip)"), answer **skip**; it would default to private anyway. |
 | 2. Study | `/<book-slug> ch05` | Asks the book skill about a chapter or topic. |
-| 3. Draft | `/book-to-post <book-slug> [chapter or topic]` | Writes a blog post draft from the book. |
+| 3. Draft | `/book-to-post <book-slug> [chapter or topic]` | Writes a blog post draft from the book (mixing Excalidraw diagrams with real-world sourced images/screenshots). |
+| 4. Enrich (any post) | `/enrich-post <post-slug>` | Adds real-world images, article figures, Wikimedia visuals, or live Playwright screenshots to any existing or draft post. |
 
 In short, the order is:
 

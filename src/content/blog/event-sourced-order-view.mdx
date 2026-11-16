@@ -5,15 +5,43 @@ date: 2026-11-15
 category: "system-design"
 tags: ["event-sourcing", "kafka", "postgresql", "pagination", "react"]
 draft: true
+sources:
+  - { title: "Event Sourcing Pattern — Azure Architecture Center", author: "Microsoft Learn", url: "https://learn.microsoft.com/en-us/azure/architecture/patterns/event-sourcing" }
+  - { title: "Event Sourcing 101: Command Query Responsibility Segregation (CQRS)", author: "Confluent", url: "https://www.youtube.com/watch?v=lg6aF5PP4Tc&t=176s" }
+  - { title: "segmentio/kafka-go — Reader.Lag()", author: "Segment", url: "https://github.com/segmentio/kafka-go/blob/2e0b3968aa51b16beb4e221876499a6ff816cd91/reader.go#L1004-L1015" }
+  - { title: "We need tool support for keyset pagination (No Offset!)", author: "Markus Winand", url: "https://use-the-index-luke.com/no-offset" }
+  - { title: "A Developer's Guide to API Pagination: Offset vs. Cursor-Based", url: "https://dev.to/reclusivecoder/a-developers-guide-to-api-pagination-offset-vs-cursor-based-2m5h" }
+  - { title: "Why we built yet another Postgres connection pooler (HN comment on keyset pagination)", author: "mmakeev", url: "https://news.ycombinator.com/item?id=48827997" }
 ---
 
 import Callout from '../../components/mdx/Callout.astro';
+import DemoFrame from '../../components/mdx/DemoFrame.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import GitHubCode from '../../components/mdx/GitHubCode.astro';
+import LinkCard from '../../components/mdx/LinkCard.astro';
+import QuoteCard from '../../components/mdx/QuoteCard.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
+import YouTube from '../../components/mdx/YouTube.astro';
+import OrderBookViewDemo from '../../components/demos/OrderBookViewDemo.tsx';
+import azureEventSourcing from '../../assets/blog/event-sourced-order-view/azure-event-sourcing.png';
+import offsetDrift from '../../assets/blog/event-sourced-order-view/offset-drift-diagram.png';
+import offsetVsCursor from '../../assets/blog/event-sourced-order-view/offset-vs-cursor.png';
 
 A trading screen I worked on had a classic problem. The orders table showed only the first few hundred rows, because two layers each had a hard cap. Worse, every order event made each open browser tab re-read the **entire** order book from the upstream system that owns the orders. More traders, more tabs, more events: the read load on that upstream system grew with all three.
 
 The fix was not a bigger cap. It was to stop treating the upstream system as the place to read from, and to build our own view of the book from the events we were already receiving.
 
+<Figure src={azureEventSourcing} alt="Event sourcing architecture showing events flowing through a queue to event handlers that populate a dedicated read-only store" caption="Instead of querying the upstream command system on every tab refresh, event handlers project the event stream into a dedicated read-only store tailored for the UI." sourceTitle="Microsoft Learn — Event Sourcing Pattern" sourceUrl="https://learn.microsoft.com/en-us/azure/architecture/patterns/event-sourcing" />
+
 This post walks through the four decisions that made that work. The stack was a Python service, a Go backend-for-frontend (BFF) and a React UI, with PostgreSQL and Kafka in between, but the ideas carry over to any stack.
+
+## Try the rules interactively
+
+Use the simulator below to step through a delayed execution report arriving after an order is already `FILLED`, or to see what happens to Page 2 when a new fill lands at the top of the book between page loads.
+
+<DemoFrame title="Out-of-order event merge & cursor vs. offset pagination">
+  <OrderBookViewDemo client:only="react" />
+</DemoFrame>
 
 ## 1. Store live state, and never let a late event move a row backwards
 
@@ -63,6 +91,8 @@ func merge(stored, live Order) Order {
 }
 ```
 
+<YouTube id="lg6aF5PP4Tc" title="Event Sourcing 101: Command Query Responsibility Segregation (CQRS)" start={176} end={252} caption="Between 2:56 and 4:12, Confluent explains why CQRS read views lag slightly behind the Kafka log (eventual consistency) and how retaining the full topic lets a service rebuild its read view from scratch after a restart." sourceTitle="Confluent — Event Sourcing 101 (CQRS)" />
+
 ## 3. Say "incomplete" instead of returning a short list
 
 After a restart, the BFF has to read the event stream from the start of the day before its view is whole. During those seconds it could return a short list and look fine, which is exactly the kind of quiet wrong answer that erodes trust in a trading screen.
@@ -73,9 +103,30 @@ Instead, every response carries a `complete` flag. While the stream is still cat
 { "orders": [ ... ], "complete": false, "next_cursor": "..." }
 ```
 
+In a Go BFF using `kafka-go`, tracking whether the partition reader has caught up to the high-watermark directly determines when `complete` flips to `true`:
+
+<GitHubCode repo="segmentio/kafka-go" path="reader.go" lines="L1004-L1015" url="https://github.com/segmentio/kafka-go/blob/2e0b3968aa51b16beb4e221876499a6ff816cd91/reader.go#L1004-L1015" caption="Note that kafka-go exposes Lag() only for explicit partition readers; consumer-group readers return -1, so replay health needs explicit partition tracking.">
+```go
+// Lag returns the lag of the last message returned by ReadMessage, or -1
+// if r is backed by a consumer group.
+func (r *Reader) Lag() int64 {
+	if r.useConsumerGroup() {
+		return -1
+	}
+
+	r.mutex.Lock()
+	lag := r.lag
+	r.mutex.Unlock()
+	return lag
+}
+```
+</GitHubCode>
+
 ## 4. Page with a cursor, not an offset
 
 With thousands of rows and new ones arriving all the time, `LIMIT/OFFSET` breaks down: a row inserted at the top shifts every page, so users see duplicates or miss rows. A cursor on a stable, unique sort key does not have that problem.
+
+<Figure src={offsetDrift} alt="Three-step diagram showing how inserting a new row at the top causes OFFSET 10 to return row 10 a second time on page 2" caption="When a new order arrives at the top of the book between page loads, OFFSET 10 shifts the window down by one and returns row 10 a second time." sourceTitle="Use The Index, Luke — No Offset!" sourceUrl="https://use-the-index-luke.com/no-offset" />
 
 ```sql
 SELECT *
@@ -86,6 +137,29 @@ LIMIT 200;
 ```
 
 The `id` breaks ties between rows with the same timestamp, so no row is ever skipped or shown twice. Filtering moved into SQL too, instead of loading everything and filtering in memory.
+
+<Figure src={offsetVsCursor} alt="Side-by-side comparison of offset-based pagination scanning 20,000 rows versus cursor-based pagination performing a direct index seek" caption="Cursor pagination seeks directly to the last seen key in the index instead of scanning and discarding every preceding row." sourceTitle="DEV Community — Offset vs. Cursor-Based Pagination" sourceUrl="https://dev.to/reclusivecoder/a-developers-guide-to-api-pagination-offset-vs-cursor-based-2m5h" />
+
+Even in a local SQLite table with 100,000 rows indexed on `(ts DESC, id DESC)`, querying page 401 (`OFFSET 80000`) forces a full index scan of 80,000 rows, while a keyset cursor seeks directly into the B-tree:
+
+<TerminalOutput command="python3 bench_pagination.py" label="SQLite EXPLAIN & Timing (100k rows)" caption="Measured locally on 100,000 fills indexed on (ts DESC, id DESC), 30 runs each: keyset seek is 9.0x faster at depth 80,000 and stays O(log N) regardless of page number.">
+```text
+Dataset: 100,000 fills (indexed on ts DESC, id DESC), page size = 200
+OFFSET 80000 plan : ['SCAN fills USING INDEX idx_fills_ts_id']
+KEYSET cursor plan: ['SEARCH fills USING INDEX idx_fills_ts_id (ts<?)']
+OFFSET 80000 median: 1.43 ms (p95: 1.93 ms)
+KEYSET cursor median: 0.16 ms (p95: 0.19 ms)
+Speedup: 9.0x faster
+```
+</TerminalOutput>
+
+Keyset cursors also avoid holding open server-side database portals—a trap engineers frequently hit when running behind transaction-level connection poolers like PgBouncer:
+
+<QuoteCard author="mmakeev" sourceTitle="Hacker News — Why we built yet another Postgres connection pooler" sourceUrl="https://news.ycombinator.com/item?id=48827997">
+The honest knock on the streaming kind isn't "bad design", it's that it holds a portal open server-side, which is why it can't survive transaction pooling. So the pooler-friendly fix isn't one giant fetch, it's keyset pagination (`where id > last limit n`), stateless and constant memory, which is what we moved those paths to.
+</QuoteCard>
+
+<LinkCard url="https://use-the-index-luke.com/no-offset" title="We need tool support for keyset pagination" description="Pagination without OFFSET has many benefits but one problem: there is no tool support. Please help changing this." tag="Deep Dive" />
 
 On the React side the table is **virtualized** (only visible rows are in the DOM) and **scroll-anchored**, so loading the next page or inserting a new row does not make the list jump under the reader's eyes. The UI reloads after a quiet period, on reconnect, or when the user asks, instead of on every single event.
 

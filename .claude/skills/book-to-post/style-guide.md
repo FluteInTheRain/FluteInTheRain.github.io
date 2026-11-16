@@ -10,9 +10,9 @@ The reader is a developer new to the topic. They should understand each idea on 
 - [ ] **Every `##` section carries at least one visual: a diagram, a table, a code block or a `Callout`.**
   The two closing sections ("Key takeaways", "Review questions") are lists by design and are exempt.
 
-- [ ] **Which visual for what: a flow, sequence, mental model or architecture → Excalidraw; a comparison or trade-off → table; a warning or tip → `Callout`.**
-  Example: "how a write travels from client to replicas" is a diagram; "leader-based vs leaderless replication" is a table; "don't read your own write from a replica" is a `Callout type="warning"`.
-  Every visual must explain something. No decoration, no stock images, no AI-generated pictures.
+- [ ] **Which visual for what: a custom flow, sequence, or mental model → Excalidraw; a real benchmark chart, external architecture figure, live UI/docs screenshot, or real-world photograph → Real image (`fetch_real_image.py` + `sourceTitle`/`sourceUrl` on `Figure`); a conference talk explanation (`30s–5min`) → Timestamped `<YouTube start={...} end={...} />`; a short visual demo (`5–15s`, `< 2MB`) → `<Video autoplay loop />`; real open-source code → `<GitHubCode />`; community discussion or engineer insight → `<QuoteCard />`; external reference card → `<LinkCard />`; real local measurement/stdout → `<TerminalOutput />`; a comparison or trade-off → table; a warning or tip → `Callout`.**
+  Example: "how a write travels from client to replicas" is a diagram; "Cloudflare's p99 latency spike during leader election" is a real chart extracted from their post with `sourceTitle`/`sourceUrl`; "Martin Kleppmann explaining write skew at QCon" is `<YouTube start={...} end={...} />`; "how Postgres implements it" is `<GitHubCode />`; "what engineers ran into on HN" is `<QuoteCard />`; "actual query plan timings" is `<TerminalOutput />`.
+  Every visual must explain something. Mix at least 1–2 real-world sourced visuals or artifacts with Excalidraw diagrams so the post feels grounded in real engineering evidence. No decoration, no generic stock images, no AI-generated pictures.
 
 - [ ] **Short paragraphs (≤ 4 sentences), short sentences, terms defined on first use.**
   Example: "An idempotent operation (one you can run twice with the same result as once) …". Define the term in the same sentence, not three sections later.
@@ -50,13 +50,19 @@ import writePath from '../../assets/blog/<post-slug>/write-path.png';
 
 <Figure src={writePath} alt="A write goes to the leader, then copies to two replicas" caption="Replicas copy the leader, so they can lag behind it." />
 
+<Figure src={realChart} alt="Latency distribution showing tail spikes during failover" caption="Tail latency jumps during leader election before replicas catch up." sourceTitle="Article or Docs Title" sourceUrl="https://example.com/article" />
+
+<YouTube id="VIDEO_ID" title="Conference Talk Title" start={125} end={210} caption="What the speaker demonstrates in this segment." sourceTitle="Channel — Talk Title" />
+
+<Video src="/assets/blog/<post-slug>/demo-clip.mp4" poster="/assets/blog/<post-slug>/demo-clip-poster.jpg" autoplay loop caption="Short visual demo of the behavior." sourceTitle="Channel — Talk Title" sourceUrl="https://www.youtube.com/watch?v=VIDEO_ID&t=125s" />
+
 <Callout type="warning" title="Read-your-writes">
 Reading from a replica right after a write can return the old value.
 </Callout>
 ```
 
 - `Callout` `type` is `note`, `tip` or `warning`; `title` is optional.
-- Keep each `<Figure … />` on one line (the Step 7 check relies on it).
+- Keep each `<Figure … />`, `<YouTube … />`, `<Video … />`, and `<LinkCard … />` on one line, and keep `<GitHubCode>`, `<QuoteCard>`, `<TerminalOutput>` open/close tags on their own lines (the Step 7 check relies on it).
 - `alt` says what the picture shows; `caption` says the point. They are not the same sentence.
 - Tables are plain Markdown; the site styles them. Keep cells short; 2–5 columns.
 
