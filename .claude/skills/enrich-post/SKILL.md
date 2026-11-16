@@ -176,7 +176,8 @@ Instead of quoting theoretical numbers, run a quick local reproduction script (N
        <MyTopicDemo client:only="react" />
      </DemoFrame>
      ```
-   - Keep `<Figure />`, `<YouTube />`, `<Video />`, `<LinkCard />`, and the opening/closing tags of `<GitHubCode>`, `<QuoteCard>`, `<TerminalOutput>`, and `<DemoFrame>` on **their own single lines** (so `humanizer` and build checks preserve them cleanly).
+   - Keep `<Figure />`, `<YouTube />`, `<Video />`, `<LinkCard />`, and the opening/closing tags of `<En>`, `<Vi>`, `<GitHubCode>`, `<QuoteCard>`, `<TerminalOutput>`, and `<DemoFrame>` on **their own single lines** (so `humanizer` and build checks preserve them cleanly).
+   - If the post is bilingual (`<En>…</En>` and `<Vi>…</Vi>`), add the new visual/artifact caption in both the English block and the Vietnamese block (translating technical concepts with English keywords in parentheses), and ensure any shared `<DemoFrame>` includes `titleVi`.
    - Ensure every source article, video, GitHub permalink, or HN thread (`{ title: "…", url: "https://…" }`) is listed in the post's `sources` frontmatter array.
 
 5. **Verify build:**

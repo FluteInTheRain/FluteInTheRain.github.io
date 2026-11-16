@@ -1,6 +1,8 @@
 ---
 title: "Stop re-reading the whole order book: an event-sourced view with cursor pagination"
+title_vi: "Ngừng đọc lại toàn bộ sổ lệnh (order book): xây khung nhìn dựng từ sự kiện (event-sourced view) và phân trang con trỏ (cursor pagination)"
 description: "How to show every order of the day without hammering the upstream system: monotonic writes, a merged event stream, an honest \"incomplete\" flag and cursor pages."
+description_vi: "Cách hiển thị mọi lệnh trong ngày mà không quá tải hệ thống lõi: ghi đơn điệu (monotonic writes), hợp nhất luồng sự kiện, cờ báo chưa đầy đủ và phân trang bằng con trỏ."
 date: 2026-11-15
 category: "system-design"
 tags: ["event-sourcing", "kafka", "postgresql", "pagination", "react"]
@@ -16,16 +18,20 @@ sources:
 
 import Callout from '../../components/mdx/Callout.astro';
 import DemoFrame from '../../components/mdx/DemoFrame.astro';
+import En from '../../components/mdx/En.astro';
 import Figure from '../../components/mdx/Figure.astro';
 import GitHubCode from '../../components/mdx/GitHubCode.astro';
 import LinkCard from '../../components/mdx/LinkCard.astro';
 import QuoteCard from '../../components/mdx/QuoteCard.astro';
 import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
+import Vi from '../../components/mdx/Vi.astro';
 import YouTube from '../../components/mdx/YouTube.astro';
 import OrderBookViewDemo from '../../components/demos/OrderBookViewDemo.tsx';
 import azureEventSourcing from '../../assets/blog/event-sourced-order-view/azure-event-sourcing.png';
 import offsetDrift from '../../assets/blog/event-sourced-order-view/offset-drift-diagram.png';
 import offsetVsCursor from '../../assets/blog/event-sourced-order-view/offset-vs-cursor.png';
+
+<En>
 
 A trading screen I worked on had a classic problem. The orders table showed only the first few hundred rows, because two layers each had a hard cap. Worse, every order event made each open browser tab re-read the **entire** order book from the upstream system that owns the orders. More traders, more tabs, more events: the read load on that upstream system grew with all three.
 
@@ -39,9 +45,29 @@ This post walks through the four decisions that made that work. The stack was a 
 
 Use the simulator below to step through a delayed execution report arriving after an order is already `FILLED`, or to see what happens to Page 2 when a new fill lands at the top of the book between page loads.
 
-<DemoFrame title="Out-of-order event merge & cursor vs. offset pagination">
+</En>
+
+<Vi>
+
+Một màn hình giao dịch mình từng làm gặp phải một bài toán kinh điển. Bảng lệnh chỉ hiển thị được vài trăm dòng đầu tiên vì hai tầng dịch vụ đều có giới hạn cứng (hard cap). Tệ hơn nữa, mỗi khi có một sự kiện lệnh mới, mọi tab trình duyệt đang mở đều đọc lại **toàn bộ** sổ lệnh (order book) từ hệ thống lõi phía trên (upstream system) đang nắm giữ dữ liệu lệnh. Càng nhiều nhà giao dịch, càng nhiều tab, càng nhiều sự kiện thì tải đọc (read load) đè lên hệ thống lõi càng tăng theo cả ba chiều.
+
+Cách sửa không phải là nới giới hạn lên cao hơn. Giải pháp là ngừng coi hệ thống lõi là nơi để truy vấn đọc trực tiếp, và tự dựng khung nhìn (view) sổ lệnh cho riêng mình từ chính luồng sự kiện (event stream) mà chúng ta vốn đã nhận sẵn.
+
+<Figure src={azureEventSourcing} alt="Kiến trúc Event Sourcing minh họa luồng sự kiện đi qua hàng đợi tới các trình xử lý sự kiện để cập nhật kho dữ liệu chỉ đọc riêng" caption="Thay vì truy vấn thẳng vào hệ thống lõi mỗi lần tab làm mới dữ liệu, các trình xử lý sự kiện (event handlers) chiếu luồng sự kiện vào một kho dữ liệu chỉ đọc (read-only store) riêng tối ưu cho giao diện." sourceTitle="Microsoft Learn — Event Sourcing Pattern" sourceUrl="https://learn.microsoft.com/en-us/azure/architecture/patterns/event-sourcing" />
+
+Bài viết này đi qua bốn quyết định thiết kế đã giúp hệ thống đó chạy ổn định. Stack thực tế gồm một service Python, một lớp Backend-for-Frontend (BFF) viết bằng Go và giao diện React, ở giữa là PostgreSQL và Kafka — nhưng các ý tưởng này áp dụng được cho mọi tech stack.
+
+## Thử nghiệm các quy tắc trực tiếp
+
+Dùng trình mô phỏng (simulator) dưới đây để bấm từng bước xem chuyện gì xảy ra khi một báo cáo khớp lệnh đến trễ sau khi lệnh đã `FILLED`, hoặc điều gì xảy ra với Trang 2 khi có một giao dịch khớp mới chèn lên đầu bảng giữa hai lần tải trang.
+
+</Vi>
+
+<DemoFrame title="Out-of-order event merge & cursor vs. offset pagination" titleVi="Hợp nhất sự kiện sai thứ tự (Out-of-order merge) & phân trang Cursor vs. Offset">
   <OrderBookViewDemo client:only="react" />
 </DemoFrame>
+
+<En>
 
 ## 1. Store live state, and never let a late event move a row backwards
 
@@ -175,3 +201,142 @@ Code review was worth it here. It caught four real problems before release: dupl
 - **Write merge rules down and test each one.** "Newer wins" and "finished stays finished" are simple to state and easy to break.
 - **Be honest about incomplete data.** A `complete: false` flag is better than a confident, short answer.
 - **Use cursors for live lists.** Offsets and inserts do not mix.
+
+</En>
+
+<Vi>
+
+## 1. Lưu trạng thái trực tiếp và không bao giờ để sự kiện đến trễ kéo lùi trạng thái (monotonic writes)
+
+Service gửi lệnh cũng là nơi nhận toàn bộ báo cáo thực thi (execution reports): đã tiếp nhận (accepted), khớp một phần (partially filled), khớp hết (filled), hay đã hủy (cancelled). Thay vì chỉ ghi log những báo cáo đó, giờ nó ghi **trạng thái hiện tại** của từng lệnh vào PostgreSQL.
+
+Các sự kiện có thể đến sai thứ tự (out of order). Một báo cáo "đã khớp hết" (filled) có thể bị theo sau bởi một báo cáo "đã tiếp nhận" (accepted) đến muộn của chính lệnh đó. Nếu lệnh ghi chỉ ghi đè mù quáng, dòng dữ liệu sẽ bị quay ngược thời gian. Vì vậy mỗi dòng đều lưu lại dấu thời gian sự kiện (event time) tạo ra nó, và chỉ cho phép cập nhật khi sự kiện mới đến có thời gian lớn hơn (ghi đơn điệu — monotonic write):
+
+```sql
+INSERT INTO orders (order_id, status, filled_qty, avg_price, event_ns)
+VALUES ($1, $2, $3, $4, $5)
+ON CONFLICT (order_id) DO UPDATE
+SET status     = EXCLUDED.status,
+    filled_qty = EXCLUDED.filled_qty,
+    avg_price  = EXCLUDED.avg_price,
+    event_ns   = EXCLUDED.event_ns
+WHERE orders.event_ns < EXCLUDED.event_ns;   -- bỏ qua các sự kiện cũ hơn
+```
+
+Thêm một quy tắc nữa nằm ở tầng trên: **một lệnh đã kết thúc sẽ không bao giờ mở lại (final order never reopens).** Khi một dòng đã ở trạng thái khớp hết, đã hủy hoặc bị từ chối, các sự kiện đến sau có thể bổ sung thông tin chi tiết nhưng không bao giờ được phép đưa nó quay về trạng thái đang chờ xử lý.
+
+<Callout type="tip" title="Suy giảm an toàn, đừng làm sập luồng chính (Degrade, don't crash)">
+Code mới thường được triển khai trước khi chạy di trú cơ sở dữ liệu (database migration). Nếu thiếu các cột mới, trình ghi chỉ ghi một dòng cảnh báo và bỏ qua bước lưu trạng thái trực tiếp, thay vì làm lỗi cả luồng đặt lệnh.
+</Callout>
+
+## 2. Hợp nhất hai nguồn dữ liệu bằng các quy tắc tường minh
+
+Lớp BFF dựng sổ lệnh từ hai nguồn:
+
+- **PostgreSQL**, lưu trạng thái ghi nhận gần nhất của mọi lệnh, và
+- **luồng sự kiện lệnh từ Kafka**, mang những thay đổi mới nhất — đôi khi đi trước cả khi dữ liệu kịp ghi xuống database.
+
+Hợp nhất (merge) hai nguồn là nơi lỗi rất dễ ẩn mình, nên các quy tắc cần được viết rõ ràng và viết unit test kiểm chứng từng quy tắc một:
+
+1. **Thời gian sự kiện mới hơn thắng.** Giống hệt quy tắc trên đường ghi (write path), để hai phía không bao giờ mâu thuẫn nhau.
+2. **Lệnh đã kết thúc phải giữ nguyên trạng thái kết thúc**, bất kể nguồn nào báo cáo điều đó trước.
+3. **Khớp các dòng chưa có mã định danh từ hệ thống lõi (upstream ID).** Một lệnh vừa gửi cách đây vài tích tắc có thể mới chỉ có mã nội bộ của ta; nó tuyệt đối không được xuất hiện thành hai dòng khi mã từ hệ thống lõi trả về.
+
+```go
+func merge(stored, live Order) Order {
+	if isFinal(stored.Status) && !isFinal(live.Status) {
+		return stored // không bao giờ mở lại một lệnh đã kết thúc
+	}
+	if live.EventNs > stored.EventNs {
+		return live
+	}
+	return stored
+}
+```
+
+<YouTube id="lg6aF5PP4Tc" title="Event Sourcing 101: Command Query Responsibility Segregation (CQRS)" start={176} end={252} caption="Từ 2:56 đến 4:12, Confluent giải thích vì sao khung nhìn đọc CQRS thường trễ nhẹ so với Kafka log (nhất quán cuối cùng — eventual consistency) và việc giữ lại toàn bộ topic cho phép service dựng lại view từ đầu sau khi khởi động lại." sourceTitle="Confluent — Event Sourcing 101 (CQRS)" />
+
+## 3. Báo rõ "chưa đầy đủ" (`incomplete`) thay vì trả về một danh sách thiếu
+
+Sau khi khởi động lại (restart), lớp BFF phải đọc lại luồng sự kiện từ đầu ngày trước khi có được bức tranh toàn vẹn. Trong vài giây ngắn ngủi đó, nếu nó cứ im lặng trả về một danh sách ngắn trông có vẻ bình thường thì chính những câu trả lời "sai một cách âm thầm" như vậy sẽ làm mất niềm tin trên màn hình giao dịch.
+
+Thay vào đó, mọi phản hồi (response) đều mang theo cờ `complete`. Trong lúc luồng sự kiện vẫn đang bắt kịp (catching up), giao diện hiển thị trạng thái đang tải sổ lệnh thay vì giả vờ một danh sách thiếu là toàn bộ sổ lệnh.
+
+```json
+{ "orders": [ ... ], "complete": false, "next_cursor": "..." }
+```
+
+Trong Go BFF sử dụng `kafka-go`, việc theo dõi xem trình đọc phân vùng (partition reader) đã đuổi kịp mốc cao nhất (high-watermark) hay chưa quyết định trực tiếp thời điểm `complete` chuyển sang `true`:
+
+<GitHubCode repo="segmentio/kafka-go" path="reader.go" lines="L1004-L1015" url="https://github.com/segmentio/kafka-go/blob/2e0b3968aa51b16beb4e221876499a6ff816cd91/reader.go#L1004-L1015" caption="Lưu ý rằng kafka-go chỉ trả về Lag() cho partition reader chỉ định trực tiếp; consumer-group reader trả về -1, nên việc theo dõi trạng thái replay cần quản lý rõ theo từng phân vùng (partition).">
+```go
+// Lag returns the lag of the last message returned by ReadMessage, or -1
+// if r is backed by a consumer group.
+func (r *Reader) Lag() int64 {
+	if r.useConsumerGroup() {
+		return -1
+	}
+
+	r.mutex.Lock()
+	lag := r.lag
+	r.mutex.Unlock()
+	return lag
+}
+```
+</GitHubCode>
+
+## 4. Phân trang bằng con trỏ (cursor), không dùng độ lệch (offset)
+
+Với hàng nghìn dòng dữ liệu và các dòng mới đổ về liên tục, `LIMIT/OFFSET` sẽ gãy ngay: chỉ cần một dòng mới chèn vào đầu bảng là toàn bộ các trang sau bị xê dịch (shift), khiến người dùng thấy trùng dòng hoặc sót dòng. Phân trang bằng con trỏ (cursor / keyset pagination) dựa trên một khóa sắp xếp ổn định và duy nhất (unique sort key) không gặp vấn đề này.
+
+<Figure src={offsetDrift} alt="Sơ đồ ba bước cho thấy khi chèn thêm một dòng mới ở đầu bảng, lệnh OFFSET 10 sẽ trả lại dòng 10 thêm một lần nữa ở trang 2" caption="Khi có một lệnh mới chèn vào đầu sổ lệnh giữa hai lần tải trang, OFFSET 10 đẩy cửa sổ lấy dữ liệu xuống một dòng và trả lại dòng 10 lần thứ hai." sourceTitle="Use The Index, Luke — No Offset!" sourceUrl="https://use-the-index-luke.com/no-offset" />
+
+```sql
+SELECT *
+FROM fills
+WHERE (ts, id) < ($1, $2)          -- con trỏ (cursor): dòng cuối cùng của trang trước
+ORDER BY ts DESC, id DESC
+LIMIT 200;
+```
+
+Trường `id` đóng vai trò phân định khi hai dòng có cùng dấu thời gian `ts` (tie-breaker), nhờ vậy không dòng nào bị bỏ sót hay hiển thị hai lần. Việc lọc dữ liệu (filtering) cũng được đưa thẳng vào SQL thay vì tải hết lên RAM rồi mới lọc.
+
+<Figure src={offsetVsCursor} alt="So sánh trực quan giữa phân trang bằng offset phải quét 20.000 dòng và phân trang bằng cursor tìm thẳng qua chỉ mục" caption="Phân trang con trỏ (cursor pagination) nhảy thẳng tới khóa cuối cùng đã đọc trong chỉ mục (index seek) thay vì quét và bỏ đi toàn bộ các dòng đứng trước." sourceTitle="DEV Community — Offset vs. Cursor-Based Pagination" sourceUrl="https://dev.to/reclusivecoder/a-developers-guide-to-api-pagination-offset-vs-cursor-based-2m5h" />
+
+Ngay cả trên một bảng SQLite cục bộ có 100.000 dòng đã đánh chỉ mục (index) trên `(ts DESC, id DESC)`, truy vấn trang 401 (`OFFSET 80000`) buộc database phải quét tuần tự qua 80.000 dòng chỉ mục (`SCAN`), trong khi keyset cursor nhảy thẳng vào đúng vị trí trên cây B-tree (`SEARCH`):
+
+<TerminalOutput command="python3 bench_pagination.py" label="SQLite EXPLAIN & Timing (100k dòng)" caption="Đo thực tế trên 100.000 lệnh khớp đã đánh chỉ mục (ts DESC, id DESC), chạy lặp 30 lần: keyset seek nhanh gấp 9,0 lần ở độ sâu 80.000 và giữ độ phức tạp O(log N) bất kể số trang.">
+```text
+Dataset: 100,000 fills (indexed on ts DESC, id DESC), page size = 200
+OFFSET 80000 plan : ['SCAN fills USING INDEX idx_fills_ts_id']
+KEYSET cursor plan: ['SEARCH fills USING INDEX idx_fills_ts_id (ts<?)']
+OFFSET 80000 median: 1.43 ms (p95: 1.93 ms)
+KEYSET cursor median: 0.16 ms (p95: 0.19 ms)
+Speedup: 9.0x faster
+```
+</TerminalOutput>
+
+Keyset cursor cũng tránh được lỗi giữ kết nối mở ở phía server (server-side database portals) — một cái bẫy kỹ sư thường vấp phải khi chạy sau các bộ gom kết nối theo giao dịch (transaction-level connection poolers) như PgBouncer:
+
+<QuoteCard author="mmakeev" sourceTitle="Hacker News — Why we built yet another Postgres connection pooler" sourceUrl="https://news.ycombinator.com/item?id=48827997">
+Điểm yếu thật sự của kiểu streaming cursor không phải do "thiết kế tệ", mà là nó giữ một portal mở trên server, khiến nó không thể sống sót qua transaction pooling. Vì vậy cách sửa thân thiện với pooler không phải là tải một cục khổng lồ, mà là dùng keyset pagination (`where id > last limit n`), không trạng thái (stateless) và tốn bộ nhớ hằng số — đó là hướng chúng tôi đã chuyển toàn bộ các luồng đó sang.
+</QuoteCard>
+
+<LinkCard url="https://use-the-index-luke.com/no-offset" title="We need tool support for keyset pagination" description="Bài viết chuyên sâu của Markus Winand phân tích lý do phân trang không dùng OFFSET nhanh và ổn định hơn hẳn trong cơ sở dữ liệu." tag="Đọc thêm" />
+
+Ở phía React, bảng dữ liệu được **ảo hóa (virtualized)** — chỉ đưa các dòng đang nằm trong khung nhìn vào DOM — và **neo vị trí cuộn (scroll-anchored)**, nên việc tải trang tiếp theo hay chèn thêm dòng mới không làm danh sách nhảy giật dưới mắt người đọc. Giao diện chỉ tải lại sau một khoảng lặng (quiet period), khi kết nối lại, hoặc khi người dùng chủ động bấm làm mới, thay vì tải lại theo từng sự kiện đơn lẻ.
+
+## Kết quả thay đổi
+
+Trong quá trình kiểm thử cục bộ, các lần tải lại sổ lệnh tạo ra **bằng không** lượt đọc lên hệ thống lõi phía trên, một lệnh khớp mới hiển thị ngay lập tức lên dòng lệnh đã lưu, và sau khi khởi động lại BFF, sổ lệnh tự báo chưa đầy đủ (`complete: false`) rồi hoàn tất chỉ trong vài giây.
+
+Khâu đánh giá mã nguồn (code review) đã phát huy giá trị rất rõ ở đây: nó bắt được bốn lỗi thực tế trước khi phát hành — trùng dòng khi lệnh chưa được hệ thống lõi xác nhận, trạng thái kết thúc bị ghi đè, lỗi sập khi chưa chạy migration, và trình đọc luồng sự kiện có nguy cơ bị mất vị trí khi khởi động lại.
+
+## Điểm rút ra (Takeaways)
+
+- **Biến thứ tự thời gian thành tường minh.** Lưu dấu thời gian sự kiện và chỉ ghi tiến tới, đừng tin vào thứ tự gói tin đến mạng.
+- **Viết rõ quy tắc hợp nhất và test từng quy tắc một.** "Sự kiện mới hơn thắng" và "đã kết thúc thì giữ nguyên kết thúc" nghe đơn giản nhưng rất dễ gãy nếu không khóa bằng test.
+- **Trung thực khi dữ liệu chưa đầy đủ.** Một cờ `complete: false` tốt hơn nhiều so với một câu trả lời thiếu nhưng tự tin.
+- **Dùng con trỏ (cursor) cho danh sách biến động liên tục.** `OFFSET` và thao tác chèn dòng mới không đi cùng nhau được.
+
+</Vi>

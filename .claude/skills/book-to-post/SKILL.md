@@ -75,12 +75,14 @@ Apply his changes. If he changes the angle a lot, re-propose.
 ## Step 5: Write the MDX
 
 1. Read `.claude/skills/book-to-post/voice.md` and `.claude/skills/book-to-post/style-guide.md`. Follow both.
-2. Write `src/content/blog/<post-slug>.mdx` in English. Frontmatter must pass the `blog` schema in `src/content.config.ts`, or `npm run build` fails:
+2. Write `src/content/blog/<post-slug>.mdx` bilingually (English in `<En>…</En>` and Vietnamese in `<Vi>…</Vi>`, with `title_vi` and `description_vi` in frontmatter). Frontmatter must pass the `blog` schema in `src/content.config.ts`, or `npm run build` fails:
 
 ```yaml
 ---
 title: "…"
+title_vi: "…"               # Vietnamese title keeping technical English keywords where helpful
 description: "…"            # max 180 characters: count them
+description_vi: "…"         # max 220 characters
 date: YYYY-MM-DD            # today
 category: "system-design"   # one of CATEGORY_IDS
 tags: ["…", "…"]
@@ -91,6 +93,8 @@ sources:
 ---
 ```
 
+   - Import `En from '../../components/mdx/En.astro'` and `Vi from '../../components/mdx/Vi.astro'`. Always put `<En>`, `</En>`, `<Vi>`, `</Vi>` on their own lines with blank lines before and after the Markdown content inside so MDX parses headings, lists, and code blocks properly.
+   - In the `<Vi>` version, write natural engineer-to-engineer Vietnamese ("mình"), keep common stack names (`React`, `Kafka`, `PostgreSQL`, `BFF`, `CI/CD`), and translate technical concepts into Vietnamese with the English keyword in parentheses on first use per section (e.g. `độ trễ sao chép (replication lag)`).
    - The book entry has `author` and `chapters`. Add a `url` only for the publisher's or the book's official page.
    - Each web article you used has `title` and `url`.
 3. Quotes stay short: a sentence or two, in quotation marks, attributed in the text (for example "as Kleppmann puts it in chapter 5").
@@ -157,7 +161,7 @@ If the renderer fails, stop and tell Khang with the error. Do not ship a post wi
 ## Step 7: Humanize the prose
 
 1. Copy the post first: `cp src/content/blog/<post-slug>.mdx "${TMPDIR:-/tmp}/<post-slug>.before.mdx"`.
-2. Run `/humanizer:humanizer` (invoke it through the Skill tool) in file mode on `src/content/blog/<post-slug>.mdx`. Tell it: change prose only; leave the frontmatter, `import` lines, code blocks, inline code, JSX tags (`<Figure … />`, `<YouTube … />`, `<Video … />`, `<LinkCard … />`, `<GitHubCode …>`, `<QuoteCard …>`, `<TerminalOutput …>`, `<Callout …>`, and closing tags; keep self-closing tags on one line, wrapper open/close tags on their own lines, and every code fence at column 0), link targets and quotations untouched; keep every fact and number; keep the voice in `voice.md`. (If file mode misbehaves, give it the body paragraph by paragraph instead.)
+2. Run `/humanizer:humanizer` (invoke it through the Skill tool) in file mode on `src/content/blog/<post-slug>.mdx`. Tell it: change prose only; leave the frontmatter, `import` lines, code blocks, inline code, JSX tags (`<En>`, `</En>`, `<Vi>`, `</Vi>`, `<Figure … />`, `<YouTube … />`, `<Video … />`, `<LinkCard … />`, `<GitHubCode …>`, `<QuoteCard …>`, `<TerminalOutput …>`, `<DemoFrame …>`, `<Callout …>`, and closing tags; keep self-closing tags on one line, wrapper open/close tags on their own lines, and every code fence at column 0), link targets and quotations untouched; keep every fact and number; keep the voice in `voice.md` (and keep the Vietnamese technical keyword parentheses intact). (If file mode misbehaves, give it the body paragraph by paragraph instead.)
 3. Confirm none of those changed (the function reads stdin on purpose: a `$1` in a skill file gets replaced by the slash-command arguments). This must print `non-prose unchanged`:
 
 ```bash

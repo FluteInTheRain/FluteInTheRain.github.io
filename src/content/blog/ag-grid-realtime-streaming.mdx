@@ -1,6 +1,8 @@
 ---
 title: "Keeping a real-time AG Grid table smooth: batching, delta updates, and cheap cells"
+title_vi: "Giữ bảng AG Grid real-time luôn mượt: gom lô (batching), cập nhật phần bù (delta updates) và tối ưu ô (cheap cells)"
 description: "A live demo and four practical techniques for rendering thousands of streaming updates per second in AG Grid without freezing the UI."
+description_vi: "Demo trực tiếp và bốn kỹ thuật thực tế giúp hiển thị hàng nghìn cập nhật mỗi giây trong AG Grid mà không làm đơ giao diện."
 date: 2026-11-01
 category: "frontend"
 tags: ["ag-grid", "react", "performance", "real-time"]
@@ -9,7 +11,11 @@ draft: false
 
 import Callout from '../../components/mdx/Callout.astro';
 import DemoFrame from '../../components/mdx/DemoFrame.astro';
+import En from '../../components/mdx/En.astro';
+import Vi from '../../components/mdx/Vi.astro';
 import GridStreamingDemo from '../../components/demos/GridStreamingDemo.tsx';
+
+<En>
 
 Price boards, order books, monitoring dashboards: they all show a table whose cells change many times per second. Libraries like AG Grid already virtualize rows, so a table with 10,000 rows only keeps a handful of them in the DOM. That head start is easy to waste. How you *feed* the grid usually matters more than the grid's own settings.
 
@@ -19,9 +25,25 @@ This post walks through four changes that keep a streaming table smooth, and giv
 
 The demo below simulates a market-data feed. Both modes receive exactly the same stream of updates; only the way they hand it to the grid differs.
 
-<DemoFrame title="Naive vs. optimized streaming into AG Grid">
+</En>
+
+<Vi>
+
+Bảng giá chứng khoán, sổ lệnh (order book), hay màn hình giám sát (monitoring dashboard) đều có chung một đặc điểm: rất nhiều ô trong bảng đổi giá trị liên tục nhiều lần mỗi giây. Các thư viện như AG Grid đã hỗ trợ sẵn ảo hóa dòng (row virtualization), nên một bảng 10.000 dòng thực chất chỉ giữ vài chục dòng trên DOM. Nhưng lợi thế đó rất dễ bị phá hỏng. Cách bạn *đẩy dữ liệu* vào bảng thường quyết định hiệu năng nhiều hơn các cấu hình của chính thư viện.
+
+Bài viết này đi qua bốn thay đổi giúp bảng dữ liệu truyền trực tiếp (streaming table) luôn mượt, kèm theo bản demo tương tác để bạn tự cảm nhận sự khác biệt.
+
+## Dùng thử trước
+
+Bản demo dưới đây mô phỏng một luồng dữ liệu thị trường (market-data feed). Cả hai chế độ đều nhận cùng một lượng cập nhật như nhau; điểm khác biệt duy nhất nằm ở cách đẩy dữ liệu vào bảng.
+
+</Vi>
+
+<DemoFrame title="Naive vs. optimized streaming into AG Grid" titleVi="Streaming thô (Naive) vs. tối ưu (Optimized) vào AG Grid">
   <GridStreamingDemo client:only="react" />
 </DemoFrame>
+
+<En>
 
 <Callout type="tip" title="Can't see a difference?">
 On a fast desktop both modes can look fine. That is itself a lesson: your users are not all on your machine. Open DevTools → Performance → set **CPU: 6× slowdown**, then pick **10,000 rows** and **5,000 updates/s**. In a quick test I ran this way in Chrome, the naive version dropped to about 31 frames per second while the optimized one stayed at 60. Without throttling, both held 60. Your numbers will differ, so measure on your own hardware.
@@ -136,3 +158,123 @@ Optimizing on a fast development machine hides exactly the problem you are tryin
 - Performance was checked with CPU throttling.
 
 If you have a streaming table that still struggles after these, the next places to look are column count, expensive `valueGetter`s, and whether anything else on the page is competing for the main thread.
+
+</En>
+
+<Vi>
+
+<Callout type="tip" title="Chưa thấy sự khác biệt?">
+Trên máy tính mạnh, cả hai chế độ có thể trông mượt như nhau. Đó chính là bẫy dễ gặp: không phải người dùng nào cũng dùng máy cấu hình cao như máy dev của bạn. Hãy mở DevTools → Performance → bật **CPU: 6× slowdown**, rồi chọn **10,000 rows** và **5,000 updates/s**. Trong một lần đo nhanh trên Chrome bằng cách này, bản naive rớt xuống khoảng 31 khung hình/giây (FPS) trong khi bản tối ưu vẫn giữ vững 60 FPS. Nếu không bóp CPU (throttling), cả hai đều đạt 60. Con số trên máy bạn sẽ khác, nên hãy tự đo trực tiếp.
+</Callout>
+
+Hãy để ý thẻ thống kê cuối cùng: **rows pushed to grid per second** (số dòng đẩy vào bảng mỗi giây). Con số đó nói lên tất cả: chế độ naive ném toàn bộ các dòng vào bảng mỗi khi có tin nhắn mới, còn chế độ tối ưu chỉ gửi đúng những dòng thực sự thay đổi, vài lần mỗi giây.
+
+## 1. Gán ID ổn định cho từng dòng và chỉ gửi phần bù (delta updates)
+
+Sai lầm phổ biến nhất là thay mới toàn bộ tập dữ liệu (dataset) mỗi lần có tin nhắn tới:
+
+```ts
+// Anti-pattern: bảng phải so sánh (diff) hoặc dựng lại toàn bộ dòng ở mỗi nhịp
+socket.onmessage = () => {
+  api.setGridOption('rowData', rows.map((r) => ({ ...r })));
+};
+```
+
+Nếu không có khóa định danh dòng, bảng coi mỗi mảng mới là dữ liệu hoàn toàn mới và dựng lại toàn bộ nút dòng (row nodes). Hãy chỉ cho bảng cách nhận diện từng dòng, rồi chỉ gửi những dòng thay đổi:
+
+```ts
+<AgGridReact
+  getRowId={(p) => p.data.id}   // khóa định danh ổn định, duy nhất cho mỗi dòng
+  rowData={initialRows}
+/>
+
+// sau đó, với mỗi lô thay đổi:
+api.applyTransaction({ update: changedRows });
+```
+
+`getRowId` giải quyết hai việc cùng lúc. Nó giúp bảng tìm đúng dòng đang tồn tại để cập nhật, và giữ nguyên danh tính dòng (row identity) để phần DOM của những dòng không đổi được giữ yên. Thiếu nó, giao dịch cập nhật (update transaction) phải dò theo tham chiếu đối tượng (object reference) — điều bất khả thi với các đối tượng mới giải mã từ mạng.
+
+## 2. Hợp nhất cập nhật (coalesce) rồi đẩy theo lô (batch)
+
+Luồng dữ liệu thực tế thường đến dồn dập (bursty) và cập nhật cùng một mã nhiều lần chỉ trong vài mili-giây. Vẽ lại mọi giá trị trung gian là việc làm vô ích: mắt người không kịp nhìn thấy, và trình duyệt cũng chỉ vẽ tối đa một lần mỗi khung hình (frame).
+
+Hãy giữ một `Map` lưu giá trị **mới nhất** theo từng ID dòng và đẩy định kỳ theo bộ đếm thời gian:
+
+```ts
+const pending = new Map<string, Row>();
+
+socket.onmessage = (msg) => {
+  const row = parse(msg);
+  pending.set(row.id, row); // giá trị mới nhất ghi đè lên giá trị cũ
+};
+
+setInterval(() => {
+  if (pending.size === 0) return;
+  const batch = Array.from(pending.values());
+  pending.clear();
+  api.applyTransaction({ update: batch });
+}, 100);
+```
+
+Chu kỳ đẩy (flush interval) 100 ms nghĩa là bảng chỉ cập nhật tối đa 10 lần/giây bất kể luồng dữ liệu đầu vào nhanh đến đâu, và mỗi lần cập nhật chỉ chứa mỗi dòng thay đổi đúng một lần. Đó là cách bản demo biến hàng nghìn cập nhật đầu vào mỗi giây thành vài nghìn dòng đẩy vào bảng, thay vì hàng chục hay hàng trăm nghìn dòng.
+
+<Callout type="note" title="Giải pháp có sẵn trong AG Grid">
+AG Grid cũng có `api.applyTransactionAsync()`, tự gom hàng đợi giao dịch và áp dụng cùng lúc sau khoảng `asyncTransactionWaitMillis` (mặc định 50 ms). Nó tự gom lô (batching) giúp bạn, nhưng không tự hợp nhất (coalesce) nhiều lần cập nhật của cùng một dòng. Tự viết chiếc `Map` nhỏ ở trên giúp bạn có cả hai, đồng thời kiểm soát hoàn toàn nhịp đẩy dữ liệu.
+</Callout>
+
+## 3. Giữ cho từng ô nhẹ nhất có thể (cheap cells)
+
+Ở mức hàng nghìn cập nhật mỗi giây, chi phí xử lý trên từng ô (per-cell cost) sẽ chiếm phần lớn thời gian. Có hai thói quen rất hiệu quả:
+
+- **Ưu tiên `valueFormatter` và `cellClassRules` thay cho trình dựng ô tùy biến (custom cell renderers).** Gắn một component của framework vào từng ô tốn chi phí khởi tạo (mount) và cập nhật rất thật. Trong khi định dạng một con số và bật/tắt class CSS thì gần như miễn phí.
+- **Chọn lọc kỹ khi dùng `enableCellChangeFlash`.** Hiệu ứng nhấp nháy rất hữu ích ở cột giá khớp, nhưng sẽ gây rối mắt (và tốn thêm công vẽ lại) nếu bật cho cả sáu cột.
+
+```ts
+const columnDefs = [
+  { field: 'last', valueFormatter: fmtPrice, enableCellChangeFlash: true },
+  {
+    field: 'changePct',
+    valueFormatter: fmtChange,
+    // đổi màu qua class CSS thay vì dựng một component chứa <span>
+    cellClassRules: {
+      'up': (p) => p.value >= 0,
+      'down': (p) => p.value < 0,
+    },
+  },
+];
+```
+
+Chế độ naive trong bản demo dùng một React cell renderer cho cột phần trăm thay đổi; còn chế độ tối ưu dùng đúng đoạn cấu hình ở trên.
+
+## 4. Tắt những tính năng không dùng tới
+
+Một số cấu hình mặc định được thiết kế cho dữ liệu tần suất thấp:
+
+- **`animateRows={false}`** cho các luồng dữ liệu nhanh. Tạo hiệu ứng chuyển động cho các dòng nhảy liên tục chỉ làm nặng thêm giao diện.
+- **`deltaSort`** nếu bảng đang sắp xếp theo một cột có giá trị thay đổi liên tục. Khi bật, bảng chỉ sắp xếp lại các dòng thay đổi thay vì sắp xếp lại toàn bộ dữ liệu sau mỗi giao dịch.
+- **Giữ nguyên `rowBuffer`** trừ khi bạn đo thấy lý do cần sửa. Bộ đệm dòng (row buffer) lớn hơn sẽ dựng sẵn nhiều dòng nằm ngoài vùng nhìn thấy (viewport), đi ngược lại mục tiêu khi truyền dữ liệu nhanh.
+
+## Đo lường thực tế, đừng đoán
+
+Các thẻ thống kê trong bản demo cố ý làm rất đơn giản để bạn có thể tự tái tạo trong bất kỳ ứng dụng nào:
+
+1. **Số khung hình mỗi giây (FPS):** đếm số lần callback `requestAnimationFrame` chạy mỗi giây. Dưới ngưỡng khoảng 30 FPS, giao diện bắt đầu giật lag.
+2. **Khung hình dài nhất (Longest frame):** theo dõi khoảng nghỉ lớn nhất giữa hai khung hình. Chỉ cần một khung hình kéo dài 150 ms là mắt đã thấy khựng dù FPS trung bình trông vẫn ổn.
+3. **Chrome DevTools → Performance:** ghi lại vài giây khi bật giới hạn CPU (CPU throttling). Tìm các tác vụ dài (long tasks), và soi xem thời gian chạy script nằm ở phần tạo dòng của AG Grid hay nằm ở code của bạn.
+
+<Callout type="warning" title="Đừng bỏ qua bước bóp CPU">
+Tối ưu trên một chiếc máy dev cấu hình mạnh sẽ che khuất đúng nút thắt bạn đang cần sửa. Luôn kiểm tra hiệu năng (profile) với CPU throttling, và tốt hơn nữa là trên một thiết bị tầm trung thực tế.
+</Callout>
+
+## Danh sách kiểm tra (Checklist)
+
+- Mỗi dòng đều có `getRowId` ổn định.
+- Tin nhắn đến được hợp nhất (coalesce) theo từng dòng và đẩy định kỳ theo chu kỳ, không áp dụng lẻ tẻ từng cái một.
+- Cập nhật đi qua `applyTransaction`, tuyệt đối không thay mới toàn bộ `rowData`.
+- Các ô dùng `valueFormatter` và `cellClassRules`, tránh các component dựng ô nặng nề.
+- Đã tắt `animateRows`, và chỉ bật nhấp nháy ở những cột thực sự cần.
+- Đã đo lại hiệu năng khi bật giới hạn CPU (CPU throttling).
+
+Nếu bảng real-time của bạn vẫn chậm sau khi áp dụng hết các bước này, những chỗ tiếp theo cần kiểm tra là tổng số lượng cột, các hàm `valueGetter` nặng nề, và xem có tác vụ nào khác trên trang đang tranh chấp luồng chính (main thread) hay không.
+
+</Vi>

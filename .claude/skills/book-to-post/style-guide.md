@@ -25,8 +25,10 @@ The reader is a developer new to the topic. They should understand each idea on 
 ## Post shape
 
 ```
-frontmatter
-imports (Callout, Figure, each PNG)
+frontmatter (title, title_vi, description, description_vi, …)
+imports (En, Vi, Callout, Figure, each PNG, …)
+<En>
+
 <Callout type="note" title="TL;DR">
 One paragraph.
 </Callout>
@@ -34,6 +36,20 @@ Opening: 1–2 short paragraphs. The problem, in concrete terms, and why the rea
 ## One section per idea, in the order that answers the angle (not the chapter's order)
 ## Key takeaways
 ## Review questions
+
+</En>
+
+<Vi>
+
+<Callout type="note" title="Tóm tắt nhanh (TL;DR)">
+Một đoạn tóm tắt bằng tiếng Việt tự nhiên, giữ keyword tiếng Anh trong ngoặc cho các thuật ngữ kỹ thuật.
+</Callout>
+Mở đầu: 1–2 đoạn ngắn…
+## Các mục tương ứng bằng tiếng Việt…
+## Điểm rút ra (Key takeaways)
+## Câu hỏi ôn tập (Review questions)
+
+</Vi>
 ```
 
 - The post page already shows the title as the `h1` and renders "References" from `sources`. Start body headings at `##`, and do not add a references section.

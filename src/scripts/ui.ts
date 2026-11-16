@@ -6,6 +6,16 @@ themeBtn?.addEventListener('click', () => {
   try { localStorage.setItem('theme', next); } catch {}
 });
 
+const langBtn = document.getElementById('lang-toggle');
+langBtn?.addEventListener('click', () => {
+  const root = document.documentElement;
+  const next = root.getAttribute('data-lang') === 'vi' ? 'en' : 'vi';
+  root.setAttribute('data-lang', next);
+  root.lang = next;
+  try { localStorage.setItem('lang', next); } catch {}
+  window.dispatchEvent(new CustomEvent('langchange', { detail: next }));
+});
+
 const hamburger = document.getElementById('nav-hamburger');
 const navLinks = document.getElementById('nav-links');
 if (hamburger && navLinks) {
