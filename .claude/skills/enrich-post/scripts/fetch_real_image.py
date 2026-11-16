@@ -352,22 +352,24 @@ def cmd_screenshot(args: argparse.Namespace) -> None:
         try:
             page.goto(args.url, wait_until="domcontentloaded", timeout=30000)
             page.wait_for_timeout(1500)
-            # Hide common cookie / newsletter overlays and give inline SVGs breathing room
-            page.add_style_tag(
-                content="""
+            # Hide common cookie / newsletter overlays
+            extra_css = """
                 [id*="cookie" i], [class*="cookie" i],
                 [id*="consent" i], [class*="consent" i],
                 [id*="gdpr" i], [class*="gdpr" i],
                 [aria-label*="cookie" i] {
                     display: none !important;
                 }
+            """
+            if args.selector and "svg" in args.selector.lower():
+                extra_css += """
                 svg {
                     padding: 18px;
                     background: #ffffff;
                     overflow: visible !important;
                 }
                 """
-            )
+            page.add_style_tag(content=extra_css)
             if args.selector:
                 locator = page.locator(args.selector).first
                 locator.scroll_into_view_if_needed(timeout=10000)

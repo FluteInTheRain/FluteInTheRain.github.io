@@ -1,0 +1,478 @@
+---
+title: "How NautilusTrader Works: Core Components, Wiring, and Order Lifecycle for Beginners"
+title_vi: "NautilusTrader là gì? Giải phẫu các thành phần, luồng tương tác và vòng đời lệnh cho người mới IT Chứng khoán"
+description: "A beginner-friendly guide to NautilusTrader for securities IT engineers: what it is, its 6 internal components, how they interact, and an order's lifecycle."
+description_vi: "Cẩm nang hệ thống cho kỹ sư mới bước vào IT chứng khoán: NautilusTrader là gì, 6 thành phần cốt lõi bên trong, luồng tương tác và từng trạng thái trong vòng đời lệnh."
+date: 2026-11-16
+category: "system-design"
+tags: ["nautilus-trader", "trading-systems", "system-design", "event-driven", "rust", "python"]
+draft: false
+sources:
+  - { title: "nautechsystems/nautilus_trader — Official Architecture Overview", author: "Nautech Systems", url: "https://github.com/nautechsystems/nautilus_trader" }
+  - { title: "NautilusTrader Documentation — Architecture", author: "Nautech Systems", url: "https://nautilustrader.io/docs/latest/concepts/architecture/" }
+  - { title: "NautilusTrader Documentation — Orders & Order Book", author: "Nautech Systems", url: "https://nautilustrader.io/docs/latest/concepts/orders/" }
+  - { title: "nautechsystems/nautilus_trader — OrderStatus implementation (enums.rs)", author: "Nautech Systems", url: "https://github.com/nautechsystems/nautilus_trader/blob/83529d1cd11d8a23179cf52d70b013b831923a32/crates/model/src/enums.rs#L1511-L1554" }
+  - { title: "Nautilus Trader GitHub Overview: Deterministic Backtests to Live Trading Parity", author: "Alex Hitt", url: "https://www.youtube.com/watch?v=BFBHyVmE_Gs" }
+  - { title: "Audit of OpenBB vs. Nautilus Trader thread-blocking patterns", author: "colemanwillis (Hacker News)", url: "https://news.ycombinator.com/item?id=46682717" }
+---
+
+import Callout from '../../components/mdx/Callout.astro';
+import DemoFrame from '../../components/mdx/DemoFrame.astro';
+import En from '../../components/mdx/En.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import GitHubCode from '../../components/mdx/GitHubCode.astro';
+import LinkCard from '../../components/mdx/LinkCard.astro';
+import QuoteCard from '../../components/mdx/QuoteCard.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import YouTube from '../../components/mdx/YouTube.astro';
+import NautilusFlowDemo from '../../components/demos/NautilusFlowDemo.tsx';
+import nautilusBanner from '../../assets/blog/nautilus-trader-trading-system-architecture/nautilus-banner.png';
+import twoWorldsImg from '../../assets/blog/nautilus-trader-trading-system-architecture/two-worlds-vs-nautilus.png';
+import architectureOverview from '../../assets/blog/nautilus-trader-trading-system-architecture/architecture-overview.png';
+import orderBookDepth from '../../assets/blog/nautilus-trader-trading-system-architecture/order-book-depth.png';
+import orderLifecycleImg from '../../assets/blog/nautilus-trader-trading-system-architecture/order-lifecycle-state-machine.png';
+
+<En>
+
+If you are a software engineer stepping into **securities IT (IT chứng khoán)** or **algorithmic trading**, opening your first order-management codebase can feel overwhelming. Instead of clean CRUD endpoints, you run into tick streams, risk gates, async exchange disconnects, and strict audit rules.
+
+Study **NautilusTrader** and that fog clears quickly. It is an open-source, institutional-grade trading platform whose internal boundaries make a textbook blueprint for how modern trading systems work from market tick to exchange fill.
+
+Let's answer the four foundational questions step by step: what NautilusTrader actually is, what lives inside it (and why every box must exist), how those boxes talk to each other, and how an order travels through its lifecycle.
+
+</En>
+
+<Vi>
+
+Nếu bạn là kỹ sư phần mềm mới bước chân vào mảng **IT chứng khoán (Securities IT)** hoặc hệ thống giao dịch tự động (**Algorithmic Trading**), cảm giác choáng ngợp khi lần đầu đọc kiến trúc khớp lệnh là chuyện rất bình thường. Thay vì các API CRUD quen thuộc, bạn phải đối mặt với luồng giá **Tick (tích tắc thị trường)**, chốt chặn rủi ro (**Risk Gate**), mất kết nối giữa chừng với Sở/Sàn và các quy tắc đối soát khắt khe.
+
+Đọc kiến trúc của **NautilusTrader** là một cách đi đường tắt cực kỳ hiệu quả. Đây là nền tảng giao dịch mã nguồn mở chuẩn tổ chức (institutional-grade), tách bạch từng khối trách nhiệm rõ ràng đến mức gần như là sách giáo khoa về cấu tạo một hệ thống giao dịch thực chiến.
+
+Trong bài viết này, mình sẽ cùng bạn giải quyết gọn gàng 4 câu hỏi cốt lõi nhất: **NautilusTrader là gì**, **các thành phần bên trong đóng vai trò gì và vì sao bắt buộc phải tồn tại**, **chúng phối hợp với nhau ra sao**, và **vòng đời một lệnh đi xuyên qua hệ thống như thế nào**.
+
+</Vi>
+
+<Figure
+  src={nautilusBanner}
+  alt="Official NautilusTrader isometric system architecture diagram showing Data Engine, Message Bus, Cache, Risk Engine, and Execution Engine"
+  altVi="Sơ đồ kiến trúc không gian 3D chính thức của NautilusTrader thể hiện Data Engine, Message Bus, Cache, Risk Engine và Execution Engine"
+  caption="Official isometric system architecture overview from NautilusTrader: market data streams in from the left, state is governed by Cache and MessageBus, strategies run inside Trader, and orders pass through RiskEngine before touching venues."
+  captionVi="Toàn cảnh kiến trúc NautilusTrader từ bản vẽ chính thức: dữ liệu đi từ trái qua Data Engine, trạng thái nằm ở Cache/MessageBus, chiến lược chạy trong Trader và mọi lệnh đều đi qua Risk Engine trước khi chạm sàn qua Execution Engine."
+  sourceTitle="Nautech Systems — Official Repository Architecture"
+  sourceUrl="https://github.com/nautechsystems/nautilus_trader"
+/>
+
+<YouTube
+  id="BFBHyVmE_Gs"
+  title="Nautilus Trader GitHub Overview: Deterministic Backtests to Live Trading Parity"
+  titleVi="Tổng quan NautilusTrader: Đồng nhất từ Backtest xác định đến Live Trading"
+  start={0}
+  end={60}
+  caption="60-second summary on why NautilusTrader was built: running an identical execution kernel from historical backtesting to live production."
+  captionVi="Video tóm tắt 60 giây lý do NautilusTrader ra đời: giữ nguyên một lõi thực thi từ lúc thử nghiệm dữ liệu lịch sử (Backtest) cho đến lúc chạy tiền thật (Live)."
+  sourceTitle="Alex Hitt (YouTube)"
+/>
+
+<En>
+
+## 1. What is NautilusTrader?
+
+For beginners, think of **NautilusTrader** in one sentence: **it is an event-driven trading operating system (`hệ điều hành giao dịch hướng sự kiện`) written with a fast Rust core and a friendly Python interface.**
+
+Before frameworks like NautilusTrader existed, trading teams almost always fell into the **Two-System Trap (`cái bẫy 2 hệ thống`)**:
+
+1. **Research world (`Thế giới Backtest`)**: Quants prototype strategies in **Python / pandas** because iteration is fast. Backtests assume zero latency, instant fills, and relaxed validation.
+2. **Production world (`Thế giới Live Trading`)**: Once a strategy looks profitable, IT engineers must rewrite the entire logic into **C++, Java, or Go** to talk to live exchange sockets and handle real risk checks.
+
+Every manual rewrite introduces **parity drift (`sai lệch đồng bộ`)**: rounding differences, missed fee calculations, or subtle order-timing bugs that make a profitable backtest lose money in live trading.
+
+</En>
+
+<Vi>
+
+## 1. NautilusTrader là gì? (Góc nhìn cho người mới)
+
+Nếu giải thích ngắn gọn nhất cho người mới bước vào IT chứng khoán, bạn có thể hình dung **NautilusTrader là một "hệ điều hành giao dịch hướng sự kiện" (`event-driven trading engine`) dùng lõi Rust siêu tốc bên dưới và giao diện Python thân thiện bên trên.**
+
+Trước đây, các đội kỹ thuật và đầu tư định lượng thường mắc phải **Cái bẫy 2 hệ thống (`Two-System Trap`)**:
+
+1. **Môi trường thử nghiệm (`Research / Backtest`)**: Dùng **Python / pandas** để viết nhanh công thức kiểm thử trên dữ liệu quá khứ, thường bỏ qua độ trễ mạng hay trạng thái lệnh khớp dở dang.
+2. **Môi trường chạy thật (`Live Production`)**: Khi công thức có lãi, đội IT chứng khoán lại phải viết lại toàn bộ sang **C++, Java hoặc Go** để kết nối với cổng Sở/Broker, thêm kiểm soát rủi ro và xử lý rớt mạng.
+
+Quá trình viết lại thủ công này luôn đẻ ra **Parity Drift (`độ lệch giữa thử nghiệm và thực tế`)**: sai khác về làm tròn bước giá, phí giao dịch, hoặc thứ tự khớp lệnh khiến chiến lược lúc Backtest thì đẹp nhưng lên Live lại lỗ.
+
+</Vi>
+
+<Figure
+  src={twoWorldsImg}
+  alt="Architecture comparison diagram: Traditional Two-System Trap with separate codebases versus NautilusTrader Unified Kernel Architecture"
+  altVi="Sơ đồ so sánh kiến trúc: Cái bẫy 2 hệ thống truyền thống tách rời hai codebase so với kiến trúc hạt nhân thống nhất của NautilusTrader"
+  caption="Left: the traditional disconnected pipeline where research logic must be manually rewritten for production. Right: NautilusTrader's unified kernel where one shared Rust core powers both BacktestNode and TradingNode with zero rewrite."
+  captionVi="Bên trái: quy trình truyền thống phải viết lại code bằng tay từ Python sang C++/Go dễ lệch pha. Bên phải: NautilusTrader dùng chung một hạt nhân Rust NautilusKernel cho cả BacktestNode và TradingNode mà không cần viết lại."
+  sourceTitle="Trading Systems Architecture Analysis"
+  sourceUrl="https://nautilustrader.io/docs/latest/concepts/architecture/"
+/>
+
+<En>
+
+NautilusTrader solves this with **Parity-by-Design (`đồng nhất ngay từ thiết kế`)**:
+
+- **Write once in Python (`Viết một lần bằng Python`)**: Your strategy inherits clean lifecycle hooks such as `on_quote_tick()` and `on_bar()` without touching raw sockets or multithreading locks.
+- **Execute on one shared `NautilusKernel` (`Dùng chung một hạt nhân Rust`)**: Both `BacktestNode` (historical `Parquet` replay + `TestClock`) and `TradingNode` (live broker `WebSocket` / `FIX` + `LiveClock`) run the exact same state machines, risk rules, and order validation.
+- **Deterministic single-threaded core (`Đơn luồng xác định`)**: Market events enter a single ordered loop in Rust, avoiding Python GIL lock contention and making bugs 100% reproducible.
+
+</En>
+
+<Vi>
+
+NautilusTrader giải quyết dứt điểm bài toán này bằng triết lý **Parity-by-Design (`đồng nhất kiến trúc từ gốc`)**:
+
+- **Viết chiến lược một lần bằng Python**: Bạn chỉ viết logic nhận dữ liệu và ra quyết định (`on_quote_tick()`, `on_bar()`, `submit_order()`), không cần tự code socket hay xử lý đa luồng phức tạp.
+- **Chạy chung một hạt nhân `NautilusKernel` bằng Rust**: Dù bạn chạy `BacktestNode` (đọc file lịch sử `Parquet` với đồng hồ giả lập `TestClock`) hay `TradingNode` (đấu cổng thật `WebSocket` / `FIX` với đồng hồ thời gian thực `LiveClock`), bộ máy xử lý lệnh bên trong vẫn là **một đoạn code duy nhất**.
+- **Đơn luồng xác định (`Deterministic Single-Threaded Core`)**: Mọi sự kiện xếp hàng đi qua một vòng lặp duy nhất bằng Rust nên kết quả chạy lại dữ liệu cũ có thể tái hiện giống hệt nhau 100% tới từng nanosecond.
+
+</Vi>
+
+<QuoteCard author="colemanwillis" sourceTitle="Thread-blocking audit on Hacker News: OpenBB vs. Nautilus Trader" sourceUrl="https://news.ycombinator.com/item?id=46682717">
+OpenBB vs Nautilus Trader (comparable complex Python async frameworks): OpenBB: 306 total calls, 999KB, Variance Score 1602. Nautilus Trader: 0 blocking calls, 0KB, Variance Score 99. ... A naive asyncio audit would see async def and move on; tracking what blocks the loop tells a different story.
+</QuoteCard>
+
+<En>
+
+## 2. Internal Components: What They Do & Why Each Must Exist
+
+Beginners often ask: *"Why not just write one Python script that listens to a WebSocket price feed and calls `requests.post('/order')`?"*
+
+The answer in securities IT is simple: **a toy script works on happy-path Wi-Fi, then loses money the moment two quotes arrive out of order, a loop fires 50 orders in one second, or a network cable drops mid-fill.** Every internal component in `NautilusKernel` exists to neutralize a specific production disaster.
+
+The official blueprint below illustrates how these decoupled engines connect around the central `Message Bus`:
+
+</En>
+
+<Vi>
+
+## 2. Các thành phần bên trong: Vai trò & lý do bắt buộc phải tồn tại
+
+Câu hỏi kinh điển của người mới là: *"Sao phải chia nhiều lớp phức tạp vậy, sao không viết một script Python nghe WebSocket giá rồi gọi thẳng API đặt lệnh của sàn?"*
+
+Trong ngành IT chứng khoán, một script viết vội chạy ổn lúc mạng đẹp nhưng sẽ **gây thiệt hại tiền thật** ngay khi gặp giá giật, lỗi vòng lặp bắn nhầm 50 lệnh trong 1 giây, hoặc rớt mạng đúng lúc lệnh đang khớp dở. Mỗi khối bên trong `NautilusKernel` tồn tại để chặn đứng đúng một thảm họa thực tế như vậy.
+
+Bản vẽ kiến trúc chính thức từ kho mã nguồn NautilusTrader dưới đây minh họa sự phân chia rạch ròi giữa các khối quanh trục `Message Bus`:
+
+</Vi>
+
+<Figure
+  src={architectureOverview}
+  alt="Official NautilusTrader Architecture Overview blueprint from Nautech Systems repository showing DataClient, DataEngine, Trader, RiskEngine, ExecutionEngine, Cache, and Message Bus"
+  altVi="Bản vẽ sơ đồ kiến trúc chính thức từ kho mã nguồn NautilusTrader thể hiện DataClient, DataEngine, Trader, RiskEngine, ExecutionEngine, Cache và Message Bus"
+  caption="Official architectural blueprint from the NautilusTrader repository: clear decoupled boundaries between DataEngine, Cache, Trader, RiskEngine, and ExecutionEngine wired together via Message Bus."
+  captionVi="Bản vẽ sơ đồ kiến trúc chính thức từ kho mã nguồn NautilusTrader: các khối DataEngine, Cache, Trader, RiskEngine và ExecutionEngine được phân tách rạch ròi và liên kết qua Message Bus."
+  sourceTitle="Nautech Systems — Official Repository Architecture Blueprint"
+  sourceUrl="https://github.com/nautechsystems/nautilus_trader/blob/develop/assets/architecture-overview.png"
+/>
+
+<En>
+
+Let's inspect each of the **6 core components** inside `NautilusKernel`:
+
+### 1. `DataEngine` — The Market Intake & Normalizer
+- **Role:** Connects to one or more `DataClient` adapters (`Parquet` catalogs in backtest, `WebSocket` / `FIX` / broker feeds in live), parses incoming ticks, trades, depth deltas, and OHLCV bars into uniform internal domain objects, and maintains live `OrderBook` state.
+- **Why it must exist:** Without `DataEngine`, every strategy would need exchange-specific parsing code (`Binance JSON` vs `HOSE / SSI gateway` vs `Parquet`), and time-travel bugs (`look-ahead bias`) would slip into backtests whenever clocks aren't gated centrally.
+
+Below is an active order book depth ladder, showing the continuous stream of bid/ask limits that `DataEngine` parses into discrete levels:
+
+</En>
+
+<Vi>
+
+Hãy đi sâu vào từng khối trong **6 thành phần trụ cột** của `NautilusKernel`:
+
+### 1. `DataEngine` — Trạm tiếp nhận & chuẩn hóa dữ liệu thị trường
+- **Vai trò:** Quản lý các cổng kết nối dữ liệu (`DataClient` — đọc `Parquet` lúc Backtest hoặc nhận luồng `WebSocket` / `FIX` khi chạy Live), chuẩn hóa mọi bản tin thô thành các kiểu dữ liệu thống nhất (`QuoteTick`, `TradeTick`, `OrderBookDelta`, `Bar`) và tự động cập nhật sổ lệnh `OrderBook`.
+- **Tại sao phải tồn tại:** Nếu thiếu `DataEngine`, mỗi chiến lược phải tự viết parser riêng cho từng sàn/công ty chứng khoán, và cực kỳ dễ dính lỗi "nhìn trộm tương lai" (`look-ahead bias`) khi backtest không kiểm soát mốc thời gian tập trung.
+
+Hình ảnh dưới đây minh họa một bảng độ sâu sổ lệnh thực tế, nơi dòng lệnh Mua/Bán liên tục được `DataEngine` gom thành các mức giá rõ ràng:
+
+</Vi>
+
+<Figure
+  src={orderBookDepth}
+  alt="Real-world Order Book Depth UI visualization showing Bid and Ask quantity depth ladder at multiple price levels"
+  altVi="Giao diện hiển thị độ sâu sổ lệnh thực tế minh họa thang giá và khối lượng Mua/Bán tại nhiều mức giá"
+  caption="A live order book depth ladder: market data engines aggregate individual incoming order packets into discrete price levels (L2 Market by Price) so strategies can evaluate slippage and liquidity."
+  captionVi="Thang độ sâu sổ lệnh thực tế: bộ máy dữ liệu thị trường (DataEngine) tổng hợp từng bản tin lệnh thành các thang giá và khối lượng (L2 Market by Price) giúp chiến lược tính toán trượt giá và độ sâu thanh khoản."
+  sourceTitle="Order Book Market Microstructure Mechanics"
+  sourceUrl="https://liquidity-provider.com/articles/what-is-an-order-book-and-how-do-you-read-analyze-it/"
+/>
+
+<En>
+
+### 2. `Cache` — The High-Speed Shared State Memory
+- **Role:** Stores authoritative in-memory records of `Instrument` definitions (tick size, lot size, fees), recent market ticks/bars, every `Order`, `Position`, and `Account` balance, indexed for sub-microsecond access.
+- **Why it must exist:** Trading decisions happen on hot paths measured in microseconds. Querying PostgreSQL or Redis mid-tick adds unacceptable latency jitter, while letting strategies keep private copies leads to stale split-brain state.
+
+### 3. `MessageBus` — The Single-Threaded Event Wire
+- **Role:** Acts as the central nervous system connecting every component using three communication patterns: `Pub/Sub` (`market data topics`), `Point-to-Point` (`commands to specific engines`), and `Request/Response` (`historical queries`).
+- **Why it must exist:** Direct object references between components create spaghetti coupling and multithreaded race conditions. Serializing messages through one single-threaded `MessageBus` guarantees strict event ordering and zero mutex locks.
+
+### 4. `Actor` & `Strategy` — The Pure Decision Brain
+- **Role:** Subscribes to data streams on the `MessageBus`, reads historical context from `Cache`, computes indicators or alpha signals, and emits trading intents (`submit_order`, `cancel_order`, `modify_order`). An `Actor` handles read-only signals/alerts; a `Strategy` extends `Actor` with full order execution privileges.
+- **Why it must exist:** Your quantitative business logic stays 100% pure and clean, insulated from retry timers, FIX tag encoding, or exchange rate-limit backoffs.
+
+### 5. `RiskEngine` — The Mandatory Pre-Trade Safety Gate
+- **Role:** Intercepts every single trading command emitted by `Strategy` **before** it touches `ExecutionEngine` or the network. Enforces max order quantity, max notional value, fat-finger price collars, order submission throttle rates, and account margin/cash checks.
+- **Why it must exist:** In securities IT, **"Software bugs burn real money."** If an off-by-one bug triggers 1,000 buy orders per second or puts an extra zero on volume (`fat-finger`), `RiskEngine` blocks it locally inside `NautilusKernel` before a single packet reaches the exchange.
+
+### 6. `ExecutionEngine` & `Portfolio` — Order Router, Accounting & Reconciliation
+- **Role:** `ExecutionEngine` routes validated orders to the appropriate `ExecutionClient` adapter (`Binance`, `Interactive Brokers`, or `SimulatedExchange`), records immutable order events, and runs **Startup/Reconnect Reconciliation (`đối soát trạng thái`)** with the venue. Alongside it, `Portfolio` calculates live balances, margin requirements, and realized/unrealized `PnL`.
+- **Why it must exist:** Networks disconnect and servers crash. Without centralized execution routing and reconciliation, restarting a bot creates **ghost orders** (`lệnh vẫn treo trên sàn nhưng bot quên mất`) or double-fills.
+
+| Component | Real-world securities IT analogy | What breaks if you remove it? |
+| :--- | :--- | :--- |
+| **`DataEngine`** | Market feed normalizer (`GW`) | Parser duplication; look-ahead bugs in backtests |
+| **`Cache`** | Hot RAM state store (`Order/Pos`) | Slow DB bottlenecks; inconsistent strategy state |
+| **`MessageBus`** | Single-threaded Kafka/wire in RAM | Race conditions; irreproducible execution order |
+| **`Strategy`** | Quant decision maker | Alpha logic tangled inside network/socket code |
+| **`RiskEngine`** | Pre-trade compliance officer | Runaway loop or fat-finger wipes capital |
+| **`ExecutionEngine` + `Portfolio`** | Order Gateway (`OMS`) & Ledger | Ghost orders on reconnect; wrong `PnL`/margin |
+
+</En>
+
+<Vi>
+
+### 2. `Cache` — Bộ nhớ trạng thái siêu tốc trong RAM
+- **Vai trò:** Lưu giữ tập trung toàn bộ dữ liệu tham chiếu (`Instrument`: bước giá tick size, lô giao dịch, biểu phí), chuỗi giá/nến gần nhất, danh sách mọi `Order` (lệnh), `Position` (vị thế) và số dư `Account` ngay trên RAM.
+- **Tại sao phải tồn tại:** Trong hệ thống giao dịch thực chiến, mỗi bước xử lý tính bằng microsecond. Nếu chiến lược phải query xuống database (PostgreSQL) giữa lúc giá đang chạy, hệ thống sẽ bị nghẽn cổ chai; còn nếu mỗi class tự lưu biến riêng thì rất dễ lệch dữ liệu giữa các bộ phận.
+
+### 3. `MessageBus` — Đường dây truyền tin đơn luồng
+- **Vai trò:** Làm trục giao tiếp trung tâm cho toàn bộ module theo 3 cơ chế: `Pub/Sub` (phát dữ liệu thị trường cho nhiều nơi cùng nghe), `Point-to-Point` (gửi lệnh tới đúng đích), và `Request/Response` (hỏi đáp dữ liệu lịch sử).
+- **Tại sao phải tồn tại:** Nếu các component gọi hàm chéo trực tiếp lẫn nhau, hệ thống sẽ rối như tơ vò và dễ xung đột luồng (`race condition`). Ép mọi tin nhắn đi qua một kênh `MessageBus` đơn luồng giúp triệt tiêu mutex lock và đảm bảo thứ tự sự kiện tuyệt đối chuẩn xác.
+
+### 4. `Actor` & `Strategy` — Bộ não phân tích & ra quyết định
+- **Vai trò:** Đăng ký nhận dữ liệu từ `MessageBus`, đọc lịch sử trong `Cache` để tính chỉ báo kỹ thuật rồi phát ra ý định giao dịch (`submit_order`, `cancel_order`, `modify_order`). `Actor` chỉ quan sát và tính tín hiệu, còn `Strategy` kế thừa `Actor` để có thêm quyền đặt lệnh.
+- **Tại sao phải tồn tại:** Tách biệt hoàn toàn **tư duy tài chính / thuật toán** ra khỏi code hạ tầng như retry socket, đóng gói bản tin FIX hay xử lý giới hạn tốc độ API (`rate limit`).
+
+### 5. `RiskEngine` — Chốt chặn kiểm soát rủi ro trước khi đặt lệnh (`Pre-Trade Risk Gate`)
+- **Vai trò:** Là trạm gác bắt buộc mà mọi yêu cầu đặt/sửa/hủy lệnh từ `Strategy` phải đi qua **trước khi** chạm tới `ExecutionEngine` hay đường truyền mạng. Kiểm tra khối lượng tối đa, giá trị danh nghĩa (`notional`), giới hạn tần suất đặt lệnh (`throttle`), sức mua và biên độ giá (`fat-finger collar`).
+- **Tại sao phải tồn tại:** Trong IT chứng khoán có nguyên tắc bất di bất dịch: **bug phần mềm mất tiền thật trong tích tắc.** Nếu code `Strategy` gặp lỗi vòng lặp `while True` hoặc gõ dư một số `0` vào khối lượng, `RiskEngine` chặn đứng ngay tại RAM trước khi gói tin kịp bay lên Sở/Sàn.
+
+### 6. `ExecutionEngine` & `Portfolio` — Điều phối thực thi, Sổ cái & Đối soát (`Reconciliation`)
+- **Vai trò:** `ExecutionEngine` định tuyến lệnh đã qua kiểm duyệt xuống đúng `ExecutionClient` (cổng Sở thật hoặc sàn giả lập lúc Backtest), lưu nhật ký bất biến mọi phản hồi, và tự động **đối soát trạng thái (`Reconciliation`)** với Sở mỗi khi khởi động lại hoặc rớt mạng. Song song đó, `Portfolio` tính toán liên tục sức mua (`Margin`) và lãi/lỗ (`PnL`).
+- **Tại sao phải tồn tại:** Mạng có thể rớt và server có thể sập bất kỳ lúc nào. Không có `ExecutionEngine` đối soát khi bật lại, hệ thống sẽ bỏ sót **lệnh ma (`Ghost Orders`)** vẫn đang treo trên sàn hoặc ghi nhận khớp đúp (`Double Fill`).
+
+| Thành phần | Hình dung thực tế ở CTCK | Điều gì xảy ra nếu bỏ đi? |
+| :--- | :--- | :--- |
+| **`DataEngine`** | Bộ chuẩn hóa bảng giá (`Market Feed`) | Code parser trùng lặp; backtest dễ nhìn nhầm giá tương lai |
+| **`Cache`** | RAM giữ sổ lệnh & vị thế nóng | Nghẽn DB khi thị trường biến động; lệch trạng thái giữa các module |
+| **`MessageBus`** | Hệ thống bus sự kiện nội bộ | Xung đột đa luồng; không thể tái hiện bug chính xác |
+| **`Strategy`** | Bộ não định lượng (`Quant Logic`) | Logic mua/bán dính chặt vào code socket khó kiểm thử |
+| **`RiskEngine`** | Kiểm soát rủi ro tiền giao dịch (`Compliance`) | Một bug lặp vô hạn có thể đốt sạch tài khoản |
+| **`ExecutionEngine` + `Portfolio`** | Cổng gửi lệnh (`OMS`) & Kế toán giao dịch | Sót lệnh treo khi rớt mạng; tính sai sức mua / `PnL` |
+
+</Vi>
+
+<En>
+
+## 3. How Do They Interact With Each Other?
+
+Now let's connect those six static blocks into one live heartbeat. Follow the **six-step loop** as a market price tick arrives, wakes up your strategy, crosses the safety gate, and returns as an exchange fill:
+
+1. **Ingest (`DataClient` → `DataEngine`):** An external adapter receives a raw broker packet, converts it into a `QuoteTick`, and hands it to `DataEngine`.
+2. **Store & Broadcast (`DataEngine` → `Cache` + `MessageBus`):** `DataEngine` writes the fresh `QuoteTick` into `Cache` first (so any reader querying `Cache` always sees up-to-date data), then publishes a message onto topic `data.quotes...` on `MessageBus`.
+3. **Evaluate (`MessageBus` → `Strategy.on_quote_tick()`):** `Strategy` wakes up on that topic, reads indicators or historical bars from `Cache`, decides to buy 100 shares, creates an `Order` object (`INITIALIZED`), and emits a `SubmitOrder` command to the `MessageBus` **point-to-point endpoint** `RiskEngine.execute`.
+4. **Validate (`MessageBus` → `RiskEngine`):** `RiskEngine` inspects order limits, buying power, and submission rate limits. If rejected, it immediately fires `OrderDenied` locally (stopping right here!). If valid, it forwards `SubmitOrder` to `ExecutionEngine.execute`.
+5. **Dispatch (`ExecutionEngine` → `ExecutionClient` → Venue):** `ExecutionEngine` looks up the destination venue, forwards the command to the matching `ExecutionClient` adapter (`SimulatedExchange` in backtest, or broker gateway in live), and emits `OrderSubmitted`.
+6. **Feedback Loop (`ExecutionClient` → `ExecutionEngine` → `Cache` & `Portfolio` & `Strategy`):** As the exchange acknowledges (`OrderAccepted`) or fills (`OrderFilled`) the order, `ExecutionClient` passes events back to `ExecutionEngine`, which updates `Cache` and `Portfolio`, then broadcasts the update via `MessageBus` so `Strategy.on_order_filled()` reacts cleanly.
+
+</En>
+
+<Vi>
+
+## 3. Các thành phần bên trong tương tác với nhau như thế nào?
+
+Khi ghép 6 khối trên lại thành một cơ thể sống, luồng dữ liệu và luồng đặt lệnh vận hành theo một chu trình khép kín. Hãy lần theo **nhịp xử lý 6 bước** từ lúc giá mới vừa tới cho đến khi lệnh bay lên Sở và báo khớp về:
+
+1. **Đón tin (`DataClient` → `DataEngine`):** Cổng kết nối bên ngoài nhận gói tin từ sàn hoặc file lịch sử, chuyển thành chuẩn `QuoteTick` rồi đưa vào `DataEngine`.
+2. **Lưu kho & Phát sóng (`DataEngine` → `Cache` + `MessageBus`):** `DataEngine` ghi giá mới nhất vào `Cache` **trước tiên** (để bất kỳ ai hỏi `Cache` đều có số mới nhất), rồi phát sự kiện lên chủ đề `data.quotes...` trên `MessageBus`.
+3. **Ra quyết định (`MessageBus` → `Strategy.on_quote_tick()`):** `Strategy` được đánh thức khi chủ đề có tin mới, đọc thêm lịch sử từ `Cache`, quyết định mua 100 cổ phiếu, tạo đối tượng lệnh ở trạng thái `INITIALIZED`, và gửi lệnh `SubmitOrder` qua `MessageBus` tới điểm nhận trực tiếp (`point-to-point`) `RiskEngine.execute`.
+4. **Qua trạm kiểm soát (`MessageBus` → `RiskEngine`):** `RiskEngine` soi khối lượng, sức mua và tần suất đặt lệnh. Nếu vi phạm quy tắc, nó chặn đứng tại chỗ và phát `OrderDenied` (kết thúc ngay, không chạm mạng!). Nếu hợp lệ, nó chuyển tiếp `SubmitOrder` sang `ExecutionEngine.execute`.
+5. **Đẩy lệnh ra cổng (`ExecutionEngine` → `ExecutionClient` → Sàn):** `ExecutionEngine` tìm đúng adapter của sàn đích (`SimulatedExchange` khi Backtest hoặc cổng thật khi Live), giao việc gửi gói tin và phát sự kiện `OrderSubmitted`.
+6. **Vòng hồi tiếp (`ExecutionClient` → `ExecutionEngine` → `Cache` & `Portfolio` & `Strategy`):** Khi Sở xác nhận đã nhận lệnh (`OrderAccepted`) hoặc báo khớp (`OrderFilled`), `ExecutionClient` báo ngược về `ExecutionEngine` để cập nhật `Cache`, tính lại `Portfolio`, rồi phát sự kiện qua `MessageBus` để hàm `Strategy.on_order_filled()` xử lý bước tiếp theo.
+
+</Vi>
+
+<Callout type="tip" title="Data uses Pub/Sub; Orders must use Point-to-Point Commands / Dữ liệu dùng Pub/Sub, Lệnh bắt buộc dùng Command một điểm chạm">
+<En>
+
+Notice an important architectural rule in `MessageBus`: market data uses **Pub/Sub** (`one-to-many` — many strategies can subscribe freely), whereas trade orders use **Point-to-Point Commands** (`Strategy` → `RiskEngine` → `ExecutionEngine`). A command always routes to one mandatory handler so no order can ever skip `RiskEngine` or fire twice!
+
+</En>
+<Vi>
+
+Một nguyên tắc thiết kế cực kỳ tinh tế trong `MessageBus`: dữ liệu thị trường đi theo kiểu **Pub/Sub (`một-nhiều`)** để hàng chục chiến lược cùng nghe thoải mái; còn yêu cầu đặt/hủy lệnh bắt buộc phải dùng **Point-to-Point Command (`một-một`)** theo đúng tuyến `Strategy` → `RiskEngine` → `ExecutionEngine`. Nhờ vậy, không có chiến lược nào có thể vô tình đi tắt bỏ qua `RiskEngine` hay gửi trùng lệnh qua hai đường song song.
+
+</Vi>
+</Callout>
+
+<En>
+
+Try clicking through the interactive simulator below to watch an `AAPL` order travel across every component, and toggle `RiskEngine` to `Block > 200` to observe what happens when a strategy tries to place an oversized order:
+
+</En>
+
+<Vi>
+
+Bạn có thể tự bấm từng bước ở mô phỏng tương tác bên dưới để quan sát một lệnh `AAPL` đi qua từng thành phần, hoặc bật chế độ **`Block > 200`** ở `RiskEngine` để xem hệ thống chặn lệnh quá khổ ngay tại RAM như thế nào:
+
+</Vi>
+
+<DemoFrame title="Interactive Walkthrough: Order Path & Pre-Trade Risk Gate" titleVi="Mô phỏng tương tác: Đường đi một lệnh xuyên qua NautilusKernel">
+  <NautilusFlowDemo client:only="react" />
+</DemoFrame>
+
+<En>
+
+## 4. The Order Lifecycle Inside NautilusTrader
+
+Now zoom into the **single most important concept for any securities IT engineer**: **how an order transitions across states from birth to finality.**
+
+A common beginner mistake is treating order status as just a simple boolean (`open` vs `closed`). In real trading systems, network packets take time to cross the wire — creating an awkward limbo period where **you sent an order, your local process thinks it went out, yet the exchange hasn't confirmed receipt.**
+
+NautilusTrader models every order using **Event Sourcing (`OrderInitialized` → `OrderSubmitted` → `OrderAccepted` → `OrderFilled`...)** and groups states cleanly into **four distinct stages**:
+
+</En>
+
+<Vi>
+
+## 4. Vòng đời một lệnh đi bên trong NautilusTrader
+
+Giờ hãy phóng đại vào khái niệm **quan trọng bậc nhất với mọi kỹ sư IT chứng khoán**: **cách một lệnh chuyển đổi qua từng trạng thái từ lúc mới sinh ra cho đến khi khép lại.**
+
+Sai lầm phổ biến nhất của người mới là chia trạng thái lệnh theo kiểu nhị phân đơn giản: chỉ có `Đang mở (Open)` và `Đã đóng (Closed)`. Trên thực tế ở sàn giao dịch, gói tin cần thời gian chạy trên đường truyền mạng — tạo ra một **"khoảng lửng" (`In-Flight`)** nơi bạn đã gửi lệnh đi nhưng chưa nhận được xác nhận (`ACK`) từ Sở.
+
+NautilusTrader áp dụng **Event Sourcing (lưu chuỗi sự kiện bất biến)** để quản lý chặt chẽ vòng đời lệnh theo **4 vùng trạng thái tách biệt rõ ràng**:
+
+</Vi>
+
+<Figure
+  src={orderLifecycleImg}
+  alt="Formal Order Lifecycle State Machine diagram showing Active Local, In-Flight limbo, Open on Venue, and Closed terminal states with verification flags"
+  altVi="Sơ đồ máy trạng thái vòng đời lệnh thể hiện 4 giai đoạn Nội bộ, Đang truyền trên mạng, Đang treo trên sàn và Đóng vĩnh viễn kèm bảng kiểm tra cờ"
+  caption="Formal order state machine in institutional trading systems: separating local in-memory states, in-flight network transit (the SUBMITTED limbo trap), resting venue orders, and immutable closed terminal states."
+  captionVi="Máy trạng thái vòng đời lệnh trong hệ thống giao dịch tổ chức: tách bạch giữa trạng thái nội bộ tại RAM, trạng thái đang truyền trên mạng (bẫy lơ lửng SUBMITTED), lệnh đang treo trên sàn và trạng thái đóng bất biến."
+  sourceTitle="NautilusTrader Order Lifecycle Specification"
+  sourceUrl="https://nautilustrader.io/docs/latest/concepts/orders/"
+/>
+
+<En>
+
+Look carefully at the **three production lessons** hidden in that state machine:
+
+1. **`DENIED` vs. `REJECTED` (`Local Gate` vs `Venue Refusal`):**
+   - `DENIED`: Your local `RiskEngine` blocked the order before any network I/O ever happened. Zero exchange fees, zero exposure.
+   - `REJECTED`: Your order passed `RiskEngine`, reached the venue, and the **exchange itself** refused it (invalid tick increment, insufficient collateral on venue, or post-only breach).
+2. **The `SUBMITTED` Limbo Trap (`is_open == false` AND `is_closed == false`):**
+   - While waiting for venue acknowledgement (`ACK`), an order is in `SUBMITTED`. It is **not open** (not resting on the order book yet) and **not closed** (it might suddenly appear on the exchange 50ms later!). Only `is_inflight()` returns `true`.
+3. **Always Reconcile with `is_open() || is_inflight()`:**
+   - If your trading server crashes right after sending `SUBMITTED`, checking only `is_open()` upon restart would silently drop your pending order from tracking. You must check `is_open() || is_inflight()`.
+
+Below is the actual Rust implementation in `crates/model/src/enums.rs` enforcing that exact truth table:
+
+</En>
+
+<Vi>
+
+Khi đọc sơ đồ trên, có **3 bài học sống còn** cho kỹ sư hệ thống giao dịch bạn cần nhớ kỹ:
+
+1. **Phân biệt rạch ròi `DENIED` và `REJECTED`:**
+   - `DENIED`: Lệnh bị **`RiskEngine` nội bộ chặn lại** trước khi đụng vào card mạng. Gói tin chưa từng rời khỏi máy chủ của bạn.
+   - `REJECTED`: Lệnh đã vượt qua `RiskEngine` và bay lên sàn, nhưng bị **Sở/Sàn từ chối** (sai bước giá, thiếu ký quỹ trên sàn, hoặc vi phạm điều kiện khớp).
+2. **Cái bẫy lơ lửng của trạng thái `SUBMITTED`:**
+   - Khi lệnh vừa gửi đi và đang đợi phản hồi `ACK`, trạng thái là `SUBMITTED`. Lúc này hàm `is_open()` trả về **`false`** (chưa nằm trên sổ lệnh Sở), mà `is_closed()` cũng trả về **`false`** (chưa kết thúc — có thể 50ms sau sàn mới khớp!). Chỉ có `is_inflight()` bằng **`true`**.
+3. **Quy tắc đối soát an toàn (`Reconciliation`):**
+   - Nếu bot bị tắt đột ngột ngay lúc lệnh đang `SUBMITTED`, khi bật lại mà bạn chỉ lọc các lệnh `is_open()`, hệ thống sẽ bỏ quên luôn lệnh đang bay trên đường truyền! Phải luôn kiểm tra **`is_open() || is_inflight()`**.
+
+Ngay dưới đây là đoạn code Rust gốc trong file `enums.rs` quy định chính xác bảng trạng thái bất biến đó:
+
+</Vi>
+
+<GitHubCode repo="nautechsystems/nautilus_trader" path="crates/model/src/enums.rs" lines="L1511-L1554" url="https://github.com/nautechsystems/nautilus_trader/blob/83529d1cd11d8a23179cf52d70b013b831923a32/crates/model/src/enums.rs#L1511-L1554" caption="Official Rust implementation in crates/model/src/enums.rs: author comments emphasize why reconciliation MUST test is_open() || is_inflight() to avoid dropping unacknowledged orders.">
+
+```rust
+impl OrderStatus {
+    /// Returns whether the order status represents an open (working) order at the venue.
+    ///
+    /// This excludes `Submitted`, which is in-flight rather than working. When filtering venue
+    /// order status reports for orders the venue still holds, use `is_open() || is_inflight()`:
+    /// a venue that reports a resting order as pending maps it to `Submitted`, and testing
+    /// `is_open()` alone silently drops it from reconciliation.
+    #[must_use]
+    pub const fn is_open(self) -> bool {
+        matches!(
+            self,
+            Self::Accepted
+                | Self::Triggered
+                | Self::PendingUpdate
+                | Self::PendingCancel
+                | Self::PartiallyFilled
+        )
+    }
+
+    /// Returns whether the order status represents a terminal (closed) state.
+    #[must_use]
+    pub const fn is_closed(self) -> bool {
+        matches!(
+            self,
+            Self::Denied
+                | Self::Rejected
+                | Self::Canceled
+                | Self::Expired
+                | Self::Filled
+                | Self::Voided
+        )
+    }
+
+    /// Returns whether the order status represents an in-flight request to the venue.
+    ///
+    /// `PENDING_UPDATE` and `PENDING_CANCEL` are both open and in-flight: the order is working at
+    /// the venue while a modify or cancel request is outstanding.
+    #[must_use]
+    pub const fn is_inflight(self) -> bool {
+        matches!(
+            self,
+            Self::Submitted | Self::PendingUpdate | Self::PendingCancel
+        )
+    }
+}
+```
+
+</GitHubCode>
+
+<En>
+
+## Summary Mental Model
+
+If you carry just one takeaway into your first week in securities IT, remember this four-line map of NautilusTrader:
+
+- **What it is:** One deterministic Rust `NautilusKernel` wrapped in Python (`NautilusTrader`), eliminating the rewrite gap between Backtest and Live.
+- **Internal components:** `DataEngine` feeds & normalizes, `Cache` remembers state fast in RAM, `MessageBus` wires everything serially, `Strategy` decides, `RiskEngine` guards pre-trade, and `ExecutionEngine` + `Portfolio` route, account, and reconcile.
+- **Interaction rule:** Market data flows via `Pub/Sub`; money-moving commands flow strictly `Point-to-Point` through `RiskEngine`.
+- **Order lifecycle:** `INITIALIZED` → (`DENIED` locally OR) `SUBMITTED` (`in-flight`) → `ACCEPTED` / `PARTIALLY_FILLED` (`open`) → `FILLED` / `CANCELED` / `REJECTED` (`closed`).
+
+</En>
+
+<Vi>
+
+## Tóm tắt nhanh để bỏ túi
+
+Khi bước vào tuần làm việc đầu tiên tại một công ty chứng khoán hay đội làm sản phẩm tài chính, chỉ cần nhớ 4 gạch đầu dòng cốt lõi này từ NautilusTrader:
+
+- **NautilusTrader là gì:** Một hạt nhân giao dịch hướng sự kiện bằng Rust (`NautilusKernel`) bọc lớp API Python bên trên, giúp chạy **cùng một logic duy nhất** từ Backtest đến Live mà không cần viết lại code.
+- **6 khối bên trong:** `DataEngine` nhận & chuẩn hóa dữ liệu, `Cache` lưu trạng thái nóng trên RAM, `MessageBus` truyền tin đơn luồng, `Strategy` ra quyết định, `RiskEngine` chặn rủi ro trước giờ G, và `ExecutionEngine` + `Portfolio` đẩy lệnh, ghi nhận `PnL` & đối soát.
+- **Cách tương tác:** Dữ liệu thị trường đi đường `Pub/Sub`; lệnh tiền thật đi một chiều bắt buộc qua `Command` để không thể né `RiskEngine`.
+- **Vòng đời lệnh:** `INITIALIZED` → (`DENIED` nội bộ nếu vi phạm Risk, hoặc) `SUBMITTED` (`đang trên đường truyền`) → `ACCEPTED` / `PARTIALLY_FILLED` (`đang treo/khớp dở`) → `FILLED` / `CANCELED` / `REJECTED` (`kết thúc bất biến`).
+
+</Vi>
+
+<LinkCard url="https://nautilustrader.io/docs/latest/concepts/architecture/" title="NautilusTrader Official Architecture Concepts" description="Deep dive into NautilusKernel, MessageBus endpoints, Actor lifecycles, and Environment isolation." tag="Official Docs" />
+<LinkCard url="https://nautilustrader.io/docs/latest/concepts/orders/" title="NautilusTrader Orders & Execution Concepts" description="Full specification of OrderStatus, event sourcing transitions, emulated orders, and contingency orders (OCO/OTO)." tag="Official Docs" />
