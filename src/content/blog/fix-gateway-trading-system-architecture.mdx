@@ -1,0 +1,559 @@
+---
+title: "What is a FIX Gateway? Architecture, Wire Protocol, and Order Lifecycle for Beginners"
+title_vi: "FIX Gateway là gì? Kiến trúc, Giao thức Wire và Vòng đời lệnh FIX cho người mới IT Chứng khoán"
+description: "A beginner's guide to FIX Gateways in securities trading: why finance uses FIX over REST/WebSocket, internal gateway anatomy, gap recovery, and complete order routing."
+description_vi: "Cẩm nang toàn diện về FIX Gateway cho kỹ sư IT chứng khoán: tại sao giới tài chính dùng FIX thay vì REST/WebSocket, 5 tầng cấu tạo bên trong gateway, cơ chế bù chuỗi và vòng đời lệnh thực chiến."
+date: 2026-11-17
+category: "system-design"
+tags: ["fix-protocol", "trading-systems", "system-design", "securities-it", "fintech", "distributed-systems"]
+draft: false
+sources:
+  - { title: "FIX Trading Community — Official FIX Protocol Standards & Specifications", author: "FIX Protocol Ltd", url: "https://www.fixtrading.org/standards/" }
+  - { title: "CME Group — iLink 3 Binary & FIX Protocol Order Entry Specifications", author: "CME Group", url: "https://www.cmegroup.com/confluence/display/EPICSANDBOX/iLink+3+Binary+Order+Entry" }
+  - { title: "OnixS — High-Performance C++ & Java FIX Engine Architecture", author: "Onix Solutions", url: "https://www.onixs.biz/products/fix-engines" }
+  - { title: "QuickFIX — Open Source C++ / Java / Go FIX Protocol Engine", author: "QuickFIX Project", url: "https://github.com/quickfix/quickfix" }
+---
+
+import Callout from '../../components/mdx/Callout.astro';
+import DemoFrame from '../../components/mdx/DemoFrame.astro';
+import En from '../../components/mdx/En.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import LinkCard from '../../components/mdx/LinkCard.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import FixSessionDemo from '../../components/demos/FixSessionDemo.tsx';
+
+import fixEcosystemTopology from '../../assets/blog/fix-gateway-trading-system-architecture/fix-ecosystem-topology.png';
+import fixPacketImg from '../../assets/blog/fix-gateway-trading-system-architecture/fix-tag-value-packet-structure.png';
+import fixGatewayArch from '../../assets/blog/fix-gateway-trading-system-architecture/fix-gateway-internal-architecture.png';
+import onixsFixEngine from '../../assets/blog/fix-gateway-trading-system-architecture/onixs-fix-engine.png';
+import fixGapRecovery from '../../assets/blog/fix-gateway-trading-system-architecture/fix-gap-recovery-sequence.png';
+import fixOrderLifecycle from '../../assets/blog/fix-gateway-trading-system-architecture/fix-order-lifecycle-state-machine.png';
+import cmeIlinkArch from '../../assets/blog/fix-gateway-trading-system-architecture/cme-ilink-architecture.png';
+
+<En>
+
+When software engineers transition from general web tech into **securities IT (IT chứng khoán)** or **electronic trading**, their first architectural review often triggers a culture shock:
+
+* *"Where is the OpenAPI / Swagger documentation?"*
+* *"Why aren't orders sent via REST JSON endpoints?"*
+* *"Why does the gateway care so much about sequence numbers and disk journals?"*
+
+The answer is **FIX (Financial Information eXchange) Protocol**. Created in 1992 by Salomon Brothers and Fidelity Investments, FIX is the undisputed lingua franca of global capital markets. Every day, trillions of dollars across equities, derivatives, FX, and fixed income move across FIX connections between hedge funds, asset managers, brokerages, and exchanges (such as NYSE, NASDAQ, CME, LSE, and HOSE/HNX).
+
+And standing at the front door of every institutional broker and exchange is the **FIX Gateway**.
+
+In this guide, we will break down the FIX Gateway from the ground up: why financial markets refuse to run on REST or WebSocket, what lives inside a production FIX Gateway, how its deterministic sequence-recovery mechanism eliminates lost orders, and how an order travels through its complete lifecycle.
+
+</En>
+
+<Vi>
+
+Khi một kỹ sư phần mềm chuyển từ mảng ứng dụng web thông thường sang **IT chứng khoán (Securities IT)** hoặc hệ thống giao dịch điện tử, buổi đọc kiến trúc đầu tiên thường mang lại một cảm giác bỡ ngỡ:
+
+* *"Tài liệu Swagger / OpenAPI ở đâu?"*
+* *"Tại sao đặt lệnh không dùng REST API gửi JSON cho tiện?"*
+* *"Tại sao hệ thống lại cực kỳ khắt khe với số thứ tự (Sequence Number) và bắt buộc phải ghi log nhị phân xuống ổ cứng trước khi xử lý?"*
+
+Câu trả lời nằm ở **FIX (Financial Information eXchange) Protocol**. Ra đời từ năm 1992 bởi Salomon Brothers và Fidelity Investments, FIX là "ngôn ngữ chung" thống trị toàn bộ thị trường tài chính toàn cầu. Mỗi ngày, hàng nghìn tỷ USD cổ phiếu, phái sinh, ngoại hối và trái phiếu được giao dịch qua kết nối FIX giữa các quỹ đầu cơ (Hedge Funds), công ty quản lý quỹ (Asset Managers), công ty chứng khoán (Brokers) và các Sở giao dịch (như NYSE, NASDAQ, CME, LSE, và HOSE/HNX).
+
+Và đứng gác ngay tại cửa ngõ của mọi công ty chứng khoán hay sàn giao dịch chính là **FIX Gateway**.
+
+Trong cẩm nang này, chúng ta sẽ cùng giải phẫu FIX Gateway từ căn bản: tại sao tài chính không dùng REST/WebSocket, cấu tạo 5 tầng bên trong một gateway thực chiến, cơ chế bù chuỗi (Gap Recovery) thần thánh giúp không bao giờ mất lệnh, và vòng đời một lệnh đi qua hệ thống như thế nào.
+
+</Vi>
+
+<Figure
+  src={fixEcosystemTopology}
+  alt="Institutional Securities FIX Topology showing external Buy-Side clients connecting via TLS to a DMZ FIX Gateway Cluster, which interfaces via RingBuffer IPC to the Core Trading Engine and Exchange"
+  altVi="Sơ đồ phân tầng tổng thể hệ thống FIX chứng khoán: các khách hàng tổ chức bên ngoài kết nối TLS tới cụm FIX Gateway đặt tại DMZ, liên kết qua RingBuffer IPC với Core Trading Engine và Sàn giao dịch"
+  caption="Enterprise Securities Topology: The FIX Gateway acts as the secure, stateful perimeter bastion in the DMZ, isolating external network volatility from the ultra-fast internal Core Trading LAN."
+  captionVi="Kiến trúc tổng thể chứng khoán: FIX Gateway đóng vai trò chốt chặn bảo mật có trạng thái (stateful) đặt tại DMZ, cách ly hoàn toàn biến động mạng Internet bên ngoài với mạng LAN siêu tốc của Core Trading nội bộ."
+/>
+
+---
+
+<En>
+
+## 1. Why FIX? Why Not REST, GraphQL, or WebSocket?
+
+In modern web development, REST over HTTP/2 or WebSockets with JSON payloads is standard. But financial trading venues have fundamentally different constraints:
+
+| Requirement | REST / HTTP | WebSocket + JSON | FIX Protocol (over TCP) |
+| :--- | :--- | :--- | :--- |
+| **Transport Model** | Request / Response (Stateless) | Full Duplex Stream | Full Duplex Stateful Stream |
+| **Delivery Guarantee** | Best-effort (At-most-once without custom headers) | Transport-level TCP only (App-level loss if disconnected) | **Guaranteed In-Order Exactly-Once Semantics** via `MsgSeqNum` |
+| **Message Ordering** | Out-of-order execution possible across HTTP threads | In-order on single socket, lost upon reconnect | **Strict Monotonic Sequence Recovery** (`ResendRequest 35=2`) |
+| **Serialization Overhead** | Large text payloads (`"orderQuantity": 1000`) | Text JSON parsing, GC allocations | Compact integer Tag-Value (`38=1000`), zero-allocation lookup |
+| **Industry Interop** | Proprietary schema per broker | Proprietary JSON schema per venue | **Universal Standard Dictionary** (Same tag 55, 54, 38, 44 everywhere) |
+
+</En>
+
+<Vi>
+
+## 1. Tại sao lại là FIX? Sao không dùng REST, GraphQL hay WebSocket?
+
+Trong lập trình web hiện đại, REST qua HTTP/2 hoặc WebSocket truyền JSON là lựa chọn mặc định. Tuy nhiên, thị trường tài chính và giao dịch chứng khoán lại đối mặt với những bài toán sống còn mà REST/JSON không thể đáp ứng:
+
+| Tiêu chí | REST / HTTP | WebSocket + JSON | FIX Protocol (trên nền TCP) |
+| :--- | :--- | :--- | :--- |
+| **Mô hình truyền tải** | Request / Response (Không lưu trạng thái) | Luồng 2 chiều (Full Duplex) | Luồng 2 chiều có trạng thái nghiêm ngặt (**Stateful**) |
+| **Bảo đảm toàn vẹn** | Best-effort (Dễ trùng lệnh hoặc mất lệnh khi mạng timeout) | Chỉ bảo đảm ở tầng TCP (Mất kết nối là mất trạng thái ứng dụng) | **Bảo đảm đúng thứ tự và không thất lạc** nhờ `MsgSeqNum` |
+| **Khôi phục khi rớt mạng** | Khó đối soát chính xác lệnh nào đã vào sổ lệnh sàn | Phải tự viết lại logic đồng bộ snapshot từ đầu | **Cơ chế bù chuỗi tự động chuẩn hóa** (`ResendRequest 35=2`) |
+| **Hiệu năng tuần tự hóa** | Chuỗi JSON cồng kềnh (`"orderQuantity": 1000`) | JSON text parse tốn CPU, kích hoạt Garbage Collection | Tag-Value số nguyên cực gọn (`38=1000`), **Zero-allocation** |
+| **Tính tương thích toàn cầu**| Mỗi công ty chứng khoán tự chế 1 kiểu URL/JSON | Mỗi sàn một cấu trúc WebSocket khác nhau | **Từ điển chuẩn quốc tế** (Mọi sàn trên thế giới đều hiểu Tag 55=Mã, 54=Chiều, 38=Khối lượng) |
+
+</Vi>
+
+<En>
+
+If a trading algorithm fires 50 orders and the network cable flickers for 200 milliseconds, HTTP or raw WebSocket cannot tell you cleanly: *Did order #37 get executed before the link dropped? Did the exchange match it? Which messages were lost in flight?*
+
+FIX solves this at the protocol level. Every message sent in either direction has an integer sequence number: `MsgSeqNum (Tag 34)`. If either side observes a skipped sequence number, it immediately halts normal processing, demands an audit replay, and resumes without losing a single financial transaction.
+
+</En>
+
+<Vi>
+
+Thử tưởng tượng: một thuật toán giao dịch bắn 50 lệnh liên tiếp, đúng lúc đó đường truyền bị chập chờn 200 mili-giây. Với REST hay WebSocket thuần, hệ thống sẽ rơi vào thế tiến thoái lưỡng nan: *Lệnh số 37 đã chạm tới sàn chưa? Sàn đã khớp chưa? Có lệnh nào bị rơi rớt giữa đường không?*
+
+FIX giải quyết triệt để bài toán này ngay tại tầng giao thức. Mọi gói tin gửi đi theo cả hai chiều đều bắt buộc phải mang một số thứ tự tăng dần liên tục: `MsgSeqNum (Tag 34)`. Bất kỳ khi nào một bên phát hiện số thứ tự bị nhảy cóc (sequence gap), toàn bộ quá trình xử lý lệnh mới sẽ lập tức tạm dừng để kích hoạt cơ chế tua lại (Resend Request), bảo đảm không bao giờ có chuyện mất lệnh hay khớp trùng lệnh.
+
+</Vi>
+
+---
+
+<En>
+
+## 2. Anatomy of a FIX Tag-Value Frame
+
+A raw FIX message looks like a string of key-value pairs separated by the non-printable ASCII delimiter `SOH (Start of Header, byte 0x01)`. In documentation and log visualizers, this delimiter is traditionally rendered as a pipe `|` or `^A`.
+
+Every valid FIX packet consists of three strict sections:
+1. **Standard Header**: Begins with Tag 8 (`BeginString`), Tag 9 (`BodyLength`), and Tag 35 (`MsgType`). Contains routing addresses (`SenderCompID 49`, `TargetCompID 56`), sequence count (`MsgSeqNum 34`), and timestamp (`SendingTime 52`).
+2. **Application Body**: Carries financial payload (e.g. `ClOrdID 11`, `Symbol 55`, `Side 54`, `OrderQty 38`, `Price 44`).
+3. **Standard Trailer**: Always terminates with Tag 10 (`CheckSum`), a 3-character modulo 256 sum of all preceding bytes.
+
+</En>
+
+<Vi>
+
+## 2. Giải phẫu cấu trúc gói tin FIX Tag-Value (Wire Protocol)
+
+Một gói tin FIX dạng thô (raw wire bytes) là một chuỗi các cặp key-value được phân cách bằng ký tự điều khiển ASCII `SOH (Start of Header, mã byte 0x01)`. Khi hiển thị trên log hoặc tài liệu kỹ thuật, ký tự này thường được quy ước viết bằng dấu gạch đứng `|` hoặc `^A`.
+
+Mọi bản tin FIX hợp lệ đều gồm 3 phần bắt buộc:
+1. **Standard Header (Phần đầu)**: Luôn bắt đầu bằng Tag 8 (`BeginString`), Tag 9 (`BodyLength`), và Tag 35 (`MsgType`). Chứa định danh đối tác (`SenderCompID 49`, `TargetCompID 56`), số thứ tự gói tin (`MsgSeqNum 34`), và thời gian gửi (`SendingTime 52`).
+2. **Application Body (Nội dung nghiệp vụ)**: Chứa thông tin giao dịch cụ thể (ví dụ: mã lệnh `ClOrdID 11`, mã chứng khoán `Symbol 55`, chiều mua/bán `Side 54`, khối lượng `OrderQty 38`, mức giá `Price 44`).
+3. **Standard Trailer (Phần đuôi)**: Luôn kết thúc bằng Tag 10 (`CheckSum`) gồm 3 chữ số, tính bằng tổng modulo 256 của toàn bộ các byte đứng trước nó.
+
+</Vi>
+
+<Figure
+  src={fixPacketImg}
+  alt="Anatomy of a FIX Tag-Value Message (NewOrderSingle MsgType=D) showing Header, Body, Trailer, and SOH delimiters"
+  altVi="Giải phẫu cấu trúc gói tin FIX Tag-Value (NewOrderSingle MsgType=D) phân tách Header, Body, Trailer và ký tự phân cách SOH"
+  caption="Wire protocol breakdown: ASCII bytes separated by 0x01 (SOH). Tags are integer identifiers mapping to standard dictionary definitions."
+  captionVi="Giải mã cấu trúc byte trên đường truyền: các chuỗi ASCII phân tách bằng byte 0x01 (SOH). Các thẻ (tag) là số nguyên đối chiếu trực tiếp vào từ điển chuẩn quốc tế."
+/>
+
+<Callout type="tip" title="Why integer tags beat JSON string keys in low-latency systems">
+<En>
+In JSON, parsing requires hashing variable-length string keys (`"accountIdentifier"`, `"orderQuantity"`). In FIX, tags are small integers (`1`, `38`, `55`). High-performance FIX engines (written in C++, Rust, or Java) parse packets by scanning directly for `<tag>=<val>\x01` and storing pointers in a fixed-size integer array (`fields[38] = &slice`). This enables zero heap allocations and sub-microsecond parsing.
+</En>
+<Vi>
+Với JSON, bộ parse phải băm (hash) các chuỗi ký tự dài (`"accountIdentifier"`, `"orderQuantity"`). Trong khi đó với FIX, các tag là số nguyên nhỏ (`1`, `38`, `55`). Các FIX Engine hiệu năng cao (viết bằng C++, Rust hoặc Java) quét trực tiếp byte stream và lưu con trỏ vào một mảng cố định (`fields[38] = &slice`). Điều này triệt tiêu hoàn toàn việc cấp phát bộ nhớ động (Zero Heap Allocation), đạt tốc độ phân tích dưới mức micro-giây.
+</Vi>
+</Callout>
+
+---
+
+<En>
+
+## 3. What Lives Inside a FIX Gateway?
+
+A production FIX Gateway is much more than a network proxy. It is a stateful protocol guardian and security perimeter.
+
+Here are the 5 internal layers that power institutional FIX gateways:
+
+</En>
+
+<Vi>
+
+## 3. Cấu tạo 5 thành phần bên trong FIX Gateway
+
+Một FIX Gateway thực tế trong các công ty chứng khoán hoặc sàn giao dịch không đơn thuần là một reverse proxy. Nó là một chốt chặn bảo mật và điều phối giao thức có lưu trạng thái (stateful).
+
+Dưới đây là 5 tầng cốt lõi cấu thành một FIX Gateway chuẩn tổ chức:
+
+</Vi>
+
+<Figure
+  src={fixGatewayArch}
+  alt="Internal Architecture of a High-Performance FIX Gateway showing Network Edge, Session State & WAL, Zero-Allocation Parser, Pre-Trade Throttle, and High-Speed IPC Bridge"
+  altVi="Kiến trúc nội bộ 5 tầng của FIX Gateway hiệu năng cao: Network Edge, Quản lý Session & WAL, Parser Zero-Allocation, Throttle Kiểm soát Rủi ro và IPC Bridge siêu tốc"
+  caption="Anatomy of a High-Performance FIX Gateway: 5 distinct stages decoupling network volatility from core matching engines."
+  captionVi="Giải phẫu 5 tầng xử lý của FIX Gateway hiệu năng cao: tách bạch hoàn toàn I/O mạng bên ngoài với lõi khớp lệnh nội bộ."
+/>
+
+<En>
+
+### Layer 1: Network & Socket I/O Acceptor
+* **Socket Multiplexing**: Built on non-blocking I/O event loops (`epoll` on Linux, `kqueue` on macOS, or Netty/IOCP). A single gateway instance can manage hundreds of persistent client connections concurrently.
+* **TLS / VPN Offloading**: Hardware-accelerated AES decryption for secure connections across leased lines or cross-connects.
+* **Direct Byte Buffering**: Accumulates byte slices into contiguous memory buffers until the closing delimiter (`10=xxx\x01`) confirms a complete frame.
+
+### Layer 2: FIX Session State Engine & WAL Message Store
+* **Sequence Counter**: Tracks two crucial integers for every active session:
+  * `ExpectedInSeqNum`: Next expected sequence number from client.
+  * `NextOutSeqNum`: Sequence number for the next outgoing message from gateway.
+* **Message Store (Write-Ahead Log)**: Every message received or sent is immediately persisted to a memory-mapped file (`mmap`), RocksDB, LMDB, or disk journal. This disk journal is mandatory: if the server reboots or a client issues a `ResendRequest`, the gateway must replay historical messages verbatim.
+
+### Layer 3: Zero-Allocation Parser & Data Dictionary
+* Validates messages against the agreed FIX XML Data Dictionary (e.g. FIX 4.2, FIX 4.4, or custom broker extensions).
+* Verifies required tags (e.g. Tag 35=D must have Tag 11, 55, 54, 38, 40).
+* Checks data types (integers, floating point decimals, UTC timestamps) and checks Tag 10 checksum.
+* If a packet is malformed, the session rejects it with a **Session Reject (`35=3`)** specifying `RefTagID (371)` and `RefSeqNum (45)`.
+
+### Layer 4: Inbound Throttle & Pre-Trade Gate
+* **Token Bucket Rate Limiting**: Exchanges fine brokers heavily if clients spam cancel/replace orders. The gateway enforces limits (e.g. maximum 500 messages/second per CompID).
+* **Account Whitelisting**: Verifies that the client's `SenderCompID` is permitted to trade the specified `Account (1)` and `Symbol (55)`.
+* **Fat-Finger Sanity Filter**: Instantly rejects orders with nonsensical prices or quantities before they touch downstream matching engines.
+
+### Layer 5: High-Speed IPC Bridge & Binary Transcoder
+* Web applications communicate via HTTP/JSON, but high-frequency trading cores cannot afford string parsing.
+* This bridge transcodes ASCII FIX into ultra-compact binary protocols like **Simple Binary Encoding (SBE)**, **FlatBuffers**, or **Protobuf**.
+* Publishes the message across a lock-free ring buffer (such as the **LMAX Disruptor** or **Aeron IPC**) to the internal Order Management System (OMS) or Matching Engine.
+
+</En>
+
+<Vi>
+
+### Tầng 1: Network & Socket I/O Acceptor (Tiếp nhận mạng)
+* **Ghép kênh Socket (Multiplexing)**: Hoạt động dựa trên non-blocking I/O (`epoll` trên Linux, `kqueue` trên BSD/macOS, hoặc thư viện Netty/Aeron). Một gateway có thể duy trì hàng trăm kết nối TCP thường trực song song.
+* **Giải mã TLS / VPN**: Giải mã AES bằng phần cứng chuyên dụng trên các đường truyền riêng (Leased Line / Metronet / Cross-Connect).
+* **Vùng đệm Byte trực tiếp**: Gom các mảnh dữ liệu mạng thành các khối bộ nhớ liên tục cho đến khi gặp thẻ kết thúc `10=xxx\x01` để xác nhận một gói tin trọn vẹn.
+
+### Tầng 2: Session State Engine & Bộ lưu trữ WAL (Message Store)
+* **Bộ đếm Sequence**: Quản lý 2 số nguyên then chốt cho mỗi phiên:
+  * `ExpectedInSeqNum`: Số thứ tự tiếp theo mà Gateway kỳ vọng nhận từ Client.
+  * `NextOutSeqNum`: Số thứ tự tiếp theo mà Gateway sẽ đánh dấu khi gửi cho Client.
+* **Write-Ahead Log (WAL)**: Mọi tin nhắn nhận hoặc gửi đều bắt buộc phải ghi xuống ổ đĩa (thông qua memory-mapped file `mmap`, LMDB hoặc RocksDB). Đây là yêu cầu bắt buộc: nếu server sập nguồn hoặc đối tác yêu cầu gửi lại (`ResendRequest`), gateway phải có khả năng đọc từ đĩa để phát lại nguyên vẹn từng gói tin.
+
+### Tầng 3: Zero-Allocation Parser & Từ điển dữ liệu (Data Dictionary)
+* Đối soát gói tin với bộ từ điển XML FIX đã thống nhất (FIX 4.2, 4.4, hoặc từ điển tùy biến riêng của từng Sở/Sàn).
+* Kiểm tra các trường bắt buộc (ví dụ: lệnh mua bán `35=D` bắt buộc phải có đủ Tag 11, 55, 54, 38, 40).
+* Xác thực kiểu dữ liệu (số nguyên, số thực, thời gian UTC) và tính lại CheckSum (Tag 10).
+* Nếu gói tin sai cú pháp, Gateway lập tức trả về **Session Reject (`35=3`)** kèm chỉ rõ lỗi ở thẻ nào (`RefTagID 371`) và số sequence nào (`RefSeqNum 45`).
+
+### Tầng 4: Throttle & Chốt chặn kiểm soát rủi ro (Pre-Trade Gate)
+* **Giới hạn tần suất lệnh (Token Bucket Rate Limiting)**: Các Sở giao dịch (HOSE, HNX, CME) đều phạt tiền rất nặng nếu công ty chứng khoán để khách hàng spam lệnh hủy/sửa vượt định mức. Gateway chặn ngay tại cửa (ví dụ: tối đa 500 tin nhắn/giây cho một tài khoản).
+* **Kiểm tra quyền tài khoản (Account Whitelisting)**: Xác minh xem `SenderCompID` này có được phép đặt lệnh cho số tài khoản `Account (1)` và mã `Symbol (55)` tương ứng hay không.
+* **Lọc lỗi gõ nhầm (Fat-Finger Filter)**: Chặn đứng các lệnh có khối lượng hoặc mức giá phi thực tế (ví dụ: đặt mua 10 triệu cổ phiếu) ngay tại cửa ngõ trước khi làm nghẽn hệ thống khớp lệnh bên trong.
+
+### Tầng 5: IPC Bridge & Chuyển đổi nhị phân (Binary Transcoder)
+* Các ứng dụng web thích dùng JSON, nhưng các Matching Engine chứng khoán triệu lệnh/giây không bao giờ parse chuỗi text.
+* Tầng Bridge chuyển đổi gói tin FIX ASCII thành định dạng nhị phân siêu gọn như **Simple Binary Encoding (SBE)**, **FlatBuffers**, hoặc **Protobuf**.
+* Đẩy trực tiếp thông điệp qua vòng đệm không khóa (Lock-free Ring Buffer như **LMAX Disruptor** hoặc **Aeron IPC**) thẳng vào Order Management System (OMS) hoặc Matching Engine nội bộ.
+
+</Vi>
+
+<Figure
+  src={onixsFixEngine}
+  alt="Real-world enterprise C++ and Java FIX Engine Architecture from OnixS showing Session Storage, Session State Machine, Parser, and Trading Application"
+  altVi="Kiến trúc FIX Engine thực chiến viết bằng C++ và Java của hãng OnixS thể hiện Session Storage, Session State Machine, Parser và Trading Application"
+  caption="Commercial FIX Engine blueprint (OnixS): Notice how Session Storage (WAL) and the Session State Machine strictly isolate network sockets from the trading logic."
+  captionVi="Bản vẽ kiến trúc FIX Engine chuẩn thương mại (OnixS): Lưu ý cách bộ lưu trữ Session Storage (WAL) và Session State Machine cô lập hoàn toàn socket mạng với logic giao dịch."
+/>
+
+---
+
+<En>
+
+## 4. The Superpower of FIX: Session State & Gap Recovery
+
+In HTTP, if a request drops, the client retries and risks executing twice.
+In raw WebSocket, if the connection drops, messages sent during the reconnection gap vanish forever.
+
+**In FIX, sequence numbers make lost or duplicate orders mathematically impossible.**
+
+Here is what happens during a real session:
+
+1. **Session Establishment (Logon `35=A`)**:
+   * Client sends `MsgType=A`, `MsgSeqNum=1`.
+   * Gateway verifies credentials, accepts with `MsgType=A`, `MsgSeqNum=1`.
+   * Both sides initialize sequence counters.
+2. **Heartbeats & Inactivity (`35=0` and `35=1`)**:
+   * Every `HeartBtInt` seconds (e.g. 30s), if no orders were sent, a `Heartbeat (35=0)` is exchanged.
+   * If a peer goes silent, a `TestRequest (35=1)` is sent with a unique `TestReqID (112)`. The peer must echo this ID immediately. Failure to reply triggers an automated disconnect.
+
+</En>
+
+<Vi>
+
+## 4. Cơ chế "Bù lỗ hổng Sequence" (Gap Recovery) thần thánh của FIX
+
+Trong giao thức HTTP thông thường, nếu request bị timeout giữa chừng, client bấm retry có nguy cơ làm khớp 2 lần thành 2 lệnh riêng biệt.
+Trong WebSocket thuần, nếu đứt mạng nửa giây, những tin nhắn bắn ra trong khoảng trống đó sẽ vĩnh viễn biến mất.
+
+**Trong giao thức FIX, hệ thống số thứ tự (Sequence Numbers) biến việc mất lệnh hoặc trùng lệnh thành điều bất khả thi.**
+
+Hãy cùng xem điều gì diễn ra trong một phiên giao dịch thực tế:
+
+1. **Khởi tạo phiên (Logon `35=A`)**:
+   * Client gửi `MsgType=A`, `MsgSeqNum=1`.
+   * Gateway xác thực tài khoản, phản hồi bằng `MsgType=A`, `MsgSeqNum=1`.
+   * Hai bên đồng bộ số đếm chuỗi từ 1.
+2. **Duy trì nhịp đập (Heartbeat `35=0` và TestRequest `35=1`)**:
+   * Cứ mỗi chu kỳ `HeartBtInt` (thường là 30 giây), nếu không có lệnh nào phát sinh, hai bên sẽ gửi `Heartbeat (35=0)`.
+   * Nếu đối tác im lặng quá thời gian cho phép, bên kia sẽ phát lệnh kiểm tra `TestRequest (35=1)` kèm mã `TestReqID (112)`. Đối tác bắt buộc phải phản hồi ngay lập tức. Nếu tiếp tục im lặng, kết nối TCP sẽ bị hủy để bảo đảm an toàn.
+
+</Vi>
+
+<Figure
+  src={fixGapRecovery}
+  alt="Deterministic Sequence Gap Recovery Flow showing Client sending MsgSeqNum 14, Gateway detecting gap from expected 11, issuing ResendRequest 35=2, Client sending SequenceReset GapFill 35=4 and replaying MsgSeqNum 13 with PossDupFlag 43=Y"
+  altVi="Luồng khôi phục Sequence Gap: Client gửi MsgSeqNum 14, Gateway phát hiện thiếu số 11, phát ResendRequest 35=2, Client gửi SequenceReset GapFill 35=4 và phát lại lệnh 13 kèm cờ PossDupFlag 43=Y"
+  caption="Sequence Gap Recovery: The Gateway holds out-of-order message 14 in quarantine, demands replay of missing messages (11-13), skips heartbeats via GapFill, and only processes message 14 once all historical gaps are healed."
+  captionVi="Quy trình bù chuỗi: Gateway giữ gói tin số 14 vào hàng đợi cách ly, yêu cầu gửi lại các gói bị thiếu (11-13), bỏ qua heartbeat bằng GapFill và chỉ xử lý tiếp gói số 14 khi lỗ hổng dữ liệu đã được vá lành hoàn toàn."
+/>
+
+<En>
+
+### What happens when packets drop? (The Gap Recovery Algorithm)
+
+Look closely at the diagram above:
+* The client was at `MsgSeqNum=10`.
+* A network blip occurs. The client emits messages 11, 12 (heartbeats), and 13 (a cancel request), but the socket drops.
+* The client reconnects and immediately sends a new order with **`MsgSeqNum=14`**.
+* The Gateway inspects the packet: `ExpectedInSeqNum` is **11**, but the incoming message is **14**!
+* **Immediate Reaction**:
+  1. The Gateway **quarantines** message 14 into an in-memory buffer. It does *not* process it yet.
+  2. The Gateway issues a **`ResendRequest (35=2)`** with `BeginSeqNo (Tag 7) = 11` and `EndSeqNo (Tag 16) = 0` (meaning "replay everything from 11 up to current").
+  3. The client receives the request, opens its local Message Store, and checks what messages 11 and 12 were. They were heartbeats! It is pointless to replay administrative heartbeats.
+  4. The client sends **`SequenceReset (35=4)`** with `GapFillFlag (Tag 123) = Y` and `NewSeqNo (Tag 36) = 13`. This instructs the Gateway: *"Skip sequence numbers 11 and 12 safely."*
+  5. The client reaches message 13 (the cancel request). This is a business message! The client replays message 13, but marks it with **`PossDupFlag (Tag 43) = Y`** (Possible Duplicate) so downstream engines know it was replayed.
+  6. The Gateway processes message 13.
+  7. The sequence counter is now at 14. The Gateway releases quarantined message 14, processes it normally, and advances `ExpectedInSeqNum` to 15!
+
+Zero lost orders. Zero duplicated fills. Completely deterministic.
+
+</En>
+
+<Vi>
+
+### Điều gì xảy ra khi rớt mạng? (Thuật toán Gap Recovery)
+
+Quan sát kỹ sơ đồ trên:
+* Client đang ở gói tin số `MsgSeqNum=10`.
+* Một sự cố mạng xảy ra. Client đã phát tiếp các gói 11, 12 (heartbeat) và gói 13 (lệnh hủy), nhưng đường truyền bị đứt đoạn khiến Gateway chưa nhận được.
+* Client kết nối lại và gửi ngay một lệnh mới toanh với **`MsgSeqNum=14`**.
+* Gateway nhận được gói 14, kiểm tra bộ đếm: `ExpectedInSeqNum` đang chờ số **11**, mà tự nhiên lại nhận được số **14**!
+* **Phản xạ của Gateway**:
+  1. Gateway lập tức **cách ly** gói tin số 14 vào hàng đợi tạm thời. Tuyệt đối không xử lý lệnh này ngay!
+  2. Gateway phát ngược lại lệnh **`ResendRequest (35=2)`** với `BeginSeqNo (Tag 7) = 11` và `EndSeqNo (Tag 16) = 0` (nghĩa là: "Hãy phát lại toàn bộ tin nhắn từ số 11 cho đến hiện tại").
+  3. Client nhận được yêu cầu, tra cứu vào Message Store trên ổ cứng để xem tin 11 và 12 là gì. Đó là các tin nhắn Heartbeat! Việc phát lại các gói tin nhịp tim trong quá khứ là vô nghĩa.
+  4. Client phát lệnh **`SequenceReset (35=4)`** bật cờ `GapFillFlag (Tag 123) = Y` và chỉ định `NewSeqNo (Tag 36) = 13`. Lệnh này báo cho Gateway: *"Hãy nhảy cóc qua số 11 và 12 an toàn."*
+  5. Tiếp theo, client phát hiện tin số 13 là lệnh hủy nghiệp vụ quan trọng. Client phát lại tin số 13, nhưng gắn thêm cờ **`PossDupFlag (Tag 43) = Y`** (Cảnh báo có khả năng trùng lặp) để hệ thống phía sau lưu ý đối soát.
+  6. Gateway tiếp nhận và xử lý xong tin số 13.
+  7. Lúc này bộ đếm đã khớp đến số 14! Gateway mở khóa gói tin số 14 đang nằm trong khu vực cách ly, đẩy vào xử lý bình thường và nâng `ExpectedInSeqNum` lên 15.
+
+Không một lệnh nào bị rơi rớt. Không một giao dịch nào bị nhân đôi. Tất cả vận hành với độ chính xác tuyệt đối.
+
+</Vi>
+
+---
+
+<En>
+
+## 5. The Complete Order Lifecycle
+
+When an algorithmic trader submits an order, how does it navigate through the gateway and come back as an execution?
+
+</En>
+
+<Vi>
+
+## 5. Vòng đời lệnh thực chiến qua FIX Gateway
+
+Khi một thuật toán giao dịch bắn lệnh, gói tin sẽ di chuyển qua gateway và nhận kết quả khớp lệnh (Execution Report) từ sàn như thế nào?
+
+</Vi>
+
+<Figure
+  src={fixOrderLifecycle}
+  alt="FIX Order Lifecycle and State Machine Mapping showing phases from Client Submission, Venue Acceptance, Fills, to Terminal states with truth table"
+  altVi="Sơ đồ máy trạng thái vòng đời lệnh FIX thể hiện các giai đoạn từ Đặt lệnh, Chấp nhận trên sàn, Khớp lệnh đến Trạng thái đóng kèm bảng chân trị"
+  caption="The 4 execution phases of FIX orders: ClOrdID (Tag 11) is owned by the client, while OrderID (Tag 37) and ExecID (Tag 17) are generated by the venue."
+  captionVi="4 giai đoạn thực thi của lệnh FIX: ClOrdID (Tag 11) do client quản lý, trong khi OrderID (Tag 37) và ExecID (Tag 17) do Sở giao dịch cấp phát."
+/>
+
+<En>
+
+Here is the step-by-step state transition:
+
+1. **Submission (`35=D NewOrderSingle`)**:
+   * The client assigns a unique identifier: `ClOrdID (Tag 11) = ORD_001`.
+   * The order enters `Pending New` state in the client OMS.
+2. **Venue Acceptance (`35=8 ExecutionReport, ExecType=0, OrdStatus=0`)**:
+   * The Exchange receives the order, validates price ticks, and places it onto the central order book.
+   * It assigns a venue `OrderID (Tag 37) = EXCH_999`.
+   * It sends back an `ExecutionReport` where `OrdStatus=0 (New)`, `CumQty=0`, and `LeavesQty=1000`. The order is now officially **Working** on the book.
+3. **Partial Execution (`35=8 ExecutionReport, ExecType=1, OrdStatus=1`)**:
+   * A counterparty crosses the spread and matches 400 shares.
+   * Venue emits an `ExecutionReport`:
+     * `LastQty (Tag 32) = 400`
+     * `LastPx (Tag 31) = 28.50`
+     * `CumQty (Tag 14) = 400` (Cumulative filled so far)
+     * `LeavesQty (Tag 151) = 600` (Shares remaining on book)
+     * `ExecID (Tag 17) = TRD_01` (Unique trade execution ID)
+4. **Complete Fill (`35=8 ExecutionReport, ExecType=2, OrdStatus=2`)**:
+   * The remaining 600 shares match.
+   * `LeavesQty = 0`, `CumQty = 1000`. The order reaches a **Terminal State** and cannot be modified or canceled further.
+5. **Cancellation Branch (`35=F` vs `35=9`)**:
+   * If the client wants to pull an open order, it fires **`OrderCancelRequest (35=F)`** referencing `OrigClOrdID (Tag 41)`.
+   * If the order was already filled before the cancel request arrived, the venue responds with **`OrderCancelReject (35=9)`** (`CxlRejReason 102 = Too late to cancel`).
+   * Otherwise, the venue pulls the order and sends `ExecutionReport (35=8, ExecType=4, OrdStatus=4 Canceled)`.
+
+</En>
+
+<Vi>
+
+Dưới đây là từng bước chuyển đổi trạng thái thực tế:
+
+1. **Đặt lệnh (`35=D NewOrderSingle`)**:
+   * Client tự sinh một mã định danh duy nhất: `ClOrdID (Tag 11) = ORD_001`.
+   * Lệnh nằm ở trạng thái chờ duyệt `Pending New` tại client OMS.
+2. **Sàn chấp nhận (`35=8 ExecutionReport, ExecType=0, OrdStatus=0`)**:
+   * Sở giao dịch nhận lệnh, kiểm tra bước giá, và ghi nhận lệnh vào sổ lệnh khớp (Order Book).
+   * Sàn cấp phát mã định danh trên sàn: `OrderID (Tag 37) = EXCH_999`.
+   * Sàn bắn ngược lại `ExecutionReport` với `OrdStatus=0 (New)`, `CumQty=0` (khối lượng khớp lũy kế = 0), và `LeavesQty=1000` (khối lượng còn lại trên sổ = 1000). Lệnh chính thức **Working** (Đang chờ khớp).
+3. **Khớp một phần (`35=8 ExecutionReport, ExecType=1, OrdStatus=1`)**:
+   * Có người đối ứng bán vào 400 cổ phiếu.
+   * Sàn gửi ngay `ExecutionReport`:
+     * `LastQty (Tag 32) = 400` (Khối lượng khớp lượt này)
+     * `LastPx (Tag 31) = 28.50` (Mức giá khớp lượt này)
+     * `CumQty (Tag 14) = 400` (Tổng khối lượng đã khớp lũy kế)
+     * `LeavesQty (Tag 151) = 600` (Khối lượng còn dư trên sổ lệnh)
+     * `ExecID (Tag 17) = TRD_01` (Mã định danh khớp lệnh của Sở)
+4. **Khớp toàn bộ (`35=8 ExecutionReport, ExecType=2, OrdStatus=2`)**:
+   * 600 cổ phiếu còn lại được khớp hết.
+   * `LeavesQty = 0`, `CumQty = 1000`. Lệnh bước vào **Trạng thái đóng (Terminal State)**, không thể hủy hay sửa được nữa.
+5. **Nhánh hủy lệnh (`35=F` và `35=9`)**:
+   * Nếu muốn rút lệnh khi chưa khớp hết, client phát **`OrderCancelRequest (35=F)`** dẫn chiếu đến mã lệnh cũ `OrigClOrdID (Tag 41)`.
+   * Nếu lệnh đã kịp khớp hết ngay trước khi tin hủy tới sàn, sàn sẽ từ chối bằng **`OrderCancelReject (35=9)`** (`CxlRejReason 102 = Quá trễ để hủy`).
+   * Nếu rút thành công, sàn gửi về `ExecutionReport (35=8, ExecType=4, OrdStatus=4 Canceled)`.
+
+</Vi>
+
+<Figure
+  src={cmeIlinkArch}
+  alt="CME Group iLink 3 Binary and FIX Order Entry High-Level Architecture showing Client, MSGW Gateway, and CME Globex Match Engine"
+  altVi="Kiến trúc tổng thể hệ thống đặt lệnh CME Group iLink 3 thể hiện kết nối giữa Client, Cổng MSGW Gateway và Lõi khớp lệnh CME Globex"
+  caption="Real-world exchange gateway blueprint (CME Group iLink 3): Global market participants connect to Market Segment Gateways (MSGW) before entering the Globex matching core."
+  captionVi="Bản vẽ kiến trúc gateway thực tế của Sở giao dịch hàng hóa Chicago (CME Group iLink 3): Các nhà giao dịch toàn cầu kết nối qua các cổng MSGW trước khi lệnh chạm tới lõi khớp lệnh Globex."
+/>
+
+---
+
+<En>
+
+## 6. Interactive Simulator: FIX Session & Packet Inspector
+
+To build hands-on intuition for sequence tracking and gap recovery, use the interactive simulator below. Click **"Send NewOrderSingle"** to watch the sequence counters increment and inspect the raw wire bytes. Then click **"Simulate Network Gap"** to witness how the gateway triggers a `ResendRequest (35=2)` and heals with `GapFill (35=4)`.
+
+</En>
+
+<Vi>
+
+## 6. Trình mô phỏng trực quan: Phiên FIX & Soi gói tin (Packet Inspector)
+
+Để nắm bắt trực quan cách quản lý số thứ tự và cơ chế bù lỗ hổng mạng, bạn hãy thử nghiệm với trình giả lập bên dưới. Bấm **"Send NewOrderSingle"** để thấy số sequence tăng dần và soi từng tag trên đường truyền. Sau đó bấm **"Simulate Network Gap"** để xem Gateway phát hiện lỗi, đòi gửi lại bằng `ResendRequest (35=2)` và hàn gắn bằng `GapFill (35=4)` ra sao.
+
+</Vi>
+
+<DemoFrame
+  title="Interactive FIX Session Simulator & Packet Inspector"
+  titleVi="Trình mô phỏng phiên kết nối FIX & Soi gói tin trực tiếp"
+>
+  <FixSessionDemo client:load />
+</DemoFrame>
+
+---
+
+<En>
+
+## 7. Hard-Earned Lessons for Securities IT Engineers
+
+If you are designing, maintaining, or integrating with a FIX Gateway, keep these four battlefield rules in mind:
+
+### 1. Beware of the "Gap Loop of Death"
+A notorious production bug occurs when a client receives a `ResendRequest`, but its internal message store is corrupted or missing those historical sequence numbers. In desperation, the client sends a message with an invalid sequence, which makes the gateway fire another `ResendRequest`.
+The two machines enter an infinite loop, blasting hundreds of thousands of resend requests per second until the network link saturates and crashes the gateway. Always configure maximum resend attempt limits (e.g., terminate session after 3 failed gap recovery attempts).
+
+### 2. Zero-Allocation Parsing is Not Optional
+In high-frequency environments, an algo engine might receive 20,000 tick updates and submit 2,000 orders every second. If your FIX parser creates 15 small heap objects per message (strings for tags, hashmap entries), the Java or Go garbage collector will periodically pause the process for 5 to 20 milliseconds.
+In trading, a 10ms GC pause during a market announcement can mean millions of dollars in execution slippage. Always use zero-allocation parsers that slice directly into fixed byte buffers.
+
+### 3. The End-of-Day (EOD) Sequence Reset Ritual
+FIX sequence numbers do not run forever. If they grew indefinitely, message stores would consume gigabytes of disk space and sequence integer overflows could occur.
+Every exchange and brokerage executes a mandatory **Daily Reset** (usually around midnight or 4:00 PM local market close). Both sides disconnect, flush their message stores, reset `ExpectedInSeqNum` and `NextOutSeqNum` back to **1**, and reconnect cleanly for the next trading day.
+
+### 4. ClOrdID Must Be Globally Unique Across Sessions
+Exchanges reject duplicate `ClOrdID (Tag 11)` instantly. In many brokerages, if your algo restarts, it must never reuse a ClOrdID from earlier today. Best practice is prefixing ClOrdIDs with a timestamp or session epoch: `ORD_20261117_0001`.
+
+</En>
+
+<Vi>
+
+## 7. Kinh nghiệm thực chiến xương máu cho kỹ sư IT Chứng khoán
+
+Nếu bạn đang tham gia thiết kế, vận hành hoặc kết nối vào một hệ thống FIX Gateway, hãy khắc cốt ghi tâm 4 quy tắc sống còn sau:
+
+### 1. Cảnh giác với "Vòng lặp tử thần" (Gap Loop of Death)
+Một lỗi kinh điển trong môi trường production: Gateway phát hiện thiếu gói tin và gửi `ResendRequest`, nhưng client bị hỏng ổ cứng hoặc mất log lịch sử nên không thể tìm lại gói tin cũ đó. Trong cơn bối rối, client lại gửi một gói tin có số sequence sai lệch khác, khiến Gateway tiếp tục bắn `ResendRequest`.
+Hai máy chủ rơi vào vòng lặp vô tận, nã hàng trăm nghìn gói tin đòi gửi lại mỗi giây cho đến khi đường truyền nghẽn cứng và sập luôn Gateway. Hãy luôn cài đặt ngưỡng giới hạn resend (ví dụ: ngắt kết nối session ngay lập tức nếu sau 3 lần yêu cầu mà không khôi phục được gap).
+
+### 2. Triệt tiêu Garbage Collection (Zero-Allocation là bắt buộc)
+Trong môi trường giao dịch tần suất cao, một engine có thể nhận 20.000 biến động giá (ticks) và bắn hàng nghìn lệnh mỗi giây. Nếu bộ parser của bạn cứ mỗi tin nhắn lại cấp phát hàng chục đối tượng String trong bộ nhớ heap (để chứa tên tag, giá trị), trình gom rác (Garbage Collector) của Java hay Go sẽ định kỳ đóng băng ứng dụng từ 5 đến 20 mili-giây.
+Trong chứng khoán, một cú giật lag 10ms ngay lúc ra tin tức có thể làm trượt giá hàng trăm triệu đồng. Các hệ thống thực chiến bắt buộc phải dùng kỹ thuật zero-allocation (mượn bộ nhớ đệm byte tĩnh, không tạo object mới).
+
+### 3. Nghi thức Reset Sequence cuối ngày (End-of-Day EOD)
+Số thứ tự FIX không được phép tăng mãi mãi. Nếu để tăng vô tận, file nhật ký (Message Store) sẽ phình to hàng trăm Gigabytes và có nguy cơ tràn số nguyên (Integer Overflow).
+Mọi Sở giao dịch và công ty chứng khoán đều có một khung giờ **Reset cuối ngày** cố định (thường vào lúc nửa đêm hoặc sau giờ đóng cửa 16:00). Hai bên sẽ ngắt kết nối, lưu trữ log cũ vào kho lưu trữ (archive), đặt lại số đếm `ExpectedInSeqNum` và `NextOutSeqNum` về lại **1**, sẵn sàng cho ngày giao dịch tiếp theo.
+
+### 4. Mã lệnh ClOrdID bắt buộc phải là độc nhất vô nhị
+Sở giao dịch sẽ từ chối thẳng thừng nếu phát hiện trùng mã `ClOrdID (Tag 11)`. Nếu bot hoặc thuật toán của bạn bị crash rồi khởi động lại trong ngày, tuyệt đối không được đánh số ClOrdID trùng với buổi sáng. Cách làm chuẩn chỉ là luôn gắn kèm ngày tháng hoặc timestamp epoch vào tiền tố: `ORD_20261117_0001`.
+
+</Vi>
+
+---
+
+<En>
+
+## Conclusion
+
+The FIX Protocol may feel rigid and verbose compared to modern Web APIs, but its uncompromising reliability, deterministic sequence tracking, and zero-allocation speed make it the backbone of global finance.
+
+Understanding how a FIX Gateway validates wire bytes, persists write-ahead journals, recovers from network drops, and translates external orders into high-speed internal ring buffers is a rite of passage for any engineer stepping into securities IT.
+
+With this mental model in place, you are ready to explore low-latency engines like QuickFIX, Aeron, and LMAX Disruptor with confidence.
+
+</En>
+
+<Vi>
+
+## Lời kết
+
+Giao thức FIX thoạt nhìn có vẻ cứng nhắc và cổ điển so với các Web API hiện đại, nhưng chính sự khắt khe về tính toàn vẹn, khả năng tự hồi phục khi rớt mạng và tốc độ xử lý cấp độ vi giây đã biến nó thành xương sống bất khả thay thế của nền tài chính toàn cầu.
+
+Hiểu rõ cách một FIX Gateway bóc tách từng byte dữ liệu, ghi nhật ký WAL xuống đĩa, hàn gắn các lỗ hổng mạng và chuyển đổi lệnh vào các vòng đệm siêu tốc (Ring Buffer) là bước đệm nền tảng vững chắc nhất cho bất kỳ kỹ sư nào muốn dấn thân sâu vào mảng IT chứng khoán và FinTech đỉnh cao.
+
+Khi đã nắm vững mô hình tư duy này, bạn hoàn toàn có thể tự tin đào sâu vào các thư viện thực chiến như QuickFIX, Aeron IPC hay LMAX Disruptor.
+
+</Vi>
+
+<LinkCard
+  title="FIX Trading Community Official Specifications"
+  description="Explore the complete FIX 4.2, 4.4, and 5.0 SP2 data dictionaries, message definitions, and protocol standards."
+  href="https://www.fixtrading.org/standards/"
+/>
