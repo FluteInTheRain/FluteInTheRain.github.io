@@ -1,0 +1,587 @@
+---
+title: "Trade-Offs in Data Systems: Explained Simply from First Principles"
+title_vi: "Các thế đánh đổi trong kiến trúc dữ liệu: Giải thích từ gốc rễ cho người mới bắt đầu"
+description: "There are no solutions, only trade-offs. Why Prime Video ditched serverless, 37signals left AWS, and running an analytical query crashes checkout."
+description_vi: "Không có giải pháp hoàn hảo, chỉ có sự đánh đổi. Giải thích dễ hiểu từ gốc rễ: tại sao Prime Video bỏ serverless, 37signals rời cloud, và chạy báo cáo làm sập thanh toán."
+date: 2026-11-17
+category: "system-design"
+tags: ["system-design", "architecture", "oltp", "olap", "cloud-native", "microservices"]
+draft: true
+sources:
+  - { title: "Designing Data-Intensive Applications, 2nd Edition", author: "Martin Kleppmann & Chris Riccomini", chapters: "Ch. 1", url: "https://dataintensive.net/" }
+  - { title: "Scaling up the Prime Video audio/video monitoring service and reducing costs by 90%", author: "Marcin Kolny", url: "https://www.primevideotech.com/video-streaming/scaling-up-the-prime-video-audio-video-monitoring-service-and-reducing-costs-by-90" }
+  - { title: "Why we're leaving the cloud", author: "David Heinemeier Hansson (DHH)", url: "https://world.hey.com/dhh/why-we-re-leaving-the-cloud-654b47e0" }
+---
+
+import Callout from '../../components/mdx/Callout.astro';
+import En from '../../components/mdx/En.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import LinkCard from '../../components/mdx/LinkCard.astro';
+import QuoteCard from '../../components/mdx/QuoteCard.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import figureEtl from '../../assets/blog/trade-offs-in-data-systems-architecture/figure-1-1-etl-data-warehouse.png';
+import figureCloud from '../../assets/blog/trade-offs-in-data-systems-architecture/figure-1-2-spectrum-cloud-outsourcing.png';
+
+<En>
+
+> "There are no solutions; there are only trade-offs."  
+> &mdash; *Thomas Sowell*
+
+If you spend five minutes on software engineering forums, you will be bombarded with absolute statements:
+- *"Monoliths are legacy; modern systems must be microservices."*
+- *"Relational databases don't scale; you need NoSQL."*
+- *"Running your own servers is obsolete; serverless is the future."*
+
+Then, a few years later, reality hits. High-profile engineering teams publish viral postmortems:
+- **Amazon Prime Video** collapses their serverless microservices back into a single monolithic process and cuts infrastructure costs by **90%**.
+- **37signals (creators of Basecamp & HEY)** moves off AWS onto their own physical servers, saving **$3.2 million** over five years.
+- An innocent marketing analyst clicks "Refresh Dashboard" on Monday morning and accidentally crashes the company's checkout page for thousands of paying customers.
+
+Why does this keep happening? Because in system design, **there are no silver bullets**. Every architectural choice is a trade-off: you gain one advantage by sacrificing another.
+
+Chapter 1 of Martin Kleppmann and Chris Riccomini's *Designing Data-Intensive Applications* (2nd Edition) breaks data systems down into three fundamental trade-offs:
+
+1. **OLTP vs. OLAP**: How data is stored, and why analytical queries crash transactional checkouts.
+2. **Cloud vs. Self-Hosting**: The economics of renting hardware by the hour vs. owning it outright.
+3. **Single-Node vs. Distributed**: The invisible "tax" you pay the moment you connect two computers over a network wire.
+
+Let's break down each one with intuitive real-world analogies, from the hardware up.
+
+---
+
+## 1. OLTP vs. OLAP: Why Running a Report Crashes Your Checkout
+
+Imagine a busy supermarket with two different operations:
+1. **The Cashier Counter (OLTP)**: Customers line up to buy a basket of groceries. The cashier must scan items, take payment, and hand over the receipt in 15 seconds. Speed, concurrency, and reliability are vital.
+2. **The Inventory Audit Office (OLAP)**: The finance director sits in a back office with a clipboard, calculating: *"How many cartons of oat milk did we sell on rainy Tuesdays across the entire country over the last three years?"*
+
+Now imagine the finance director walks up to cashier register #1 at 9:00 AM on Monday, stands in front of a line of 20 hurried shoppers, and tells the cashier:  
+*"Stop scanning groceries! Count every single receipt in our warehouse from the past three years before you scan that woman's loaf of bread!"*
+
+The cashier stops. The checkout line backs up out the front door. Shoppers abandon their carts and leave.
+
+This is exactly what happens when someone connects a BI tool (like Metabase, Tableau, or PowerBI) directly to your production database.
+
+```sql
+-- The "Innocent" Monday Morning Query
+SELECT 
+  DATE_TRUNC('month', created_at) AS order_month,
+  customer_tier,
+  COUNT(id)                       AS total_orders,
+  SUM(total_amount_cents)         AS gross_revenue
+FROM orders
+WHERE created_at >= NOW() - INTERVAL '3 years'
+GROUP BY 1, 2;
+```
+
+Within seconds, the database CPU hits 100%, checkout requests time out, and customers see `504 Gateway Timeout`. But why? Why can't a database handle both?
+
+### The Storage Anatomy: Row-Oriented vs. Column-Oriented
+
+The fundamental reason is how databases physically lay out bytes on disk.
+
+#### Row-Oriented Storage (PostgreSQL, MySQL): The Index Card Analogy
+Imagine each order in your system is written on a physical **3x5 index card**. Each card has 50 fields: customer name, delivery address, credit card token, delivery notes, audit timestamps, and the order amount ($35.00).
+
+```
+[ Card 1: ID=1 | Name=Alice | Address=... | Notes=... | Amount=$35 ]
+[ Card 2: ID=2 | Name=Bob   | Address=... | Notes=... | Amount=$12 ]
+[ Card 3: ID=3 | Name=Carol | Address=... | Notes=... | Amount=$50 ]
+```
+
+- When Bob logs in to check his order (`SELECT * FROM orders WHERE id = 2`), the database grabs Card #2. It takes **one quick fetch**. Everything Bob needs is right there on that single card. This is **OLTP (Online Transaction Processing)**.
+- But what happens when the finance query asks: `SELECT SUM(total_amount_cents) FROM orders` across 10,000,000 orders?
+  The database must pick up all 10,000,000 cards one by one. On every single card, it has to read past the address, the notes, and the timestamps just to look at the tiny 8-byte amount.
+
+**Over 99% of the data loaded from the SSD into RAM is completely wasted!**
+
+#### Column-Oriented Storage (ClickHouse, BigQuery): The Paper Strip Analogy
+In an analytical columnar database, data is not stored as cards. Instead, each column is stored as its own **continuous roll of tape**:
+
+```
+Tape "orders.id":           [ 1, 2, 3, 4, 5, 6, ... ]
+Tape "orders.customer":     [ Alice, Bob, Carol, ... ]
+Tape "orders.amount":       [ $35, $12, $50, $15, $22, ... ]
+Tape "orders.address":      [ 123 Main St, 456 Elm Ave, ... ]
+```
+
+When you ask for `SELECT SUM(total_amount_cents) FROM orders`:
+1. The engine grabs **only** the `orders.amount` tape.
+2. It completely ignores the address, customer notes, and timestamps. Disk heads don't touch them; RAM never loads them.
+3. Because the numbers on the tape are all identical integers, they compress tightly (like a zip file). A billion numbers can shrink into a few hundred megabytes.
+4. Modern CPU chips use **SIMD (Single Instruction, Multiple Data)** instructions to add 8 to 16 numbers from that tape in a single CPU clock tick.
+
+This is why **ClickHouse can scan 1 billion records in 50 milliseconds**, while running that same query on PostgreSQL takes 10 minutes or crashes the server.
+
+---
+
+### The Solution: Systems of Record vs. Derived Data
+
+How do you allow marketing to run complex queries without bringing down the checkout counter? You separate the two workloads completely:
+
+1. **System of Record (Source of Truth)**: The primary operational database (PostgreSQL/MySQL). When Alice clicks "Pay", the money is deducted and written here first. It represents authoritative ground truth.
+2. **Derived Data System**: A secondary store (Data Warehouse like ClickHouse or Snowflake) created by copying and transforming data from the system of record.
+
+```
++--------------------------+          CDC / ETL Stream          +--------------------------+
+|     SYSTEM OF RECORD     |  ------------------------------->  |   DERIVED DATA SYSTEM    |
+|   (PostgreSQL / OLTP)    |      (Debezium + Kafka log)        |  (ClickHouse / Warehouse)|
+|  * Fast user checkouts   |                                    |  * Heavy analytical BI   |
+|  * Row-oriented storage  |                                    |  * Column-oriented scans |
++--------------------------+                                    +--------------------------+
+```
+
+<Callout type="tip" title="The Golden Rule of Derived Data">
+**Derived data is 100% loss-tolerant.**  
+If your analytics warehouse crashes, corrupts, or is accidentally deleted, **zero business data is lost**. You can always rebuild it from scratch simply by re-reading the change log from the system of record.
+</Callout>
+
+Never let application code write directly to both systems at once (the "Dual-Write" trap: if writing to the warehouse fails, your data gets permanently out of sync). Instead, use **Change Data Capture (CDC)**: the database writes to its internal commit log, and background workers stream those changes cleanly into the analytics warehouse.
+
+</En>
+
+<Vi>
+
+> "Không có giải pháp hoàn hảo; chỉ có sự đánh đổi."  
+> &mdash; *Thomas Sowell*
+
+Nếu bạn dạo qua các diễn đàn kỹ thuật phần mềm, bạn sẽ liên tục bắt gặp những câu khẳng định mang tính "chân lý tuyệt đối":
+- *"Làm Monolith là cổ lỗ sĩ rồi; hệ thống hiện đại bắt buộc phải xẻ ra Microservices."*
+- *"Database quan hệ không scale được đâu; phải dùng NoSQL."*
+- *"Tự dựng server là chuyện thời xưa; kỷ nguyên này phải dùng Serverless."*
+
+Nhưng chỉ vài năm sau, thực tế trần trụi lại tát vào mặt những trào lưu đó:
+- **Amazon Prime Video** gộp toàn bộ cụm microservices serverless về lại một tiến trình monolith duy nhất và cắt giảm tới **90% chi phí hạ tầng**.
+- **37signals (công ty mẹ của Basecamp & HEY)** rời bỏ đám mây AWS để tự mua server, tiết kiệm **3,2 triệu USD** chỉ trong 5 năm.
+- Một bạn chuyên viên dữ liệu vô tình bấm "Làm mới Dashboard" vào sáng thứ Hai và làm sập luôn trang thanh toán của toàn bộ khách hàng trên website.
+
+Tại sao những câu chuyện trớ trêu này cứ lặp đi lặp lại? Bởi vì trong thiết kế hệ thống, **hoàn toàn không có viên đạn bạc**. Mọi quyết định kiến trúc thực chất là một sự đánh đổi: bạn nhận được lợi thế này thì bắt buộc phải trả giá bằng một bất lợi khác.
+
+Chương 1 trong cuốn *Designing Data-Intensive Applications* (Bản 2nd Edition) của Martin Kleppmann và Chris Riccomini phân tích bản chất của hệ thống dữ liệu qua 3 bài toán đánh đổi cốt lõi:
+
+1. **OLTP vs. OLAP**: Dữ liệu được lưu trữ như thế nào, và vì sao một câu truy vấn báo cáo lại có thể làm sập quầy thanh toán?
+2. **Cloud vs. Tự mua Server**: Bản chất kinh tế của việc thuê máy theo giờ so với việc mua đứt phần cứng.
+3. **Máy chủ đơn lẻ vs. Hệ phân tán**: Khoản "thuế vô hình" mà bạn bắt buộc phải trả ngay khi nối hai chiếc máy tính với nhau bằng một sợi dây mạng.
+
+Hãy cùng bóc tách từng bài toán bằng những hình ảnh ẩn dụ đời thực dễ hiểu nhất, từ tầng phần cứng trở lên.
+
+---
+
+## 1. OLTP vs. OLAP: Vì sao chạy báo cáo tài chính lại làm sập trang thanh toán?
+
+Hãy tưởng tượng một siêu thị lớn với 2 hoạt động hoàn toàn khác nhau:
+1. **Quầy thu ngân tính tiền (OLTP)**: Khách xếp hàng dài để thanh toán giỏ hàng. Thu ngân phải quét mã vạch, quẹt thẻ và in hóa đơn trong vòng 15 giây. Tốc độ, tính ổn định và sự liên tục là sống còn.
+2. **Phòng kiểm toán kho vận (OLAP)**: Vị giám đốc tài chính ngồi trong phòng kín với một cuốn sổ kiểm kê, đặt câu hỏi: *"Trong 3 năm qua, vào những ngày thứ Ba trời mưa, toàn hệ thống siêu thị đã bán được tổng cộng bao nhiêu hộp sữa yến mạch?"*
+
+Bây giờ, hãy tưởng tượng vị giám đốc cầm sổ bước thẳng ra quầy thu ngân số 1 vào đúng 9:00 sáng thứ Hai, chặn đầu một hàng dài 20 người đang vội đi làm, và bảo thu ngân:  
+*"Dừng quét mã vạch lại! Đem toàn bộ hóa đơn 3 năm qua trong kho ra đây, đếm hết cho tôi xem có bao nhiêu hộp sữa rồi mới được thanh toán ổ bánh mì của chị kia!"*
+
+Thu ngân đứng hình. Hàng người phía sau dài dằng dặc tràn ra tới cửa siêu thị. Khách bực bội vứt lại giỏ hàng và bỏ đi.
+
+Đó chính xác là những gì diễn ra khi ai đó kết nối công cụ báo cáo BI (như Metabase hay Tableau) trực tiếp vào cơ sở dữ liệu chính của hệ thống đang phục vụ khách hàng.
+
+```sql
+-- Câu truy vấn "ngây thơ" sáng thứ Hai
+SELECT 
+  DATE_TRUNC('month', created_at) AS order_month,
+  customer_tier,
+  COUNT(id)                       AS total_orders,
+  SUM(total_amount_cents)         AS gross_revenue
+FROM orders
+WHERE created_at >= NOW() - INTERVAL '3 years'
+GROUP BY 1, 2;
+```
+
+Chỉ trong chớp mắt, CPU máy chủ vọt lên 100%, khách bấm thanh toán bị xoay vòng tròn chờ đợi và nhận về lỗi `504 Gateway Timeout`. Nhưng tại sao lại như vậy? Tại sao một database xịn lại không gánh nổi cả hai?
+
+### Giải phẫu cấu trúc đĩa: Lưu theo dòng vs. Lưu theo cột
+
+Nguyên nhân gốc rễ nằm ở cách database sắp xếp từng byte dữ liệu vật lý trên ổ cứng.
+
+#### Lưu trữ dạng dòng (Row-Oriented: PostgreSQL, MySQL) — Ẩn dụ những tấm thẻ hồ sơ
+Hãy tưởng tượng mỗi đơn hàng trong hệ thống được viết lên một **tấm thẻ giấy**. Mỗi tấm thẻ có tới 50 dòng thông tin: tên khách hàng, địa chỉ giao hàng, mã thẻ ngân hàng, ghi chú đơn hàng, ngày giờ tạo, và số tiền thanh toán (350.000 VNĐ).
+
+```
+[ Thẻ 1: ID=1 | Tên=An   | Địa chỉ=... | Ghi chú=... | Tiền=350.000đ ]
+[ Thẻ 2: ID=2 | Tên=Bình | Địa chỉ=... | Ghi chú=... | Tiền=120.000đ ]
+[ Thẻ 3: ID=3 | Tên=Cúc  | Địa chỉ=... | Ghi chú=... | Tiền=500.000đ ]
+```
+
+- Khi anh Bình mở app xem lại đơn hàng của mình (`SELECT * FROM orders WHERE id = 2`), database chỉ cần rút đúng Tấm thẻ số 2. **Chỉ tốn đúng 1 thao tác**. Mọi thông tin của Bình đều nằm trọn vẹn trên tấm thẻ đó. Đây là bản chất của **OLTP (Xử lý giao dịch trực tuyến)**.
+- Nhưng chuyện gì xảy ra khi câu query phân tích hỏi: `SELECT SUM(total_amount_cents) FROM orders` trên 10 triệu đơn hàng?
+  Database bắt buộc phải cầm lên từng tấm thẻ trong số 10 triệu tấm thẻ đó. Trên mỗi tấm thẻ, nó phải lướt mắt qua địa chỉ, ghi chú, mã khách hàng dài dằng dặc chỉ để liếc nhìn đúng một con số tiền bé tí 8-byte ở cuối thẻ.
+
+**Hơn 99% dữ liệu nạp từ ổ cứng SSD lên bộ nhớ RAM bị lãng phí hoàn toàn để chở những thông tin không ai cần tới!**
+
+#### Lưu trữ dạng cột (Column-Oriented: ClickHouse, BigQuery) — Ẩn dụ những cuộn băng giấy
+Trong database chuyên cho phân tích dạng cột, dữ liệu không được ghi thành từng tấm thẻ. Thay vào đó, mỗi cột thông tin được ghi thành một **dải băng dài riêng biệt**:
+
+```
+Cuộn băng "orders.id":       [ 1, 2, 3, 4, 5, 6, ... ]
+Cuộn băng "orders.customer": [ An, Bình, Cúc, ... ]
+Cuộn băng "orders.amount":   [ 350k, 120k, 500k, 150k, 220k, ... ]
+Cuộn băng "orders.address":  [ Số 1 Lê Lợi, Số 5 Trần Phú, ... ]
+```
+
+Khi bạn chạy lệnh tính tổng doanh thu `SELECT SUM(total_amount_cents) FROM orders`:
+1. Database chỉ cần kéo duy nhất **Cuộn băng số tiền**.
+2. Toàn bộ các cuộn băng địa chỉ, ghi chú, thông tin cá nhân hoàn toàn không bị đụng tới. Đầu đọc ổ cứng không chạm vào chúng; bộ nhớ RAM không phải chứa chúng.
+3. Vì toàn bộ các giá trị trên cuộn băng số tiền đều là những con số cùng kiểu, chúng được nén lại cực kỳ chặt (giống như nén file zip), giảm dung lượng tới 90%.
+4. Bộ vi xử lý CPU hiện đại dùng tập lệnh **SIMD (Single Instruction, Multiple Data)** để cộng đồng thời 8 đến 16 con số trên dải băng đó chỉ trong đúng **1 chu kỳ xung nhịp CPU**.
+
+Đó là lý do vì sao **ClickHouse có thể quét 1 tỷ dòng dữ liệu chỉ trong 50 mili-giây**, trong khi câu lệnh đó chạy trên PostgreSQL sẽ mất hàng chục phút hoặc làm nổ tung bộ nhớ máy chủ.
+
+---
+
+### Giải pháp kiến trúc: Hệ thống gốc (Record) vs. Dữ liệu phái sinh (Derived)
+
+Làm sao để phòng phân tích thoải mái chạy báo cáo mà quầy thanh toán của khách vẫn chạy mượt mà? Câu trả lời là: **tách rời hai thế giới ra làm đôi**:
+
+1. **Hệ thống dữ liệu gốc (System of Record / Source of Truth)**: Là database vận hành (PostgreSQL/MySQL). Khi khách bấm "Thanh toán", tiền bị trừ và đơn hàng được ghi vào đây đầu tiên. Đây là "sự thật tuyệt đối" đại diện cho đồng tiền của khách hàng.
+2. **Hệ thống dữ liệu phái sinh (Derived Data System)**: Là kho dữ liệu phân tích (như ClickHouse hay Snowflake) được tạo ra bằng cách sao chép và chuyển đổi dữ liệu từ hệ thống gốc sang dạng cột.
+
+```
++--------------------------+          Luồng sao chép CDC        +--------------------------+
+|  HỆ THỐNG GỐC (RECORD)   |  ------------------------------->  | HỆ THỐNG PHÁI SINH (OLAP)|
+|   (PostgreSQL / OLTP)    |      (Debezium + Kafka log)        | (ClickHouse / Warehouse) |
+|  * Khách checkout nhanh  |                                    |  * Chạy báo cáo nặng     |
+|  * Lưu trữ theo dòng     |                                    |  * Lưu trữ theo cột      |
++--------------------------+                                    +--------------------------+
+```
+
+<Callout type="tip" title="Quy tắc vàng của Dữ liệu phái sinh">
+**Dữ liệu phái sinh có thể chịu mất mát 100% (Loss-tolerant).**  
+Nếu kho ClickHouse phân tích bị cháy ổ cứng hay bị ai đó lỡ tay xóa mất, **không có một đồng tiền nào của khách bị mất cả**. Bạn hoàn toàn có thể dựng lại một kho mới và phát lại (replay) nhật ký từ database gốc để tái tạo dữ liệu nguyên vẹn như cũ.
+</Callout>
+
+Tuyệt đối không để code ứng dụng tự tay ghi vào cả hai database cùng lúc (bẫy "Dual-Write": nếu ghi vào kho phân tích bị lỗi mạng, dữ liệu hai bên sẽ lệch nhau vĩnh viễn). Thay vào đó, hãy dùng kỹ thuật **Change Data Capture (CDC)**: database gốc tự ghi log giao dịch, và một tiến trình chạy ngầm sẽ chuyển các thay đổi đó sang kho phân tích một cách an toàn.
+
+</Vi>
+
+<Figure 
+  src={figureEtl} 
+  alt="Simplified outline of ETL into a data warehouse" 
+  altVi="Sơ đồ tổng quát của quy trình trích xuất, biến đổi và nạp dữ liệu (ETL) vào kho dữ liệu"
+  caption="Figure 1-1: A simplified outline of ETL into a data warehouse from DDIA 2nd Edition."
+  captionVi="Hình 1-1: Sơ đồ đơn giản hóa quy trình ETL nạp dữ liệu từ các hệ thống vận hành vào kho dữ liệu tập trung (DDIA 2nd Edition)."
+  sourceTitle="Designing Data-Intensive Applications, 2nd Edition (Ch. 1)"
+  sourceUrl="https://dataintensive.net/"
+/>
+
+<En>
+
+## 2. Cloud vs. Self-Hosting: Renting a Hotel Room vs. Buying an Apartment
+
+The debate over Public Cloud vs. On-Premises hardware is easily understood through a simple housing analogy:
+
+- **Public Cloud (AWS, GCP)** is like **renting a hotel room by the night**. Everything is furnished, towels are washed for you, and if you suddenly need 10 rooms for visiting friends tomorrow, you can book them in five minutes. But the daily rate is high.
+- **Self-Hosting (Colocation, Bare-Metal)** is like **buying or leasing an apartment for 5 years**. You have to assemble your own IKEA furniture, fix your own plumbing, and pay upfront. But your monthly mortgage is a tiny fraction of paying hotel room rates every single day for half a decade.
+
+### The 37signals Lesson: The Hidden Markups of Cloud
+
+In 2022, David Heinemeier Hansson (DHH) published the financial postmortem of 37signals' AWS exit:
+- They were spending roughly **$3.2 million per year on AWS**.
+- They purchased **18 custom Dell servers** outright for roughly **$600,000 upfront**.
+- They placed them in two professional colocation datacenters with redundant power, cooling, and internet fiber commits costing ~$140,000 per year.
+- Result: **Over $3.2 million in projected savings over five years**, while their apps ran faster on dedicated hardware.
+
+Where was all that cloud money going? Into three hidden cloud markups:
+
+1. **The IOPS Tax**: On cloud storage (AWS EBS), disk speed is metered. If your database needs 64,000 IOPS on an `io2` volume, AWS bills you **over $4,000 every single month for just one drive**. Meanwhile, an enterprise NVMe SSD costs $600 to buy outright and delivers **over 800,000 IOPS forever** with zero monthly fees.
+2. **The Bandwidth (Egress) Tax**: AWS charges **$0.09 per gigabyte** to send data out to the internet, and bills you to move data between different availability zones in the same city. In a colocation datacenter, bandwidth is rented as an unmetered pipe (e.g., flat $1,000/month for 10 Gbps), dropping the cost per gigabyte to fractions of a penny.
+3. **The "Noisy Neighbor" Tax**: On virtualized cloud VMs, other companies' workloads share the same physical CPU socket, causing unpredictable latency spikes ($p99$ lag). On dedicated bare metal, 100% of the silicon is yours.
+
+### When DOES the Cloud Make Sense? The Elasticity Rule
+
+Does this mean everyone should ditch AWS? Definitely not. 
+
+Cloud computing is a financial game of **elasticity**:
+
+```
+Scenario A: E-Commerce Black Friday / Concert Ticket Sale
+Load
+ ^
+ |             [ 4-Hour Spike: 1,000 Servers ]
+ |                  /\
+ |                 /  \
+ |----------------/    \------------------  Normal Load: 50 Servers
+ +-----------------------------------------> Time
+ * Buying 1,000 servers means 950 servers sit completely idle 360 days a year.
+ * The Cloud is BRILLIANT here: spin up 950 servers for 4 hours, pay $500, shut them down.
+
+Scenario B: Steady B2B Business SaaS (Basecamp, Internal DBs)
+Load
+ ^
+ |   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~  Steady Load: 50 Servers Day & Night
+ +-----------------------------------------> Time
+ * Load never spikes 20x. Paying a 300% cloud markup 24/7/365 is pure financial waste.
+```
+
+<Callout type="note" title="The Simple Rule for Cloud Economics">
+If your traffic swings wildly between day and night (Peak-to-Average ratio is massive), the Cloud saves you money because you only pay for spikes.  
+If your traffic is predictable and steady, running on the Cloud means you are paying an expensive daily hotel rate to live in a room for five years.
+</Callout>
+
+</En>
+
+<Vi>
+
+## 2. Thuê Cloud hay Mua Server? — Bài học thuê phòng khách sạn vs. Mua nhà ở dài hạn
+
+Cuộc tranh luận nảy lửa giữa việc dùng Đám mây (AWS, GCP) hay tự mua máy chủ (Bare-Metal / Colocation) thực ra rất dễ hiểu nếu đặt vào một bài toán đời thường:
+
+- **Public Cloud (AWS, GCP)** giống như việc **thuê phòng khách sạn theo ngày**. Mọi thứ đã có sẵn, ga giường có người giặt, phòng ốc có người dọn, và nếu ngày mai có 10 người bạn tới chơi, bạn có thể thuê thêm 10 phòng chỉ trong 5 phút. Nhưng giá thuê mỗi đêm thì cực kỳ đắt đỏ.
+- **Tự mua Server (On-Premises / Colocation)** giống như việc **mua đứt một căn hộ để ở dài hạn**. Bạn phải tự tay lắp bàn ghế, tự sửa ống nước khi hỏng hóc và phải trả một khoản tiền lớn lúc đầu. Nhưng chia đều tiền nhà ra từng tháng trong 5 năm, số tiền đó rẻ hơn rất nhiều so với việc ở khách sạn mỗi ngày suốt nửa thập kỷ.
+
+### Bài học thực tế từ 37signals: Những khoản tiền "vô lý" trên Cloud
+
+Năm 2022, David Heinemeier Hansson (DHH) công bố toàn bộ sổ sách tài chính khi đưa 37signals rời khỏi AWS:
+- Hàng năm, họ phải trả khoảng **3,2 triệu USD tiền thuê dịch vụ trên AWS**.
+- Họ quyết định chi khoảng **600.000 USD mua đứt 18 máy chủ phiến Dell** cấu hình khủng (mỗi máy có 96 nhân CPU, 576 GB RAM và ổ cứng SSD NVMe siêu tốc).
+- Họ đem dàn máy này đặt vào 2 trung tâm dữ liệu thuê ngoài (colocation) với tiền điện, làm mát và tiền mạng trọn gói khoảng 140.000 USD/năm.
+- Kết quả: Dự kiến **tiết kiệm hơn 3,2 triệu USD sau 5 năm**, mà ứng dụng lại chạy nhanh hơn nhờ phần cứng chuyên dụng.
+
+Hóa đơn triệu đô trước đây trên Cloud thực chất trôi đi đâu? Nó bị bào mòn bởi 3 "khoản phụ phí ngầm":
+
+1. **"Thuế" tốc độ ổ đĩa (IOPS Tax)**: Trên Cloud (AWS EBS), tốc độ đọc ghi đĩa bị đếm từng lượt để tính tiền. Nếu database của bạn cần 64.000 IOPS để chạy mượt, riêng tiền thuê ổ đĩa đó đã ngốn **hơn 4.000 USD mỗi tháng cho một ổ duy nhất**. Trong khi đó, một thanh SSD NVMe mua đứt chỉ tốn khoảng 600 USD (trả 1 lần duy nhất) là có ngay **hơn 800.000 IOPS vĩnh viễn** mà không phải trả thêm một xu nào hàng tháng.
+2. **"Thuế" đường truyền mạng (Egress Tax)**: AWS thu **0,09 USD cho mỗi Gigabyte** dữ liệu truyền ra ngoài Internet, và thu tiếp tiền khi truyền dữ liệu giữa các cụm máy trong cùng thành phố. Tại các trung tâm dữ liệu colocation, bạn thuê đường truyền cáp quang trọn gói (ví dụ 1.000 USD/tháng cho đường truyền 10 Gbps không giới hạn), đưa chi phí mạng xuống gần như bằng 0.
+3. **"Thuế" hàng xóm ồn ào (Noisy Neighbor)**: Trên máy ảo đám mây, CPU vật lý bị chia sẻ với các công ty khác. Nếu máy ảo của họ chạy nặng, máy ảo của bạn sẽ bị khựng lại bất chợt. Khi tự mua server, 100% sức mạnh phần cứng là của riêng bạn.
+
+### Khi nào thì Cloud LÀ LỰA CHỌN ĐÚNG ĐẮN? Quy tắc của sự co giãn (Elasticity)
+
+Điều này có đồng nghĩa với việc startup nào cũng nên đi mua máy chủ? Hoàn toàn sai lầm.
+
+Đám mây sinh ra là để giải quyết bài toán **tính co giãn (Elasticity)**:
+
+```
+Kịch bản A: Bán vé liveshow ca nhạc / Săn sale Black Friday
+Tải
+ ^
+ |             [ Đỉnh cao điểm 4 tiếng: Cần 1.000 Máy chủ ]
+ |                  /\
+ |                 /  \
+ |----------------/    \------------------  Ngày thường: Chỉ cần 50 Máy chủ
+ +-----------------------------------------> Thời gian
+ * Nếu tự mua 1.000 máy chủ, thì 950 máy sẽ đắp chiếu chạy không tải suốt 360 ngày còn lại.
+ * Dùng Cloud là THẦN THÁNH: Bật 950 máy ảo trong 4 tiếng, trả 500 USD, xong việc tắt đi ngay!
+
+Kịch bản B: Ứng dụng B2B doanh nghiệp (Basecamp, Phần mềm nội bộ)
+Tải
+ ^
+ |   ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~  Lượng truy cập phẳng lì cả ngày lẫn đêm
+ +-----------------------------------------> Thời gian
+ * Tải không bao giờ tăng đột biến 20 lần. Việc trả phí thuê khách sạn đắt hơn 300%
+   suốt 24/7/365 cho một tính năng co giãn không bao giờ dùng tới là sự lãng phí vô nghĩa.
+```
+
+<Callout type="note" title="Quy tắc ghi nhớ về kinh tế học Cloud">
+Nếu lượng truy cập của bạn trồi sụt dữ dội bất ngờ (lúc cần 50 máy, lúc cần 1.000 máy), Cloud sẽ giúp bạn tiết kiệm bộn tiền vì bạn chỉ trả tiền cho phần đỉnh đột biến.  
+Nhưng nếu lượng truy cập của bạn phẳng lặng và ổn định quanh năm, việc ở lì trên Cloud chẳng khác nào bạn đang trả tiền thuê khách sạn 5 sao theo ngày để làm nơi ở cố định suốt 5 năm.
+</Callout>
+
+</Vi>
+
+<Figure 
+  src={figureCloud} 
+  alt="The spectrum of decisions on outsourcing software and its operations" 
+  altVi="Phổ quyết định về mức độ ủy thác phần mềm và quy trình vận hành"
+  caption="Figure 1-2: The spectrum of decisions on outsourcing software and operations from DDIA 2nd Edition."
+  captionVi="Hình 1-2: Phổ quyết định mức độ ủy thác giữa phần mềm tự phát triển, mã nguồn mở, dịch vụ lưu trữ đám mây và SaaS (DDIA 2nd Edition)."
+  sourceTitle="Designing Data-Intensive Applications, 2nd Edition (Ch. 1)"
+  sourceUrl="https://dataintensive.net/"
+/>
+
+<En>
+
+## 3. The Distributed Systems Tax: Prime Video and the Monolith Comeback
+
+There is a running joke in computer science:  
+*"A distributed system is one in which the failure of a computer you didn't even know existed can render your own computer unusable."*
+
+Over the last decade, junior engineers were taught that every application must be broken into microservices connected by network calls. But few people explained the **hidden tax** of doing so.
+
+### The Kitchen Analogy: Monolith vs. Microservices
+
+Imagine you are running a ramen restaurant:
+- **The Monolith (Single-Process)**: Chef A boils the noodles, turns around, hands the bowl directly to Chef B who adds the broth, and Chef C tops it with chashu pork. Everything happens in **one single kitchen**. Handing off a bowl takes **0.5 seconds**.
+- **The Distributed Microservices**: Chef A is in Kitchen #1. When the noodles are boiled, he packs them into a cardboard box, seals it, calls a delivery motorcycle, and ships it across city traffic to Kitchen #2 in another district. Chef B opens the box, reheats the noodles, pours the broth, repackages it, calls another motorcycle, and ships it to Kitchen #3.
+
+What happens?
+- The motorcycle gets stuck in a traffic jam (Network latency).
+- Gas and courier fees cost 5x more than the ingredients (Bandwidth & serialization cost).
+- The motorcycle crashes in the rain and the bowl disappears (Partial network failure).
+- By the time the customer gets the ramen, it is cold and soggy.
+
+This is not an exaggeration. This is literally what Amazon Prime Video did to their video monitoring service.
+
+---
+
+### The Amazon Prime Video Case: Slashing Costs by 90%
+
+In 2023, Amazon Prime Video published an engineering retrospective that shocked the industry:
+
+</En>
+
+<Vi>
+
+## 3. Thuế phân tán: Cú quay xe của Prime Video và sự trỗi dậy của Monolith
+
+Trong giới khoa học máy tính có một câu nói đùa kinh điển của Leslie Lamport:  
+*"Hệ thống phân tán là một hệ thống mà sự cố của một chiếc máy tính mà bạn thậm chí còn không biết là nó có tồn tại lại có thể làm sập hoàn toàn chiếc máy tính của chính bạn."*
+
+Trong suốt 10 năm qua, nhiều kỹ sư trẻ lớn lên với niềm tin rằng cứ làm phần mềm là phải bẻ vụn ra thành hàng chục microservices gọi nhau qua mạng. Nhưng rất ít người cảnh báo cho họ về **khoản thuế vô hình** của quyết định này.
+
+### Ẩn dụ quán mì Ramen: Monolith vs. Microservices
+
+Hãy tưởng tượng bạn mở một quán mì Ramen:
+- **Kiến trúc Monolith (Tiến trình duy nhất)**: Đầu bếp A trụng mì xong, quay người sang bên cạnh chuyền tay bát mì cho Đầu bếp B chan nước dùng, rồi chuyển tiếp cho Đầu bếp C gắp thịt xá xíu lên trên. Mọi việc diễn ra trong **duy nhất 1 gian bếp**. Thao tác chuyền bát mì chỉ mất **nửa giây**.
+- **Kiến trúc Microservices phân tán**: Đầu bếp A ở Quận 1. Trụng mì xong, anh đóng gói bát mì vào thùng xốp, dán băng keo, gọi một shipper chạy xe máy băng qua đường phố kẹt xe sang Quận 5 cho Đầu bếp B chan nước dùng. Đầu bếp B chan xong lại đóng thùng xốp, gọi shipper thứ hai phi sang Bình Thạnh cho Đầu bếp C đặt thịt lên.
+
+Chuyện gì sẽ xảy ra?
+- Xe máy bị kẹt xe trên đường (Độ trễ mạng - Network latency).
+- Tiền xăng xe và tiền shipper đắt gấp 5 lần tiền mua nguyên liệu tô mì (Chi phí tuần tự hóa và tiền mạng).
+- Shipper bị ngã xe giữa đường làm đổ bát mì, không biết mì đã tới nơi chưa hay bị mất tích (Lỗi mạng một phần - Partial failure).
+- Đến tay khách hàng thì tô mì đã nguội ngắt và nhũn nát.
+
+Đây hoàn toàn không phải chuyện đùa. Đó chính xác là những gì đội ngũ kỹ thuật của Amazon Prime Video đã trải qua trong hệ thống giám sát video của họ.
+
+---
+
+### Chuyện gì đã xảy ra tại Amazon Prime Video?
+
+Vào năm 2023, chính đội ngũ kỹ sư của Amazon Prime Video đã công bố một bài viết gây chấn động toàn cầu:
+
+</Vi>
+
+<QuoteCard 
+  author="Marcin Kolny" 
+  role="Senior Software Engineer, Prime Video"
+  sourceTitle="Prime Video Tech Blog (2023)"
+  sourceUrl="https://www.primevideotech.com/video-streaming/scaling-up-the-prime-video-audio-video-monitoring-service-and-reducing-costs-by-90"
+>
+"The main scaling bottleneck in the architecture was the orchestration management that was implemented using AWS Step Functions. Our service performed multiple state transitions for every second of the video, so we quickly hit account limits. The second cost bottleneck was the way we were passing video frames through Amazon S3 buckets."
+</QuoteCard>
+
+<En>
+
+Their service monitors live video streams to detect defects (black screens, audio out-of-sync, glitches). 
+
+Following the modern cloud trend, they originally designed it as distributed microservices:
+1. Video frames were sliced up by one service.
+2. Uncompressed video frames were uploaded to **Amazon S3** buckets.
+3. **AWS Step Functions** orchestrated state changes, triggering **AWS Lambda** functions to download those frames from S3 and run defect-detection algorithms.
+
+At scale, this distributed architecture broke down:
+- For a 30-frame-per-second video, triggering Step Functions transitions dozens of times per second hit AWS account limits and throttled the pipeline.
+- S3 bills exploded because millions of read/write API requests were being made every minute just to pass intermediate video frames between functions across the datacenter network!
+
+#### The Fix: Colocate Everything in One Kitchen
+The Prime Video team made the bold move to **eliminate the microservices**:
+- They consolidated the decoder, audio detector, and video detector into a **single monolithic application** deployed onto Amazon ECS/EC2 instances.
+- Instead of serializing video frames, sending them over the network, and saving them to S3, the frames were held in local **RAM memory**.
+- Passing a video frame from the decoder to the detector became an instantaneous **in-memory pointer pass** (taking 5 nanoseconds instead of 50 milliseconds over HTTP).
+- **Result: A 90% reduction in infrastructure costs and instant scaling stability.**
+
+---
+
+### The Superpower of a Single Modern Server
+
+A common beginner fear is: *"If I don't use microservices and distributed databases, how will my system handle millions of users?"*
+
+People underestimate how staggeringly powerful modern single servers are:
+- A single modern server can be equipped with an **AMD EPYC chip with 192 CPU cores / 384 threads**.
+- You can plug in **1.5 TB to 4 TB of DDR5 RAM**.
+- Modern NVMe SSDs read data at **14,000 MB/s** and perform **over 3,000,000 read operations per second**.
+
+**Almost every company's operational database can fit entirely inside the RAM of a single modern server.** When your data fits in RAM, disk seeks vanish, and a standard PostgreSQL instance on a single machine can comfortably serve **50,000 to 100,000 queries per second**.
+
+<Callout type="tip" title="Proof from the Real World">
+- **Stack Overflow** famously served **1.3 billion page views per month** using just **9 on-premise web servers and 1 primary Microsoft SQL Server database**.
+- **Shopify** processes billions of dollars on Black Friday using a monolithic Ruby on Rails codebase backed by sharded MySQL nodes.
+- **SQLite** powers billions of mobile phones and edge devices with zero network latency because it runs completely in-process.
+</Callout>
+
+### When DO You Legitimately Need a Distributed System?
+
+You only pay the distributed systems tax when you hit hard, insurmountable physical constraints:
+
+1. **Your dataset exceeds a single machine's physical limits**: When you have 500 Terabytes or Petabytes of clickstream logs or videos (BigQuery, ClickHouse cluster, Kafka).
+2. **Speed of Light across the globe**: If you have users in Tokyo, London, and New York, fiber-optic latency requires servers (or read replicas and CDNs) physically close to each continent.
+3. **High Availability (Disaster Recovery)**: Datacenters lose power; hardware dies. If your SLA guarantees 99.999% uptime, you need replicated copies in separate geographical zones.
+4. **Huge Engineering Teams (>200+ engineers)**: When hundreds of developers step on each other's toes merging code into the same repository, microservices help draw clear organizational boundaries.
+
+If you don't have petabytes of data, a global footprint, or 300 engineers, **start with a clean monolith on a single powerful server.** You will build faster, spend a fraction of the cost, and sleep peacefully through the night.
+
+---
+
+## The Decision Cheat Sheet
+
+| Decision | Choose Option A | Choose Option B | The Real-World Rule |
+| :--- | :--- | :--- | :--- |
+| **Data Engine** | **OLTP** (PostgreSQL/MySQL) | **OLAP** (ClickHouse/Snowflake) | Store your customer transactions in row-store OLTP. Stream changes via CDC to columnar OLAP for analytics. Never run heavy BI queries on OLTP. |
+| **Hosting** | **Public Cloud** (AWS/GCP) | **Self-Hosted** (Bare-Metal) | Choose Cloud if traffic spikes unpredictably (high elasticity). Choose Bare-Metal if your workload is flat and steady to save millions. |
+| **Architecture**| **Single-Node Monolith** | **Distributed Microservices**| Default to a single-node monolith for speed, simplicity, and low cost. Distribute only when physical data size or team boundaries force you to. |
+
+</En>
+
+<Vi>
+
+Hệ thống của Prime Video có nhiệm vụ theo dõi hàng ngàn luồng phát video trực tiếp để bắt lỗi (mất tiếng, đứng hình, vỡ hình) trước khi khán giả kịp nhận ra.
+
+Theo đúng trào lưu thời thượng, ban đầu họ thiết kế hệ thống thành một mạng lưới microservices phân tán:
+1. Video được một service cắt thành từng khung hình.
+2. Các khung hình video thô chưa nén được tải lên lưu trữ trên **Amazon S3**.
+3. **AWS Step Functions** đóng vai trò điều phối quy trình, kích hoạt hàng loạt hàm **AWS Lambda** để tải khung hình từ S3 về rồi chạy thuật toán phát hiện lỗi.
+
+Ở quy mô lớn, kiến trúc này lập tức gãy đổ:
+- Mỗi giây video có 30 khung hình, việc kích hoạt Step Functions hàng ngàn lần mỗi giây nhanh chóng đụng trần giới hạn tài khoản của AWS và bị bóp nghẽn liên tục.
+- Tiền gọi API S3 bùng nổ vì mỗi phút có hàng triệu lượt đọc/ghi chỉ để chuyển qua chuyển lại các khung hình video giữa các máy chủ trong cùng một datacenter!
+
+#### Cách giải quyết: Đưa tất cả đầu bếp về chung một gian bếp
+Đội ngũ Prime Video đưa ra một quyết định dũng cảm: **xóa bỏ toàn bộ cụm microservices phân tán**:
+- Họ gom toàn bộ module giải mã, module phân tích âm thanh và hình ảnh vào chung **một ứng dụng monolithic duy nhất** chạy trên các máy ảo Amazon ECS/EC2.
+- Các khung hình video sau khi giải mã không còn bị đóng gói gửi lên S3 nữa. Chúng được lưu trực tiếp trên **bộ nhớ RAM** của máy.
+- Việc chuyển khung hình video từ khâu giải mã sang khâu phát hiện lỗi giờ đây chỉ là **truyền một con trỏ bộ nhớ (pointer dereference)** trong RAM, mất đúng 5 nano-giây thay vì 50 mili-giây qua mạng.
+- **Kết quả: Cắt giảm ngay 90% chi phí hóa đơn AWS và hệ thống chạy mượt mà không còn nghẽn.**
+
+---
+
+### Sức mạnh phi thường của một chiếc máy chủ đơn lẻ ngày nay
+
+Một nỗi sợ rất phổ biến ở các bạn mới làm quen với system design: *"Nếu em không chia nhỏ microservices và dùng database phân tán ngay từ đầu, nhỡ mai này có cả triệu người dùng thì một máy chủ làm sao gánh nổi?"*
+
+Nhiều người đánh giá quá thấp sức mạnh của phần cứng máy chủ hiện đại:
+- Một chiếc máy chủ 2U tiêu chuẩn ngày nay có thể gắn chip **AMD EPYC tới 192 nhân vật lý / 384 luồng xử lý**.
+- Bạn có thể cắm từ **1.5 TB đến 4 TB bộ nhớ RAM**.
+- Ổ cứng SSD NVMe chuẩn doanh nghiệp đọc dữ liệu với tốc độ **14.000 MB/giây** và thực hiện **hơn 3.000.000 lượt đọc mỗi giây**.
+
+**Hầu hết cơ sở dữ liệu của các công ty khởi nghiệp và doanh nghiệp vừa và nhỏ hoàn toàn có thể nằm gọn gàng bên trong bộ nhớ RAM của một chiếc máy chủ duy nhất.** Khi dữ liệu nằm trên RAM, đĩa cứng không phải tìm kiếm, và một con PostgreSQL được tối ưu chuẩn mực có thể gánh mượt mà từ **50.000 đến 100.000 lượt truy vấn mỗi giây**.
+
+<Callout type="tip" title="Những bằng chứng sống ngoài đời thực">
+- **Stack Overflow** nổi tiếng toàn cầu khi phục vụ tới **1,3 tỷ lượt xem trang mỗi tháng** chỉ với **9 web server và đúng 1 máy chủ cơ sở dữ liệu Microsoft SQL Server chính**.
+- **Shopify** xử lý hàng tỷ USD tiền hàng trong các dịp Black Friday bằng một ứng dụng Ruby on Rails monolithic khổng lồ chạy trên các cụm MySQL được phân vùng cẩn thận.
+- **SQLite** chạy mượt mà trên hàng tỷ chiếc điện thoại thông minh với độ trễ bằng 0 vì nó chạy trực tiếp bên trong tiến trình của ứng dụng mà không cần qua bất kỳ kết nối mạng nào.
+</Callout>
+
+### Khi nào bạn MỚI THỰC SỰ cần đến một hệ thống phân tán?
+
+Bạn chỉ nên chấp nhận trả "khoản thuế phân tán" khi và chỉ khi chạm phải các rào cản vật lý bắt buộc sau:
+
+1. **Dữ liệu vượt quá dung lượng vật lý tối đa của một máy chủ**: Khi bạn có hàng trăm Terabyte hoặc Petabyte dữ liệu log hoặc video (cần dùng BigQuery, cụm ClickHouse, Kafka).
+2. **Khoảng cách địa lý và vận tốc ánh sáng**: Nếu người dùng của bạn ở Tokyo, London và New York, tín hiệu cáp quang bắt buộc bạn phải đặt các máy chủ (hoặc bản sao đọc và CDN) ở gần từng châu lục để giảm độ trễ.
+3. **Tính sẵn sàng cao và phòng chống thảm họa**: Sự cố cháy trung tâm dữ liệu hay mất điện luôn có thể xảy ra. Nếu hợp đồng cam kết dịch vụ (SLA) yêu cầu 99.999% thời gian hoạt động, bạn cần nhiều cụm máy chủ sao chép đặt ở các vùng địa lý khác nhau.
+4. **Quy mô công ty quá lớn (>200 kỹ sư)**: Khi hàng trăm lập trình viên cùng làm việc trên một kho mã nguồn và giẫm chân lên nhau, microservices giúp phân chia ranh giới rõ ràng để các team độc lập tự triển khai dịch vụ của mình.
+
+Nếu bạn chưa có hàng Petabyte dữ liệu, chưa phục vụ người dùng đa lục địa, và công ty của bạn chỉ có dưới vài chục người, **hãy bắt đầu với một khối Monolith gọn gàng chạy trên một máy chủ cấu hình mạnh.** Bạn sẽ ra mắt tính năng nhanh hơn, tiết kiệm được cả gia tài tiền bạc, và ngủ ngon mỗi đêm mà không sợ bị điện thoại réo vì lỗi mạng chập chờn.
+
+---
+
+## Bảng tra cứu nhanh để đưa ra quyết định kiến trúc
+
+| Lĩnh vực | Chọn Lựa chọn A | Chọn Lựa chọn B | Quy tắc thực chiến |
+| :--- | :--- | :--- | :--- |
+| **Lưu trữ dữ liệu** | **OLTP** (PostgreSQL/MySQL) | **OLAP** (ClickHouse/Snowflake) | Lưu các giao dịch thanh toán của khách trên database theo dòng OLTP. Dùng luồng CDC đẩy dữ liệu sang database dạng cột OLAP để chạy báo cáo. Tuyệt đối không chạy BI nặng trên OLTP. |
+| **Môi trường hạ tầng** | **Public Cloud** (AWS/GCP) | **Tự dựng** (Bare-Metal) | Chọn Cloud nếu lượng truy cập trồi sụt thất thường (cần co giãn). Chọn Tự dựng nếu lượng truy cập phẳng và ổn định để tiết kiệm hàng triệu USD. |
+| **Mô hình kiến trúc**| **Máy chủ đơn lẻ / Monolith** | **Microservices phân tán** | Mặc định luôn bắt đầu bằng Monolith để tối ưu tốc độ, sự đơn giản và chi phí. Chỉ phân tán khi khối lượng dữ liệu hoặc quy mô nhân sự bắt buộc. |
+
+</Vi>

@@ -82,9 +82,22 @@ Reading from a replica right after a write can return the old value.
 - `alt` says what the picture shows; `caption` says the point. They are not the same sentence.
 - Tables are plain Markdown; the site styles them. Keep cells short; 2–5 columns.
 
-## Diagram colours
+## Diagram Strategy & Visual Standards
 
-Use only these for Excalidraw elements. They match the site, so a fresh machine needs no edit to the excalidraw skill's palette.
+Always choose the appropriate diagram tool according to Khang's 4-tier decision matrix:
+
+1. **System Architecture & Data Flows → ByteByteGo Style (`ByteByteGoHq/system-design-101`)**:
+   - Visual identity: Explicit system component icons, numbered step badges (`①`, `②`, `③`), data payload callouts, clear directional arrows, and high-contrast 3-level color depth.
+2. **Cloud Infrastructure & DevOps → `mingrammer/diagrams` (Python)**:
+   - Visual identity: Official AWS / GCP / Azure / Kubernetes / Docker icons, structured network clusters, clean modern vector output.
+3. **Brainstorming & Mental Models → Excalidraw**:
+   - Visual identity: Organic hand-drawn strokes (Rough.js), hand-drawn typography (Virgil/Cascadia), human intuition and mental models.
+4. **Interactive System Demos → ReactFlow (`@xyflow/react`)**:
+   - Visual identity: Live interactive graph inside `<DemoFrame>`, allowing readers to drag, click, inspect node metadata, or step through simulated request lifecycles.
+
+## Diagram colours (Excalidraw & ByteByteGo SVG)
+
+Use only these colors. They match the site, so a fresh machine needs no edit to the excalidraw skill's palette.
 
 | Role | Colour |
 |---|---|
@@ -110,7 +123,7 @@ Go through the draft and fix every "no":
 - [ ] The angle from Step 4 is clear in the opening, and the sections follow it, not the chapter's order.
 - [ ] Each concept goes plain → analogy → example → details.
 - [ ] Every `##` section (except the two closing ones) has a diagram, table, code block or `Callout`.
-- [ ] Each visual is the right kind (flow/sequence/mental model/architecture → Excalidraw, comparison → table, warning/tip → `Callout`) and explains something.
+- [ ] Each visual is the right kind: System Design → ByteByteGo style, Cloud/Infra → `mingrammer/diagrams`, Mental models/Brainstorming → Excalidraw, Interactive exploration → ReactFlow, comparison → table, warning/tip → `Callout`.
 - [ ] No paragraph is over 4 sentences. No sentence needs a second read.
 - [ ] Every term is defined where it first appears.
 - [ ] TL;DR at the top; "Key takeaways" and "Review questions" at the end.

@@ -18,7 +18,11 @@ Do the 8 steps in order. Steps 3 and 4 wait for Khang. Do not skip ahead.
 - Commit anything under `books/`, or copy a book skill (`~/.claude/skills/<book-slug>/`) into this repo. The repo is public and books are copyrighted.
 - Copy book text beyond short quotes (a sentence or two, in quotation marks, attributed). This includes the chapter files of the book skill: they are close to the book's wording.
 - Reproduce a figure or table from the book, even redrawn with the same layout and labels.
-- Use Mermaid. Every diagram is Excalidraw (Khang rejected Mermaid).
+- Use Mermaid. Diagrams follow Khang's 4-tier strategy:
+  1. **ByteByteGo Style (`ByteByteGoHq/system-design-101`)**: System architecture, data flow, distributed systems, and protocol lifecycles.
+  2. **`mingrammer/diagrams` (Python)**: Cloud infrastructure, networking, and DevOps (AWS, GCP, Azure, K8s, Docker).
+  3. **Excalidraw**: Brainstorming, mental models, conceptual explanations, and hand-drawn whiteboard clarity.
+  4. **ReactFlow (`@xyflow/react`)**: Interactive diagrams where readers interact with system nodes, toggle states, or step through flows.
 - Set `draft: false`. Khang reads the post and flips it himself.
 - Invent Khang's experience, numbers or quotes. Use only what Khang said, the book, or a source you read.
 - Add a `## References` section by hand. The post page renders one from `sources`.
@@ -132,31 +136,29 @@ For each visual planned as a real-world image, screenshot, or video:
 
 3. **Authentic engineering artifacts & live benchmarks** — use `.claude/skills/enrich-post/scripts/artifact_helper.py` (or run a local benchmark script) for `<GitHubCode />`, `<QuoteCard />`, `<LinkCard />`, and `<TerminalOutput />`, or add an interactive React mini-playground under `src/components/demos/<Name>Demo.tsx` inside `<DemoFrame title="...">` reusing `.sd-*` classes (see `.claude/skills/enrich-post/SKILL.md` for syntax). Keep `<LinkCard />` on one single line, and put opening/closing tags of `<GitHubCode>`, `<QuoteCard>`, `<TerminalOutput>`, and `<DemoFrame>` on their own lines.
 
-### B. Excalidraw diagrams (for mental models, custom flows, and sequences)
+### B. Diagrams & Visuals (Khang's 4-Tier Strategy)
 
-For each visual planned as Excalidraw:
+Select the right tool based on the scenario:
 
-1. Use the `excalidraw-diagram` skill for the design method and its render-view-fix loop. **Colours:** use the "Diagram colours" section of `style-guide.md`, not that skill's `references/color-palette.md`.
-2. Draw from your own understanding, in Khang's words. Never reproduce a figure from the book.
-3. Save the source as `src/assets/blog/<post-slug>/<name>.excalidraw` (`mkdir -p` the folder first; `<name>` is kebab-case, e.g. `write-path`).
-4. Render it (needs network). Pass the absolute path:
+1. **System Architecture & Data Flows → ByteByteGo Style (`ByteByteGoHq/system-design-101`)**:
+   - Use for: Distributed system topology, caching strategies, message broker routing, protocol lifecycles, and microservice workflows.
+   - Design principles: Distinct component icons (Database, Cache, Queue, Load Balancer), numbered step badges (`①`, `②`, `③`), data payload callouts, and clean 3-tier color hierarchy. Render as clean SVG/PNG into `src/assets/blog/<post-slug>/`.
 
-```bash
-cd ~/.claude/skills/excalidraw-diagram/references && uv run python render_excalidraw.py <absolute path to .excalidraw>
-```
+2. **Cloud Infrastructure & DevOps → `mingrammer/diagrams` (Python)**:
+   - Use for: Cloud networking, VPCs, Kubernetes clusters, serverless pipelines, and provider architectures (AWS, GCP, Azure).
+   - Execution: Write a short Python script using `diagrams` (`from diagrams import Diagram, Cluster...`), execute it to generate crisp PNGs with official vendor icons directly into `src/assets/blog/<post-slug>/`.
 
-   This writes `<name>.png` beside the `.excalidraw` file. (That skill's own docs show a relative `.claude/skills/...` path; use the `~/.claude/skills/...` one above.)
-5. Read the PNG, fix what looks wrong, re-render. Repeat until it is clean.
-6. Embed it in the post, with the import at the top after the frontmatter and the `Figure` on **one line**:
+3. **Brainstorming & Mental Models → Excalidraw**:
+   - Use for: Abstract concepts, algorithmic intuition, trade-off comparisons, brainstorming, and whiteboard-style human explanations.
+   - Workflow: Use the `excalidraw-diagram` skill and site colors from `style-guide.md`. Save to `src/assets/blog/<post-slug>/<name>.excalidraw`, render via:
+     ```bash
+     cd ~/.claude/skills/excalidraw-diagram/references && uv run python render_excalidraw.py <absolute path to .excalidraw>
+     ```
+   - Embed via `<Figure src={imgImport} alt="..." caption="..." />`.
 
-```mdx
-import Figure from '../../components/mdx/Figure.astro';
-import writePath from '../../assets/blog/<post-slug>/write-path.png';
-
-<Figure src={writePath} alt="What the diagram shows, in one sentence" caption="The one point the reader should take from it" />
-```
-
-If the renderer fails, stop and tell Khang with the error. Do not ship a post with a missing image. If the error is about loading Excalidraw from esm.sh, point him to the "Known issue" fix in `books/README.md`.
+4. **Interactive System Exploration → ReactFlow (`@xyflow/react`)**:
+   - Use for: Scenarios where readers benefit from interacting with components (clicking nodes to inspect state, toggling failover, stepping through packets, or dragging flows).
+   - Workflow: Create an interactive demo component under `src/components/demos/<Name>Demo.tsx` wrapped in `<DemoFrame title="...">`. Embed in MDX with `client:load` or `client:visible`.
 
 ## Step 7: Humanize the prose
 
