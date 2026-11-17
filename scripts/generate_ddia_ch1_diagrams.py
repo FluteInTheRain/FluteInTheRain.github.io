@@ -486,7 +486,7 @@ HTML_CDC_PIPELINE = f"""<!DOCTYPE html>
     display: inline-block;
   }}
   .bbg-canvas {{
-    width: 1260px;
+    width: 1360px;
     background: #ffffff;
     border: 1.5px solid #cbd5e1;
     border-radius: 14px;
@@ -527,7 +527,7 @@ HTML_CDC_PIPELINE = f"""<!DOCTYPE html>
   /* Main Pipeline Grid */
   .topology-row {{
     display: grid;
-    grid-template-columns: 160px 45px 230px 45px 240px 45px 230px 45px 160px;
+    grid-template-columns: 155px 75px 220px 75px 235px 75px 220px 75px 155px;
     align-items: center;
     margin-bottom: 28px;
   }}
@@ -657,12 +657,17 @@ HTML_CDC_PIPELINE = f"""<!DOCTYPE html>
     border-left: 6px solid #64748b;
   }}
   .arrow-label {{
-    font-size: 9px;
+    font-size: 9.5px;
     font-weight: 700;
-    color: #64748b;
-    margin-top: 4px;
+    color: #475569;
+    margin-top: 5px;
     text-align: center;
     white-space: nowrap;
+    background: #ffffff;
+    padding: 2px 6px;
+    border-radius: 4px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.06);
+    border: 1px solid #e2e8f0;
   }}
 
   /* Payload Callout Box */

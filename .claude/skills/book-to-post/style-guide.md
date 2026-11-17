@@ -26,14 +26,18 @@ The reader is a developer new to the topic. They should understand each idea on 
 
 ```
 frontmatter (title, title_vi, description, description_vi, …)
-imports (En, Vi, Callout, Figure, each PNG, …)
+imports (En, Vi, Callout, Figure, heroVisual, each PNG, …)
 <En>
 
-<Callout type="note" title="TL;DR">
-One paragraph.
-</Callout>
-Opening: 1–2 short paragraphs. The problem, in concrete terms, and why the reader should care.
-## One section per idea, in the order that answers the angle (not the chapter's order)
+<Figure src={heroVisual} alt="Visual metaphor capturing the core dilemma" caption="The core trade-off: In software engineering, there are no silver bullets, only deliberate trade-offs." />
+
+> "Compelling opening quote." — *Author*
+
+### The Hook & The Paradox
+Opening: 1–2 short paragraphs. Real-world incident (e.g. Prime Video, 37signals), the central trade-off, and the 4 dilemmas answered.
+
+## Concise H2 Title (One section per idea)
+## Next Concise H2 Title
 ## Key takeaways
 ## Review questions
 
@@ -41,11 +45,15 @@ Opening: 1–2 short paragraphs. The problem, in concrete terms, and why the rea
 
 <Vi>
 
-<Callout type="note" title="Tóm tắt nhanh (TL;DR)">
-Một đoạn tóm tắt bằng tiếng Việt tự nhiên, giữ keyword tiếng Anh trong ngoặc cho các thuật ngữ kỹ thuật.
-</Callout>
-Mở đầu: 1–2 đoạn ngắn…
-## Các mục tương ứng bằng tiếng Việt…
+<Figure src={heroVisual} alt="Hình ảnh ẩn dụ trực quan về bản chất kỹ thuật" caption="Bản chất của ngành kỹ thuật: Không có viên đạn bạc, chỉ có sự đánh đổi." />
+
+> "Câu trích dẫn ngắn truyền cảm hứng." — *Tác giả*
+
+### Mở đầu & Đặt vấn đề
+Mở đầu: 1–2 đoạn ngắn kịch tính (sự cố sập hệ thống, quyết định quay xe), bản chất đánh đổi, và 4 câu hỏi cốt lõi được giải quyết.
+
+## Tiêu đề H2 ngắn gọn (Mục tương ứng tiếng Việt)
+## Tiêu đề H2 tiếp theo
 ## Điểm rút ra (Key takeaways)
 ## Câu hỏi ôn tập (Review questions)
 
@@ -88,12 +96,37 @@ Always choose the appropriate diagram tool according to Khang's 4-tier decision 
 
 1. **System Architecture & Data Flows → ByteByteGo Style (`ByteByteGoHq/system-design-101`)**:
    - Visual identity: Explicit system component icons, numbered step badges (`①`, `②`, `③`), data payload callouts, clear directional arrows, and high-contrast 3-level color depth.
+   - **Showdown / Solo comparisons**: When contrasting two paradigms (e.g., Row-Store vs. Column-Store, Kafka vs. RabbitMQ), design them as a clean, direct visual face-off ("solo" duel). Show the concrete tangible difference (e.g., sequential disk blocks vs. columnar chunks) rather than a wall of text boxes.
+   - **Anti-collision rules (Strict)**: 
+     - Minimum 75px–115px connector spacing between nodes/columns.
+     - Always wrap connector/edge text with a white background badge (`padding: 2px 6px; background: #fff; border: 1px solid #e2e8f0; border-radius: 4px;`) so lines and arrows never cut through typography.
+     - Never let labels overlap adjacent node cards, borders, or neighboring text.
 2. **Cloud Infrastructure & DevOps → `mingrammer/diagrams` (Python)**:
    - Visual identity: Official AWS / GCP / Azure / Kubernetes / Docker icons, structured network clusters, clean modern vector output.
+   - **Anti-collision rules (Strict)**:
+     - Always configure `"nodesep": "0.9"` and `"ranksep": "1.2"` (or greater) in `graph_attr`.
+     - Shorten long node labels and break text across multiple lines with explicit `\n` to prevent labels from colliding with neighbor nodes or bounding clusters.
 3. **Brainstorming & Mental Models → Excalidraw**:
    - Visual identity: Organic hand-drawn strokes (Rough.js), hand-drawn typography (Virgil/Cascadia), human intuition and mental models.
-4. **Interactive System Demos → ReactFlow (`@xyflow/react`)**:
-   - Visual identity: Live interactive graph inside `<DemoFrame>`, allowing readers to drag, click, inspect node metadata, or step through simulated request lifecycles.
+4. **Interactive System Flows & Demos → Animated Flow (`<AnimatedFlow />`) / ReactFlow (`@xyflow/react`)**:
+   - Visual identity: For architecture trade-offs or pipeline journeys where data packets travel through services over time (e.g. Microservices vs. Monolith, OLTP to OLAP CDC pipeline), use `<AnimatedFlow />` (`src/components/mdx/AnimatedFlow.astro`).
+   - Features: Play/Pause controls, step scrubbing, speed selector (1x, 1.5x, 2x), before/after scenario comparison, and real-time telemetry log.
+
+## The Hero Intro Hook & Centerpiece Visual
+
+Every post must feature a high-impact intro that instantly hooks the reader before Section 1:
+1. **The Single Hero Visual Metaphor (`<Figure src={heroVisual} ... />`)**:
+   - **Placement**: Placed at the VERY TOP of the post body (right under `<En>` and `<Vi>`), immediately before the quote or opening narrative.
+   - **Zero Preamble**: Do NOT write clumsy announcement text before it (e.g., *"Trước khi đi sâu vào từng ngóc ngách, đây là hình ảnh..."* or *"Below is an overview diagram..."*). Let the image speak for itself as the article's visual header.
+   - **Single Metaphor Rule**: Exactly ONE striking hero visual per post. It is NOT an engineering manual or a cluttered multi-box diagram full of tiny text. It is an artistic, conceptual, or real-world metaphor (e.g. a precision mechanical balance scale weighing trade-offs, two storage formats facing off in a duel, or physical server hardware vs an ethereal cloud) that sparks curiosity and anchors the central theme.
+2. **The Lead Hook (Quote + The Paradox / War Story)**:
+   - Open with an attributed quote and a gripping, counter-intuitive real-world incident (e.g., Prime Video collapsing microservices back to a monolith, 37signals saving $3.2M leaving cloud, or an analyst query crashing checkout).
+   - Reject generic intros or AI-sounding summaries.
+3. **The 4 Key Takeaways Preview**:
+   - Explicitly list the 3–4 core engineering dilemmas the post resolves so readers and hiring managers know the exact depth of knowledge to expect.
+4. **Concise Section Headings (Clean TOC)**:
+   - Keep all `##` headings punchy, short, and clear.
+   - The sidebar Table of Contents (TOC) strictly renders H2 titles and strips technical prefixes/colons; concise headings ensure the sidebar remains elegant, readable, and never crowded.
 
 ## Diagram colours (Excalidraw & ByteByteGo SVG)
 
@@ -120,16 +153,22 @@ Use only these colors. They match the site, so a fresh machine needs no edit to 
 
 Go through the draft and fix every "no":
 
+- [ ] Exactly ONE hero visual metaphor is placed right at the top under `<En>` and `<Vi>` (before the quote or text), with NO clumsy lead-in sentences ("Trước khi đi sâu vào...").
+- [ ] The intro visual is NOT a cluttered diagram full of boxes and text; it is an artistic, philosophical, or real-world metaphor (e.g. balance scale, face-off duel).
+- [ ] All `##` section headings are concise, short, and focused (to ensure the Table of Contents sidebar stays clean and elegant).
+- [ ] No author cards or bylines added (this is Khang's personal blog).
 - [ ] The angle from Step 4 is clear in the opening, and the sections follow it, not the chapter's order.
 - [ ] Each concept goes plain → analogy → example → details.
-- [ ] Every `##` section (except the two closing ones) has a diagram, table, code block or `Callout`.
-- [ ] Each visual is the right kind: System Design → ByteByteGo style, Cloud/Infra → `mingrammer/diagrams`, Mental models/Brainstorming → Excalidraw, Interactive exploration → ReactFlow, comparison → table, warning/tip → `Callout`.
+- [ ] Comparisons between two architectures/paradigms (e.g. Row vs Column Store) are structured as direct visual showdowns ("solo"), focusing on tangible differences with minimal text clutter.
+- [ ] All diagrams pass the **Anti-Collision Rule**: NO overlapping text with boxes, nodes, or arrows; connectors have >= 75px-115px spacing; connector text is wrapped in white pill badges; Python/Graphviz diagrams have `nodesep: 0.9` and `ranksep: 1.2`.
+- [ ] Every `##` section (except the two closing ones) has a diagram, table, code block, animated flow (`<AnimatedFlow />`), or `Callout`.
 - [ ] No paragraph is over 4 sentences. No sentence needs a second read.
 - [ ] Every term is defined where it first appears.
-- [ ] TL;DR at the top; "Key takeaways" and "Review questions" at the end.
+- [ ] "Key takeaways" and "Review questions" at the end.
 - [ ] No quote is longer than two sentences; each is in quotation marks and attributed.
 - [ ] Nothing reads like the chapter file reworded. Nothing redraws a book figure.
 - [ ] Every claim with a number comes from the book, a listed source, or Khang.
-- [ ] `description` is 180 characters or fewer; `draft: true`; `category` is in `CATEGORY_IDS`; every used article is in `sources` with its `url`; the book has `author` and `chapters`.
-- [ ] Every `Figure` imports a PNG that exists, and sits on one line.
-- [ ] The voice matches `voice.md`.
+- [ ] Frontmatter includes both `description` (<= 180 chars) and `description_vi` (<= 220 chars), with `description_vi` written in natural, engaging Vietnamese.
+- [ ] `draft: true`; `category` is in `CATEGORY_IDS`; every used article is in `sources` with its `url`; the book has `author` and `chapters`.
+- [ ] Every `Figure` imports a PNG/JPG that exists, and sits on one line.
+- [ ] The voice matches `voice.md` (Vietnamese is natural and colloquial engineer-to-engineer, not robotic AI translation).

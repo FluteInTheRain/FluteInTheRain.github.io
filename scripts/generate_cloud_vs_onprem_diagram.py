@@ -20,9 +20,11 @@ out_file = OUT_DIR / "cloud-vs-colocation-architecture"
 graph_attr = {
     "fontsize": "18",
     "bgcolor": "white",
-    "pad": "0.5",
+    "pad": "0.6",
     "compound": "true",
     "rankdir": "LR",
+    "nodesep": "0.9",
+    "ranksep": "1.2",
 }
 
 with Diagram("Cloud (AWS) vs. 37signals Bare-Metal Colocation", show=False, filename=str(out_file), graph_attr=graph_attr):
@@ -31,16 +33,16 @@ with Diagram("Cloud (AWS) vs. 37signals Bare-Metal Colocation", show=False, file
     # AWS Cloud Side
     with Cluster("Public Cloud: AWS Managed Infrastructure ($$$ Variable OpEx)"):
         dns = Route53("Route 53 DNS")
-        alb = ALB("Application Load Balancer")
+        alb = ALB("App Load Balancer\n(Managed ALB)")
         
         with Cluster("Compute & Storage"):
             ec2 = EC2("EC2 Fleet (c6i)\n[Virtualized vCPUs]")
             rds = RDS("RDS Aurora Postgres\n[Primary-Replica]")
-            ebs = ElasticBlockStoreEBS("EBS io2 Block Express\n[$4,000/mo Metered IOPS!]")
-            s3 = S3("Amazon S3 Buckets\n[Object Storage]")
+            ebs = ElasticBlockStoreEBS("EBS io2 Express\n[$4,000/mo IOPS!]")
+            s3 = S3("Amazon S3\n[Object Storage]")
             nat = NATGateway("NAT Gateway\n[$0.09/GB Egress Tax!]")
             
-            ec2 >> Edge(label="SQL Queries") >> rds >> ebs
+            ec2 >> Edge(label="  SQL Queries  ") >> rds >> ebs
             ec2 >> s3
             ec2 >> nat
 
@@ -49,14 +51,14 @@ with Diagram("Cloud (AWS) vs. 37signals Bare-Metal Colocation", show=False, file
     # 37signals Colocation Side
     with Cluster("Self-Hosted: 37signals Bare-Metal Colocation ($840k/yr Fixed TCO)"):
         with Cluster("Dual Redundant Colocation (Deft Chicago & Ashburn)"):
-            fiber = Switch("Unmetered 10G Transit Commit\n[Pennies per GB!]")
+            fiber = Switch("10G Transit Commit\n[Pennies per GB!]")
             
             with Cluster("18x Dell PowerEdge R7625 Servers"):
-                traefik = Traefik("Traefik Ingress\n(Kamal Zero-Downtime)")
-                docker = Docker("Application Containers\n(96 AMD EPYC Cores / 576GB RAM)")
-                bare_pg = PostgreSQL("PostgreSQL on NVMe SSD\n[800,000+ IOPS forever ($0/mo)]")
+                traefik = Traefik("Traefik Ingress\n(Kamal Proxy)")
+                docker = Docker("18x App Hosts\n(96 Cores / 576GB RAM)")
+                bare_pg = PostgreSQL("Postgres on NVMe\n[800k+ IOPS ($0/mo)]")
                 
-                fiber >> traefik >> docker >> Edge(label="Local NVMe I/O") >> bare_pg
+                fiber >> traefik >> docker >> Edge(label="  Local NVMe I/O  ") >> bare_pg
 
     users >> Edge(color="orange", style="bold") >> dns
     users >> Edge(color="green", style="bold") >> fiber

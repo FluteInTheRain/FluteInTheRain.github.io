@@ -71,7 +71,7 @@ Send one proposal and **wait for Khang's OK** before writing:
 - **Angle**: one sentence on the question the post answers and for whom. The post is built around this angle, Khang's answers and the research, not around the chapter's order. A chapter summary with the words shuffled is a failure.
 - **Category**: one of `CATEGORY_IDS` in `src/data/categories.ts` (read the file; today: frontend, backend, database, devops, ai, system-design, finance). If none fits, say so and propose adding one (in non-interactive `claude -p` runs where you cannot ask, pick the closest and flag it in the hand-over; interactive runs wait for an answer at Steps 3–4) to `categories.ts` (and the category list comment in `src/content/blog/_TEMPLATE.md.txt`).
 - **Tags** and **post slug** (kebab-case; it becomes the URL `/blog/<post-slug>/`).
-- **Outline**: every `##` section with the visual/artifact planned for it (Excalidraw diagram, Real-world image / screenshot with its source, Timestamped `<YouTube />` talk or short `<Video />` clip, `<GitHubCode />`, `<QuoteCard />`, `<LinkCard />`, `<TerminalOutput />`, table, code block or `Callout`) and one line on what it shows. Aim to include at least 1–2 real-world sourced artifacts alongside Excalidraw diagrams so the post does not feel 100% AI-generated. Include the TL;DR, "Key takeaways" and "Review questions".
+- **Outline**: every `##` section with the visual/artifact planned for it. Keep `##` headings short and concise for a clean Table of Contents sidebar. **Mandatory: Start with a single Hero Visual Metaphor (`<Figure src={heroVisual} ... />`) at the very top without preamble announcement, followed by an irresistible Intro Hook (Quote + Paradox / Production Incident).** Then outline each section using Khang's 4-tier diagram standard (ByteByteGo, `mingrammer/diagrams`, Excalidraw, `<AnimatedFlow />` / ReactFlow) alongside real-world verified artifacts. Include "Key takeaways" and "Review questions".
 - **Sources**: the book (chapters) and the articles you plan to cite. Mention any book-vs-web conflict from Step 2.
 
 Apply his changes. If he changes the angle a lot, re-propose.
@@ -98,7 +98,9 @@ sources:
 ```
 
    - Import `En from '../../components/mdx/En.astro'` and `Vi from '../../components/mdx/Vi.astro'`. Always put `<En>`, `</En>`, `<Vi>`, `</Vi>` on their own lines with blank lines before and after the Markdown content inside so MDX parses headings, lists, and code blocks properly.
-   - In the `<Vi>` version, write natural engineer-to-engineer Vietnamese ("mình"), keep common stack names (`React`, `Kafka`, `PostgreSQL`, `BFF`, `CI/CD`), and translate technical concepts into Vietnamese with the English keyword in parentheses on first use per section (e.g. `độ trễ sao chép (replication lag)`).
+   - **Hero Visual Placement**: Place exactly ONE hero visual metaphor at the very top under `<En>` and `<Vi>` before the opening quote or intro text. Never add clumsy announcement text before it (*"Trước khi đi sâu vào..."*).
+   - **Natural Vietnamese**: In the `<Vi>` version, write fluid, natural engineer-to-engineer Vietnamese ("mình"), never word-by-word machine translation. Craft `description_vi` as an engaging, authentic sentence reflecting real-world engineering dilemmas. Keep common stack names (`React`, `Kafka`, `PostgreSQL`, `BFF`, `CI/CD`), and translate technical concepts with the English keyword in parentheses on first use per section (e.g. `độ trễ sao chép (replication lag)`).
+   - **No Author Cards**: Khang is the sole author of this blog; do not add author bylines or author cards.
    - The book entry has `author` and `chapters`. Add a `url` only for the publisher's or the book's official page.
    - Each web article you used has `title` and `url`.
 3. Quotes stay short: a sentence or two, in quotation marks, attributed in the text (for example "as Kleppmann puts it in chapter 5").

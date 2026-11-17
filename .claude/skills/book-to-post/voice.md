@@ -23,6 +23,15 @@ Default profile (Khang has no writing samples yet). For the tone in practice, re
 
 ## Vietnamese (`<Vi>`) technical tone
 
-- Write like a senior Vietnamese engineer explaining to a peer: natural, direct, first-person `"mình"` (or `"chúng ta"` for the team), `"bạn"` for the reader. Avoid stiff word-for-word machine-translation phrasing ("trong bài viết này chúng ta sẽ khám phá…").
-- Keep common stack names, brands, and universally used English dev terms untranslated (`React`, `Kafka`, `PostgreSQL`, `BFF`, `CI/CD`, `Full-stack`, `Real-time`, `DOM`).
+- Write like a senior Vietnamese engineer explaining to a peer: natural, direct, conversational first-person `"mình"` (or `"chúng ta"` for the team), `"bạn"` for the reader.
+- **Dịch thoát ý, mượt mà (Natural, polished Vietnamese)**:
+  - Tuyệt đối tránh giọng văn AI hoặc dịch thô cứng từ chữ sang chữ (word-by-word) như: *"trong bài viết này chúng ta sẽ khám phá..."*, *"nó là một giải pháp..."*, *"được thiết kế để..."*.
+  - Dùng câu chủ động, gãy gọn, đúng khẩu ngữ kỹ thuật của lập trình viên Việt Nam.
+  - `description_vi` trong frontmatter: Phải súc tích, tự nhiên, cuốn hút, nêu thẳng bài toán thực tế hoặc sự cố hệ thống (ví dụ: *"Không có giải pháp hoàn hảo, chỉ có sự đánh đổi. Giải thích dễ hiểu từ gốc rễ: tại sao Prime Video bỏ serverless, 37signals rời cloud, và chạy báo cáo làm sập thanh toán."*), tránh dịch máy móc.
+- Keep common stack names, brands, and universally used English dev terms untranslated (`React`, `Kafka`, `PostgreSQL`, `BFF`, `CI/CD`, `Full-stack`, `Real-time`, `DOM`, `Serverless`, `Monolith`, `Cloud`).
 - Translate technical concepts into clear Vietnamese and keep the original English keyword in parentheses on first appearance in a section: e.g., `độ trễ sao chép (replication lag)`, `phân trang bằng con trỏ (cursor pagination)`, `ghi đơn điệu (monotonic writes)`. Once introduced in a section, use the shorter term naturally instead of repeating parentheses in every sentence.
+
+## Blog Structure & Constraints
+
+- **Tác giả (Author)**: Trang blog này là blog kỹ thuật cá nhân của Khang. Tuyệt đối không thêm tác giả, byline card hay thẻ tác giả vào bài viết.
+- **Tiêu đề mục (Headings & TOC)**: Giữ các tiêu đề `##` ngắn gọn, súc tích, đi thẳng vào bản chất vấn đề để mục lục (Table of Contents) ở thanh bên luôn thanh thoát, không bị dài dòng hay tràn chữ.
