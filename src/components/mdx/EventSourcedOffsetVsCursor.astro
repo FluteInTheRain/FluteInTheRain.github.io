@@ -1,0 +1,245 @@
+---
+// Offset vs cursor (keyset) pagination on the same index, sorted by (ts DESC, id DESC).
+//  1. OFFSET 80000 LIMIT 200 walks the first 80,000 index entries and throws them away;
+//  2. WHERE (ts, id) < cursor LIMIT 200 walks down the B-tree to the cursor, then reads 200.
+// The strip is to scale for 100,000 entries; the 200-row page is widened so it is visible.
+// Timings and plans are the ones from the post's local SQLite benchmark.
+// Plain inline SVG with polygon arrowheads, so the hidden EN/VI copy needs no ids.
+
+const W = 900;
+const H = 404;
+const X0 = 40;
+const X1 = 860;
+const TOTAL = 100_000;
+const SKIP = 80_000;
+const ex = (i: number) => X0 + ((X1 - X0) * i) / TOTAL;
+const pageX = ex(SKIP); // 696
+const pageW = 12; // 200 rows would be 1.6px wide: widened to be seen
+const stripH = 32;
+
+// Arrow drawn as a line plus a small filled triangle (no SVG markers needed).
+function arrow(x1: number, y1: number, x2: number, y2: number) {
+  const a = Math.atan2(y2 - y1, x2 - x1);
+  const len = 8;
+  const p1 = [x2 - len * Math.cos(a - 0.45), y2 - len * Math.sin(a - 0.45)];
+  const p2 = [x2 - len * Math.cos(a + 0.45), y2 - len * Math.sin(a + 0.45)];
+  return {
+    line: `M ${x1} ${y1} L ${x2 - 6 * Math.cos(a)} ${y2 - 6 * Math.sin(a)}`,
+    head: `${x2},${y2} ${p1[0].toFixed(1)},${p1[1].toFixed(1)} ${p2[0].toFixed(1)},${p2[1].toFixed(1)}`,
+  };
+}
+
+// Lane 1: offset
+const s1 = 78; // strip top
+const walk = arrow(X0 + 4, 64, pageX - 4, 64);
+
+// Lane 2: cursor (B-tree descent, then a short read)
+const nodeW = 80;
+const nodeH = 26;
+const nodes = [
+  { x: X0, y: 204, en: 'root', vi: 'gốc' },
+  { x: 340, y: 244, en: 'branch', vi: 'nhánh' },
+  { x: pageX + pageW / 2 - nodeW / 2, y: 284, en: 'leaf', vi: 'lá' },
+];
+const hop1 = arrow(nodes[0].x + nodeW, nodes[0].y + nodeH / 2, nodes[1].x, nodes[1].y + nodeH / 2);
+const hop2 = arrow(nodes[1].x + nodeW, nodes[1].y + nodeH / 2, nodes[2].x, nodes[2].y + nodeH / 2);
+const s2 = 332; // strip top
+const drop = arrow(pageX + pageW / 2, nodes[2].y + nodeH, pageX + pageW / 2, s2);
+---
+<figure class="esovc">
+  <div class="esovc-scroll">
+  <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Top: an OFFSET 80000 query steps through 80,000 index entries and discards them before returning 200 rows. Bottom: a cursor query walks down the B-tree from the root to the leaf that holds the cursor and returns the same 200 rows without touching the earlier entries.">
+    {/* ---------- Lane 1: offset ---------- */}
+    <text x={X0} y="24" class="esovc-h">
+      <tspan data-lang-en>Offset, page 401: step over 80,000 entries, then read 200</tspan>
+      <tspan data-lang-vi>Offset, trang 401: bước qua 80.000 mục rồi mới đọc 200 dòng</tspan>
+    </text>
+
+    <g class="esovc-arrow"><path d={walk.line} /><polygon points={walk.head} /></g>
+    <text x={X0} y="54" class="esovc-sub">
+      <tspan data-lang-en>OFFSET 80000 starts at the newest entry and counts</tspan>
+      <tspan data-lang-vi>OFFSET 80000 bắt đầu từ mục mới nhất và đếm dần</tspan>
+    </text>
+    <text x={pageX + pageW + 8} y="70" class="esovc-page">
+      <tspan data-lang-en>200 rows returned</tspan>
+      <tspan data-lang-vi>trả về 200 dòng</tspan>
+    </text>
+
+    <rect x={X0} y={s1} width={pageX - X0} height={stripH} class="esovc-scanned" />
+    <text x={(X0 + pageX) / 2} y={s1 + 21} text-anchor="middle" class="esovc-in">
+      <tspan data-lang-en>80,000 entries read one by one, then thrown away</tspan>
+      <tspan data-lang-vi>80.000 mục bị đọc lần lượt rồi bỏ đi</tspan>
+    </text>
+    <rect x={pageX} y={s1} width={pageW} height={stripH} class="esovc-pagebox" />
+    <rect x={pageX + pageW} y={s1} width={X1 - pageX - pageW} height={stripH} class="esovc-rest" />
+
+    <text x={X0} y={s1 + stripH + 22} class="esovc-end">
+      <tspan data-lang-en>newest</tspan>
+      <tspan data-lang-vi>mới nhất</tspan>
+    </text>
+    <text x={W / 2} y={s1 + stripH + 22} text-anchor="middle" class="esovc-plan">
+      <tspan data-lang-en>SQLite plan: SCAN … USING INDEX · median 1.43 ms</tspan>
+      <tspan data-lang-vi>Plan của SQLite: SCAN … USING INDEX · trung vị 1,43 ms</tspan>
+    </text>
+    <text x={X1} y={s1 + stripH + 22} text-anchor="end" class="esovc-end">
+      <tspan data-lang-en>oldest</tspan>
+      <tspan data-lang-vi>cũ nhất</tspan>
+    </text>
+
+    {/* ---------- Lane 2: cursor ---------- */}
+    <line x1={X0} x2={X1} y1="160" y2="160" class="esovc-rule" />
+    <text x={X0} y="188" class="esovc-h">
+      <tspan data-lang-en>Cursor: jump to the last row you saw, then read 200</tspan>
+      <tspan data-lang-vi>Cursor: nhảy thẳng tới dòng cuối đã xem, rồi đọc 200 dòng</tspan>
+    </text>
+
+    {nodes.map((n) => (
+      <g class="esovc-node">
+        <rect x={n.x} y={n.y} width={nodeW} height={nodeH} rx="5" />
+        <text x={n.x + nodeW / 2} y={n.y + 18} text-anchor="middle">
+          <tspan data-lang-en>{n.en}</tspan>
+          <tspan data-lang-vi>{n.vi}</tspan>
+        </text>
+      </g>
+    ))}
+    <g class="esovc-arrow is-red"><path d={hop1.line} /><polygon points={hop1.head} /></g>
+    <g class="esovc-arrow is-red"><path d={hop2.line} /><polygon points={hop2.head} /></g>
+    <g class="esovc-arrow is-red"><path d={drop.line} /><polygon points={drop.head} /></g>
+
+    <text x={X0} y="256" class="esovc-sub">
+      <tspan data-lang-en>B-tree seek: a few hops,</tspan>
+      <tspan data-lang-vi>Tìm trên B-tree: vài bước,</tspan>
+    </text>
+    <text x={X0} y="274" class="esovc-sub">
+      <tspan data-lang-en>about log N, not 80,000</tspan>
+      <tspan data-lang-vi>cỡ log N, không phải 80.000</tspan>
+    </text>
+    <text x={nodes[2].x + nodeW + 10} y={nodes[2].y + 18} class="esovc-page">
+      <tspan data-lang-en>200 rows returned</tspan>
+      <tspan data-lang-vi>trả về 200 dòng</tspan>
+    </text>
+
+    <rect x={X0} y={s2} width={pageX - X0} height={stripH} class="esovc-skipped" />
+    <text x={(X0 + pageX) / 2} y={s2 + 21} text-anchor="middle" class="esovc-in is-muted">
+      <tspan data-lang-en>entries before the cursor are never read</tspan>
+      <tspan data-lang-vi>các mục đứng trước cursor không hề bị đọc</tspan>
+    </text>
+    <rect x={pageX} y={s2} width={pageW} height={stripH} class="esovc-pagebox" />
+    <rect x={pageX + pageW} y={s2} width={X1 - pageX - pageW} height={stripH} class="esovc-rest" />
+
+    <text x={X0} y={s2 + stripH + 22} class="esovc-end">
+      <tspan data-lang-en>newest</tspan>
+      <tspan data-lang-vi>mới nhất</tspan>
+    </text>
+    <text x={W / 2} y={s2 + stripH + 22} text-anchor="middle" class="esovc-plan">
+      <tspan data-lang-en>SQLite plan: SEARCH … USING INDEX (ts&lt;?) · median 0.16 ms</tspan>
+      <tspan data-lang-vi>Plan của SQLite: SEARCH … USING INDEX (ts&lt;?) · trung vị 0,16 ms</tspan>
+    </text>
+    <text x={X1} y={s2 + stripH + 22} text-anchor="end" class="esovc-end">
+      <tspan data-lang-en>oldest</tspan>
+      <tspan data-lang-vi>cũ nhất</tspan>
+    </text>
+  </svg>
+  </div>
+  <figcaption>
+    <span data-lang-en>Both queries return the same 200 rows from an index sorted by (ts DESC, id DESC). The offset query has to step over every entry in front of the page; the cursor query finds its starting point by walking down the B-tree. The strip is to scale for 100,000 entries, with the 200-row page widened so you can see it; plans and timings come from the benchmark below.</span>
+    <span data-lang-vi>Cả hai truy vấn trả về cùng 200 dòng từ một index sắp theo (ts DESC, id DESC). Truy vấn offset phải bước qua mọi mục đứng trước trang cần lấy; truy vấn cursor tìm điểm bắt đầu bằng cách đi xuống cây B-tree. Dải ngang vẽ đúng tỉ lệ cho 100.000 mục, riêng trang 200 dòng được vẽ to hơn cho dễ thấy; plan và thời gian lấy từ phép đo ngay bên dưới.</span>
+  </figcaption>
+</figure>
+
+<style>
+  .esovc {
+    margin: 2em 0;
+    width: 100%;
+  }
+  .esovc-scroll {
+    overflow-x: auto;
+  }
+  .esovc svg {
+    display: block;
+    width: 100%;
+    min-width: 640px;
+    height: auto;
+  }
+  .esovc text {
+    font-size: 14px;
+    fill: var(--text-body);
+  }
+  .esovc .esovc-h {
+    font-size: 16px;
+    font-weight: 700;
+    fill: var(--text);
+  }
+  .esovc .esovc-sub,
+  .esovc .esovc-end {
+    fill: var(--text-muted);
+  }
+  .esovc .esovc-plan {
+    fill: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .esovc .esovc-page {
+    fill: var(--red);
+    font-weight: 700;
+  }
+  .esovc .esovc-in {
+    fill: var(--text);
+    font-variant-numeric: tabular-nums;
+  }
+  .esovc .esovc-in.is-muted {
+    fill: var(--text-muted);
+  }
+  .esovc-scanned {
+    fill: var(--border);
+    stroke: var(--text-muted);
+    stroke-width: 1.2;
+  }
+  .esovc-skipped {
+    fill: var(--bg-alt);
+    stroke: var(--border);
+    stroke-width: 1.2;
+    stroke-dasharray: 4 3;
+  }
+  .esovc-rest {
+    fill: var(--bg-alt);
+    stroke: var(--border);
+    stroke-width: 1.2;
+  }
+  .esovc-pagebox {
+    fill: var(--red);
+    stroke: var(--red);
+  }
+  .esovc-node rect {
+    fill: var(--bg-alt);
+    stroke: var(--text-muted);
+    stroke-width: 1.2;
+  }
+  .esovc-node text {
+    fill: var(--text);
+    font-weight: 600;
+  }
+  .esovc-arrow path {
+    fill: none;
+    stroke: var(--text-muted);
+    stroke-width: 1.5;
+  }
+  .esovc-arrow polygon {
+    fill: var(--text-muted);
+  }
+  .esovc-arrow.is-red path {
+    stroke: var(--red);
+  }
+  .esovc-arrow.is-red polygon {
+    fill: var(--red);
+  }
+  .esovc-rule {
+    stroke: var(--border);
+  }
+  .esovc figcaption {
+    margin-top: 10px;
+    font-size: 14px;
+    color: var(--text-muted);
+    line-height: 1.55;
+    text-align: center;
+  }
+</style>

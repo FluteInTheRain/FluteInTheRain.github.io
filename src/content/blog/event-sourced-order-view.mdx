@@ -17,8 +17,10 @@ sources:
 ---
 
 import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
 import DemoFrame from '../../components/mdx/DemoFrame.astro';
 import En from '../../components/mdx/En.astro';
+import EventSourcedOffsetVsCursor from '../../components/mdx/EventSourcedOffsetVsCursor.astro';
 import Figure from '../../components/mdx/Figure.astro';
 import GitHubCode from '../../components/mdx/GitHubCode.astro';
 import LinkCard from '../../components/mdx/LinkCard.astro';
@@ -29,7 +31,6 @@ import YouTube from '../../components/mdx/YouTube.astro';
 import OrderBookViewDemo from '../../components/demos/OrderBookViewDemo.tsx';
 import azureEventSourcing from '../../assets/blog/event-sourced-order-view/azure-event-sourcing.png';
 import offsetDrift from '../../assets/blog/event-sourced-order-view/offset-drift-diagram.png';
-import offsetVsCursor from '../../assets/blog/event-sourced-order-view/offset-vs-cursor.png';
 
 <En>
 
@@ -40,6 +41,17 @@ The fix was not a bigger cap. It was to stop treating the upstream system as the
 <Figure src={azureEventSourcing} alt="Event sourcing architecture showing events flowing through a queue to event handlers that populate a dedicated read-only store" caption="Instead of querying the upstream command system on every tab refresh, event handlers project the event stream into a dedicated read-only store tailored for the UI." sourceTitle="Microsoft Learn — Event Sourcing Pattern" sourceUrl="https://learn.microsoft.com/en-us/azure/architecture/patterns/event-sourcing" />
 
 This post walks through the four decisions that made that work. The stack was a Python service, a Go backend-for-frontend (BFF) and a React UI, with PostgreSQL and Kafka in between, but the ideas carry over to any stack.
+
+<Concepts>
+
+- **Order book**: here, the table of every order placed today and where each one stands (working, filled, cancelled).
+- **Upstream system**: the system that owns the orders and is the source of truth. Other services ask it, or listen to it, to learn about orders.
+- **Hard cap**: a fixed maximum, here on how many rows a layer returns. Anything past it is silently cut off.
+- **Event sourcing**: treating every change as an event ("order accepted", "order filled") and building the current state by applying those events in order. Like a bank balance worked out from the list of transactions.
+- **Read-only store (projection)**: a copy of the data shaped for one screen, kept up to date by applying events. The UI reads from it instead of asking the upstream system each time.
+- **BFF (backend-for-frontend)**: a small server built for one UI. It gathers and shapes data so the browser gets exactly what it shows.
+
+</Concepts>
 
 ## Try the rules interactively
 
@@ -56,6 +68,17 @@ Cách sửa không phải là nới giới hạn lên cao hơn. Giải pháp là
 <Figure src={azureEventSourcing} alt="Kiến trúc Event Sourcing minh họa luồng sự kiện đi qua hàng đợi tới các trình xử lý sự kiện để cập nhật kho dữ liệu chỉ đọc riêng" caption="Thay vì truy vấn thẳng vào hệ thống lõi mỗi lần tab làm mới dữ liệu, các trình xử lý sự kiện (event handlers) chiếu luồng sự kiện vào một kho dữ liệu chỉ đọc (read-only store) riêng tối ưu cho giao diện." sourceTitle="Microsoft Learn — Event Sourcing Pattern" sourceUrl="https://learn.microsoft.com/en-us/azure/architecture/patterns/event-sourcing" />
 
 Bài viết này đi qua bốn quyết định thiết kế đã giúp hệ thống đó chạy ổn định. Stack thực tế gồm một service Python, một lớp Backend-for-Frontend (BFF) viết bằng Go và giao diện React, ở giữa là PostgreSQL và Kafka — nhưng các ý tưởng này áp dụng được cho mọi tech stack.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Order book (sổ lệnh)**: ở bài này là bảng chứa mọi lệnh đặt trong ngày và tình trạng hiện tại của từng lệnh (đang chờ, đã khớp, đã hủy).
+- **Upstream system (hệ thống lõi phía trên)**: hệ thống sở hữu dữ liệu lệnh và là nguồn sự thật. Các service khác hỏi nó, hoặc nghe nó báo, để biết lệnh đang ra sao.
+- **Hard cap (giới hạn cứng)**: một con số tối đa cố định, ở đây là số dòng mà một tầng trả về. Vượt quá thì bị cắt đi mà không ai báo.
+- **Event sourcing**: coi mỗi thay đổi là một sự kiện ("lệnh được nhận", "lệnh đã khớp") và dựng trạng thái hiện tại bằng cách áp lần lượt các sự kiện đó. Giống số dư tài khoản được tính ra từ danh sách giao dịch.
+- **Read-only store (kho chỉ đọc, hay projection)**: một bản sao dữ liệu sắp xếp sẵn cho một màn hình, được cập nhật bằng cách áp sự kiện. Giao diện đọc từ đây thay vì lần nào cũng hỏi hệ thống lõi.
+- **BFF (backend-for-frontend)**: một server nhỏ làm riêng cho một giao diện. Nó gom và nắn dữ liệu để trình duyệt nhận đúng thứ cần hiển thị.
+
+</Concepts>
 
 ## Thử nghiệm các quy tắc trực tiếp
 
@@ -88,9 +111,21 @@ WHERE orders.event_ns < EXCLUDED.event_ns;   -- older events are ignored
 
 One more rule sits on top: **a finished order never reopens.** Once a row is filled, cancelled or rejected, later events can add detail but cannot set it back to a working status.
 
-<Callout type="tip" title="Degrade, don't crash">
+<Callout type="tip" title="If the migration hasn't run yet">
 New code often ships before its database migration. If the new columns are missing, the writer logs one warning and skips the live-state write, instead of failing the whole order path.
 </Callout>
+
+<Concepts>
+
+- **Execution report**: a message saying what happened to an order: accepted, partially filled, filled, cancelled.
+- **Out of order**: events arriving in a different order than they happened, for example when one message is delayed on the way.
+- **Upsert (`ON CONFLICT ... DO UPDATE`)**: insert the row, or update it if a row with that key already exists, in one statement. The `WHERE` at the end lets the update happen only when the incoming event is newer.
+- **Event time (`event_ns`)**: when the event happened at the source, not when we received it. Comparing it tells us which of two events is newer.
+- **Monotonic write**: a write that can only move a row forward in time, never back to an older state.
+- **Final status**: filled, cancelled or rejected. The order is done and must not go back to a working status.
+- **Database migration**: a script that changes the database structure, such as adding columns. Code is often deployed before the migration has run.
+
+</Concepts>
 
 ## 2. Merge two sources with explicit rules
 
@@ -118,6 +153,17 @@ func merge(stored, live Order) Order {
 ```
 
 <YouTube id="lg6aF5PP4Tc" title="Event Sourcing 101: Command Query Responsibility Segregation (CQRS)" start={176} end={252} caption="Between 2:56 and 4:12, Confluent explains why CQRS read views lag slightly behind the Kafka log (eventual consistency) and how retaining the full topic lets a service rebuild its read view from scratch after a restart." sourceTitle="Confluent — Event Sourcing 101 (CQRS)" />
+
+<Concepts>
+
+- **Kafka**: a service that keeps events in an append-only log. Producers write events to it; readers go through them in order and can start again from an earlier point.
+- **Event stream**: the ordered sequence of events, here every change to every order.
+- **Merge**: combining two sources into one list with fixed rules for which value wins when they disagree.
+- **Upstream ID**: the order number assigned by the upstream system. It arrives a moment after the order is sent; until then we only have our own ID.
+- **CQRS (Command Query Responsibility Segregation)**: keeping the side that changes data (commands) apart from the side that reads it (queries), so reads can use their own view.
+- **Eventual consistency**: the read view may be a little behind the log, but it catches up once it has processed the newest events.
+
+</Concepts>
 
 ## 3. Say "incomplete" instead of returning a short list
 
@@ -148,6 +194,16 @@ func (r *Reader) Lag() int64 {
 ```
 </GitHubCode>
 
+<Concepts>
+
+- **Replay**: reading the event stream again from a starting point, here the start of the day, to rebuild the view.
+- **Partition**: Kafka splits a topic into partitions. Each one is its own ordered log that a reader goes through independently.
+- **High-watermark**: the position just past the newest message readers can see in a partition. A reader that reaches it has caught up.
+- **Lag**: how many messages a reader is still behind the high-watermark. Zero lag on every partition means the replay is done.
+- **Consumer group**: a set of readers that split a topic's partitions between them automatically. In `kafka-go`, `Lag()` returns -1 for this kind of reader.
+
+</Concepts>
+
 ## 4. Page with a cursor, not an offset
 
 With thousands of rows and new ones arriving all the time, `LIMIT/OFFSET` breaks down: a row inserted at the top shifts every page, so users see duplicates or miss rows. A cursor on a stable, unique sort key does not have that problem.
@@ -164,7 +220,7 @@ LIMIT 200;
 
 The `id` breaks ties between rows with the same timestamp, so no row is ever skipped or shown twice. Filtering moved into SQL too, instead of loading everything and filtering in memory.
 
-<Figure src={offsetVsCursor} alt="Side-by-side comparison of offset-based pagination scanning 20,000 rows versus cursor-based pagination performing a direct index seek" caption="Cursor pagination seeks directly to the last seen key in the index instead of scanning and discarding every preceding row." sourceTitle="DEV Community — Offset vs. Cursor-Based Pagination" sourceUrl="https://dev.to/reclusivecoder/a-developers-guide-to-api-pagination-offset-vs-cursor-based-2m5h" />
+<EventSourcedOffsetVsCursor />
 
 Even in a local SQLite table with 100,000 rows indexed on `(ts DESC, id DESC)`, querying page 401 (`OFFSET 80000`) forces a full index scan of 80,000 rows, while a keyset cursor seeks directly into the B-tree:
 
@@ -188,6 +244,17 @@ The honest knock on the streaming kind isn't "bad design", it's that it holds a 
 <LinkCard url="https://use-the-index-luke.com/no-offset" title="We need tool support for keyset pagination" description="Pagination without OFFSET has many benefits but one problem: there is no tool support. Please help changing this." tag="Deep Dive" />
 
 On the React side the table is **virtualized** (only visible rows are in the DOM) and **scroll-anchored**, so loading the next page or inserting a new row does not make the list jump under the reader's eyes. The UI reloads after a quiet period, on reconnect, or when the user asks, instead of on every single event.
+
+<Concepts>
+
+- **Offset pagination (`LIMIT/OFFSET`)**: "skip N rows, give me the next M". Simple, but the database still walks the skipped rows, and one new row at the top shifts every page.
+- **Cursor (keyset) pagination**: remember the sort key of the last row you showed and ask for the rows after it. The page always starts in the same place.
+- **Tie-breaker**: a second sort column (`id`) that decides the order when the first one (`ts`) is equal, so every row has exactly one position.
+- **Index and B-tree**: an index is a sorted copy of some columns that the database keeps next to the table. A B-tree is the usual shape for it: a few levels of nodes, so the database can find a key in a few hops (an index seek) instead of reading entries one by one (a scan).
+- **Connection pooler (PgBouncer) and portal**: a pooler shares a few database connections among many clients. A portal is a query result the server keeps open on one connection, which transaction-level pooling cannot promise to keep.
+- **Virtualized, scroll-anchored table**: only the rows on screen exist in the page, and the row you are looking at stays put when rows are added above it.
+
+</Concepts>
 
 ## What changed
 
@@ -225,9 +292,21 @@ WHERE orders.event_ns < EXCLUDED.event_ns;   -- bỏ qua các sự kiện cũ h�
 
 Thêm một quy tắc nữa nằm ở tầng trên: **một lệnh đã kết thúc sẽ không bao giờ mở lại (final order never reopens).** Khi một dòng đã ở trạng thái khớp hết, đã hủy hoặc bị từ chối, các sự kiện đến sau có thể bổ sung thông tin chi tiết nhưng không bao giờ được phép đưa nó quay về trạng thái đang chờ xử lý.
 
-<Callout type="tip" title="Suy giảm an toàn, đừng làm sập luồng chính (Degrade, don't crash)">
+<Callout type="tip" title="Nếu migration chưa kịp chạy">
 Code mới thường được triển khai trước khi chạy di trú cơ sở dữ liệu (database migration). Nếu thiếu các cột mới, trình ghi chỉ ghi một dòng cảnh báo và bỏ qua bước lưu trạng thái trực tiếp, thay vì làm lỗi cả luồng đặt lệnh.
 </Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Execution report (báo cáo thực thi)**: tin nhắn cho biết chuyện gì đã xảy ra với một lệnh: đã nhận, khớp một phần, khớp hết, đã hủy.
+- **Out of order (sai thứ tự)**: sự kiện đến không theo đúng thứ tự xảy ra, ví dụ khi một tin nhắn bị chậm trên đường đi.
+- **Upsert (`ON CONFLICT ... DO UPDATE`)**: thêm dòng mới, hoặc cập nhật nếu đã có dòng cùng khóa, trong cùng một câu lệnh. Mệnh đề `WHERE` ở cuối chỉ cho cập nhật khi sự kiện mới đến thật sự mới hơn.
+- **Event time (`event_ns`, thời điểm sự kiện)**: lúc sự kiện xảy ra ở nguồn, không phải lúc mình nhận được. So hai giá trị này là biết sự kiện nào mới hơn.
+- **Monotonic write (ghi đơn điệu)**: kiểu ghi chỉ cho một dòng tiến về phía trước theo thời gian, không bao giờ lùi về trạng thái cũ.
+- **Final status (trạng thái kết thúc)**: đã khớp hết, đã hủy hoặc bị từ chối. Lệnh đã xong và không được quay về trạng thái đang chờ.
+- **Database migration (di trú cơ sở dữ liệu)**: script đổi cấu trúc database, như thêm cột. Code mới hay được deploy trước khi migration kịp chạy.
+
+</Concepts>
 
 ## 2. Hợp nhất hai nguồn dữ liệu bằng các quy tắc tường minh
 
@@ -255,6 +334,17 @@ func merge(stored, live Order) Order {
 ```
 
 <YouTube id="lg6aF5PP4Tc" title="Event Sourcing 101: Command Query Responsibility Segregation (CQRS)" start={176} end={252} caption="Từ 2:56 đến 4:12, Confluent giải thích vì sao khung nhìn đọc CQRS thường trễ nhẹ so với Kafka log (nhất quán cuối cùng — eventual consistency) và việc giữ lại toàn bộ topic cho phép service dựng lại view từ đầu sau khi khởi động lại." sourceTitle="Confluent — Event Sourcing 101 (CQRS)" />
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Kafka**: một service lưu sự kiện vào một log chỉ ghi nối thêm. Bên gửi ghi sự kiện vào; bên đọc đi qua lần lượt và có thể đọc lại từ một điểm trước đó.
+- **Event stream (luồng sự kiện)**: chuỗi sự kiện có thứ tự, ở đây là mọi thay đổi của mọi lệnh.
+- **Merge (hợp nhất)**: gộp hai nguồn thành một danh sách, với quy tắc cố định để quyết định giá trị nào thắng khi hai bên lệch nhau.
+- **Upstream ID (mã từ hệ thống lõi)**: số hiệu lệnh do hệ thống lõi cấp. Nó về chậm hơn lúc gửi lệnh một chút; trước đó mình chỉ có mã nội bộ của mình.
+- **CQRS (Command Query Responsibility Segregation)**: tách phần thay đổi dữ liệu (command) khỏi phần đọc dữ liệu (query), để phía đọc dùng khung nhìn riêng của nó.
+- **Eventual consistency (nhất quán cuối cùng)**: khung nhìn đọc có thể chậm hơn log một chút, nhưng sẽ bắt kịp khi xử lý xong các sự kiện mới nhất.
+
+</Concepts>
 
 ## 3. Báo rõ "chưa đầy đủ" (`incomplete`) thay vì trả về một danh sách thiếu
 
@@ -285,6 +375,16 @@ func (r *Reader) Lag() int64 {
 ```
 </GitHubCode>
 
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Replay (đọc lại)**: đọc lại luồng sự kiện từ một điểm xuất phát, ở đây là đầu ngày, để dựng lại khung nhìn.
+- **Partition (phân vùng)**: Kafka chia một topic thành nhiều partition. Mỗi partition là một log có thứ tự riêng, được đọc độc lập.
+- **High-watermark (mốc cao nhất)**: vị trí ngay sau tin nhắn mới nhất mà bên đọc thấy được trong một partition. Đọc tới đó là đã bắt kịp.
+- **Lag (độ trễ)**: bên đọc còn cách high-watermark bao nhiêu tin nhắn. Lag bằng 0 trên mọi partition nghĩa là replay đã xong.
+- **Consumer group (nhóm consumer)**: một nhóm bên đọc tự chia nhau các partition của một topic. Trong `kafka-go`, `Lag()` trả về -1 với kiểu reader này.
+
+</Concepts>
+
 ## 4. Phân trang bằng con trỏ (cursor), không dùng độ lệch (offset)
 
 Với hàng nghìn dòng dữ liệu và các dòng mới đổ về liên tục, `LIMIT/OFFSET` sẽ gãy ngay: chỉ cần một dòng mới chèn vào đầu bảng là toàn bộ các trang sau bị xê dịch (shift), khiến người dùng thấy trùng dòng hoặc sót dòng. Phân trang bằng con trỏ (cursor / keyset pagination) dựa trên một khóa sắp xếp ổn định và duy nhất (unique sort key) không gặp vấn đề này.
@@ -301,7 +401,7 @@ LIMIT 200;
 
 Trường `id` đóng vai trò phân định khi hai dòng có cùng dấu thời gian `ts` (tie-breaker), nhờ vậy không dòng nào bị bỏ sót hay hiển thị hai lần. Việc lọc dữ liệu (filtering) cũng được đưa thẳng vào SQL thay vì tải hết lên RAM rồi mới lọc.
 
-<Figure src={offsetVsCursor} alt="So sánh trực quan giữa phân trang bằng offset phải quét 20.000 dòng và phân trang bằng cursor tìm thẳng qua chỉ mục" caption="Phân trang con trỏ (cursor pagination) nhảy thẳng tới khóa cuối cùng đã đọc trong chỉ mục (index seek) thay vì quét và bỏ đi toàn bộ các dòng đứng trước." sourceTitle="DEV Community — Offset vs. Cursor-Based Pagination" sourceUrl="https://dev.to/reclusivecoder/a-developers-guide-to-api-pagination-offset-vs-cursor-based-2m5h" />
+<EventSourcedOffsetVsCursor />
 
 Ngay cả trên một bảng SQLite cục bộ có 100.000 dòng đã đánh chỉ mục (index) trên `(ts DESC, id DESC)`, truy vấn trang 401 (`OFFSET 80000`) buộc database phải quét tuần tự qua 80.000 dòng chỉ mục (`SCAN`), trong khi keyset cursor nhảy thẳng vào đúng vị trí trên cây B-tree (`SEARCH`):
 
@@ -325,6 +425,17 @@ Keyset cursor cũng tránh được lỗi giữ kết nối mở ở phía serve
 <LinkCard url="https://use-the-index-luke.com/no-offset" title="We need tool support for keyset pagination" description="Bài viết chuyên sâu của Markus Winand phân tích lý do phân trang không dùng OFFSET nhanh và ổn định hơn hẳn trong cơ sở dữ liệu." tag="Đọc thêm" />
 
 Ở phía React, bảng dữ liệu được **ảo hóa (virtualized)** — chỉ đưa các dòng đang nằm trong khung nhìn vào DOM — và **neo vị trí cuộn (scroll-anchored)**, nên việc tải trang tiếp theo hay chèn thêm dòng mới không làm danh sách nhảy giật dưới mắt người đọc. Giao diện chỉ tải lại sau một khoảng lặng (quiet period), khi kết nối lại, hoặc khi người dùng chủ động bấm làm mới, thay vì tải lại theo từng sự kiện đơn lẻ.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Offset pagination (`LIMIT/OFFSET`, phân trang bằng độ lệch)**: "bỏ qua N dòng, đưa tôi M dòng tiếp theo". Đơn giản, nhưng database vẫn phải đi qua những dòng bị bỏ, và chỉ một dòng mới chèn lên đầu là mọi trang bị xô lệch.
+- **Cursor / keyset pagination (phân trang bằng con trỏ)**: nhớ khóa sắp xếp của dòng cuối đã hiển thị rồi xin các dòng đứng sau nó. Trang luôn bắt đầu đúng chỗ.
+- **Tie-breaker (cột phân xử)**: cột sắp xếp thứ hai (`id`) quyết định thứ tự khi cột đầu (`ts`) bằng nhau, nhờ vậy mỗi dòng có đúng một vị trí.
+- **Index và B-tree (chỉ mục và cây B)**: index là bản sao đã sắp xếp của vài cột, database giữ bên cạnh bảng. B-tree là dạng phổ biến của nó: vài tầng nút, nên database tìm một khóa chỉ trong vài bước (index seek) thay vì đọc từng mục một (scan).
+- **Connection pooler (PgBouncer) và portal**: pooler cho nhiều client dùng chung vài kết nối database. Portal là một kết quả truy vấn server giữ mở trên một kết nối, điều mà pooling theo giao dịch không hứa giữ được.
+- **Bảng virtualized, scroll-anchored (ảo hóa, neo vị trí cuộn)**: chỉ những dòng đang thấy trên màn hình mới có trong trang, và dòng bạn đang nhìn đứng yên khi có dòng mới chèn phía trên.
+
+</Concepts>
 
 ## Kết quả thay đổi
 
