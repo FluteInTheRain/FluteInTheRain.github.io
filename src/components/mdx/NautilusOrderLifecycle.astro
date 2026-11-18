@@ -1,0 +1,255 @@
+---
+// The order state machine as the post describes it, in four lanes:
+//  1. local (INITIALIZED), 2. in flight (SUBMITTED), 3. open at the venue (ACCEPTED, PARTIALLY_FILLED),
+//  4. closed (DENIED, FILLED, CANCELED / EXPIRED, REJECTED),
+// with the is_open() / is_inflight() / is_closed() answers for each lane, taken from
+// OrderStatus in crates/model/src/enums.rs (the snippet shown in the post).
+// Plain inline SVG with site tokens; arrowheads are plain polygons, so no ids are needed.
+
+const W = 900;
+const H = 590;
+
+// Arrowhead pointing at (x2, y2), coming from (x1, y1).
+function head(x1: number, y1: number, x2: number, y2: number) {
+  const a = Math.atan2(y2 - y1, x2 - x1);
+  const len = 8;
+  const p1 = [x2 - len * Math.cos(a - 0.45), y2 - len * Math.sin(a - 0.45)];
+  const p2 = [x2 - len * Math.cos(a + 0.45), y2 - len * Math.sin(a + 0.45)];
+  return `${x2},${y2} ${p1[0].toFixed(1)},${p1[1].toFixed(1)} ${p2[0].toFixed(1)},${p2[1].toFixed(1)}`;
+}
+// Polyline arrow through the given points; the line stops short of the tip so the head stays sharp.
+function arrow(pts: [number, number][]) {
+  const [x1, y1] = pts[pts.length - 2];
+  const [x2, y2] = pts[pts.length - 1];
+  const a = Math.atan2(y2 - y1, x2 - x1);
+  const end: [number, number] = [x2 - 6 * Math.cos(a), y2 - 6 * Math.sin(a)];
+  const line = [...pts.slice(0, -1), end].map(([x, y], i) => `${i ? 'L' : 'M'} ${x} ${y}`).join(' ');
+  return { line, head: head(x1, y1, x2, y2) };
+}
+
+const laneX = [20, 240, 460, 680];
+const laneW = 200;
+const laneTop = 40;
+const laneBottom = 518;
+const boxW = 180;
+const boxH = 50;
+const bx = (lane: number) => laneX[lane] + 10;
+const rowY = { denied: 112, main: 196, second: 280, third: 364 };
+
+const lanes = [
+  { en: '1. Local', vi: '1. Nội bộ', subEn: 'only in your process', subVi: 'chỉ nằm trong process', flags: [false, false, false] },
+  { en: '2. In flight', vi: '2. Đang truyền đi', subEn: 'sent, venue has not replied', subVi: 'đã gửi, sàn chưa trả lời', flags: [false, true, false], hot: true },
+  { en: '3. Open', vi: '3. Đang mở', subEn: 'working at the venue', subVi: 'đang treo trên sàn', flags: [true, false, false], star: true },
+  { en: '4. Closed', vi: '4. Đã đóng', subEn: 'final, never reopens', subVi: 'kết thúc, không mở lại', flags: [false, false, true] },
+];
+const flagNames = ['is_open()', 'is_inflight()', 'is_closed()'];
+
+const states = [
+  { lane: 0, y: rowY.main, name: 'INITIALIZED', en: 'created by the Strategy', vi: 'Strategy vừa tạo' },
+  { lane: 1, y: rowY.main, name: 'SUBMITTED', en: 'sent, no ACK yet', vi: 'đã gửi, chưa có ACK', hot: true },
+  { lane: 2, y: rowY.main, name: 'ACCEPTED', en: 'resting on the book', vi: 'đang nằm trên sổ lệnh' },
+  { lane: 2, y: rowY.second, name: 'PARTIALLY_FILLED', en: 'part of it filled', vi: 'đã khớp một phần' },
+  { lane: 3, y: rowY.denied, name: 'DENIED', en: 'stopped by RiskEngine', vi: 'RiskEngine chặn lại' },
+  { lane: 3, y: rowY.main, name: 'FILLED', en: 'fully filled', vi: 'đã khớp hết' },
+  { lane: 3, y: rowY.second, name: 'CANCELED / EXPIRED', en: 'pulled or timed out', vi: 'bị hủy hoặc hết hạn' },
+  { lane: 3, y: rowY.third, name: 'REJECTED', en: 'refused by the venue', vi: 'sàn từ chối' },
+];
+
+const mid = boxH / 2;
+const right = (lane: number) => bx(lane) + boxW;
+const busX = (right(2) + bx(3)) / 2 - 5;
+
+// INITIALIZED -> DENIED: up from INITIALIZED, then straight across to lane 4.
+const deniedY = rowY.denied + mid;
+const toDenied = arrow([[bx(0) + boxW / 2, rowY.main], [bx(0) + boxW / 2, deniedY], [bx(3), deniedY]]);
+const toSubmitted = arrow([[right(0), rowY.main + mid], [bx(1), rowY.main + mid]]);
+const toAccepted = arrow([[right(1), rowY.main + mid], [bx(2), rowY.main + mid]]);
+// SUBMITTED -> REJECTED: down from SUBMITTED, then across under lane 3.
+const rejX = right(1) - 30;
+const rejectY = rowY.third + mid;
+const toRejected = arrow([[rejX, rowY.main + boxH], [rejX, rejectY], [bx(3), rejectY]]);
+const toPartial = arrow([[bx(2) + boxW / 2, rowY.main + boxH], [bx(2) + boxW / 2, rowY.second]]);
+// Both open states can end as FILLED or CANCELED / EXPIRED: join them on a short bus.
+const bus = `M ${right(2)} ${rowY.main + mid} L ${busX} ${rowY.main + mid} M ${right(2)} ${rowY.second + mid} L ${busX} ${rowY.second + mid} M ${busX} ${rowY.main + mid} L ${busX} ${rowY.second + mid}`;
+const toFilled = arrow([[busX, rowY.main + mid], [bx(3), rowY.main + mid]]);
+const toCanceled = arrow([[busX, rowY.second + mid], [bx(3), rowY.second + mid]]);
+
+const flagTop = 458;
+---
+<figure class="nol">
+  <div class="nol-scroll">
+    <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Order state machine in four lanes. Local: INITIALIZED. In flight: SUBMITTED. Open at the venue: ACCEPTED and PARTIALLY_FILLED. Closed: DENIED, FILLED, CANCELED or EXPIRED, REJECTED. INITIALIZED goes to DENIED when RiskEngine blocks it, or to SUBMITTED. SUBMITTED goes to ACCEPTED or REJECTED. Open orders end as FILLED or CANCELED. In flight, is_open() and is_closed() are both false; only is_inflight() is true.">
+      {lanes.map((l, i) => (
+        <g class={l.hot ? 'nol-lane is-hot' : 'nol-lane'}>
+          <rect x={laneX[i]} y={laneTop} width={laneW} height={laneBottom - laneTop} rx="10" />
+          <text x={laneX[i] + 14} y={laneTop + 26} class="nol-h">
+            <tspan data-lang-en>{l.en}</tspan>
+            <tspan data-lang-vi>{l.vi}</tspan>
+          </text>
+          <text x={laneX[i] + 14} y={laneTop + 46} class="nol-lane-sub">
+            <tspan data-lang-en>{l.subEn}</tspan>
+            <tspan data-lang-vi>{l.subVi}</tspan>
+          </text>
+          <line x1={laneX[i] + 12} x2={laneX[i] + laneW - 12} y1={flagTop - 24} y2={flagTop - 24} class="nol-sep" />
+          {flagNames.map((f, k) => (
+            <g>
+              <text x={laneX[i] + 14} y={flagTop + k * 22} class="nol-flag">{f}</text>
+              <text x={laneX[i] + laneW - 14} y={flagTop + k * 22} text-anchor="end" class:list={['nol-val', { 'is-true': l.flags[k], 'is-hot': l.flags[k] && l.hot }]}>
+                {l.flags[k] ? 'true' : 'false'}{l.star && k === 1 ? '*' : ''}
+              </text>
+            </g>
+          ))}
+        </g>
+      ))}
+
+      {/* transitions */}
+      <g class="nol-arrow"><path d={toDenied.line} /><polygon points={toDenied.head} /></g>
+      {/* label sits just under the INITIALIZED -> DENIED line so it reads as the arrow's label, not a lane note */}
+      <text x={bx(0) + boxW / 2 + 12} y={deniedY + 20} class="nol-edge">
+        <tspan data-lang-en>RiskEngine says no:</tspan>
+        <tspan data-lang-vi>RiskEngine không cho qua:</tspan>
+      </text>
+      <text x={bx(0) + boxW / 2 + 12} y={deniedY + 38} class="nol-edge">
+        <tspan data-lang-en>OrderDenied, nothing sent</tspan>
+        <tspan data-lang-vi>OrderDenied, chưa gửi gì</tspan>
+      </text>
+      <g class="nol-arrow"><path d={toSubmitted.line} /><polygon points={toSubmitted.head} /></g>
+      <g class="nol-arrow"><path d={toAccepted.line} /><polygon points={toAccepted.head} /></g>
+      <g class="nol-arrow"><path d={toRejected.line} /><polygon points={toRejected.head} /></g>
+      <g class="nol-arrow"><path d={toPartial.line} /><polygon points={toPartial.head} /></g>
+      <g class="nol-arrow"><path d={bus} /></g>
+      <g class="nol-arrow"><path d={toFilled.line} /><polygon points={toFilled.head} /></g>
+      <g class="nol-arrow"><path d={toCanceled.line} /><polygon points={toCanceled.head} /></g>
+
+      {/* states */}
+      {states.map((s) => (
+        <g class={s.hot ? 'nol-state is-hot' : 'nol-state'}>
+          <rect x={bx(s.lane)} y={s.y} width={boxW} height={boxH} rx="7" />
+          <text x={bx(s.lane) + boxW / 2} y={s.y + 21} text-anchor="middle" class="nol-name">{s.name}</text>
+          <text x={bx(s.lane) + boxW / 2} y={s.y + 39} text-anchor="middle" class="nol-desc">
+            <tspan data-lang-en>{s.en}</tspan>
+            <tspan data-lang-vi>{s.vi}</tspan>
+          </text>
+        </g>
+      ))}
+
+      <text x={laneX[0]} y={laneBottom + 30} class="nol-bad">
+        <tspan data-lang-en>After a restart, look for is_open() || is_inflight(); is_open() alone loses every order in lane 2.</tspan>
+        <tspan data-lang-vi>Khởi động lại thì lọc is_open() || is_inflight(); chỉ lọc is_open() là mất hết lệnh ở cột 2.</tspan>
+      </text>
+      <text x={laneX[0]} y={laneBottom + 56} class="nol-note">
+        <tspan data-lang-en>* PENDING_UPDATE and PENDING_CANCEL (a modify or cancel still on the wire) count as open and in flight at once.</tspan>
+        <tspan data-lang-vi>* PENDING_UPDATE và PENDING_CANCEL (lệnh sửa hoặc hủy còn trên đường truyền) vừa là open, vừa là in-flight.</tspan>
+      </text>
+    </svg>
+  </div>
+  <figcaption>
+    <span data-lang-en>An order moves left to right; lane 4 holds the terminal (closed) states. The trap is lane 2: the order has left your machine, but it is neither open nor closed yet. Flag values from OrderStatus in <a href="https://github.com/nautechsystems/nautilus_trader/blob/83529d1cd11d8a23179cf52d70b013b831923a32/crates/model/src/enums.rs#L1511-L1554" rel="noopener" target="_blank">enums.rs</a>; less common states (EMULATED, RELEASED, TRIGGERED) are left out.</span>
+    <span data-lang-vi>Lệnh đi từ trái sang phải; cột 4 là các trạng thái kết thúc (closed). Chỗ dễ sai là cột 2: lệnh đã rời khỏi máy nhưng chưa open, cũng chưa closed. Giá trị các cờ lấy từ OrderStatus trong <a href="https://github.com/nautechsystems/nautilus_trader/blob/83529d1cd11d8a23179cf52d70b013b831923a32/crates/model/src/enums.rs#L1511-L1554" rel="noopener" target="_blank">enums.rs</a>; vài trạng thái ít gặp hơn (EMULATED, RELEASED, TRIGGERED) không vẽ ở đây.</span>
+  </figcaption>
+</figure>
+
+<style>
+  .nol {
+    margin: 2em 0;
+    width: 100%;
+  }
+  .nol-scroll {
+    overflow-x: auto;
+  }
+  .nol svg {
+    display: block;
+    width: 100%;
+    min-width: 640px;
+    height: auto;
+  }
+  .nol text {
+    font-size: 14px;
+    fill: var(--text-body);
+  }
+  .nol-lane rect {
+    fill: none;
+    stroke: var(--border);
+    stroke-width: 1.2;
+  }
+  .nol-lane.is-hot rect {
+    fill: var(--red-tint-bg);
+    stroke: var(--red);
+  }
+  .nol .nol-h {
+    font-size: 15px;
+    font-weight: 700;
+    fill: var(--text);
+  }
+  .nol .nol-lane-sub {
+    font-size: 13px;
+    fill: var(--text-muted);
+  }
+  .nol-sep {
+    stroke: var(--border);
+  }
+  .nol .nol-flag {
+    font-size: 13px;
+    fill: var(--text-muted);
+  }
+  .nol .nol-val {
+    font-size: 13px;
+    fill: var(--text-faint);
+  }
+  .nol .nol-val.is-true {
+    font-weight: 700;
+    fill: var(--text);
+  }
+  .nol .nol-val.is-hot {
+    fill: var(--red);
+  }
+  .nol-state rect {
+    fill: var(--bg-alt);
+    stroke: var(--text-muted);
+    stroke-width: 1.2;
+  }
+  .nol-state.is-hot rect {
+    stroke: var(--red);
+    stroke-width: 2;
+  }
+  .nol .nol-name {
+    font-size: 13px;
+    font-weight: 700;
+    fill: var(--text);
+  }
+  .nol .nol-desc {
+    font-size: 12.5px;
+    fill: var(--text-muted);
+  }
+  .nol-arrow path {
+    fill: none;
+    stroke: var(--text-muted);
+    stroke-width: 1.5;
+  }
+  .nol-arrow polygon {
+    fill: var(--text-muted);
+  }
+  .nol .nol-edge {
+    font-size: 13.5px;
+    fill: var(--text);
+  }
+  .nol .nol-bad {
+    font-size: 14.5px;
+    font-weight: 700;
+    fill: var(--red);
+  }
+  .nol .nol-note {
+    font-size: 13px;
+    fill: var(--text-muted);
+  }
+  .nol figcaption {
+    margin-top: 10px;
+    font-size: 14px;
+    color: var(--text-muted);
+    line-height: 1.55;
+    text-align: center;
+  }
+  .nol figcaption a {
+    color: inherit;
+  }
+</style>

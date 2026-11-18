@@ -1,0 +1,224 @@
+---
+// Sequence diagram of FIX gap recovery, following the walk-through in the post:
+// 11-13 are lost, 14 arrives, the gateway holds 14, sends ResendRequest(7=11, 16=0),
+// the client gap-fills 11-12 (heartbeats) and replays 13 with PossDupFlag=Y, then 14 is released.
+// Inline SVG, site tokens, polygon arrowheads (no ids).
+
+const W = 900;
+const H = 588;
+const cX = 110; // client lifeline
+const gX = 560; // gateway lifeline
+const noteX = 584;
+const labelX = (cX + gX) / 2;
+
+function arrow(x1: number, x2: number, y: number) {
+  const dir = Math.sign(x2 - x1);
+  return {
+    line: `M ${x1} ${y} L ${x2 - dir * 7} ${y}`,
+    head: `${x2},${y} ${x2 - dir * 9},${y - 5} ${x2 - dir * 9},${y + 5}`,
+  };
+}
+
+type Msg = {
+  y: number;
+  from: 'c' | 'g';
+  label: string;
+  subEn?: string;
+  subVi?: string;
+  note?: { en: string[]; vi: string[]; alert?: boolean };
+};
+
+const msgs: Msg[] = [
+  {
+    y: 112, from: 'c', label: '34=10 · 35=D NewOrderSingle',
+    note: { en: ['processed, now expects 11'], vi: ['xử lý xong, giờ chờ số 11'] },
+  },
+  {
+    y: 284, from: 'c', label: '34=14 · 35=D NewOrderSingle',
+    subEn: 'after reconnecting, a brand-new order', subVi: 'sau khi kết nối lại, một lệnh mới',
+    note: { en: ['expected 11, got 14', '→ hold 14 aside, do not process it'], vi: ['chờ số 11 mà nhận số 14', '→ giữ 14 lại, chưa xử lý'], alert: true },
+  },
+  {
+    y: 354, from: 'g', label: '35=2 ResendRequest · 7=11 · 16=0',
+    subEn: 'send again everything from 11 (0 = up to the latest)', subVi: 'gửi lại mọi thứ từ số 11 (0 = tới tin mới nhất)',
+  },
+  {
+    y: 424, from: 'c', label: '34=11 · 35=4 SequenceReset · 123=Y · 36=13',
+    subEn: '11 and 12 were only heartbeats: skip them', subVi: '11 và 12 chỉ là heartbeat: bỏ qua',
+    note: { en: ['skips 11 and 12, now expects 13'], vi: ['bỏ qua 11, 12, giờ chờ số 13'] },
+  },
+  {
+    y: 494, from: 'c', label: '34=13 · 35=F OrderCancelRequest · 43=Y',
+    subEn: 'the cancel is replayed, marked as a possible duplicate', subVi: 'lệnh hủy được gửi lại, gắn cờ có thể bị trùng',
+    note: { en: ['processes 13, now expects 14'], vi: ['xử lý 13, giờ chờ số 14'] },
+  },
+];
+
+const lost = [
+  { y: 166, label: '34=11 · Heartbeat' },
+  { y: 194, label: '34=12 · Heartbeat' },
+  { y: 222, label: '34=13 · 35=F OrderCancelRequest' },
+];
+const lostEnd = 350;
+const releaseY = 552;
+---
+<figure class="fixgap">
+  <div class="fixgap-scroll">
+    <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Sequence diagram between a client and a FIX gateway. Message 10 arrives. Messages 11, 12 and 13 are lost when the connection drops. After reconnecting the client sends 14; the gateway expected 11, so it holds 14 and sends a ResendRequest from 11. The client answers with a SequenceReset GapFill that skips the heartbeats 11 and 12, then replays the cancel request 13 with PossDupFlag Y. The gateway processes 13, then releases 14 and now expects 15.">
+      {/* lifelines */}
+      <line x1={cX} x2={cX} y1="56" y2={H - 14} class="fixgap-life" />
+      <line x1={gX} x2={gX} y1="56" y2={H - 14} class="fixgap-life" />
+      <g class="fixgap-actor">
+        <rect x={cX - 70} y="16" width="140" height="40" rx="8" />
+        <text x={cX} y="41" text-anchor="middle">Client</text>
+      </g>
+      <g class="fixgap-actor is-gw">
+        <rect x={gX - 80} y="16" width="160" height="40" rx="8" />
+        <text x={gX} y="41" text-anchor="middle">FIX gateway</text>
+      </g>
+
+      {/* lost messages */}
+      {lost.map((m) => (
+        <g>
+          <text x={cX + 14} y={m.y - 7} class="fixgap-lost-label">{m.label}</text>
+          <path d={`M ${cX} ${m.y} L ${lostEnd - 14} ${m.y}`} class="fixgap-lost" />
+          <text x={lostEnd - 4} y={m.y + 5} text-anchor="middle" class="fixgap-x">✕</text>
+        </g>
+      ))}
+      <text x={noteX} y="182" class="fixgap-note is-alert">
+        <tspan data-lang-en>connection drops:</tspan>
+        <tspan data-lang-vi>mất kết nối:</tspan>
+      </text>
+      <text x={noteX} y="202" class="fixgap-note">
+        <tspan data-lang-en>11, 12 and 13 never arrive</tspan>
+        <tspan data-lang-vi>11, 12 và 13 không tới nơi</tspan>
+      </text>
+
+      {/* delivered messages */}
+      {msgs.map((m) => {
+        const a = m.from === 'c' ? arrow(cX, gX, m.y) : arrow(gX, cX, m.y);
+        return (
+          <g>
+            <text x={labelX} y={m.y - 9} text-anchor="middle" class="fixgap-msg">{m.label}</text>
+            <g class="fixgap-arrow"><path d={a.line} /><polygon points={a.head} /></g>
+            {m.subEn && (
+              <text x={labelX} y={m.y + 21} text-anchor="middle" class="fixgap-sub">
+                <tspan data-lang-en>{m.subEn}</tspan>
+                <tspan data-lang-vi>{m.subVi}</tspan>
+              </text>
+            )}
+            {m.note && m.note.en.map((line, i) => (
+              <text x={noteX} y={m.y + 5 + i * 20} class={m.note!.alert ? 'fixgap-note is-alert' : 'fixgap-note'}>
+                <tspan data-lang-en>{line}</tspan>
+                <tspan data-lang-vi>{m.note!.vi[i]}</tspan>
+              </text>
+            ))}
+          </g>
+        );
+      })}
+
+      {/* release of the held message */}
+      <circle cx={gX} cy={releaseY} r="5" class="fixgap-dot" />
+      <text x={noteX} y={releaseY + 5} class="fixgap-note is-strong">
+        <tspan data-lang-en>releases the held 14 → now expects 15</tspan>
+        <tspan data-lang-vi>thả 14 ra xử lý → giờ chờ số 15</tspan>
+      </text>
+    </svg>
+  </div>
+  <figcaption>
+    <span data-lang-en>The gateway never processes a message out of order. It parks 14, asks for the gap, lets the client skip the heartbeats with a GapFill, takes the replayed cancel (flagged 43=Y), and only then handles 14.</span>
+    <span data-lang-vi>Gateway không bao giờ xử lý tin nhắn sai thứ tự. Nó giữ 14 lại, đòi phần bị hụt, để client bỏ qua các heartbeat bằng GapFill, nhận lại lệnh hủy được gửi lại (gắn cờ 43=Y), rồi mới xử lý 14.</span>
+  </figcaption>
+</figure>
+
+<style>
+  .fixgap {
+    margin: 2em 0;
+    width: 100%;
+  }
+  .fixgap-scroll {
+    overflow-x: auto;
+  }
+  .fixgap svg {
+    display: block;
+    width: 100%;
+    min-width: 640px;
+    height: auto;
+  }
+  .fixgap text {
+    font-size: 14px;
+    fill: var(--text-body);
+    font-variant-numeric: tabular-nums;
+  }
+  .fixgap-life {
+    stroke: var(--border);
+    stroke-width: 2;
+    stroke-dasharray: 6 5;
+  }
+  .fixgap-actor rect {
+    fill: var(--bg-alt);
+    stroke: var(--text-muted);
+    stroke-width: 1.2;
+  }
+  .fixgap-actor.is-gw rect {
+    fill: var(--red-tint-bg);
+    stroke: var(--red);
+  }
+  .fixgap-actor text {
+    font-weight: 700;
+    fill: var(--text);
+  }
+  .fixgap .fixgap-msg {
+    font-weight: 600;
+    fill: var(--text);
+  }
+  .fixgap .fixgap-sub {
+    font-size: 13px;
+    fill: var(--text-muted);
+  }
+  .fixgap-arrow path {
+    fill: none;
+    stroke: var(--text-muted);
+    stroke-width: 1.5;
+  }
+  .fixgap-arrow polygon {
+    fill: var(--text-muted);
+  }
+  .fixgap-lost {
+    fill: none;
+    stroke: var(--text-muted);
+    stroke-width: 1.5;
+    stroke-dasharray: 4 4;
+    opacity: 0.7;
+  }
+  .fixgap .fixgap-lost-label {
+    font-size: 13px;
+    fill: var(--text-muted);
+  }
+  .fixgap .fixgap-x {
+    font-size: 15px;
+    font-weight: 700;
+    fill: var(--red);
+  }
+  .fixgap .fixgap-note {
+    font-size: 13.5px;
+  }
+  .fixgap .fixgap-note.is-alert {
+    fill: var(--red);
+    font-weight: 700;
+  }
+  .fixgap .fixgap-note.is-strong {
+    fill: var(--text);
+    font-weight: 700;
+  }
+  .fixgap-dot {
+    fill: var(--red);
+  }
+  .fixgap figcaption {
+    margin-top: 10px;
+    font-size: 14px;
+    color: var(--text-muted);
+    line-height: 1.55;
+    text-align: center;
+  }
+</style>
