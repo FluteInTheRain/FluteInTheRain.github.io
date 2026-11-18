@@ -1,0 +1,841 @@
+---
+title: "Documents, tables, graphs, event logs: choosing a data model from real migrations"
+title_vi: "Document, bảng, graph hay event log: chọn data model qua những cuộc migration có thật"
+description: "Diaspora left MongoDB, Stripe pulled subscriptions out of Customer, Facebook built TAO on MySQL, Netflix logged events: DDIA chapter 3 through real choices."
+description_vi: "Diaspora bỏ MongoDB, Stripe tách subscription khỏi Customer, Facebook dựng graph TAO trên MySQL, Netflix ghi event thay vì sửa dòng: chương 3 DDIA kể qua những lần chọn data model có thật."
+date: 2026-11-18
+category: "database"
+tags: ["data-modeling", "ddia", "mongodb", "postgresql", "graph-database", "event-sourcing", "graphql", "schema-migration"]
+draft: true
+sources:
+  - { title: "Designing Data-Intensive Applications, 2nd Edition", author: "Martin Kleppmann & Chris Riccomini", chapters: "Ch. 3", url: "https://dataintensive.net/" }
+  - { title: "Why You Should Never Use MongoDB (archived)", author: "Sarah Mei", url: "https://web.archive.org/web/20250418031711/http://www.sarahmei.com/blog/2013/11/11/why-you-should-never-use-mongodb/" }
+  - { title: "The Architecture Twitter Uses to Deal with 150M Active Users (summary of Raffi Krikorian's 'Timelines at Scale')", author: "Todd Hoff (High Scalability)", url: "https://highscalability.com/the-architecture-twitter-uses-to-deal-with-150m-active-users/" }
+  - { title: "Data warehouse modeling: Star schema vs. OBT", author: "Michael Kaminsky (Fivetran)", url: "https://www.fivetran.com/blog/star-schema-vs-obt" }
+  - { title: "Online migrations at scale", author: "Jacqueline Xu (Stripe)", url: "https://stripe.com/blog/online-migrations" }
+  - { title: "gh-ost: GitHub's online schema migration tool for MySQL", author: "Shlomi Noach (GitHub)", url: "https://github.blog/news-insights/company-news/gh-ost-github-s-online-migration-tool-for-mysql/" }
+  - { title: "Bye bye Mongo, Hello Postgres", author: "Philip McMahon, Maria-Livia Chiorean, Susie Coleman, Akash Askoolum (The Guardian)", url: "https://www.theguardian.com/info/2018/nov/30/bye-bye-mongo-hello-postgres" }
+  - { title: "TAO: Facebook's Distributed Data Store for the Social Graph (USENIX ATC 2013)", author: "Nathan Bronson et al.", url: "https://www.usenix.org/system/files/conference/atc13/atc13-bronson.pdf" }
+  - { title: "Rate limits and query limits for the GraphQL API", author: "GitHub Docs", url: "https://docs.github.com/en/graphql/overview/rate-limits-and-query-limits-for-the-graphql-api" }
+  - { title: "Scaling Event Sourcing for Netflix Downloads, Episode 2", author: "Karen Casella, Phillipa Avery, Robert Reta, Joseph Breuer (Netflix)", url: "https://netflixtechblog.com/scaling-event-sourcing-for-netflix-downloads-episode-2-ce1b54d46eec" }
+  - { title: "Scaling Event Sourcing for Netflix Downloads (QCon New York 2017 talk)", author: "Phillipa Avery & Robert Reta (InfoQ)", url: "https://www.youtube.com/watch?v=rsSld8NycCU" }
+  - { title: "Système figuré des connaissances humaines (Encyclopédie, public domain)", author: "Diderot and d'Alembert, Wikimedia Commons", url: "https://commons.wikimedia.org/wiki/File:ENC_SYSTEME_FIGURE.jpeg" }
+---
+
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import En from '../../components/mdx/En.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import QuoteCard from '../../components/mdx/QuoteCard.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import YouTube from '../../components/mdx/YouTube.astro';
+import DataModelsTreeVsWeb from '../../components/mdx/DataModelsTreeVsWeb.astro';
+import DataModelsStarVsObt from '../../components/mdx/DataModelsStarVsObt.astro';
+import AnimatedFlow from '../../components/mdx/AnimatedFlow.astro';
+import DataModelsTaoGraph from '../../components/mdx/DataModelsTaoGraph.astro';
+import DemoFrame from '../../components/mdx/DemoFrame.astro';
+import LicenseReplayDemo from '../../components/demos/LicenseReplayDemo.tsx';
+import figureHeroTree from '../../assets/blog/data-models-and-query-languages/encyclopedie-tree-of-knowledge.jpg';
+
+<En>
+
+<Figure src={figureHeroTree} alt="The top of the Encyclopédie's tree of human knowledge: memory, reason and imagination split into branches and sub-branches" caption="Diderot and d'Alembert filed all knowledge as one tree, then tied articles in different branches together with cross-references. Most data has both shapes: a tree you own and a web of links you don't." sourceTitle="Wikimedia Commons: Système figuré des connaissances humaines, Encyclopédie (public domain)" sourceUrl="https://commons.wikimedia.org/wiki/File:ENC_SYSTEME_FIGURE.jpeg" />
+
+> "The limits of my language mean the limits of my world."
+> &mdash; *Ludwig Wittgenstein*, quoted at the start of DDIA chapter 3
+
+### What happened at Diaspora
+
+In 2010, four students asked Kickstarter for $10,000 to build an open alternative to Facebook. They raised over $200,000 from about 6,400 people and built Diaspora on Ruby on Rails and MongoDB. A social feed looked like nested data (posts, with comments and likes inside), so a document database seemed a good fit.
+
+It took the team about six months and "a lot of user complaints" to see that the fit was wrong. Sarah Mei, who worked on the code, wrote it up in 2013. They moved eight months of production data, about 1.2 million rows once it was in MySQL, after four pair-weeks of work and about two hours of downtime.
+
+Diaspora's mistake is the subject of chapter 3 of Kleppmann and Riccomini's *Designing Data-Intensive Applications* (2nd edition). A data model is the shape you give your data when you store it: tables, nested documents, a graph of nodes and edges, or a log of events. The book's claim is that this choice shapes your code and even how you think about the problem. This post goes through it with real teams who chose a model and later had to change it:
+
+1. **Tree or web**: when one document holds everything, and when it starts copying people around (Diaspora).
+2. **Copy or point**: when to store a value twice and when to store an id (Twitter's timelines, a warehouse benchmark).
+3. **When the shape changes**: schema on write versus schema on read, and what a migration costs (Stripe, GitHub, The Guardian).
+4. **Everything links to everything**: graphs and the languages that query them (Facebook's TAO, GitHub's GraphQL limits).
+5. **Keep what happened**: storing events and deriving the current state (Netflix downloads).
+
+<Callout type="note" title="TL;DR">
+Look at the links in your data before you pick a database. If each record is a self-contained tree, a document fits. If the same entity shows up in many places, use ids and joins, which is the relational model's home ground. If links are the main thing and queries follow paths of unknown length, use a graph. If you need to know why the data changed, keep an event log and build the views you read from it. Most real systems mix these, and the big databases now support more than one.
+</Callout>
+
+<Concepts>
+
+- **Data model**: the shape you store data in. Tables with rows, JSON documents, nodes and edges, or a list of events.
+- **Document database**: a database that stores each record as one JSON-like document, possibly with lists and objects nested inside. MongoDB is the best known.
+- **Relational database**: a database of tables with rows and columns, queried with SQL. PostgreSQL and MySQL are examples.
+- **Migration**: moving data from one shape or one database to another while keeping it correct.
+- **Downtime**: time when the product is unavailable to users.
+
+</Concepts>
+
+---
+
+## 1. A tree or a web
+
+Start with the relationships between things, because they decide most of what follows.
+
+A **one-to-many** relationship is a parent with children that belong only to it: a TV show has seasons, a season has episodes. Data made only of these is a tree. A **many-to-one** relationship goes the other way: many posts have the same author. A **many-to-many** relationship is both at once: a person likes many posts, and a post is liked by many people.
+
+A tree fits a document well. Before Diaspora, Mei's team had built a TV-show site on MongoDB. Each page showed one show with all its seasons, episodes, reviews and cast, and each show was one document. For "General Hospital", over 12,000 episodes across 50+ seasons, fetching the whole show by id from MongoDB took a fraction of a second on her laptop. PostgreSQL took about a minute to return the same data denormalized out of five tables.
+
+That speed is **locality**: everything the page needs sits together on disk, so one read gets it. A relational database would split the same show across five tables (shows, seasons, episodes, reviews, cast) and **join** them back together at read time. Splitting a tree like this is what the book calls **shredding**.
+
+A social feed looks like the same nested shape: a stream holds posts, posts hold comments and likes. Mei counted a seven-table join to build it from normalized tables, and that is why Diaspora picked a document per stream. The difference is in the boxes. On a TV-show page every level is a different kind of thing. In a feed, the author of one post can be the commenter on another and the person who liked a third: the same user, in three places.
+
+</En>
+
+<Vi>
+
+<Figure src={figureHeroTree} alt="Phần đầu cây tri thức của bộ Encyclopédie: trí nhớ, lý trí và tưởng tượng tách thành nhánh và nhánh con" altVi="Phần đầu cây tri thức của bộ Encyclopédie: trí nhớ, lý trí và tưởng tượng tách thành nhánh và nhánh con" caption="Diderot and d'Alembert filed all knowledge as one tree, then tied articles in different branches together with cross-references. Most data has both shapes: a tree you own and a web of links you don't." captionVi="Diderot và d'Alembert xếp toàn bộ tri thức thành một cái cây, rồi nối các bài ở những nhánh khác nhau bằng tham chiếu chéo. Dữ liệu thật thường có cả hai hình: một cái cây mình sở hữu và một mạng liên kết đan chéo." sourceTitle="Wikimedia Commons: Système figuré des connaissances humaines, Encyclopédie (public domain)" sourceUrl="https://commons.wikimedia.org/wiki/File:ENC_SYSTEME_FIGURE.jpeg" />
+
+> "Giới hạn ngôn ngữ của tôi là giới hạn thế giới của tôi."
+> &mdash; *Ludwig Wittgenstein*, câu mở đầu chương 3 của DDIA
+
+### Chuyện ở Diaspora
+
+Năm 2010, bốn sinh viên lên Kickstarter xin 10.000 USD để làm một mạng xã hội mở thay cho Facebook. Họ gọi được hơn 200.000 USD từ khoảng 6.400 người, rồi dựng Diaspora bằng Ruby on Rails và MongoDB. Bảng tin mạng xã hội trông như dữ liệu lồng nhau (bài viết, bên trong có bình luận và lượt thích), nên document database có vẻ hợp.
+
+Team mất khoảng sáu tháng và "rất nhiều lời phàn nàn của người dùng" mới nhận ra là chọn sai. Sarah Mei, người từng viết code cho dự án, kể lại chuyện này năm 2013. Họ chuyển tám tháng dữ liệu production, khoảng 1,2 triệu dòng khi sang MySQL, sau bốn "pair-week" (tuần làm việc của một cặp lập trình viên) viết code chuyển đổi và khoảng hai giờ downtime.
+
+Sai lầm của Diaspora chính là chủ đề chương 3 cuốn *Designing Data-Intensive Applications* (bản 2) của Kleppmann và Riccomini. Data model là hình dạng bạn chọn để lưu dữ liệu: bảng, document lồng nhau, graph gồm đỉnh và cạnh, hay một chuỗi event. Sách cho rằng lựa chọn này định hình code của bạn, thậm chí cả cách bạn nghĩ về bài toán. Bài này đi qua chương 3 cùng các team thật đã chọn một model rồi sau đó phải đổi:
+
+1. **Cây hay mạng lưới**: khi nào một document chứa được tất cả, khi nào nó bắt đầu phải chép người dùng đi khắp nơi (Diaspora).
+2. **Chép ra hay trỏ tới**: khi nào lưu một giá trị hai lần, khi nào chỉ lưu id (timeline của Twitter, một benchmark data warehouse).
+3. **Khi hình dạng dữ liệu đổi**: schema on write với schema on read, và cái giá của một lần migration (Stripe, GitHub, The Guardian).
+4. **Khi mọi thứ nối với mọi thứ**: graph và các ngôn ngữ truy vấn graph (TAO của Facebook, giới hạn GraphQL của GitHub).
+5. **Giữ lại chuyện đã xảy ra**: lưu event rồi dựng trạng thái hiện tại từ đó (tính năng tải phim của Netflix).
+
+<Callout type="note" title="Tóm tắt nhanh">
+Nhìn các mối liên kết trong dữ liệu trước khi chọn database. Mỗi bản ghi là một cái cây tự đóng gói thì document hợp. Cùng một thực thể xuất hiện ở nhiều chỗ thì dùng id và join, sân nhà của mô hình quan hệ. Liên kết là thứ quan trọng nhất và truy vấn phải đi theo đường dài không biết trước thì dùng graph. Cần biết vì sao dữ liệu đổi thì giữ event log rồi dựng các view để đọc từ đó. Hệ thống thật thường trộn mấy kiểu này, và các database lớn giờ đều hỗ trợ nhiều hơn một kiểu.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Data model (mô hình dữ liệu)**: hình dạng dùng để lưu dữ liệu. Bảng có dòng, document JSON, đỉnh và cạnh, hoặc một danh sách event.
+- **Document database**: database lưu mỗi bản ghi thành một document kiểu JSON, bên trong có thể lồng danh sách và object. MongoDB là cái tên nổi nhất.
+- **Relational database (database quan hệ)**: database gồm các bảng có dòng và cột, truy vấn bằng SQL. Ví dụ PostgreSQL, MySQL.
+- **Migration**: chuyển dữ liệu từ hình dạng này sang hình dạng khác, hoặc từ database này sang database khác, mà vẫn giữ đúng dữ liệu.
+- **Downtime**: khoảng thời gian sản phẩm không dùng được.
+
+</Concepts>
+
+---
+
+## 1. Cây hay mạng lưới
+
+Hãy bắt đầu từ quan hệ giữa các thứ trong dữ liệu, vì nó quyết định gần hết những chuyện phía sau.
+
+Quan hệ **một-nhiều (one-to-many)** là một cha có các con chỉ thuộc về nó: một bộ phim có nhiều mùa, một mùa có nhiều tập. Dữ liệu chỉ gồm loại quan hệ này là một cái cây. Quan hệ **nhiều-một (many-to-one)** thì ngược lại: nhiều bài viết có chung một tác giả. Quan hệ **nhiều-nhiều (many-to-many)** là cả hai cùng lúc: một người thích nhiều bài, một bài được nhiều người thích.
+
+Cây thì rất hợp với document. Trước Diaspora, team của Mei từng làm một trang phim truyền hình trên MongoDB. Mỗi trang hiện một bộ phim với đủ các mùa, tập, bài đánh giá và diễn viên, và mỗi bộ phim là một document. Với "General Hospital", hơn 12.000 tập qua hơn 50 mùa, lấy cả bộ theo id từ MongoDB chỉ mất chưa tới một giây trên laptop của cô. PostgreSQL mất khoảng một phút để trả về cùng dữ liệu đó, ghép lại từ năm bảng.
+
+Tốc độ đó đến từ **locality (tính cục bộ)**: mọi thứ trang cần nằm cạnh nhau trên đĩa, nên một lần đọc là đủ. Database quan hệ sẽ chia bộ phim ra năm bảng (shows, seasons, episodes, reviews, cast) rồi **join** chúng lại lúc đọc. Sách gọi việc chẻ một cái cây ra nhiều bảng như vậy là **shredding**.
+
+Bảng tin mạng xã hội trông cũng lồng nhau y như vậy: stream chứa bài viết, bài viết chứa bình luận và lượt thích. Mei đếm được một phép join bảy bảng nếu dựng nó từ các bảng đã chuẩn hoá, và đó là lý do Diaspora chọn mỗi stream một document. Khác biệt nằm ở các ô. Ở trang phim, mỗi tầng là một loại dữ liệu khác nhau. Ở bảng tin, tác giả bài này có thể là người bình luận bài kia và người thích bài thứ ba: cùng một user, xuất hiện ở ba chỗ.
+
+</Vi>
+
+<DataModelsTreeVsWeb />
+
+<En>
+
+With one document per stream, Diaspora had two choices for Jane. It could copy her name and avatar into every spot. Then a rename means finding and rewriting every stream she appears in, and Mei says this "often leads to inconsistent data and mysterious errors". Or it could store only her id and fetch her user record separately. That is a join, done in application code because MongoDB at the time could not do it in a query.
+
+<QuoteCard author="Sarah Mei" role="on Diaspora's move from MongoDB to MySQL" sourceTitle="Why You Should Never Use MongoDB (2013, archived)" sourceUrl="https://web.archive.org/web/20250418031711/http://www.sarahmei.com/blog/2013/11/11/why-you-should-never-use-mongodb/">
+"Once we started doing ugly MongoDB joins manually in the Diaspora code, we knew it was the first sign of trouble."
+</QuoteCard>
+
+The TV-show site got the same lesson later. An investor asked for a page listing every episode of every show an actor had been in. Actors were stored inside each show, copied once per episode, with nothing but the name to tell two copies apart. One new feature had turned a tree into a web, and the project moved to PostgreSQL.
+
+| Relationship | Example | One document? |
+|---|---|---|
+| One-to-many (a tree) | A show and its seasons and episodes | Yes, loads in one read |
+| Many-to-one | Many posts by one author | Only by copying the author, or storing an id and joining |
+| Many-to-many | People who like posts, actors in shows | Needs ids and joins, or a graph |
+
+The book makes one more practical point: one-to-many is often really *one-to-few*. A résumé has a handful of jobs, which is fine to nest. Comments on a celebrity's post can run into the thousands, and nesting all of them in one document gets unwieldy.
+
+<Concepts>
+
+- **One-to-many**: one parent, many children that belong only to it. A show and its seasons.
+- **Many-to-one**: many records point at the same one. Many posts, one author.
+- **Many-to-many**: both sides have many. People and the posts they like.
+- **Locality**: data that is read together is stored together, so one disk read fetches it.
+- **Join**: combining rows from two tables that share a key, like matching each post's `author_id` to a row in `users`.
+- **Shredding**: splitting a nested, document-shaped record into several tables.
+
+</Concepts>
+
+---
+
+## 2. Copy it or point to it
+
+Storing an id and looking the value up when you need it is **normalization**. Storing the value itself in every place that uses it is **denormalization**.
+
+Analogy: a phone contact versus writing your friend's number on every sticky note. Change the number and the contact is one edit; the sticky notes are a hunt.
+
+The book sums up the trade: normalized data is usually faster to write, because there is one copy, and slower to read, because of joins. Denormalized data is the opposite. It also suggests treating a denormalized copy as **derived data**, something you must keep updating from the original, which is what [the first post in this series](/blog/trade-offs-in-data-systems-architecture/) called a system of record and its copies.
+
+### Twitter: precompute the list, but not the content
+
+Twitter's home timeline is a good example of choosing per field. As described in [the chapter 2 post](/blog/reliable-scalable-maintainable-data-systems/), when you tweet, Twitter pushes the tweet into a cached timeline for each follower. That is denormalization: the result of the join between "people I follow" and "their tweets" is stored ahead of time.
+
+But each cached entry is small. According to Raffi Krikorian's 2012 talk, as summarized by High Scalability, a timeline in Redis holds at most 800 entries. Each entry is the tweet id, the author's user id and 4 bytes of flags that mark a retweet or a reply. The tweet text, like counts and the author's name and photo are not copied in.
+
+When you open the app, the service **hydrates** those ids: one batch lookup fetches the tweets in parallel, and another fetches the authors. Like counts change by the second and people change their profile photo, so a copy would be stale almost at once. The ids never change.
+
+```python
+# Reading a home timeline the Twitter way (sketch): the cached list holds ids only
+entries = timeline_cache.get(user_id)                     # up to 800 (tweet_id, author_id, flags)
+tweets  = tweet_store.multiget([e.tweet_id for e in entries])     # one parallel batch
+authors = user_store.multiget({e.author_id for e in entries})     # always the current name and photo
+
+# The slow version of the same join, often written by accident through an ORM:
+for e in entries:                                         # N+1 round trips instead of 2
+    e.tweet = tweet_store.get(e.tweet_id)
+```
+
+The second loop is the **N+1 query problem**: one query to get N rows, then one more query per row. The book points out that ORMs make it easy to write this without noticing. Hydration in a batch is a join too, but a cheap one, and it parallelizes well.
+
+### Analytics: denormalize freely
+
+Analytics turns the trade around. Data in a warehouse is history: last year's sales do not change, so a copied value cannot go stale. Warehouses usually use a **star schema**: a huge **fact table** with one row per event (one sale), pointing to small **dimension tables** for the who, what, where and when (customer, product, store, date). Some teams go further and pre-join everything into **one big table** (OBT).
+
+In 2022 Michael Kaminsky measured both for Fivetran, on a subset of the TPC-DS benchmark data in Redshift, Snowflake and BigQuery.
+
+</En>
+
+<Vi>
+
+Với mỗi stream một document, Diaspora có hai lựa chọn cho Jane. Cách thứ nhất là chép tên và avatar của cô vào mọi chỗ. Khi đó, đổi tên nghĩa là phải tìm và sửa mọi stream có cô ấy, và theo Mei thì việc này "hay dẫn tới dữ liệu không nhất quán và những lỗi bí ẩn". Cách thứ hai là chỉ lưu id rồi đọc bản ghi user ở chỗ khác. Đó chính là join, chỉ là phải tự làm trong code ứng dụng vì MongoDB thời đó không join được trong câu truy vấn.
+
+
+<QuoteCard author="Sarah Mei" role="về việc Diaspora chuyển từ MongoDB sang MySQL" sourceTitle="Why You Should Never Use MongoDB (2013, bản lưu)" sourceUrl="https://web.archive.org/web/20250418031711/http://www.sarahmei.com/blog/2013/11/11/why-you-should-never-use-mongodb/">
+"Once we started doing ugly MongoDB joins manually in the Diaspora code, we knew it was the first sign of trouble." (Khi bắt đầu phải tự viết tay mấy phép join MongoDB xấu xí trong code Diaspora, bọn mình biết đó là dấu hiệu rắc rối đầu tiên.)
+</QuoteCard>
+
+Trang phim truyền hình về sau cũng học đúng bài đó. Một nhà đầu tư muốn có trang liệt kê mọi tập của mọi bộ phim mà một diễn viên từng đóng. Diễn viên lại được lưu bên trong từng bộ phim, mỗi tập một bản sao, và chỉ có cái tên để biết hai bản sao là cùng một người. Một tính năng mới đã biến cái cây thành mạng lưới, và dự án chuyển sang PostgreSQL.
+
+| Quan hệ | Ví dụ | Một document được không? |
+|---|---|---|
+| Một-nhiều (cây) | Bộ phim với các mùa và tập | Được, đọc một lần là đủ |
+| Nhiều-một | Nhiều bài viết của một tác giả | Chỉ khi chép tác giả ra, hoặc lưu id rồi join |
+| Nhiều-nhiều | Người thích bài viết, diễn viên trong phim | Cần id và join, hoặc dùng graph |
+
+Sách còn một nhận xét thực tế: một-nhiều nhiều khi thật ra là *một-vài (one-to-few)*. Một bản CV chỉ có vài công việc, lồng vào document thoải mái. Bình luận dưới bài của người nổi tiếng thì có thể lên tới hàng nghìn, nhét hết vào một document sẽ rất cồng kềnh.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **One-to-many (một-nhiều)**: một cha, nhiều con chỉ thuộc về cha đó. Bộ phim và các mùa của nó.
+- **Many-to-one (nhiều-một)**: nhiều bản ghi cùng trỏ tới một bản ghi. Nhiều bài viết, một tác giả.
+- **Many-to-many (nhiều-nhiều)**: hai phía đều nhiều. Người dùng và những bài họ thích.
+- **Locality (tính cục bộ)**: dữ liệu hay được đọc cùng nhau thì lưu cạnh nhau, một lần đọc đĩa là lấy đủ.
+- **Join**: ghép dòng của hai bảng có chung khoá, ví dụ khớp `author_id` của mỗi bài viết với một dòng trong `users`.
+- **Shredding**: chẻ một bản ghi lồng nhau kiểu document ra thành nhiều bảng.
+
+</Concepts>
+
+---
+
+## 2. Chép ra hay trỏ tới
+
+Lưu id rồi tra giá trị khi cần là **chuẩn hoá (normalization)**. Lưu thẳng giá trị vào mọi chỗ dùng nó là **phi chuẩn hoá (denormalization)**.
+
+Hình dung thế này: lưu số bạn mình trong danh bạ, so với chép số đó lên từng tờ giấy nhớ. Bạn đổi số thì danh bạ sửa một chỗ là xong, còn giấy nhớ thì phải đi lục từng tờ.
+
+Sách tóm lại sự đánh đổi: dữ liệu chuẩn hoá thường ghi nhanh hơn vì chỉ có một bản, nhưng đọc chậm hơn vì phải join. Dữ liệu phi chuẩn hoá thì ngược lại. Sách cũng gợi ý coi bản sao phi chuẩn hoá là **dữ liệu phái sinh (derived data)**, thứ bạn phải liên tục cập nhật từ bản gốc, đúng như [bài đầu tiên của loạt này](/blog/trade-offs-in-data-systems-architecture/) gọi là hệ thống gốc (system of record) và các bản sao của nó.
+
+### Twitter: tính sẵn danh sách, nhưng không chép nội dung
+
+Home timeline của Twitter là ví dụ hay về việc chọn riêng cho từng trường. Như [bài về chương 2](/blog/reliable-scalable-maintainable-data-systems/) đã kể, khi bạn tweet, Twitter đẩy tweet đó vào timeline đã cache sẵn của từng follower. Đó là phi chuẩn hoá: kết quả của phép join giữa "những người mình theo dõi" và "tweet của họ" được lưu trước.
+
+Nhưng mỗi mục trong cache rất nhỏ. Theo talk năm 2012 của Raffi Krikorian, qua bản tóm tắt của High Scalability, mỗi timeline trong Redis giữ tối đa 800 mục. Mỗi mục gồm id của tweet, user id của tác giả và 4 byte cờ để đánh dấu retweet hay reply. Nội dung tweet, số like, tên và ảnh đại diện của tác giả đều không được chép vào.
+
+Khi bạn mở app, service sẽ **hydrate** các id đó: một lượt tra theo lô lấy song song các tweet, một lượt khác lấy thông tin tác giả. Số like đổi từng giây, người ta lại hay đổi ảnh đại diện, nên bản sao gần như cũ ngay lập tức. Còn id thì không bao giờ đổi.
+
+
+```python
+# Reading a home timeline the Twitter way (sketch): the cached list holds ids only
+entries = timeline_cache.get(user_id)                     # up to 800 (tweet_id, author_id, flags)
+tweets  = tweet_store.multiget([e.tweet_id for e in entries])     # one parallel batch
+authors = user_store.multiget({e.author_id for e in entries})     # always the current name and photo
+
+# The slow version of the same join, often written by accident through an ORM:
+for e in entries:                                         # N+1 round trips instead of 2
+    e.tweet = tweet_store.get(e.tweet_id)
+```
+
+Vòng lặp thứ hai là **vấn đề N+1 query (N+1 query problem)**: một query lấy N dòng, rồi mỗi dòng thêm một query nữa. Sách chỉ ra rằng ORM khiến bạn rất dễ viết kiểu này mà không hề hay biết. Hydrate theo lô cũng là join, nhưng là join rẻ, và chạy song song tốt.
+
+### Phân tích dữ liệu: cứ phi chuẩn hoá
+
+Với analytics thì sự đánh đổi đảo chiều. Dữ liệu trong warehouse là lịch sử: doanh số năm ngoái không đổi nữa, nên giá trị đã chép ra không bao giờ bị cũ. Warehouse thường dùng **star schema**: một **fact table** khổng lồ, mỗi dòng là một sự kiện (một lần bán hàng), trỏ tới các **dimension table** nhỏ mô tả ai, cái gì, ở đâu, khi nào (khách hàng, sản phẩm, cửa hàng, ngày). Có team còn đi xa hơn, join sẵn tất cả thành **one big table** (OBT).
+
+Năm 2022, Michael Kaminsky đo thử cả hai cho Fivetran, trên một phần bộ dữ liệu benchmark TPC-DS, chạy ở Redshift, Snowflake và BigQuery.
+
+</Vi>
+
+<DataModelsStarVsObt />
+
+<En>
+
+The one big table was faster everywhere, by 25 to 30% in Redshift, about 25% in Snowflake and about 50% in BigQuery. It also took twice the disk: 60,250 MB against about 29,900 MB for the star schema, even though the four dimension tables together were only 127 MB. Copying small tables into every row of a huge one adds up. Kaminsky first tried to join every dimension in, and the single-node Redshift cluster ran out of disk.
+
+So the same question has different answers in different places. In the app's database, where data changes, normalize by default and denormalize the few reads that are hot and rarely change. In the warehouse, where data does not change, denormalize as far as your disk budget allows.
+
+<Callout type="tip" title="Two questions before you copy a value">
+How often does the original change? And how many places would you have to rewrite when it does? A username shown on millions of cached timelines fails both. A product name on last year's sales rows passes both.
+</Callout>
+
+<Concepts>
+
+- **Normalization**: storing each fact once and pointing to it by id everywhere else.
+- **Denormalization**: copying the value into every place that uses it, so reads skip the lookup.
+- **Derived data**: data computed from other data, such as a cache or a copy, that you can rebuild from the original.
+- **Hydration**: turning a list of ids into full records by looking them up, usually in a batch. It is a join done in application code.
+- **N+1 query problem**: fetching a list with one query, then running one extra query per item. Slow because of the round trips.
+- **ORM (object-relational mapper)**: a library such as ActiveRecord or Hibernate that maps database rows to objects in your code.
+- **Star schema**: a warehouse layout with one big fact table in the middle and small dimension tables around it.
+- **Fact table / dimension table**: the fact table records events (each sale); dimension tables describe the things in them (products, stores, dates).
+- **OBT (one big table)**: a warehouse table with all the dimensions pre-joined into the fact rows.
+
+</Concepts>
+
+---
+
+## 3. When the shape changes
+
+Document databases are often called **schemaless**. The book calls that misleading. The code that reads the data still expects certain fields, so there is a schema; the database just does not check it. A better name is **schema on read**: the structure is assumed when you read. The traditional relational way is **schema on write**: you declare the structure, and the database rejects writes that do not match.
+
+The book's analogy: schema on read is like dynamic typing in a programming language, and schema on write is like static typing. Neither wins every time, and the difference shows up when the shape has to change.
+
+### Stripe: from a field to an array to a table
+
+Stripe's billing product began with a simple rule: one customer, at most one subscription. So the subscription was stored as a field inside the Customer record. When users needed several subscriptions per customer, the field became an array. That is still a document-style one-to-few relationship.
+
+As Jacqueline Xu wrote in 2017, the array then caused its own problems: any change to a subscription meant updating the whole Customer record, and queries about subscriptions had to scan through customers. Subscriptions needed to be their own records. Stripe had hundreds of millions of them, and the post notes that at one second per object, migrating a hundred million one at a time would take over three years.
+
+With schema on read, every reader has to cope with every shape that was ever written:
+
+```js
+// Schema on read: each reader handles every shape ever stored
+function subscriptionsOf(customer) {
+  if (Array.isArray(customer.subscriptions)) return customer.subscriptions; // newer records
+  return customer.subscription ? [customer.subscription] : [];             // older records
+}
+```
+
+With schema on write, the change is explicit, and every existing row has to be moved to match it:
+
+```sql
+-- Schema on write: declare the new shape, then backfill the old records into it
+CREATE TABLE subscriptions (
+  id          bigint PRIMARY KEY,
+  customer_id bigint NOT NULL REFERENCES customers (id),
+  plan        text   NOT NULL,
+  status      text   NOT NULL
+);
+CREATE INDEX ON subscriptions (customer_id);
+```
+
+Stripe could not stop billing to do the move, so it used a four-step pattern that keeps both shapes alive until the old one is unused.
+
+</En>
+
+<Vi>
+
+One big table nhanh hơn ở cả ba nơi: nhanh hơn 25 đến 30% trên Redshift, khoảng 25% trên Snowflake và khoảng 50% trên BigQuery. Nhưng nó cũng tốn gấp đôi đĩa: 60.250 MB so với khoảng 29.900 MB của star schema, trong khi bốn bảng dimension cộng lại chỉ có 127 MB. Chép mấy bảng nhỏ vào từng dòng của một bảng khổng lồ thì cộng dồn lại rất lớn. Lúc đầu Kaminsky định join hết mọi dimension vào, và cluster Redshift một node hết sạch đĩa.
+
+Vậy cùng một câu hỏi, ở mỗi nơi lại có câu trả lời khác. Trong database của app, nơi dữ liệu thay đổi, mặc định cứ chuẩn hoá, chỉ phi chuẩn hoá vài luồng đọc nóng mà dữ liệu ít đổi. Trong warehouse, nơi dữ liệu không đổi nữa, cứ phi chuẩn hoá tới mức ngân sách đĩa cho phép.
+
+<Callout type="tip" title="Hai câu hỏi trước khi chép một giá trị">
+Bản gốc đổi thường xuyên tới mức nào? Và khi nó đổi, bạn phải sửa lại bao nhiêu chỗ? Tên người dùng hiện trên hàng triệu timeline đã cache thì trượt cả hai. Tên sản phẩm trên các dòng doanh số năm ngoái thì qua cả hai.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Normalization (chuẩn hoá)**: mỗi sự thật chỉ lưu một lần, chỗ khác thì trỏ tới bằng id.
+- **Denormalization (phi chuẩn hoá)**: chép giá trị vào mọi chỗ dùng nó, để lúc đọc khỏi phải tra.
+- **Derived data (dữ liệu phái sinh)**: dữ liệu tính ra từ dữ liệu khác, như cache hay bản sao, mất thì dựng lại được từ bản gốc.
+- **Hydration**: biến danh sách id thành bản ghi đầy đủ bằng cách tra từng id, thường là theo lô. Thực chất là join làm trong code ứng dụng.
+- **N+1 query problem**: lấy danh sách bằng một query, rồi mỗi phần tử chạy thêm một query. Chậm vì tốn quá nhiều lượt đi về.
+- **ORM (object-relational mapper)**: thư viện như ActiveRecord hay Hibernate, ánh xạ dòng trong database thành object trong code.
+- **Star schema**: cách tổ chức warehouse với một fact table lớn ở giữa và các dimension table nhỏ bao quanh.
+- **Fact table / dimension table**: fact table ghi các sự kiện (từng lần bán); dimension table mô tả những thứ có trong sự kiện (sản phẩm, cửa hàng, ngày).
+- **OBT (one big table)**: bảng warehouse đã join sẵn mọi dimension vào từng dòng fact.
+
+</Concepts>
+
+---
+
+## 3. Khi hình dạng dữ liệu đổi
+
+Document database hay được gọi là **schemaless (không có schema)**. Sách cho rằng gọi vậy dễ gây hiểu lầm. Code đọc dữ liệu vẫn mong có những trường nhất định, tức là vẫn có schema, chỉ là database không kiểm tra. Tên đúng hơn là **schema on read**: cấu trúc được ngầm giả định lúc đọc. Cách truyền thống của database quan hệ là **schema on write**: bạn khai báo cấu trúc, và database từ chối mọi lần ghi không khớp.
+
+Sách so sánh thế này: schema on read giống kiểu động (dynamic typing) trong ngôn ngữ lập trình, schema on write giống kiểu tĩnh (static typing). Không bên nào luôn thắng, và khác biệt chỉ lộ ra khi hình dạng dữ liệu phải đổi.
+
+### Stripe: từ một trường, thành mảng, rồi thành bảng
+
+Sản phẩm billing của Stripe bắt đầu với một luật đơn giản: mỗi khách hàng có tối đa một subscription. Nên subscription được lưu thành một trường bên trong bản ghi Customer. Khi người dùng cần nhiều subscription cho một khách hàng, trường đó thành một mảng. Tới đây vẫn là quan hệ một-vài kiểu document.
+
+Rồi chính cái mảng đó lại gây chuyện. Theo bài năm 2017 của Jacqueline Xu, mọi thay đổi trên một subscription đều phải cập nhật cả bản ghi Customer, còn query về subscription thì phải quét qua các customer. Subscription cần trở thành bản ghi riêng. Stripe có hàng trăm triệu subscription, và bài viết tính rằng nếu mỗi object mất một giây thì chuyển lần lượt một trăm triệu object sẽ mất hơn ba năm.
+
+Với schema on read, chỗ nào đọc cũng phải chịu được mọi hình dạng từng được ghi:
+
+
+```js
+// Schema on read: each reader handles every shape ever stored
+function subscriptionsOf(customer) {
+  if (Array.isArray(customer.subscriptions)) return customer.subscriptions; // newer records
+  return customer.subscription ? [customer.subscription] : [];             // older records
+}
+```
+
+Với schema on write, thay đổi được khai báo rõ ràng, và mọi dòng cũ phải được chuyển sang cho khớp:
+
+
+```sql
+-- Schema on write: declare the new shape, then backfill the old records into it
+CREATE TABLE subscriptions (
+  id          bigint PRIMARY KEY,
+  customer_id bigint NOT NULL REFERENCES customers (id),
+  plan        text   NOT NULL,
+  status      text   NOT NULL
+);
+CREATE INDEX ON subscriptions (customer_id);
+```
+
+Stripe không thể dừng hệ thống billing để chuyển, nên họ dùng một quy trình bốn bước, giữ cả hai hình dạng cùng sống cho tới khi hình dạng cũ không còn ai dùng.
+
+</Vi>
+
+<AnimatedFlow preset="stripe-migration" title="Stripe moves subscriptions to their own table, without downtime" titleVi="Stripe chuyển subscription sang bảng riêng mà không cần downtime" />
+
+<En>
+
+Each step has a check. Finding every customer that still had embedded subscriptions would have meant heavy queries on production, so Stripe ran that search on database snapshots in Hadoop instead. Before reads moved, GitHub's Scientist library read both places in production and alerted on any difference. Before writes moved, code that still touched the old array raised an error. The old data was deleted last, when nothing used it.
+
+### GitHub: when ALTER TABLE is the risky part
+
+Schema on write has its own cost: changing a big table. In MySQL, adding or changing columns and indexes blocks by default. In 2016 GitHub said it changed schemas "multiple times per day". It had used the trigger-based tool pt-online-schema-change for years, but as traffic grew, some migrations could only run off-peak or at weekends, and "others would consistently cause MySQL outage". They wrote gh-ost, which copies the table in the background and reads ongoing changes from the binary log instead of using triggers. Their test replicas migrate production tables "as large as many hundreds of GB" continuously.
+
+### The Guardian: JSON inside Postgres
+
+The two camps have been moving toward each other. Relational databases added JSON columns that can be indexed. Several document databases added joins and secondary indexes. The book's view is that the two models work best combined in one database.
+
+The Guardian's CMS shows it. Its store of about 2.3 million content items ran on MongoDB. In 2018 the team moved it to PostgreSQL on Amazon RDS. The reason was operations, not the data model: two outages that each stopped publishing for at least an hour, and at least two months a year of engineering time spent running the database. They kept the documents as they were in a JSONB column, "with support for indexes on fields within the JSON blob", and noted that they could move to a more relational model later if they wanted.
+
+<Callout type="note" title="Schemaless is not the same as no schema">
+Every system has a schema. The only question is who checks it: the database on every write, or every piece of code that reads, forever. Schema on read helps when records really differ (data from outside systems you do not control, many unrelated object types). When all records should look the same, a declared schema documents that and enforces it.
+</Callout>
+
+<Concepts>
+
+- **Schema**: the expected structure of the data: which fields exist and what type each one has.
+- **Schemaless**: a label for databases that do not check structure on write. Misleading, because the reading code still assumes one.
+- **Schema on read**: the structure is assumed when data is read. Like dynamic typing.
+- **Schema on write**: the structure is declared up front and checked on every write. Like static typing.
+- **Backfill**: copying existing records into a new table or field so old data matches the new shape.
+- **Dual writing**: writing every change to both the old and the new location while a migration is in progress.
+- **Binary log (binlog)**: MySQL's log of every change, which replicas and tools like gh-ost read to follow along.
+- **JSONB**: PostgreSQL's binary JSON column type, which can be indexed and queried by field.
+
+</Concepts>
+
+---
+
+## 4. When everything links to everything
+
+If many-to-many relationships are the main thing in your data, the next step is a **graph**: **vertices** (things) connected by **edges** (relationships). Social networks, road maps, web pages and their links are all graphs. A graph also lets you put very different kinds of things into one model.
+
+### Facebook's TAO: a graph on top of MySQL
+
+Facebook is the largest real example. Its 2013 paper on TAO describes a social graph used by more than a billion people, served at a billion reads and millions of writes per second, on thousands of machines and many petabytes of data. Only 0.2% of requests involved a write. A single page may pull together hundreds of items from the graph, each one checked against the viewer's privacy settings when the page is viewed.
+
+Facebook started with the social graph in MySQL, queried from PHP, with memcache in front of it. Developers already thought in terms of objects (nodes) and associations (edges). TAO made that model a service. Its API is deliberately small: fetch an object, list the edges of one type going out of one object, count them.
+
+</En>
+
+<Vi>
+
+Bước nào cũng có chốt kiểm tra. Tìm mọi customer còn subscription nằm bên trong sẽ cần những query nặng trên production, nên Stripe chạy việc tìm kiếm đó trên snapshot của database bằng Hadoop. Trước khi chuyển luồng đọc, thư viện Scientist của GitHub đọc cả hai nơi ngay trên production và báo động khi có khác biệt. Trước khi chuyển luồng ghi, code nào còn đụng tới mảng cũ là báo lỗi. Dữ liệu cũ bị xoá sau cùng, khi không còn gì dùng nó.
+
+### GitHub: khi chính ALTER TABLE là phần rủi ro
+
+Schema on write cũng có cái giá riêng: đổi một bảng lớn. Trong MySQL, thêm hay đổi cột và index mặc định là thao tác chặn (blocking). Năm 2016, GitHub cho biết họ đổi schema "nhiều lần mỗi ngày". Họ dùng công cụ dựa trên trigger là pt-online-schema-change suốt nhiều năm, nhưng khi traffic tăng, có migration chỉ chạy được giờ thấp điểm hoặc cuối tuần, còn "có cái lần nào chạy cũng làm MySQL sập". Họ viết gh-ost, công cụ copy bảng ở chế độ nền và đọc các thay đổi đang diễn ra từ binary log thay vì dùng trigger. Các replica dùng để thử của họ chạy migration liên tục trên những bảng production "lớn tới hàng trăm GB".
+
+### The Guardian: JSON nằm trong Postgres
+
+Hai phe đang tiến lại gần nhau. Database quan hệ thêm cột JSON có thể đánh index. Nhiều document database thêm join và secondary index. Sách cho rằng hai model này phát huy tốt nhất khi kết hợp trong cùng một database.
+
+CMS của The Guardian là ví dụ. Kho khoảng 2,3 triệu bài nội dung của họ chạy trên MongoDB. Năm 2018, team chuyển nó sang PostgreSQL trên Amazon RDS. Lý do là vận hành chứ không phải data model: hai lần sự cố, mỗi lần làm tờ báo không đăng bài được ít nhất một giờ, và mỗi năm mất ít nhất hai tháng công kỹ sư chỉ để chăm database. Họ giữ nguyên các document trong một cột JSONB, loại cột "hỗ trợ index trên các trường bên trong khối JSON", và ghi rằng sau này muốn chuyển sang mô hình quan hệ hơn thì vẫn được.
+
+<Callout type="note" title="Schemaless không có nghĩa là không có schema">
+Hệ thống nào cũng có schema. Câu hỏi chỉ là ai kiểm tra nó: database ở mỗi lần ghi, hay mọi đoạn code đọc dữ liệu, mãi mãi. Schema on read có ích khi các bản ghi thật sự khác nhau (dữ liệu từ hệ thống bên ngoài bạn không kiểm soát, nhiều loại object chẳng liên quan gì nhau). Khi mọi bản ghi lẽ ra phải giống nhau, một schema khai báo rõ vừa là tài liệu vừa là luật.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Schema**: cấu trúc mong đợi của dữ liệu: có những trường nào, mỗi trường kiểu gì.
+- **Schemaless**: nhãn dán cho các database không kiểm tra cấu trúc lúc ghi. Dễ hiểu lầm, vì code đọc vẫn ngầm giả định một cấu trúc.
+- **Schema on read**: cấu trúc được giả định lúc đọc. Giống kiểu động.
+- **Schema on write**: cấu trúc khai báo trước và được kiểm tra ở mỗi lần ghi. Giống kiểu tĩnh.
+- **Backfill (chép bù)**: chép các bản ghi có sẵn sang bảng hoặc trường mới để dữ liệu cũ khớp hình dạng mới.
+- **Dual writing (ghi kép)**: trong lúc migration, mọi thay đổi được ghi vào cả chỗ cũ lẫn chỗ mới.
+- **Binary log (binlog)**: nhật ký mọi thay đổi của MySQL, replica và các công cụ như gh-ost đọc nó để bám theo.
+- **JSONB**: kiểu cột JSON dạng nhị phân của PostgreSQL, đánh index và truy vấn theo từng trường được.
+
+</Concepts>
+
+---
+
+## 4. Khi mọi thứ nối với mọi thứ
+
+Nếu quan hệ nhiều-nhiều là phần chính trong dữ liệu, bước tiếp theo là **graph**: các **đỉnh (vertex)** là đồ vật, nối với nhau bằng **cạnh (edge)** là quan hệ. Mạng xã hội, bản đồ đường sá, các trang web và đường link giữa chúng đều là graph. Graph còn cho phép gom những loại dữ liệu rất khác nhau vào cùng một mô hình.
+
+### TAO của Facebook: graph dựng trên MySQL
+
+Facebook là ví dụ thật lớn nhất. Bài báo năm 2013 về TAO mô tả một social graph phục vụ hơn một tỷ người, chịu một tỷ lượt đọc và hàng triệu lượt ghi mỗi giây, trên hàng nghìn máy và nhiều petabyte dữ liệu. Chỉ 0,2% request có ghi. Một trang có thể gom tới hàng trăm phần tử trong graph, phần tử nào cũng được kiểm tra quyền riêng tư theo người đang xem, ngay lúc xem.
+
+Ban đầu Facebook để social graph trong MySQL, truy vấn từ PHP, có memcache đứng trước. Dev vốn đã nghĩ theo kiểu object (đỉnh) và association (cạnh). TAO biến mô hình đó thành một service. API của nó cố tình rất nhỏ: lấy một object, liệt kê các cạnh của một loại đi ra từ một object, đếm số cạnh.
+
+</Vi>
+
+<DataModelsTaoGraph />
+
+<En>
+
+Three details show the trade-offs. An edge connects two objects in one direction, so a two-way relationship such as friendship is two rows, which TAO keeps in sync. Edges are stored on the shard of the object they start from, so "the latest comments on this photo" is answered by one server. And the store underneath is still MySQL, with all object types in one table and all association types in another. The book makes the same point with PostgreSQL: a property graph fits in two tables, one for vertices and one for edges.
+
+### Asking a graph question in SQL
+
+The hard part of graphs is the query. Say you want everyone in an org chart who reports to Ana, at any depth. A graph query language like **Cypher** (from Neo4j) says it in a line, because `*1..` means "follow this edge one or more times":
+
+```cypher
+MATCH (e:Employee)-[:REPORTS_TO*1..]->(:Employee {name: 'Ana'})
+RETURN e.name;
+```
+
+SQL can do the same with a **recursive common table expression**, but you write the loop yourself:
+
+```sql
+WITH RECURSIVE under_ana(id) AS (
+  SELECT id FROM employees
+   WHERE manager_id = (SELECT id FROM employees WHERE name = 'Ana')
+  UNION
+  SELECT e.id FROM employees e JOIN under_ana u ON e.manager_id = u.id
+)
+SELECT name FROM employees WHERE id IN (SELECT id FROM under_ana);
+```
+
+With one kind of edge this is fine. With several, as in the book's example of people born in one country and living in another, the book's Cypher query is 4 lines and the SQL version is 31. Both are **declarative**: you describe the result, and the database's query planner chooses the indexes and the order of work. That is also why a database can speed up queries without you changing them.
+
+Other graph languages exist: SPARQL for triple stores (data stored as subject, predicate, object), Datalog, which builds queries out of small rules, and GQL, an ISO standard based on Cypher, published in 2024.
+
+### GraphQL is not a graph database
+
+**GraphQL** has "graph" in its name, but it is a way for a client (an app or a web page) to ask an API for exactly the JSON it needs to render a screen. It works on top of any database. Because the queries come from untrusted clients, it is limited on purpose. Unlike Cypher or SQL, it has no recursion and no arbitrary search conditions.
+
+GitHub's public GraphQL API shows what that looks like in practice. Every list must say `first` or `last`, between 1 and 100. One call may not touch more than 500,000 nodes. Each query costs points, and a user gets 5,000 points an hour. A request that takes more than 10 seconds is cut off.
+
+```graphql
+query {
+  viewer {
+    repositories(first: 50) {          # 50 nodes
+      nodes {
+        name
+        issues(first: 20) {            # up to 50 x 20 = 1,000 nodes
+          nodes { title }
+        }
+      }
+    }
+  }
+}
+# 1,050 nodes in total, well under the 500,000 cap.
+# GitHub's cost rule: 1 request for the repositories + 50 for their issues = 51,
+# divided by 100 and rounded, gives 1 point (the minimum).
+```
+
+<Callout type="warning" title="The N+1 problem comes back in GraphQL">
+Each field in a GraphQL query is filled by a resolver function on the server. If the issues resolver queries the database once per repository, the query above makes 51 database calls. Batch the lookups, the same way Twitter hydrates its timelines, or the convenience for the client turns into load on your database.
+</Callout>
+
+<Concepts>
+
+- **Graph**: data made of vertices and the edges between them.
+- **Vertex / edge**: a vertex is a thing (a person, a photo, a place); an edge is a relationship between two of them (likes, wrote, taken at).
+- **Property graph**: a graph where vertices and edges carry a label (their type) and key-value properties. Neo4j uses this model.
+- **Shard**: one slice of a dataset that is split across many database servers.
+- **Cypher**: a query language for property graphs, made for Neo4j and now supported by other databases.
+- **Recursive CTE**: SQL's `WITH RECURSIVE`, a query that refers to its own results so it can follow a chain of rows.
+- **Declarative query**: you describe the result you want, and the database decides how to compute it.
+- **Triple store**: a graph stored as three-part facts: subject, predicate, object, such as (Mai, likes, photo 301).
+- **GraphQL**: a query language for APIs, where the client lists exactly which fields it wants back.
+- **Resolver**: the server function that fills in one field of a GraphQL response.
+
+</Concepts>
+
+---
+
+## 5. Keep what happened, derive the rest
+
+Every model so far stores the current state. You update a row, and the old value is gone. **Event sourcing** stores something else: every change, as an **event** appended to a log that is never edited. The current state is computed by replaying the events in order.
+
+Analogy: a bank statement versus a balance. The balance tells you where you are; the statement tells you how you got there, and you can always recompute the balance from it.
+
+### Netflix: downloads with rules nobody knew yet
+
+Netflix launched offline downloads in November 2016. While the team was designing the license service, the content rules had not been decided, but they were coming. The service also had to work for millions of members from day one, launched with a 6am global press release.
+
+In their 2017 post and talk, the team says they considered a relational schema first. They did not want to depend on schema migrations every time a rule changed. A document model gave them that flexibility. What it lacked was history: each update overwrote the data, so they could not tell why a license was in its current state. They chose event sourcing.
+
+</En>
+
+<Vi>
+
+Có ba chi tiết cho thấy rõ các đánh đổi. Một cạnh nối hai object theo một chiều, nên quan hệ hai chiều như bạn bè là hai dòng, và TAO tự giữ hai dòng đó khớp nhau. Cạnh được lưu trên shard của object mà nó xuất phát, nên câu "các bình luận mới nhất của ảnh này" chỉ cần một server trả lời. Và tầng lưu trữ bên dưới vẫn là MySQL, mọi loại object chung một bảng, mọi loại association chung một bảng khác. Sách cũng nói đúng ý đó với PostgreSQL: một property graph nằm gọn trong hai bảng, một cho đỉnh, một cho cạnh.
+
+### Hỏi một câu kiểu graph bằng SQL
+
+Phần khó của graph là truy vấn. Giả sử bạn muốn tìm mọi người trong sơ đồ tổ chức đang báo cáo cho Ana, ở bất kỳ cấp nào. Ngôn ngữ truy vấn graph như **Cypher** (của Neo4j) viết trong một dòng, vì `*1..` nghĩa là "đi theo cạnh này một lần hoặc nhiều lần":
+
+
+```cypher
+MATCH (e:Employee)-[:REPORTS_TO*1..]->(:Employee {name: 'Ana'})
+RETURN e.name;
+```
+
+SQL cũng làm được bằng **recursive common table expression**, nhưng bạn phải tự viết vòng lặp:
+
+
+```sql
+WITH RECURSIVE under_ana(id) AS (
+  SELECT id FROM employees
+   WHERE manager_id = (SELECT id FROM employees WHERE name = 'Ana')
+  UNION
+  SELECT e.id FROM employees e JOIN under_ana u ON e.manager_id = u.id
+)
+SELECT name FROM employees WHERE id IN (SELECT id FROM under_ana);
+```
+
+Chỉ một loại cạnh thì vẫn ổn. Nhiều loại cạnh, như ví dụ trong sách tìm người sinh ở nước này mà đang sống ở nước khác, thì câu Cypher trong sách dài 4 dòng còn bản SQL dài 31 dòng. Cả hai đều là **truy vấn khai báo (declarative)**: bạn mô tả kết quả, còn query planner của database tự chọn index và thứ tự thực hiện. Đó cũng là lý do database có thể làm query nhanh hơn mà bạn không cần sửa gì.
+
+Còn nhiều ngôn ngữ graph khác: SPARQL cho triple store (dữ liệu lưu dạng chủ ngữ, vị ngữ, tân ngữ), Datalog ghép truy vấn từ những luật nhỏ, và GQL, chuẩn ISO dựa trên Cypher, ra đời năm 2024.
+
+### GraphQL không phải graph database
+
+**GraphQL** có chữ "graph" trong tên, nhưng nó là cách để client (app hay trang web) hỏi API đúng phần JSON cần để vẽ một màn hình. Nó chạy được trên bất kỳ database nào. Vì truy vấn đến từ client không tin cậy được, nó bị giới hạn có chủ đích. Khác với Cypher hay SQL, GraphQL không có đệ quy và không có điều kiện tìm kiếm tuỳ ý.
+
+API GraphQL công khai của GitHub cho thấy giới hạn đó trông ra sao. Mọi danh sách phải có `first` hoặc `last`, trong khoảng 1 tới 100. Một lần gọi không được chạm quá 500.000 node. Mỗi query tốn điểm, mỗi user có 5.000 điểm mỗi giờ. Request nào chạy quá 10 giây là bị cắt.
+
+
+```graphql
+query {
+  viewer {
+    repositories(first: 50) {          # 50 nodes
+      nodes {
+        name
+        issues(first: 20) {            # up to 50 x 20 = 1,000 nodes
+          nodes { title }
+        }
+      }
+    }
+  }
+}
+# 1,050 nodes in total, well under the 500,000 cap.
+# GitHub's cost rule: 1 request for the repositories + 50 for their issues = 51,
+# divided by 100 and rounded, gives 1 point (the minimum).
+```
+
+<Callout type="warning" title="Vấn đề N+1 quay lại trong GraphQL">
+Mỗi trường trong query GraphQL được một hàm resolver trên server điền vào. Nếu resolver của issues gọi database một lần cho mỗi repository, query ở trên sẽ gọi database 51 lần. Hãy gom các lượt tra thành lô, giống cách Twitter hydrate timeline, nếu không thì sự tiện lợi phía client sẽ biến thành tải đè lên database của bạn.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Graph**: dữ liệu gồm các đỉnh và các cạnh nối giữa chúng.
+- **Vertex / edge (đỉnh / cạnh)**: đỉnh là một thứ (người, ảnh, địa điểm); cạnh là quan hệ giữa hai thứ (thích, viết, chụp ở).
+- **Property graph**: graph mà đỉnh và cạnh có nhãn (kiểu của nó) và các thuộc tính key-value. Neo4j dùng mô hình này.
+- **Shard (phân mảnh)**: một phần của tập dữ liệu khi tập đó được chia ra nhiều server database.
+- **Cypher**: ngôn ngữ truy vấn cho property graph, sinh ra cho Neo4j, giờ nhiều database khác cũng hỗ trợ.
+- **Recursive CTE**: `WITH RECURSIVE` của SQL, câu truy vấn tự tham chiếu tới kết quả của chính nó để lần theo một chuỗi dòng.
+- **Declarative query (truy vấn khai báo)**: bạn mô tả kết quả muốn có, database tự quyết cách tính.
+- **Triple store**: graph lưu thành các mệnh đề ba phần: chủ ngữ, vị ngữ, tân ngữ, ví dụ (Mai, thích, ảnh 301).
+- **GraphQL**: ngôn ngữ truy vấn cho API, client liệt kê chính xác những trường muốn nhận về.
+- **Resolver**: hàm trên server điền giá trị cho một trường trong response GraphQL.
+
+</Concepts>
+
+---
+
+## 5. Giữ lại chuyện đã xảy ra, phần còn lại thì dựng ra
+
+Mọi model nãy giờ đều lưu trạng thái hiện tại. Bạn cập nhật một dòng, giá trị cũ mất. **Event sourcing** lưu thứ khác: mọi thay đổi, dưới dạng một **event** được ghi nối vào một log không bao giờ bị sửa. Trạng thái hiện tại được tính bằng cách replay các event theo đúng thứ tự.
+
+Hình dung thế này: sao kê ngân hàng so với số dư. Số dư cho bạn biết mình đang ở đâu; sao kê cho biết làm sao mình tới đó, và từ sao kê thì lúc nào cũng tính lại được số dư.
+
+### Netflix: tính năng tải phim với những luật chưa ai biết
+
+Netflix ra mắt tính năng tải phim xem offline vào tháng 11/2016. Lúc team thiết kế service cấp license, các luật về nội dung còn chưa được chốt, chỉ biết chắc là sẽ có. Service còn phải chạy cho hàng triệu thành viên ngay từ ngày đầu, ra mắt cùng một thông cáo báo chí toàn cầu lúc 6 giờ sáng.
+
+Trong bài viết và talk năm 2017, team kể họ cân nhắc schema quan hệ trước tiên. Họ không muốn mỗi lần luật đổi lại phải chạy migration schema. Document model cho họ sự linh hoạt đó. Thứ nó thiếu là lịch sử: mỗi lần cập nhật ghi đè lên dữ liệu, nên không thể biết vì sao một license đang ở trạng thái hiện tại. Họ chọn event sourcing.
+
+</Vi>
+
+<YouTube id="rsSld8NycCU" title="Netflix engineers on choosing event sourcing over relational and document models" titleVi="Kỹ sư Netflix giải thích vì sao chọn event sourcing thay cho mô hình quan hệ và document" start={470} end={575} caption="Phillipa Avery on why the downloads team passed on a relational schema, then on a plain document model: every update lost the reason for the change." captionVi="Phillipa Avery giải thích vì sao team tải phim bỏ qua schema quan hệ, rồi cả document model thuần: mỗi lần cập nhật là mất luôn lý do của thay đổi." sourceTitle="InfoQ: Scaling Event Sourcing for Netflix Downloads" sourceUrl="https://www.youtube.com/watch?v=rsSld8NycCU&t=470s" />
+
+<En>
+
+Their service follows the pattern closely. A client request becomes a **command** ("renew this license"). A command handler checks the business rules against the current state. If the command is allowed, it becomes an **event** named in the past tense, `License Renewed`, appended to the event store. Each renewal set the license to expire 30 days later, and the post notes that changing that rule would be a configuration change in the event handler. Once an event is in the log it is a fact: the book stresses that whatever builds a view from the log may not reject it, so every check happens before the append.
+
+Reads got their own models. Netflix had one rule that some titles may be downloaded only twice a year. Checking it by replaying every license of the year and filtering by title was "a lot of processing". So they added a separate view of downloads, indexed by member and title, kept up to date from its own events. Writing in one shape and reading from other shapes built for each question is **CQRS** (command query responsibility segregation).
+
+</En>
+
+<Vi>
+
+Service của họ đi khá sát mẫu chuẩn. Request từ client thành một **command** ("gia hạn license này"). Command handler kiểm tra luật nghiệp vụ dựa trên trạng thái hiện tại. Nếu hợp lệ, command thành một **event** đặt tên ở thì quá khứ, `License Renewed`, và được ghi nối vào event store. Mỗi lần gia hạn đặt hạn của license thành 30 ngày sau đó, và bài viết ghi rằng muốn đổi luật này chỉ cần sửa cấu hình trong event handler. Event đã vào log là thành sự thật: sách nhấn mạnh rằng thứ dựng view từ log không được phép từ chối nó, nên mọi bước kiểm tra phải xong trước khi ghi.
+
+Phía đọc thì có mô hình riêng. Netflix có luật là một số phim chỉ được tải hai lần mỗi năm. Kiểm luật này bằng cách replay mọi license trong năm rồi lọc theo phim là "xử lý quá nhiều". Nên họ thêm một view riêng cho số lần tải, đánh index theo member và theo phim, tự cập nhật từ các event của nó. Ghi theo một hình dạng, còn đọc từ những hình dạng khác dựng riêng cho từng câu hỏi, gọi là **CQRS** (command query responsibility segregation, tách trách nhiệm ghi và đọc).
+
+</Vi>
+
+<DemoFrame title="Replay a license event log and change the projection rule" titleVi="Replay event log của license và đổi luật projection">
+  <LicenseReplayDemo client:visible />
+</DemoFrame>
+
+<En>
+
+The book lists what you gain and what you pay. I wrote about one case of this pattern, a trading view built from an event stream, in [an earlier post](/blog/event-sourced-order-view/).
+
+| You gain | You pay |
+|---|---|
+| Events say why something changed: "booking cancelled" instead of three rows edited in three tables | Replays must be deterministic: if an event needs an exchange rate, store the rate in the event, do not fetch today's |
+| Views can be deleted and rebuilt from the log, so a bug in a view is fixable | Personal data in an immutable log is hard to delete; see crypto-shredding in [the first post](/blog/trade-offs-in-data-systems-architecture/) |
+| A new question gets a new view, built from old events | Side effects such as emails must not fire again on every rebuild |
+| A mistake is corrected by a new event, not by an irreversible update | Every view must process events in exactly the log's order, which is hard across machines |
+
+Netflix's own verdict: it is "not all sunshine and roses", but the design let them change requirements quickly, debug state changes over time and ship to millions of users in a short time.
+
+<Concepts>
+
+- **Event sourcing**: storing every change as an immutable event in a log, and computing the current state from the log.
+- **Event**: a record of something that already happened, named in the past tense (`License Renewed`).
+- **Command**: a request to change something. It can still be rejected; once accepted it becomes an event.
+- **Aggregate / materialized view / projection**: a current-state view computed from events. Netflix uses "aggregate"; the book also says "materialized view" or "read model".
+- **CQRS**: keeping the write model (the event log) separate from the read models built for each query.
+- **Replay**: processing the events from the start, in order, to rebuild a view.
+- **Deterministic**: gives the same result every time for the same input.
+
+</Concepts>
+
+---
+
+## Which model for which data
+
+A short map of the cases above. The book's own summary is in the same spirit: the relational model is still important for many applications, and the others fit particular shapes.
+
+| Your data looks like | Model | Real case in this post |
+|---|---|---|
+| Self-contained trees, loaded whole | Document | Mei's TV-show site, before the actor page |
+| The same entities referenced from many places | Relational, normalized | Diaspora after the move to MySQL |
+| Hot reads of data that rarely changes | Denormalized copies of ids, hydrated on read | Twitter's 800-entry timelines |
+| History for reports | Star schema or one big table | Kaminsky's TPC-DS benchmark |
+| Mostly documents, needs to evolve | JSON columns in a relational database | The Guardian on PostgreSQL JSONB |
+| Links are the product, paths of any length | Graph | Facebook's TAO |
+| You must know why the state changed | Event log plus views (CQRS) | Netflix downloads |
+
+The chapter also covers DataFrames, which data scientists use to turn tables into matrices for machine learning. I left them out because none of the cases here needed one.
+
+---
+
+## Key takeaways
+
+- **Draw the relationships before choosing a database.** If the same entity appears in more than one place, a single document will copy it or point out of itself; Diaspora found that out after eight months of data.
+- **Decide copy-or-reference per field, not per system.** Twitter stores ids in its precomputed timelines and fetches content that changes, like counts and profile photos, on read.
+- **Denormalize freely where data does not change.** In the warehouse benchmark the one big table was 25 to 50% faster but used twice the disk.
+- **Plan every schema change as a migration, whatever the database.** Schema on read moves the work into every reader; Stripe's four phases and GitHub's gh-ost show what doing it safely on live data takes.
+- **Reach for a graph or an event log when the question needs it.** TAO exists because links are Facebook's product; Netflix logged events because they needed to know why a license changed, not just its current state.
+
+---
+
+## Review questions
+
+1. Diaspora's feed and the TV-show site both looked like nested data. Why did one fit a document and the other not, and what single feature request broke the TV-show site's fit? *(Section 1)*
+2. Twitter precomputes timelines but stores only ids in them. What would go wrong if it stored the tweet text and the author's photo too? *(Section 2)*
+3. Why is denormalization safe in a data warehouse when it is risky in an app's database, and what did it cost in Kaminsky's benchmark? *(Section 2)*
+4. A team says "we use MongoDB, so we don't have schema migrations". Using Stripe's subscriptions, explain what they are missing. *(Section 3)*
+5. TAO stores each edge on the shard of the object it starts from. Which queries does that make cheap, and why must a friendship be stored as two rows? *(Section 4)*
+6. In Netflix's design, why can a component that builds a view never reject an event, and where do the business rules get checked instead? *(Section 5)*
+
+</En>
+
+<Vi>
+
+Sách liệt kê cả được lẫn mất. Mình từng viết về một trường hợp dùng mẫu này, một màn hình giao dịch dựng từ luồng event, trong [một bài trước](/blog/event-sourced-order-view/).
+
+| Được gì | Trả giá gì |
+|---|---|
+| Event nói rõ vì sao có thay đổi: "booking đã huỷ" thay vì ba dòng bị sửa ở ba bảng | Replay phải tất định (deterministic): event cần tỷ giá thì lưu tỷ giá ngay trong event, đừng lấy tỷ giá hôm nay |
+| View xoá đi dựng lại được từ log, nên view có bug thì sửa được | Dữ liệu cá nhân nằm trong log bất biến thì khó xoá; xem crypto-shredding ở [bài đầu tiên](/blog/trade-offs-in-data-systems-architecture/) |
+| Câu hỏi mới thì dựng view mới, từ chính các event cũ | Hiệu ứng phụ như gửi email không được chạy lại mỗi lần dựng lại view |
+| Sai thì sửa bằng một event mới, không phải một lần update không đảo ngược được | Mọi view phải xử lý event đúng thứ tự trong log, chuyện này khó khi chạy trên nhiều máy |
+
+Kết luận của chính Netflix: nó "không phải toàn màu hồng", nhưng thiết kế này cho phép họ đổi yêu cầu nhanh, debug được trạng thái thay đổi theo thời gian, và đưa service tới hàng triệu người dùng trong thời gian ngắn.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Event sourcing**: lưu mọi thay đổi thành event bất biến trong một log, rồi tính trạng thái hiện tại từ log đó.
+- **Event**: bản ghi về một chuyện đã xảy ra, đặt tên ở thì quá khứ (`License Renewed`).
+- **Command**: yêu cầu thay đổi một thứ gì đó. Nó vẫn có thể bị từ chối; được chấp nhận rồi thì mới thành event.
+- **Aggregate / materialized view / projection**: view trạng thái hiện tại tính ra từ các event. Netflix gọi là "aggregate"; sách gọi là "materialized view" hoặc "read model".
+- **CQRS**: tách mô hình ghi (event log) khỏi các mô hình đọc dựng riêng cho từng truy vấn.
+- **Replay**: xử lý lại các event từ đầu, theo đúng thứ tự, để dựng lại một view.
+- **Deterministic (tất định)**: cùng đầu vào thì lần nào cũng ra cùng kết quả.
+
+</Concepts>
+
+---
+
+## Model nào cho dữ liệu nào
+
+Bản đồ ngắn gọn từ các trường hợp ở trên. Phần tóm tắt của sách cũng cùng tinh thần: mô hình quan hệ vẫn quan trọng với rất nhiều ứng dụng, các mô hình khác hợp với những hình dạng dữ liệu cụ thể.
+
+| Dữ liệu của bạn trông như | Model | Trường hợp thật trong bài |
+|---|---|---|
+| Các cây tự đóng gói, đọc cả cây một lần | Document | Trang phim của team Mei, trước khi có trang diễn viên |
+| Cùng một thực thể được tham chiếu từ nhiều nơi | Quan hệ, chuẩn hoá | Diaspora sau khi chuyển sang MySQL |
+| Luồng đọc nóng trên dữ liệu ít đổi | Bản sao phi chuẩn hoá chỉ chứa id, hydrate lúc đọc | Timeline 800 mục của Twitter |
+| Dữ liệu lịch sử để làm báo cáo | Star schema hoặc one big table | Benchmark TPC-DS của Kaminsky |
+| Phần lớn là document, cần thay đổi dần | Cột JSON trong database quan hệ | The Guardian với JSONB của PostgreSQL |
+| Liên kết chính là sản phẩm, đường đi dài tuỳ ý | Graph | TAO của Facebook |
+| Phải biết vì sao trạng thái thay đổi | Event log cùng các view (CQRS) | Tính năng tải phim của Netflix |
+
+Chương này còn nói về DataFrame, thứ data scientist dùng để biến bảng thành ma trận cho machine learning. Mình bỏ qua vì không trường hợp nào trong bài cần tới.
+
+---
+
+## Điểm rút ra
+
+- **Vẽ các mối quan hệ ra trước khi chọn database.** Nếu cùng một thực thể xuất hiện ở hơn một chỗ, một document đơn lẻ sẽ phải chép nó ra hoặc trỏ ra ngoài chính mình; Diaspora nhận ra điều đó sau tám tháng dữ liệu.
+- **Quyết định chép hay tham chiếu theo từng trường, không theo cả hệ thống.** Twitter lưu id trong timeline tính sẵn, còn những thứ hay đổi như số like và ảnh đại diện thì lấy lúc đọc.
+- **Cứ phi chuẩn hoá ở nơi dữ liệu không đổi nữa.** Trong benchmark warehouse, one big table nhanh hơn 25 đến 50% nhưng tốn gấp đôi đĩa.
+- **Coi mọi thay đổi schema là một cuộc migration, database nào cũng vậy.** Schema on read chỉ dời việc sang mọi chỗ đọc dữ liệu; bốn giai đoạn của Stripe và gh-ost của GitHub cho thấy làm an toàn trên dữ liệu đang chạy cần những gì.
+- **Dùng graph hay event log khi câu hỏi thật sự cần.** TAO tồn tại vì liên kết chính là sản phẩm của Facebook; Netflix ghi event vì họ cần biết vì sao license thay đổi, chứ không chỉ trạng thái hiện tại.
+
+---
+
+## Câu hỏi ôn lại
+
+1. Bảng tin Diaspora và trang phim truyền hình đều trông như dữ liệu lồng nhau. Vì sao một bên hợp với document còn bên kia thì không, và yêu cầu tính năng nào đã phá vỡ sự phù hợp của trang phim? *(Mục 1)*
+2. Twitter tính sẵn timeline nhưng chỉ lưu id trong đó. Chuyện gì sẽ hỏng nếu họ lưu luôn nội dung tweet và ảnh của tác giả? *(Mục 2)*
+3. Vì sao phi chuẩn hoá an toàn trong data warehouse nhưng rủi ro trong database của app, và trong benchmark của Kaminsky nó tốn gì? *(Mục 2)*
+4. Một team nói "bọn mình dùng MongoDB nên không có migration schema". Dùng chuyện subscription của Stripe để giải thích họ đang bỏ sót điều gì. *(Mục 3)*
+5. TAO lưu mỗi cạnh trên shard của object mà cạnh xuất phát. Điều đó làm những truy vấn nào trở nên rẻ, và vì sao quan hệ bạn bè phải lưu thành hai dòng? *(Mục 4)*
+6. Trong thiết kế của Netflix, vì sao thành phần dựng view không bao giờ được từ chối một event, và luật nghiệp vụ được kiểm tra ở đâu? *(Mục 5)*
+
+</Vi>
