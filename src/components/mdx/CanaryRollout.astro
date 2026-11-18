@@ -1,0 +1,209 @@
+---
+// A bad config is rolled out in stages (1% -> 10% -> planned 100%).
+// The error rate crosses the alarm threshold during the 10% stage and an automatic
+// rollback fires, so the mistake never reaches most users. Illustrative numbers.
+
+const W = 900;
+const H = 330;
+const L = 64; // left edge of plot
+const R = W - 20;
+const MIN_T = 60;
+const tx = (min: number) => L + (min / MIN_T) * (R - L);
+
+// Rollout lane
+const laneY = 44;
+const laneH = 30;
+const stages = [
+  { from: 0, to: 5, cls: 'is-old', en: 'old', vi: 'cũ' },
+  { from: 5, to: 18, cls: 'is-1', en: '1% of users', vi: '1% người dùng' },
+  { from: 18, to: 22, cls: 'is-10', en: '10%', vi: '10%' },
+  { from: 22, to: 60, cls: 'is-old', en: 'rolled back: everyone on the old version', vi: 'đã rollback: mọi người về bản cũ' },
+];
+
+// Error-rate chart (whole site). The new version fails ~25% of its requests:
+// at 1% of traffic that adds ~0.25%, at 10% it adds ~2.5%.
+const chartTop = 116;
+const chartBottom = 280;
+const MAX_ERR = 3;
+const ey = (pct: number) => chartBottom - (pct / MAX_ERR) * (chartBottom - chartTop);
+const THRESHOLD = 1;
+
+function rng(a: number) {
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const rand = rng(42);
+const base = 0.2;
+const shareOnNew = (m: number) => (m >= 5 && m < 18 ? 0.01 : m >= 18 && m < 22 ? 0.1 : 0);
+const points: [number, number][] = [];
+for (let m = 0; m <= MIN_T; m += 0.5) {
+  // the 10% stage ramps up over its first minute (1% -> 10% of traffic)
+  const share = m >= 18 && m < 19 ? 0.01 + 0.09 * (m - 18) : shareOnNew(m);
+  points.push([m, base + share * 25 + (rand() - 0.5) * 0.08]);
+}
+const line = points.map(([m, e], i) => `${i ? 'L' : 'M'} ${tx(m).toFixed(1)} ${ey(e).toFixed(1)}`).join(' ');
+const ROLLBACK_AT = 22;
+---
+<figure class="canary">
+  <div class="canary-scroll">
+    <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Staged rollout of a bad config: 1% of users, then 10%. The site error rate crosses the 1% alarm threshold during the 10% stage and an automatic rollback returns everyone to the old version at minute 22.">
+      {/* lane: who gets the new version */}
+      <text x={L} y="24" class="canary-h">
+        <tspan data-lang-en>Who gets the new config</tspan>
+        <tspan data-lang-vi>Ai nhận config mới</tspan>
+      </text>
+      {stages.map((s) => (
+        <g class={`canary-stage ${s.cls}`}>
+          <rect x={tx(s.from)} y={laneY} width={tx(s.to) - tx(s.from) - 2} height={laneH} rx="4" />
+          <text x={(tx(s.from) + tx(s.to)) / 2} y={laneY + 20} text-anchor="middle">
+            <tspan data-lang-en>{s.en}</tspan>
+            <tspan data-lang-vi>{s.vi}</tspan>
+          </text>
+        </g>
+      ))}
+
+      {/* chart: error rate */}
+      <text x={L} y={chartTop - 14} class="canary-h">
+        <tspan data-lang-en>Error rate, whole site</tspan>
+        <tspan data-lang-vi>Tỉ lệ lỗi, toàn hệ thống</tspan>
+      </text>
+      {[0, 1, 2, 3].map((v) => (
+        <g>
+          <line x1={L} x2={R} y1={ey(v)} y2={ey(v)} class="canary-grid" />
+          <text x={L - 8} y={ey(v) + 4} text-anchor="end" class="canary-tick">{v}%</text>
+        </g>
+      ))}
+      {[0, 10, 20, 30, 40, 50, 60].map((m) => (
+        <text x={tx(m)} y={chartBottom + 18} text-anchor="middle" class="canary-tick">{m}</text>
+      ))}
+      <text x={R} y={chartBottom + 36} text-anchor="end" class="canary-tick">
+        <tspan data-lang-en>minutes</tspan>
+        <tspan data-lang-vi>phút</tspan>
+      </text>
+
+      <line x1={L} x2={R} y1={ey(THRESHOLD)} y2={ey(THRESHOLD)} class="canary-threshold" />
+      <text x={R} y={ey(THRESHOLD) - 6} text-anchor="end" class="canary-threshold-label">
+        <tspan data-lang-en>alarm threshold 1%</tspan>
+        <tspan data-lang-vi>ngưỡng báo động 1%</tspan>
+      </text>
+
+      <path d={line} class="canary-line" />
+
+      {/* rollback marker */}
+      <line x1={tx(ROLLBACK_AT)} x2={tx(ROLLBACK_AT)} y1={laneY} y2={chartBottom} class="canary-rollback" />
+      <text x={tx(ROLLBACK_AT) + 8} y={ey(2.55)} class="canary-note">
+        <tspan data-lang-en>automatic rollback</tspan>
+        <tspan data-lang-vi>tự động rollback</tspan>
+      </text>
+      <text x={tx(ROLLBACK_AT) + 8} y={ey(2.55) + 18} class="canary-sub">
+        <tspan data-lang-en>no engineer had to wake up</tspan>
+        <tspan data-lang-vi>không cần ai thức dậy xử lý</tspan>
+      </text>
+      <text x={tx(1)} y={ey(1.75)} class="canary-sub">
+        <tspan data-lang-en>at 1%, the bug is</tspan>
+        <tspan data-lang-vi>ở mức 1%, bug còn</tspan>
+      </text>
+      <text x={tx(1)} y={ey(1.75) + 17} class="canary-sub">
+        <tspan data-lang-en>too small to trip the alarm</tspan>
+        <tspan data-lang-vi>quá nhỏ để báo động</tspan>
+      </text>
+    </svg>
+  </div>
+  <figcaption>
+    <span data-lang-en>Illustrative numbers. The new config fails about a quarter of its requests. Because it went out in stages, it reached 10% of users for about four minutes instead of everyone, and the rollback happened without waiting for a human.</span>
+    <span data-lang-vi>Số liệu minh họa. Config mới làm hỏng khoảng một phần tư số request của nó. Nhờ phát hành theo đợt, nó chỉ chạm tới 10% người dùng trong khoảng bốn phút thay vì tất cả, và việc rollback diễn ra mà không phải chờ con người.</span>
+  </figcaption>
+</figure>
+
+<style>
+  .canary {
+    margin: 2em 0;
+    width: 100%;
+  }
+  .canary-scroll {
+    overflow-x: auto;
+  }
+  .canary svg {
+    display: block;
+    width: 100%;
+    min-width: 640px;
+    height: auto;
+  }
+  .canary text {
+    font-size: 14px;
+    fill: var(--text-body);
+  }
+  .canary .canary-h {
+    font-size: 15px;
+    font-weight: 700;
+    fill: var(--text);
+  }
+  .canary-stage rect {
+    stroke-width: 1;
+  }
+  .canary-stage.is-old rect {
+    fill: var(--bg-alt);
+    stroke: var(--border);
+  }
+  .canary-stage.is-1 rect {
+    fill: var(--red-tint-bg);
+    stroke: var(--red);
+  }
+  .canary-stage.is-10 rect {
+    fill: var(--red);
+    stroke: var(--red);
+  }
+  .canary .canary-stage text {
+    font-size: 13px;
+    fill: var(--text-body);
+  }
+  .canary .canary-stage.is-10 text {
+    fill: #fff;
+    font-weight: 700;
+  }
+  .canary-grid {
+    stroke: var(--border);
+  }
+  .canary .canary-tick {
+    font-size: 12px;
+    fill: var(--text-muted);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .canary-threshold {
+    stroke: var(--red);
+    stroke-dasharray: 5 4;
+  }
+  .canary .canary-threshold-label {
+    font-size: 13px;
+    fill: var(--red);
+  }
+  .canary-line {
+    fill: none;
+    stroke: var(--text);
+    stroke-width: 2;
+    stroke-linejoin: round;
+  }
+  .canary-rollback {
+    stroke: var(--text);
+    stroke-width: 1.5;
+  }
+  .canary .canary-note {
+    font-weight: 700;
+    fill: var(--text);
+  }
+  .canary .canary-sub {
+    fill: var(--text-muted);
+    font-size: 13px;
+  }
+  .canary figcaption {
+    margin-top: 10px;
+    font-size: 14px;
+    color: var(--text-muted);
+    line-height: 1.55;
+    text-align: center;
+  }
+</style>

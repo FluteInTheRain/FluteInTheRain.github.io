@@ -18,15 +18,11 @@ Do the 8 steps in order. Steps 3 and 4 wait for Khang. Do not skip ahead.
 - Commit anything under `books/`, or copy a book skill (`~/.claude/skills/<book-slug>/`) into this repo. The repo is public and books are copyrighted.
 - Copy book text beyond short quotes (a sentence or two, in quotation marks, attributed). This includes the chapter files of the book skill: they are close to the book's wording.
 - Reproduce a figure or table from the book, even redrawn with the same layout and labels.
-- Use Mermaid. Diagrams follow Khang's 4-tier strategy:
-  1. **ByteByteGo Style (`ByteByteGoHq/system-design-101`)**: System architecture, data flow, distributed systems, and protocol lifecycles.
-  2. **`mingrammer/diagrams` (Python)**: Cloud infrastructure, networking, and DevOps (AWS, GCP, Azure, K8s, Docker).
-  3. **Excalidraw**: Brainstorming, mental models, conceptual explanations, and hand-drawn whiteboard clarity.
-  4. **ReactFlow (`@xyflow/react`)**: Interactive diagrams where readers interact with system nodes, toggle states, or step through flows.
+- Use Mermaid, or generate "infographic" PNGs (HTML/Python rendered dashboards with title banners, pill/badge labels, card grids, gradients, emoji). Khang rejected them as AI-looking. Diagrams are drawn on the page; see Step 6 B for the tiers.
 - Set `draft: false`. Khang reads the post and flips it himself.
 - Invent Khang's experience, numbers or quotes. Use only what Khang said, the book, or a source you read.
 - Add a `## References` section by hand. The post page renders one from `sources`.
-- Touch files outside the post, its asset folder, and (with Khang's OK) `src/data/categories.ts`. No new dependencies.
+- Touch files outside the post, its asset folder, new figure components for this post (`src/components/mdx/<Name>.astro`, `src/components/demos/<Name>.tsx`), and (with Khang's OK) `src/data/categories.ts`. No new dependencies (`lucide-react` for icons is already installed).
 - Commit the post. Leave it uncommitted for Khang to review unless he asks.
 
 ## Step 1: Read the book skill
@@ -71,7 +67,7 @@ Send one proposal and **wait for Khang's OK** before writing:
 - **Angle**: one sentence on the question the post answers and for whom. The post is built around this angle, Khang's answers and the research, not around the chapter's order. A chapter summary with the words shuffled is a failure.
 - **Category**: one of `CATEGORY_IDS` in `src/data/categories.ts` (read the file; today: frontend, backend, database, devops, ai, system-design, finance). If none fits, say so and propose adding one (in non-interactive `claude -p` runs where you cannot ask, pick the closest and flag it in the hand-over; interactive runs wait for an answer at Steps 3–4) to `categories.ts` (and the category list comment in `src/content/blog/_TEMPLATE.md.txt`).
 - **Tags** and **post slug** (kebab-case; it becomes the URL `/blog/<post-slug>/`).
-- **Outline**: every `##` section with the visual/artifact planned for it. Keep `##` headings short and concise for a clean Table of Contents sidebar. **Mandatory: Start with a single Hero Visual Metaphor (`<Figure src={heroVisual} ... />`) at the very top without preamble announcement, followed by an irresistible Intro Hook (Quote + Paradox / Production Incident).** Then outline each section using Khang's 4-tier diagram standard (ByteByteGo, `mingrammer/diagrams`, Excalidraw, `<AnimatedFlow />` / ReactFlow) alongside real-world verified artifacts. Include "Key takeaways" and "Review questions".
+- **Outline**: every `##` section with the visual/artifact planned for it. Keep `##` headings short and concise for a clean Table of Contents sidebar. **Mandatory: Start with a single Hero Visual Metaphor (`<Figure src={heroVisual} ... />`) at the very top without preamble announcement, followed by an irresistible Intro Hook (Quote + Paradox / Production Incident).** Then outline each section with its visual from Step 6 B (on-page SVG figure, `<AnimatedFlow />`, interactive island, Excalidraw, `mingrammer/diagrams`) alongside real-world verified artifacts, and list the new terms each section will explain in its `<Concepts>` box. Include "Key takeaways" and "Review questions".
 - **Sources**: the book (chapters) and the articles you plan to cite. Mention any book-vs-web conflict from Step 2.
 
 Apply his changes. If he changes the angle a lot, re-propose.
@@ -101,6 +97,7 @@ sources:
    - **Hero Visual Placement**: Place exactly ONE hero visual metaphor at the very top under `<En>` and `<Vi>` before the opening quote or intro text. Never add clumsy announcement text before it (*"Trước khi đi sâu vào..."*).
    - **Natural Vietnamese**: In the `<Vi>` version, write fluid, natural engineer-to-engineer Vietnamese ("mình"), never word-by-word machine translation. Craft `description_vi` as an engaging, authentic sentence reflecting real-world engineering dilemmas. Keep common stack names (`React`, `Kafka`, `PostgreSQL`, `BFF`, `CI/CD`), and translate technical concepts with the English keyword in parentheses on first use per section (e.g. `độ trễ sao chép (replication lag)`).
    - **No Author Cards**: Khang is the sole author of this blog; do not add author bylines or author cards.
+   - **Concepts box at the end of every `##` section** that introduces new terms (also the intro): `import Concepts from '../../components/mdx/Concepts.astro'`, then a Markdown list `- **Term**: plain explanation` inside `<Concepts>` … `</Concepts>` (blank lines around the list; tags on their own lines; place it just before the section's `---`). Write for someone who has never heard the term: one or two short sentences, an everyday comparison when it helps. In `<Vi>` use `<Concepts title="Khái niệm mới trong phần này">` and keep the English term with the Vietnamese meaning in parentheses, e.g. `**Cascading failure (sập dây chuyền)**`.
    - The book entry has `author` and `chapters`. Add a `url` only for the publisher's or the book's official page.
    - Each web article you used has `title` and `url`.
 3. Quotes stay short: a sentence or two, in quotation marks, attributed in the text (for example "as Kleppmann puts it in chapter 5").
@@ -138,34 +135,39 @@ For each visual planned as a real-world image, screenshot, or video:
 
 3. **Authentic engineering artifacts & live benchmarks** — use `.claude/skills/enrich-post/scripts/artifact_helper.py` (or run a local benchmark script) for `<GitHubCode />`, `<QuoteCard />`, `<LinkCard />`, and `<TerminalOutput />`, or add an interactive React mini-playground under `src/components/demos/<Name>Demo.tsx` inside `<DemoFrame title="...">` reusing `.sd-*` classes (see `.claude/skills/enrich-post/SKILL.md` for syntax). Keep `<LinkCard />` on one single line, and put opening/closing tags of `<GitHubCode>`, `<QuoteCard>`, `<TerminalOutput>`, and `<DemoFrame>` on their own lines.
 
-### B. Diagrams & Visuals (Khang's 4-Tier Strategy)
+### B. Diagrams & Visuals: drawn on the page
 
-Select the right tool based on the scenario:
+**No AI-looking generated infographics.** Khang rejected PNGs built from HTML/Python that look like dashboards: a big title banner, pill/badge labels, colored card grids, gradients, emoji, "63.4% PENALTY" boxes. Draw diagrams and charts on the page instead, so they use the site's font and colors and follow light/dark theme. Reference components (copy their structure):
 
-1. **System Architecture & Data Flows → ByteByteGo Style (`ByteByteGoHq/system-design-101`)**:
-   - Use for: Distributed system topology, caching strategies, message broker routing, protocol lifecycles, and microservice workflows.
-   - Design principles: Distinct component icons (Database, Cache, Queue, Load Balancer), numbered step badges (`①`, `②`, `③`), data payload callouts, and clean 3-tier color hierarchy. Render as clean SVG/PNG into `src/assets/blog/<post-slug>/`.
+- `src/components/mdx/PercentileStrip.astro`: static chart computed at build time (seeded data, log axis, percentile markers).
+- `src/components/mdx/FaultVsFailure.astro`: static architecture-style diagram (boxes, load bars, hand-made arrows).
+- `src/components/mdx/DiskFailures.astro`: large grid via one SVG `<pattern>` instead of thousands of nodes.
+- `src/components/mdx/CanaryRollout.astro`: timeline chart with a stage lane and a threshold line.
+- `src/components/mdx/TailAmplification.astro` + `src/components/demos/TailAmplification.tsx`: interactive React island (slider, re-roll, simulate).
+- `src/components/demos/AnimatedFlow.tsx` (`<AnimatedFlow preset=… scenarioId=… />`): step-by-step request flows with lucide icons on nodes and edge weight (thick = heavy load, thin = light load, red = bottleneck). Add a preset for a new post.
 
-2. **Cloud Infrastructure & DevOps → `mingrammer/diagrams` (Python)**:
-   - Use for: Cloud networking, VPCs, Kubernetes clusters, serverless pipelines, and provider architectures (AWS, GCP, Azure).
-   - Execution: Write a short Python script using `diagrams` (`from diagrams import Diagram, Cluster...`), execute it to generate crisp PNGs with official vendor icons directly into `src/assets/blog/<post-slug>/`.
+Pick the tool:
 
-3. **Brainstorming & Mental Models → Excalidraw**:
-   - Use for: Abstract concepts, algorithmic intuition, trade-off comparisons, brainstorming, and whiteboard-style human explanations.
-   - Workflow: Use the `excalidraw-diagram` skill and site colors from `style-guide.md`. Save to `src/assets/blog/<post-slug>/<name>.excalidraw`, render via:
-     ```bash
-     cd ~/.claude/skills/excalidraw-diagram/references && uv run python render_excalidraw.py <absolute path to .excalidraw>
-     ```
-   - Embed via `<Figure src={imgImport} alt="..." caption="..." />`.
+1. **Charts, numbers, distributions, formulas, timelines → static Astro SVG component** (default). Compute the data in the frontmatter (seeded PRNG so every build is identical); never hard-code a picture of numbers.
+2. **Architecture / data-flow diagrams → static Astro SVG component, or `<AnimatedFlow />`** when the point is the order of steps or where it gets congested. Use `lucide-react` icons for components (users, server, database, queue, cache) instead of plain text boxes.
+3. **"Try it" explanations → React island** (`client:visible`) when moving a parameter teaches more than a still picture. First render must be deterministic (seeded) to avoid hydration mismatch.
+4. **Hand-drawn mental models → Excalidraw** (`excalidraw-diagram` skill, site colors from `style-guide.md`), rendered to PNG and embedded with `<Figure />`. Use sparingly.
+5. **Cloud infrastructure with vendor icons → `mingrammer/diagrams` (Python)** PNG via `<Figure />`, only when official AWS/GCP/K8s icons are the point.
 
-4. **Interactive System Exploration → ReactFlow (`@xyflow/react`)**:
-   - Use for: Scenarios where readers benefit from interacting with components (clicking nodes to inspect state, toggling failover, stepping through packets, or dragging flows).
-   - Workflow: Create an interactive demo component under `src/components/demos/<Name>Demo.tsx` wrapped in `<DemoFrame title="...">`. Embed in MDX with `client:load` or `client:visible`.
+Rules for every on-page figure:
+
+- **Look**: editorial chart, not a dashboard. Thin axes and gridlines, plain-text annotations next to what they explain, one accent color (`--red`) for the thing that matters, everything else `--text` / `--text-muted` / `--border`. No pills, badges, gradients, glows, emoji, shaking or pulsing animation.
+- **Colors and fonts**: only site CSS tokens (`--text`, `--text-body`, `--text-muted`, `--text-faint`, `--border`, `--bg-alt`, `--red`, `--red-tint-bg`); monospace numbers via `ui-monospace, SFMono-Regular, Menlo, monospace`. `--border-strong` does not exist; do not use it.
+- **Size**: `width: 100%` of the column with a centered `figcaption` (14px, `--text-muted`), like `<Figure />`. Wrap the `<svg>` in a `div` with `overflow-x: auto` and give the svg `min-width: 640px`, so phones scroll the figure sideways instead of shrinking text to 7px. Pick a `viewBox` about 900 wide so 14–16px text stays 14–16px on desktop.
+- **Bilingual**: every label as `<tspan data-lang-en>…</tspan><tspan data-lang-vi>…</tspan>` (HTML: `<span data-lang-…>`); Vietnamese numbers use `.` for thousands (`toLocaleString('vi-VN')`). Leave room: Vietnamese labels run ~20% longer.
+- **IDs**: the post renders each figure twice (EN and VI, one hidden with `display:none`). Any `<marker>`, `<pattern>`, `<filter>`, `<clipPath>` id must be unique per instance (React `useId()`, or a random suffix in Astro frontmatter), or draw arrowheads as plain polygons with no ids at all.
+- **Honesty**: simulated or illustrative numbers say so in the caption, with the assumption used (e.g. "average disk lifetime ~27 years"). Cite the source of a model (paper, docs) with a link in the caption.
+- **Placement**: right after the paragraph that sets up the question the figure answers; replace any ASCII-art code block that tries to draw the same idea. Inside a numbered list, put the figure at column 0 after the item; the next item keeps its number.
 
 ## Step 7: Humanize the prose
 
 1. Copy the post first: `cp src/content/blog/<post-slug>.mdx "${TMPDIR:-/tmp}/<post-slug>.before.mdx"`.
-2. Run `/humanizer:humanizer` (invoke it through the Skill tool) in file mode on `src/content/blog/<post-slug>.mdx`. Tell it: change prose only; leave the frontmatter, `import` lines, code blocks, inline code, JSX tags (`<En>`, `</En>`, `<Vi>`, `</Vi>`, `<Figure … />`, `<YouTube … />`, `<Video … />`, `<LinkCard … />`, `<GitHubCode …>`, `<QuoteCard …>`, `<TerminalOutput …>`, `<DemoFrame …>`, `<Callout …>`, and closing tags; keep self-closing tags on one line, wrapper open/close tags on their own lines, and every code fence at column 0), link targets and quotations untouched; keep every fact and number; keep the voice in `voice.md` (and keep the Vietnamese technical keyword parentheses intact). (If file mode misbehaves, give it the body paragraph by paragraph instead.)
+2. Run `/humanizer:humanizer` (invoke it through the Skill tool) in file mode on `src/content/blog/<post-slug>.mdx`. Tell it: change prose only; leave the frontmatter, `import` lines, code blocks, inline code, JSX tags (`<En>`, `</En>`, `<Vi>`, `</Vi>`, `<Figure … />`, `<YouTube … />`, `<Video … />`, `<LinkCard … />`, `<GitHubCode …>`, `<QuoteCard …>`, `<TerminalOutput …>`, `<DemoFrame …>`, `<Callout …>`, `<Concepts …>`, and closing tags; keep self-closing tags on one line, wrapper open/close tags on their own lines, and every code fence at column 0), link targets and quotations untouched; keep every fact and number; keep the voice in `voice.md` (and keep the Vietnamese technical keyword parentheses intact). (If file mode misbehaves, give it the body paragraph by paragraph instead.)
 3. Confirm none of those changed (the function reads stdin on purpose: a `$1` in a skill file gets replaced by the slash-command arguments). This must print `non-prose unchanged`:
 
 ```bash
@@ -178,8 +180,19 @@ diff <(keep < "${TMPDIR:-/tmp}/<post-slug>.before.mdx") <(keep < src/content/blo
 ## Step 8: Build and hand over
 
 1. Run `npm run build`. It must pass. Draft posts are skipped by the production build, so it only checks the frontmatter; also start `npm run dev` in the background, load `http://localhost:4321/blog/<post-slug>/` and confirm it returns 200 with the images showing, then stop the server you started (do not leave port 4321 taken; if a server is already running on 4321, use it and leave it alone), which catches MDX body errors and wrong image paths. Fix and re-run on failure (usual causes: description over 180 characters, a category not in `CATEGORY_IDS`, a bad `url`, `{` or `<` in prose, a wrong image path).
-2. Tell Khang:
-   - the file path `src/content/blog/<post-slug>.mdx` and the diagrams in `src/assets/blog/<post-slug>/`;
+2. **Look at every on-page figure** before handing over. Chrome headless cannot scroll to a figure and will not open a window narrower than ~500px, so render the figures on a temporary page and delete it right after:
+   ```bash
+   mkdir -p src/pages/tmp-prev   # inner.astro: <Layout><main class="prose" style="max-width:890px;margin:0 auto;padding:0 16px"> …figures… </main></Layout>
+   # outer.astro: <iframe src="/tmp-prev/inner/" width="375"> for phone width, and a second iframe whose onload sets
+   #   contentDocument.documentElement.setAttribute('data-lang','vi') to check the Vietnamese labels
+   CHROME="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
+   "$CHROME" --headless=new --hide-scrollbars --window-size=1000,1600 --virtual-time-budget=5000 --screenshot="$TMPDIR/fig.png" http://localhost:4321/tmp-prev/inner/
+   "$CHROME" --headless=new --hide-scrollbars --window-size=1000,1600 --virtual-time-budget=5000 --force-dark-mode --blink-settings=preferredColorScheme=0 --screenshot="$TMPDIR/fig-dark.png" http://localhost:4321/tmp-prev/inner/
+   rm -r src/pages/tmp-prev
+   ```
+   Open each PNG with `Read` and fix: labels cut at the edge, text over lines or other text, text too small, wrong colors in dark mode, Vietnamese overflow.
+3. Tell Khang:
+   - the file path `src/content/blog/<post-slug>.mdx`, the diagrams in `src/assets/blog/<post-slug>/`, and any new figure components;
    - how to preview: `npm run dev`, then open `http://localhost:4321/blog/<post-slug>/` (drafts show in dev only);
    - the sources used, and anything you were unsure about;
    - that the post stays `draft: true` until **he** reads it and flips `draft` to `false`.
