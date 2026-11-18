@@ -65,8 +65,8 @@ Trong bài viết này, mình sẽ cùng bạn giải quyết gọn gàng 4 câu
 
 <YouTube
   id="BFBHyVmE_Gs"
-  title="Nautilus Trader GitHub Overview: Deterministic Backtests to Live Trading Parity"
-  titleVi="Tổng quan NautilusTrader: Đồng nhất từ Backtest xác định đến Live Trading"
+  title="NautilusTrader in a minute: the same engine for backtests and live trading"
+  titleVi="NautilusTrader trong một phút: cùng một engine cho backtest và chạy thật"
   start={0}
   end={60}
   caption="60-second summary on why NautilusTrader was built: running an identical execution kernel from historical backtesting to live production."
@@ -119,7 +119,7 @@ Every manual rewrite introduces **parity drift (`sai lệch đồng bộ`)**: ro
 
 <Vi>
 
-## 1. NautilusTrader là gì? (Góc nhìn cho người mới)
+## 1. NautilusTrader là gì?
 
 Nếu giải thích ngắn gọn nhất cho người mới bước vào IT chứng khoán, bạn có thể hình dung **NautilusTrader là một "hệ điều hành giao dịch hướng sự kiện" (`event-driven trading engine`) dùng lõi Rust siêu tốc bên dưới và giao diện Python thân thiện bên trên.**
 
@@ -200,7 +200,7 @@ OpenBB vs Nautilus Trader (comparable complex Python async frameworks): OpenBB: 
 
 <En>
 
-## 2. Internal Components: What They Do & Why Each Must Exist
+## 2. The parts inside, and why each one exists
 
 Beginners often ask: *"Why not just write one Python script that listens to a WebSocket price feed and calls `requests.post('/order')`?"*
 
@@ -212,7 +212,7 @@ The official blueprint below illustrates how these decoupled engines connect aro
 
 <Vi>
 
-## 2. Các thành phần bên trong: Vai trò & lý do bắt buộc phải tồn tại
+## 2. Các thành phần bên trong và vì sao cần từng cái
 
 Câu hỏi kinh điển của người mới là: *"Sao phải chia nhiều lớp phức tạp vậy, sao không viết một script Python nghe WebSocket giá rồi gọi thẳng API đặt lệnh của sàn?"*
 
@@ -236,7 +236,7 @@ Bản vẽ kiến trúc chính thức từ kho mã nguồn NautilusTrader dướ
 
 Let's inspect each of the **6 core components** inside `NautilusKernel`:
 
-### 1. `DataEngine` — The Market Intake & Normalizer
+### 1. `DataEngine` takes in and normalizes market data
 - **Role:** Connects to one or more `DataClient` adapters (`Parquet` catalogs in backtest, `WebSocket` / `FIX` / broker feeds in live), parses incoming ticks, trades, depth deltas, and OHLCV bars into uniform internal domain objects, and maintains live `OrderBook` state.
 - **Why it must exist:** Without `DataEngine`, every strategy would need exchange-specific parsing code (`Binance JSON` vs `HOSE / SSI gateway` vs `Parquet`), and time-travel bugs (`look-ahead bias`) would slip into backtests whenever clocks aren't gated centrally.
 
@@ -248,7 +248,7 @@ Below is an active order book depth ladder, showing the continuous stream of bid
 
 Hãy đi sâu vào từng khối trong **6 thành phần trụ cột** của `NautilusKernel`:
 
-### 1. `DataEngine` — Trạm tiếp nhận & chuẩn hóa dữ liệu thị trường
+### 1. `DataEngine` nhận và chuẩn hóa dữ liệu thị trường
 - **Vai trò:** Quản lý các cổng kết nối dữ liệu (`DataClient` — đọc `Parquet` lúc Backtest hoặc nhận luồng `WebSocket` / `FIX` khi chạy Live), chuẩn hóa mọi bản tin thô thành các kiểu dữ liệu thống nhất (`QuoteTick`, `TradeTick`, `OrderBookDelta`, `Bar`) và tự động cập nhật sổ lệnh `OrderBook`.
 - **Tại sao phải tồn tại:** Nếu thiếu `DataEngine`, mỗi chiến lược phải tự viết parser riêng cho từng sàn/công ty chứng khoán, và cực kỳ dễ dính lỗi "nhìn trộm tương lai" (`look-ahead bias`) khi backtest không kiểm soát mốc thời gian tập trung.
 
@@ -268,23 +268,23 @@ Hình ảnh dưới đây minh họa một bảng độ sâu sổ lệnh thực 
 
 <En>
 
-### 2. `Cache` — The High-Speed Shared State Memory
+### 2. `Cache` holds shared state in memory
 - **Role:** Stores authoritative in-memory records of `Instrument` definitions (tick size, lot size, fees), recent market ticks/bars, every `Order`, `Position`, and `Account` balance, indexed for sub-microsecond access.
 - **Why it must exist:** Trading decisions happen on hot paths measured in microseconds. Querying PostgreSQL or Redis mid-tick adds unacceptable latency jitter, while letting strategies keep private copies leads to stale split-brain state.
 
-### 3. `MessageBus` — The Single-Threaded Event Wire
+### 3. `MessageBus` carries events on one thread
 - **Role:** Acts as the central nervous system connecting every component using three communication patterns: `Pub/Sub` (`market data topics`), `Point-to-Point` (`commands to specific engines`), and `Request/Response` (`historical queries`).
 - **Why it must exist:** Direct object references between components create spaghetti coupling and multithreaded race conditions. Serializing messages through one single-threaded `MessageBus` guarantees strict event ordering and zero mutex locks.
 
-### 4. `Actor` & `Strategy` — The Pure Decision Brain
+### 4. `Actor` and `Strategy` make the decisions
 - **Role:** Subscribes to data streams on the `MessageBus`, reads historical context from `Cache`, computes indicators or alpha signals, and emits trading intents (`submit_order`, `cancel_order`, `modify_order`). An `Actor` handles read-only signals/alerts; a `Strategy` extends `Actor` with full order execution privileges.
 - **Why it must exist:** Your quantitative business logic stays 100% pure and clean, insulated from retry timers, FIX tag encoding, or exchange rate-limit backoffs.
 
-### 5. `RiskEngine` — The Mandatory Pre-Trade Safety Gate
+### 5. `RiskEngine` checks every order before it goes out
 - **Role:** Intercepts every single trading command emitted by `Strategy` **before** it touches `ExecutionEngine` or the network. Enforces max order quantity, max notional value, fat-finger price collars, order submission throttle rates, and account margin/cash checks.
 - **Why it must exist:** In securities IT, **"Software bugs burn real money."** If an off-by-one bug triggers 1,000 buy orders per second or puts an extra zero on volume (`fat-finger`), `RiskEngine` blocks it locally inside `NautilusKernel` before a single packet reaches the exchange.
 
-### 6. `ExecutionEngine` & `Portfolio` — Order Router, Accounting & Reconciliation
+### 6. `ExecutionEngine` and `Portfolio` route, book and reconcile orders
 - **Role:** `ExecutionEngine` routes validated orders to the appropriate `ExecutionClient` adapter (`Binance`, `Interactive Brokers`, or `SimulatedExchange`), records immutable order events, and runs **Startup/Reconnect Reconciliation (`đối soát trạng thái`)** with the venue. Alongside it, `Portfolio` calculates live balances, margin requirements, and realized/unrealized `PnL`.
 - **Why it must exist:** Networks disconnect and servers crash. Without centralized execution routing and reconciliation, restarting a bot creates **ghost orders** (`lệnh vẫn treo trên sàn nhưng bot quên mất`) or double-fills.
 
@@ -319,23 +319,23 @@ Hình ảnh dưới đây minh họa một bảng độ sâu sổ lệnh thực 
 
 <Vi>
 
-### 2. `Cache` — Bộ nhớ trạng thái siêu tốc trong RAM
+### 2. `Cache` giữ trạng thái dùng chung trong RAM
 - **Vai trò:** Lưu giữ tập trung toàn bộ dữ liệu tham chiếu (`Instrument`: bước giá tick size, lô giao dịch, biểu phí), chuỗi giá/nến gần nhất, danh sách mọi `Order` (lệnh), `Position` (vị thế) và số dư `Account` ngay trên RAM.
 - **Tại sao phải tồn tại:** Trong hệ thống giao dịch thực chiến, mỗi bước xử lý tính bằng microsecond. Nếu chiến lược phải query xuống database (PostgreSQL) giữa lúc giá đang chạy, hệ thống sẽ bị nghẽn cổ chai; còn nếu mỗi class tự lưu biến riêng thì rất dễ lệch dữ liệu giữa các bộ phận.
 
-### 3. `MessageBus` — Đường dây truyền tin đơn luồng
+### 3. `MessageBus` chuyển event trên một luồng
 - **Vai trò:** Làm trục giao tiếp trung tâm cho toàn bộ module theo 3 cơ chế: `Pub/Sub` (phát dữ liệu thị trường cho nhiều nơi cùng nghe), `Point-to-Point` (gửi lệnh tới đúng đích), và `Request/Response` (hỏi đáp dữ liệu lịch sử).
 - **Tại sao phải tồn tại:** Nếu các component gọi hàm chéo trực tiếp lẫn nhau, hệ thống sẽ rối như tơ vò và dễ xung đột luồng (`race condition`). Ép mọi tin nhắn đi qua một kênh `MessageBus` đơn luồng giúp triệt tiêu mutex lock và đảm bảo thứ tự sự kiện tuyệt đối chuẩn xác.
 
-### 4. `Actor` & `Strategy` — Bộ não phân tích & ra quyết định
+### 4. `Actor` và `Strategy` ra quyết định
 - **Vai trò:** Đăng ký nhận dữ liệu từ `MessageBus`, đọc lịch sử trong `Cache` để tính chỉ báo kỹ thuật rồi phát ra ý định giao dịch (`submit_order`, `cancel_order`, `modify_order`). `Actor` chỉ quan sát và tính tín hiệu, còn `Strategy` kế thừa `Actor` để có thêm quyền đặt lệnh.
 - **Tại sao phải tồn tại:** Tách biệt hoàn toàn **tư duy tài chính / thuật toán** ra khỏi code hạ tầng như retry socket, đóng gói bản tin FIX hay xử lý giới hạn tốc độ API (`rate limit`).
 
-### 5. `RiskEngine` — Chốt chặn kiểm soát rủi ro trước khi đặt lệnh (`Pre-Trade Risk Gate`)
+### 5. `RiskEngine` kiểm tra từng lệnh trước khi gửi đi (pre-trade risk)
 - **Vai trò:** Là trạm gác bắt buộc mà mọi yêu cầu đặt/sửa/hủy lệnh từ `Strategy` phải đi qua **trước khi** chạm tới `ExecutionEngine` hay đường truyền mạng. Kiểm tra khối lượng tối đa, giá trị danh nghĩa (`notional`), giới hạn tần suất đặt lệnh (`throttle`), sức mua và biên độ giá (`fat-finger collar`).
 - **Tại sao phải tồn tại:** Trong IT chứng khoán có nguyên tắc bất di bất dịch: **bug phần mềm mất tiền thật trong tích tắc.** Nếu code `Strategy` gặp lỗi vòng lặp `while True` hoặc gõ dư một số `0` vào khối lượng, `RiskEngine` chặn đứng ngay tại RAM trước khi gói tin kịp bay lên Sở/Sàn.
 
-### 6. `ExecutionEngine` & `Portfolio` — Điều phối thực thi, Sổ cái & Đối soát (`Reconciliation`)
+### 6. `ExecutionEngine` và `Portfolio` gửi lệnh, ghi sổ và đối soát (reconciliation)
 - **Vai trò:** `ExecutionEngine` định tuyến lệnh đã qua kiểm duyệt xuống đúng `ExecutionClient` (cổng Sở thật hoặc sàn giả lập lúc Backtest), lưu nhật ký bất biến mọi phản hồi, và tự động **đối soát trạng thái (`Reconciliation`)** với Sở mỗi khi khởi động lại hoặc rớt mạng. Song song đó, `Portfolio` tính toán liên tục sức mua (`Margin`) và lãi/lỗ (`PnL`).
 - **Tại sao phải tồn tại:** Mạng có thể rớt và server có thể sập bất kỳ lúc nào. Không có `ExecutionEngine` đối soát khi bật lại, hệ thống sẽ bỏ sót **lệnh ma (`Ghost Orders`)** vẫn đang treo trên sàn hoặc ghi nhận khớp đúp (`Double Fill`).
 
@@ -370,7 +370,7 @@ Hình ảnh dưới đây minh họa một bảng độ sâu sổ lệnh thực 
 
 <En>
 
-## 3. How Do They Interact With Each Other?
+## 3. How the parts talk to each other
 
 Now let's connect those six static blocks into one live heartbeat. Follow the **six-step loop** as a market price tick arrives, wakes up your strategy, crosses the safety gate, and returns as an exchange fill:
 
@@ -385,7 +385,7 @@ Now let's connect those six static blocks into one live heartbeat. Follow the **
 
 <Vi>
 
-## 3. Các thành phần bên trong tương tác với nhau như thế nào?
+## 3. Các thành phần trao đổi với nhau thế nào
 
 Khi ghép 6 khối trên lại thành một cơ thể sống, luồng dữ liệu và luồng đặt lệnh vận hành theo một chu trình khép kín. Hãy lần theo **nhịp xử lý 6 bước** từ lúc giá mới vừa tới cho đến khi lệnh bay lên Sở và báo khớp về:
 
@@ -426,7 +426,7 @@ Bạn có thể tự bấm từng bước ở mô phỏng tương tác bên dư�
 
 </Vi>
 
-<DemoFrame title="Interactive Walkthrough: Order Path & Pre-Trade Risk Gate" titleVi="Mô phỏng tương tác: Đường đi một lệnh xuyên qua NautilusKernel">
+<DemoFrame title="One order's path through the pre-trade risk check" titleVi="Đường đi của một lệnh qua bước kiểm tra rủi ro (pre-trade)">
   <NautilusFlowDemo client:only="react" />
 </DemoFrame>
 
@@ -462,7 +462,7 @@ Bạn có thể tự bấm từng bước ở mô phỏng tương tác bên dư�
 
 <En>
 
-## 4. The Order Lifecycle Inside NautilusTrader
+## 4. The order lifecycle inside NautilusTrader
 
 Now zoom into the **single most important concept for any securities IT engineer**: **how an order transitions across states from birth to finality.**
 
@@ -604,7 +604,7 @@ impl OrderStatus {
 
 <En>
 
-## Summary Mental Model
+## Summing up in four lines
 
 If you carry just one takeaway into your first week in securities IT, remember this four-line map of NautilusTrader:
 
@@ -617,7 +617,7 @@ If you carry just one takeaway into your first week in securities IT, remember t
 
 <Vi>
 
-## Tóm tắt nhanh để bỏ túi
+## Tóm lại trong bốn dòng
 
 Khi bước vào tuần làm việc đầu tiên tại một công ty chứng khoán hay đội làm sản phẩm tài chính, chỉ cần nhớ 4 gạch đầu dòng cốt lõi này từ NautilusTrader:
 
