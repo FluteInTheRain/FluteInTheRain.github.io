@@ -24,7 +24,11 @@ const base: React.CSSProperties = {
   padding: '9px 16px',
   borderRadius: 6,
   cursor: 'pointer',
-  border: '1px solid transparent',
+  // Longhand on purpose: the outline style overrides borderColor, and mixing it with the
+  // `border` shorthand makes React warn when the button switches style.
+  borderWidth: 1,
+  borderStyle: 'solid',
+  borderColor: 'transparent',
 };
 const solid = (bg: string): React.CSSProperties => ({ ...base, background: bg, color: '#fff' });
 const outline: React.CSSProperties = { ...base, background: '#fff', color: BLUE, borderColor: '#b7c4e4' };
