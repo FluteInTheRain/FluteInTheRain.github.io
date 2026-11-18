@@ -1,52 +1,14 @@
 import React, { useState, useEffect, useRef, useId } from 'react';
-import {
-  Archive,
-  AudioLines,
-  Combine,
-  Database,
-  Film,
-  GitMerge,
-  ListOrdered,
-  Mailbox,
-  MemoryStick,
-  Network,
-  ScanSearch,
-  Scissors,
-  ScrollText,
-  Server,
-  Smartphone,
-  Split,
-  Star,
-  UsersCollaboration,
-  Video,
-  Workflow,
-} from 'lucide-react';
+// Colour icon drawn at the top of each node: real product logos (Redis, PostgreSQL, Kafka, AWS...)
+// and flat colour pictograms for generic things. Files live in public/icons/flow/ (sources and
+// licences in its README.md); loaded with <image>, so they never clash with ids in the hidden EN/VI copy.
+const NODE_ICONS = [
+  'video', 'scissors', 'storage', 'workflow', 'scan', 'split', 'memory', 'film', 'audio', 'mobile', 'gateway',
+  'database', 'engine', 'celebrity', 'queue', 'server', 'mailbox', 'friends', 'log', 'merge', 'ec2',
+] as const;
+const iconHref = (name: FlowIconName) => `/icons/flow/${name}.svg`;
 
-// Pictogram drawn at the top of each node, so readers recognise the component at a glance.
-const NODE_ICONS = {
-  video: Video,
-  scissors: Scissors,
-  storage: Archive,
-  workflow: Workflow,
-  scan: ScanSearch,
-  split: Split,
-  memory: MemoryStick,
-  film: Film,
-  audio: AudioLines,
-  mobile: Smartphone,
-  gateway: Network,
-  database: Database,
-  engine: Combine,
-  celebrity: Star,
-  queue: ListOrdered,
-  server: Server,
-  mailbox: Mailbox,
-  friends: UsersCollaboration,
-  log: ScrollText,
-  merge: GitMerge,
-} as const;
-
-export type FlowIconName = keyof typeof NODE_ICONS;
+export type FlowIconName = (typeof NODE_ICONS)[number];
 
 export interface FlowNode {
   id: string;
@@ -172,8 +134,8 @@ const PRIME_VIDEO_SCENARIOS: FlowScenario[] = [
         activeNodeIds: ['converter', 's3-bucket'],
         activeEdgeIds: ['e2'],
         alertNodeId: 's3-bucket',
-        alertLabelEn: '⚠️ S3 I/O LIMIT',
-        alertLabelVi: '⚠️ CHẠM TRẦN S3',
+        alertLabelEn: 'S3 request limit',
+        alertLabelVi: 'Chạm trần request S3',
         packet: { edgeId: 'e2', labelEn: 'Chunk PUTs', labelVi: 'Ghi Frame lên S3' },
         metrics: { latency: '120ms', throughput: '1,200 PUT/sec', costImpact: '$$ High API Cost' },
         badge: { textEn: 'Bottleneck #1', textVi: 'Điểm nghẽn #1', type: 'warning' },
@@ -185,11 +147,11 @@ const PRIME_VIDEO_SCENARIOS: FlowScenario[] = [
         activeNodeIds: ['s3-bucket', 'step-fn'],
         activeEdgeIds: ['e3'],
         alertNodeId: 'step-fn',
-        alertLabelEn: '⚡ $$ COST SPIKE',
-        alertLabelVi: '⚡ $$ CHI PHÍ VỌT',
+        alertLabelEn: 'Cost climbs fast',
+        alertLabelVi: 'Chi phí tăng nhanh',
         packet: { edgeId: 'e3', labelEn: 'State Polling', labelVi: 'Thăm dò trạng thái' },
         metrics: { latency: '85ms', throughput: 'State transitions', costImpact: '$$ Step Fn pricing' },
-        badge: { textEn: 'Orchestration Overhead', textVi: 'Độ trễ điều phối', type: 'warning' },
+        badge: { textEn: 'Orchestration cost', textVi: 'Chi phí điều phối', type: 'warning' },
         narrativeEn: 'AWS Step Functions polls S3 to orchestrate downstream worker jobs. Thousands of state transitions per minute pile up costs.',
         narrativeVi: 'AWS Step Functions liên tục thăm dò S3 để điều phối chuỗi xử lý. Hàng ngàn bước chuyển trạng thái mỗi phút làm tăng vọt chi phí.',
       },
@@ -198,11 +160,11 @@ const PRIME_VIDEO_SCENARIOS: FlowScenario[] = [
         activeNodeIds: ['s3-bucket', 'defect-detector'],
         activeEdgeIds: ['e4'],
         alertNodeId: 's3-bucket',
-        alertLabelEn: '🚨 GET LIMIT OVERLOAD',
-        alertLabelVi: '🚨 ĐỌC S3 QUÁ TẢI',
+        alertLabelEn: 'Too many GETs',
+        alertLabelVi: 'Đọc S3 quá tải',
         packet: { edgeId: 'e4', labelEn: 'Download Frame', labelVi: 'Tải Frame về Lambda' },
         metrics: { latency: '240ms', throughput: 'Bandwidth saturation', costImpact: '$$$$ Critical S3 GET' },
-        badge: { textEn: 'Bottleneck #2: GET Limit', textVi: 'Điểm nghẽn #2: Đọc S3', type: 'danger' },
+        badge: { textEn: 'Bottleneck #2: S3 reads', textVi: 'Điểm nghẽn #2: đọc S3', type: 'danger' },
         narrativeEn: 'Defect-detecting Lambdas download frames back from S3. Read concurrency hits AWS account limits, throttling analysis pipelines.',
         narrativeVi: 'Các Lambda phân tích phải đọc lại frame từ S3. Băng thông và số lượng GET request chạm trần tài khoản, gây nghẽn và chi phí đội lên gấp nhiều lần.',
       },
@@ -218,7 +180,7 @@ const PRIME_VIDEO_SCENARIOS: FlowScenario[] = [
     overallMetricVi: 'Chi phí S3: $0 (Triệt tiêu) · Tổng chi phí giảm: -90% · Độ trễ: <10ms',
     nodes: [
       { id: 'video-source', labelEn: 'Live Feed', labelVi: 'Luồng Live', subEn: 'Video Input', subVi: 'Nguồn Video', x: 20, y: 125, width: 115, height: 80, icon: 'video', type: 'source' },
-      { id: 'monolith-container', labelEn: 'Amazon EC2 Instance (Single Monolithic Process)', labelVi: 'Máy chủ Amazon EC2 (Tiến trình Monolith duy nhất)', subEn: 'C6i Compute-Optimized', subVi: 'Instance tối ưu tính toán', x: 195, y: 12, width: 705, height: 268, icon: 'server', type: 'default' },
+      { id: 'monolith-container', labelEn: 'Amazon EC2 Instance (Single Monolithic Process)', labelVi: 'Máy chủ Amazon EC2 (Tiến trình Monolith duy nhất)', subEn: 'C6i Compute-Optimized', subVi: 'Instance tối ưu tính toán', x: 195, y: 12, width: 705, height: 268, icon: 'ec2', type: 'default' },
       { id: 'mem-ingest', labelEn: 'Frame Demux', labelVi: 'Bộ nhận Frame', subEn: 'In-Memory Pipe', subVi: 'Ống dẫn RAM', x: 225, y: 125, width: 125, height: 80, icon: 'split', type: 'worker' },
       { id: 'shared-mem', labelEn: 'Shared Memory', labelVi: 'Vùng nhớ chia sẻ', subEn: 'Zero-Copy Buffer', subVi: 'Ring Buffer RAM', x: 470, y: 125, width: 155, height: 80, icon: 'memory', type: 'success' },
       { id: 'detector-video', labelEn: 'Video Detector', labelVi: 'Phân tích Video', subEn: 'Native C++ Thread', subVi: 'Thread C++ đồng thời', x: 735, y: 48, width: 145, height: 80, icon: 'film', type: 'worker' },
@@ -237,7 +199,7 @@ const PRIME_VIDEO_SCENARIOS: FlowScenario[] = [
         activeEdgeIds: ['m1'],
         packet: { edgeId: 'm1', labelEn: 'TCP Ingest', labelVi: 'Nhận gói tin TCP' },
         metrics: { latency: '8ms', throughput: '1080p60 Stream', costImpact: '$0 S3 API' },
-        badge: { textEn: 'Fast Ingestion', textVi: 'Nhận luồng tốc độ cao', type: 'info' },
+        badge: { textEn: 'Ingest', textVi: 'Nhận luồng', type: 'info' },
         narrativeEn: 'Stream enters the monolithic daemon process running directly on the EC2 host.',
         narrativeVi: 'Luồng video đi trực tiếp vào tiến trình daemon monolith chạy trên máy chủ EC2.',
       },
@@ -246,11 +208,11 @@ const PRIME_VIDEO_SCENARIOS: FlowScenario[] = [
         activeNodeIds: ['mem-ingest', 'shared-mem'],
         activeEdgeIds: ['m2'],
         successNodeId: 'shared-mem',
-        successLabelEn: '✓ 0.1ms ZERO-COPY',
-        successLabelVi: '✓ 0.1ms DÙNG RAM',
+        successLabelEn: '0.1 ms, no copy',
+        successLabelVi: '0,1 ms, chỉ qua RAM',
         packet: { edgeId: 'm2', labelEn: 'In-Memory Write', labelVi: 'Ghi vào Ring Buffer' },
         metrics: { latency: '0.12ms', throughput: '12 GB/s RAM Bandwidth', costImpact: '$0 (Zero Disk I/O)' },
-        badge: { textEn: 'Zero-Copy RAM', textVi: 'Không tốn I/O', type: 'success' },
+        badge: { textEn: 'Write to RAM', textVi: 'Ghi vào RAM', type: 'success' },
         narrativeEn: 'Frames are written straight into a shared memory ring buffer. No HTTP requests, no S3 calls, zero disk roundtrips.',
         narrativeVi: 'Các frame được ghi thẳng vào vùng nhớ chia sẻ (Shared Memory Ring Buffer). Không cần HTTP, không gọi S3, không tốn I/O đĩa.',
       },
@@ -259,11 +221,11 @@ const PRIME_VIDEO_SCENARIOS: FlowScenario[] = [
         activeNodeIds: ['shared-mem', 'detector-video', 'detector-audio'],
         activeEdgeIds: ['m3', 'm4'],
         successNodeId: 'shared-mem',
-        successLabelEn: '✓ 90% COST SAVED',
-        successLabelVi: '✓ GIẢM 90% CHI PHÍ',
+        successLabelEn: '90% cheaper',
+        successLabelVi: 'Rẻ hơn 90%',
         packet: { edgeId: 'm3', labelEn: 'Thread Read', labelVi: 'Đọc song song qua RAM' },
         metrics: { latency: '2ms', throughput: 'Real-time 60fps', costImpact: '90% Cost Cut' },
-        badge: { textEn: 'Parallel Workers', textVi: 'Xử lý song song siêu tốc', type: 'success' },
+        badge: { textEn: 'Read in parallel', textVi: 'Đọc song song', type: 'success' },
         narrativeEn: 'Video and audio defect detectors run as concurrent threads in the same process, inspecting memory buffers simultaneously.',
         narrativeVi: 'Các thuật toán phân tích video và âm thanh chạy dưới dạng các luồng đồng thời trong cùng tiến trình, phân tích dữ liệu ngay trên RAM.',
       },
@@ -299,7 +261,7 @@ const TWITTER_FANOUT_SCENARIOS: FlowScenario[] = [
         activeEdgeIds: ['e1'],
         packet: { edgeId: 'e1', labelEn: 'GET /feed', labelVi: 'Yêu cầu tải Feed' },
         metrics: { latency: '12ms', throughput: '300,000 req/sec', costImpact: 'Baseline' },
-        badge: { textEn: 'Read Storm', textVi: 'Cơn bão Đọc', type: 'info' },
+        badge: { textEn: 'Read request', textVi: 'Yêu cầu đọc', type: 'info' },
         narrativeEn: 'Follower opens their mobile app, triggering a GET /timeline request to the API Gateway.',
         narrativeVi: 'Người dùng mở ứng dụng, kích hoạt yêu cầu GET /timeline tới hệ thống API Gateway.',
       },
@@ -308,11 +270,11 @@ const TWITTER_FANOUT_SCENARIOS: FlowScenario[] = [
         activeNodeIds: ['api-gateway', 'sql-db'],
         activeEdgeIds: ['e2'],
         alertNodeId: 'sql-db',
-        alertLabelEn: '⚠️ DISK THRASHING',
-        alertLabelVi: '⚠️ NGHẼN BỘ NHỚ',
+        alertLabelEn: 'Disk thrashing',
+        alertLabelVi: 'Nghẽn bộ nhớ đệm',
         packet: { edgeId: 'e2', labelEn: 'SQL JOIN', labelVi: 'Nối 3 Bảng SQL' },
         metrics: { latency: '350ms', throughput: 'Queueing lock', costImpact: 'High CPU' },
-        badge: { textEn: 'Database Contention', textVi: 'Xung đột Database', type: 'warning' },
+        badge: { textEn: 'The big JOIN', textVi: 'Câu JOIN nặng', type: 'warning' },
         narrativeEn: 'Gateway executes a multi-table JOIN across follows, users, and tweets with ORDER BY timestamp DESC LIMIT 800.',
         narrativeVi: 'Gateway thực thi câu lệnh SQL JOIN đa bảng giữa follows, users và tweets kèm lệnh sắp xếp thời gian trên 800 dòng.',
       },
@@ -321,13 +283,13 @@ const TWITTER_FANOUT_SCENARIOS: FlowScenario[] = [
         activeNodeIds: ['sql-db', 'query-engine'],
         activeEdgeIds: ['e3'],
         alertNodeId: 'sql-db',
-        alertLabelEn: '🔥 100% CPU CRASH',
-        alertLabelVi: '🔥 100% CPU SẬP DB',
+        alertLabelEn: 'CPU at 100%',
+        alertLabelVi: 'CPU 100%, DB sắp sập',
         packet: { edgeId: 'e3', labelEn: 'Disk Scan', labelVi: 'Quét đĩa Disk' },
         metrics: { latency: '850ms', throughput: 'IOPS Saturation', costImpact: 'Fail Whale Risk' },
-        badge: { textEn: 'Critical Bottleneck', textVi: 'Nghẽn nghiêm trọng', type: 'danger' },
-        narrativeEn: 'Database buffer pool thrashes as 300k concurrent read queries compete for memory. Response times degrade into seconds.',
-        narrativeVi: 'Bộ nhớ đệm buffer pool bị quá tải vì 300,000 truy vấn đọc đồng thời tranh chấp tài nguyên. Thời gian phản hồi tụt dốc thảm hại.',
+        badge: { textEn: 'Database gives out', textVi: 'Database đuối sức', type: 'danger' },
+        narrativeEn: 'Database buffer pool thrashes as 300k concurrent read queries compete for memory. Responses slow down to seconds.',
+        narrativeVi: 'Bộ nhớ đệm buffer pool bị quá tải vì 300,000 truy vấn đọc đồng thời tranh chấp tài nguyên. Thời gian phản hồi tăng lên hàng giây.',
       },
     ],
   },
@@ -357,7 +319,7 @@ const TWITTER_FANOUT_SCENARIOS: FlowScenario[] = [
         activeEdgeIds: ['e1'],
         packet: { edgeId: 'e1', labelEn: '1 Tweet', labelVi: '1 Bài Tweet' },
         metrics: { latency: '3ms', throughput: '1 Event', costImpact: 'Nominal' },
-        badge: { textEn: 'Trigger', textVi: 'Kích hoạt', type: 'info' },
+        badge: { textEn: 'One tweet', textVi: 'Một tweet', type: 'info' },
         narrativeEn: 'A celebrity with 30,000,000 followers publishes a single tweet into the message queue.',
         narrativeVi: 'Một tài khoản có hơn 30 triệu người theo dõi đăng một bài viết vào hàng đợi thông điệp.',
       },
@@ -366,11 +328,11 @@ const TWITTER_FANOUT_SCENARIOS: FlowScenario[] = [
         activeNodeIds: ['broker-queue', 'fanout-workers'],
         activeEdgeIds: ['e2'],
         alertNodeId: 'broker-queue',
-        alertLabelEn: '⚠️ 30M JOBS SURGE',
-        alertLabelVi: '⚠️ BÃO 30M JOB',
+        alertLabelEn: '30M jobs queued',
+        alertLabelVi: '30 triệu job xếp hàng',
         packet: { edgeId: 'e2', labelEn: 'Batch Jobs', labelVi: 'Phân rã Job' },
         metrics: { latency: '1,200ms', throughput: 'Queue Lagging', costImpact: 'Worker saturation' },
-        badge: { textEn: 'Amplification Storm', textVi: 'Cơn bão Khuếch đại', type: 'warning' },
+        badge: { textEn: '30M jobs', textVi: '30 triệu job', type: 'warning' },
         narrativeEn: 'Fan-out workers pull the event, query the social graph, and generate 30,000,000 individual timeline insertion tasks.',
         narrativeVi: 'Cụm worker lấy sự kiện, tra cứu đồ thị quan hệ và sinh ra 30,000,000 tác vụ chèn bài viết vào từng timeline riêng lẻ.',
       },
@@ -379,13 +341,13 @@ const TWITTER_FANOUT_SCENARIOS: FlowScenario[] = [
         activeNodeIds: ['fanout-workers', 'redis-mailboxes'],
         activeEdgeIds: ['e3'],
         alertNodeId: 'fanout-workers',
-        alertLabelEn: '🚨 5+ MIN BACKLOG',
-        alertLabelVi: '🚨 TRỄ HÀNG ĐỢI >5P',
+        alertLabelEn: 'Minutes behind',
+        alertLabelVi: 'Trễ vài phút',
         packet: { edgeId: 'e3', labelEn: '30M LPUSH', labelVi: 'Bão ghi 30 triệu lần' },
         metrics: { latency: '5+ Minutes', throughput: 'Redis IOPS Maxed', costImpact: 'Severe Lag' },
-        badge: { textEn: 'Celebrity Fanout Penalty', textVi: 'Thảm họa Fan-out', type: 'danger' },
-        narrativeEn: 'Workers hammer Redis clusters with millions of writes. Delivery lag spikes to several minutes before followers see the update.',
-        narrativeVi: 'Cụm worker làm quá tải Redis với hàng triệu lệnh ghi. Độ trễ hiển thị bài viết tăng lên tới vài phút khiến người theo dõi chờ đợi.',
+        badge: { textEn: 'Writes pile up', textVi: 'Lệnh ghi dồn ứ', type: 'danger' },
+        narrativeEn: 'Workers send millions of writes to Redis. Delivery lag spikes to several minutes before followers see the update.',
+        narrativeVi: 'Cụm worker gửi hàng triệu lệnh ghi vào Redis. Độ trễ hiển thị bài viết tăng lên tới vài phút khiến người theo dõi chờ đợi.',
       },
     ],
   },
@@ -416,13 +378,13 @@ const TWITTER_FANOUT_SCENARIOS: FlowScenario[] = [
         activeNodeIds: ['user-hybrid', 'redis-box', 'celeb-hybrid', 'celeb-store'],
         activeEdgeIds: ['e1', 'e2'],
         successNodeId: 'celeb-store',
-        successLabelEn: '✓ ZERO WRITE FANOUT',
-        successLabelVi: '✓ KHÔNG CẦN FANOUT',
+        successLabelEn: 'Written once',
+        successLabelVi: 'Chỉ ghi một lần',
         packet: { edgeId: 'e1', labelEn: 'Smart Ingest', labelVi: 'Tiếp nhận thông minh' },
         metrics: { latency: '3ms', throughput: '12,000 tweets/s', costImpact: 'Optimized' },
-        badge: { textEn: 'Decoupled Ingestion', textVi: 'Phân luồng độc lập', type: 'info' },
+        badge: { textEn: 'Two write paths', textVi: 'Hai đường ghi', type: 'info' },
         narrativeEn: 'Regular tweets are quickly pushed to followers. Celebrity tweets are appended to an indexed log without running a 30M-write fan-out.',
-        narrativeVi: 'Bài viết của bạn bè được đẩy vào Redis. Bài viết của người nổi tiếng chỉ ghi một lần vào bảng log riêng, tuyệt đối không fan-out 30 triệu lần.',
+        narrativeVi: 'Bài viết của bạn bè được đẩy vào Redis. Bài viết của người nổi tiếng chỉ ghi một lần vào bảng log riêng, không fan-out 30 triệu lần.',
       },
       {
         stepIndex: 2,
@@ -439,12 +401,12 @@ const TWITTER_FANOUT_SCENARIOS: FlowScenario[] = [
         activeNodeIds: ['in-memory-merger'],
         activeEdgeIds: [],
         successNodeId: 'in-memory-merger',
-        successLabelEn: '✓ 2ms INSTANT MERGE',
-        successLabelVi: '✓ 2ms NỐI RAM TỨC THÌ',
+        successLabelEn: 'Merged in 2 ms',
+        successLabelVi: 'Ghép xong trong 2 ms',
         metrics: { latency: '6ms Total', throughput: '300,000 req/sec', costImpact: 'Minimal RAM' },
-        badge: { textEn: 'Blistering Performance', textVi: 'Tốc độ siêu việt', type: 'success' },
-        narrativeEn: 'Timeline Merger executes an in-memory sorted array merge in microseconds. The end user enjoys immediate sub-10ms delivery!',
-        narrativeVi: 'Bộ hợp nhất ghép và sắp xếp mảng trong RAM chỉ mất vài phần nghìn giây. Người dùng nhìn thấy dòng thời gian tức thì dưới 10 mili-giây!',
+        badge: { textEn: 'Merge and reply', textVi: 'Ghép và trả về', type: 'success' },
+        narrativeEn: 'The Timeline Merger merges two sorted lists in memory. The user gets the feed in under 10 ms.',
+        narrativeVi: 'Bộ hợp nhất ghép hai danh sách đã sắp xếp ngay trong RAM. Người dùng nhận feed trong chưa tới 10 ms.',
       },
     ],
   },
@@ -625,7 +587,7 @@ export default function AnimatedFlow({
           {scenario.nodes
             .filter((n) => n.width && n.height && n.width > 200)
             .map((containerNode) => {
-              const ContainerIcon = containerNode.icon ? NODE_ICONS[containerNode.icon] : null;
+              const containerIcon = containerNode.icon;
               return (
                 <g key={containerNode.id} className="flow-outer-container">
                   <rect
@@ -636,16 +598,17 @@ export default function AnimatedFlow({
                     rx="14"
                     className="flow-container-rect"
                   />
-                  {ContainerIcon && (
-                    <ContainerIcon
+                  {containerIcon && (
+                    <image
+                      href={iconHref(containerIcon)}
                       x={containerNode.x + 14}
-                      y={containerNode.y + 11}
-                      size={17}
-                      className="flow-container-icon"
+                      y={containerNode.y + 9}
+                      width={20}
+                      height={20}
                       aria-hidden="true"
                     />
                   )}
-                  <text x={containerNode.x + (ContainerIcon ? 38 : 18)} y={containerNode.y + 24} className="flow-container-label">
+                  <text x={containerNode.x + (containerIcon ? 40 : 18)} y={containerNode.y + 24} className="flow-container-label">
                     <tspan data-lang-en>{containerNode.labelEn}</tspan>
                     <tspan data-lang-vi>{containerNode.labelVi || containerNode.labelEn}</tspan>
                   </text>
@@ -694,7 +657,7 @@ export default function AnimatedFlow({
             const labelEn = edge.labelEn || '';
             const labelVi = edge.labelVi || labelEn;
             const maxLen = Math.max(labelEn.length, labelVi.length);
-            // 10px monospace label: ~6px per character plus padding.
+            // 10px label in the site font: ~6px per character plus padding.
             const pillWidth = Math.max(maxLen * 6.2 + 14, 50);
 
             return (
@@ -782,7 +745,7 @@ export default function AnimatedFlow({
               const isAlertNode = currentStep.alertNodeId === node.id;
               const isSuccessNode = currentStep.successNodeId === node.id;
               const isDistress = isAlertNode || (isActive && node.type === 'bottleneck' && (currentStep.badge?.type === 'danger' || currentStep.badge?.type === 'warning'));
-              const NodeIcon = node.icon ? NODE_ICONS[node.icon] : null;
+              const nodeIcon = node.icon;
               const w = node.width || 135;
               const h = node.height || 80;
 
@@ -848,52 +811,57 @@ export default function AnimatedFlow({
                       className={`flow-node-status-dot ${isActive ? 'is-active' : ''} ${isDistress ? 'is-danger' : ''} ${isSuccessNode ? 'is-success' : ''}`}
                     />
 
-                    {/* Pictogram of what this component is (server, database, users...) */}
-                    {NodeIcon && (
-                      <NodeIcon
-                        x={w / 2 - 13}
-                        y={9}
-                        size={26}
-                        strokeWidth={1.75}
-                        className="flow-node-icon"
-                        aria-hidden="true"
-                      />
+                    {/* Colour icon of what this component is (logo or pictogram) */}
+                    {nodeIcon && (
+                      <>
+                        {/* light disc behind the icon: only filled in dark mode so dark logos (Kafka) stay visible */}
+                        <circle cx={w / 2} cy={23} r={18} className="flow-node-icon-bg" />
+                        <image
+                          href={iconHref(nodeIcon)}
+                          x={w / 2 - 15}
+                          y={8}
+                          width={30}
+                          height={30}
+                          className="flow-node-icon"
+                          aria-hidden="true"
+                        />
+                      </>
                     )}
 
                     {/* Node Main Title */}
-                    <text x={w / 2} y={NodeIcon ? 52 : 30} textAnchor="middle" className="flow-node-title">
+                    <text x={w / 2} y={nodeIcon ? 52 : 30} textAnchor="middle" className="flow-node-title">
                       <tspan data-lang-en>{node.labelEn}</tspan>
                       <tspan data-lang-vi>{node.labelVi || node.labelEn}</tspan>
                     </text>
 
                     {/* Subtitle / Tech stack */}
-                    <text x={w / 2} y={NodeIcon ? 68 : 48} textAnchor="middle" className="flow-node-sub">
+                    <text x={w / 2} y={nodeIcon ? 68 : 48} textAnchor="middle" className="flow-node-sub">
                       <tspan data-lang-en>{node.subEn}</tspan>
                       <tspan data-lang-vi>{node.subVi || node.subEn}</tspan>
                     </text>
                   </g>
 
-                  {/* Floating Warning / Danger Pill on top-center of Node */}
+                  {/* Label above the node; its background ends above the red outline (outline sits at y = -7) */}
                   {(isAlertNode || (!currentStep.alertNodeId && isDistress)) && (
-                    <g transform={`translate(${w / 2}, -11)`}>
+                    <g transform={`translate(${w / 2}, -18)`}>
                       <g className="flow-floating-badge danger">
-                        <rect x="-80" y="-11" width="160" height="22" rx="11" className="flow-floating-badge-bg danger" />
+                        <rect x="-80" y="-9" width="160" height="18" className="flow-floating-badge-bg" />
                         <text x="0" y="4" textAnchor="middle" className="flow-floating-badge-text">
-                          <tspan data-lang-en>{currentStep.alertLabelEn || '⚠️ BOTTLENECK'}</tspan>
-                          <tspan data-lang-vi>{currentStep.alertLabelVi || '⚠️ ĐIỂM NGHẼN'}</tspan>
+                          <tspan data-lang-en>{currentStep.alertLabelEn || 'Bottleneck'}</tspan>
+                          <tspan data-lang-vi>{currentStep.alertLabelVi || 'Điểm nghẽn'}</tspan>
                         </text>
                       </g>
                     </g>
                   )}
 
-                  {/* Floating Success Pill on top-center of Node */}
+                  {/* Green label above the node, same placement as the red one */}
                   {isSuccessNode && (
-                    <g transform={`translate(${w / 2}, -11)`}>
+                    <g transform={`translate(${w / 2}, -18)`}>
                       <g className="flow-floating-badge success">
-                        <rect x="-80" y="-11" width="160" height="22" rx="11" className="flow-floating-badge-bg success" />
+                        <rect x="-80" y="-9" width="160" height="18" className="flow-floating-badge-bg" />
                         <text x="0" y="4" textAnchor="middle" className="flow-floating-badge-text">
-                          <tspan data-lang-en>{currentStep.successLabelEn || '✓ OPTIMIZED'}</tspan>
-                          <tspan data-lang-vi>{currentStep.successLabelVi || '✓ TỐI ƯU'}</tspan>
+                          <tspan data-lang-en>{currentStep.successLabelEn || 'Fixed'}</tspan>
+                          <tspan data-lang-vi>{currentStep.successLabelVi || 'Đã ổn'}</tspan>
                         </text>
                       </g>
                     </g>
@@ -1018,9 +986,6 @@ export default function AnimatedFlow({
           <div className="telemetry-badge-container">
             {currentStep.badge && (
               <span className={`telemetry-badge type-${currentStep.badge.type}`}>
-                {currentStep.badge.type === 'danger' && <span className="telemetry-icon-siren">🚨</span>}
-                {currentStep.badge.type === 'warning' && <span className="telemetry-icon-siren">⚠️</span>}
-                {currentStep.badge.type === 'success' && <span className="telemetry-icon-siren">✓</span>}
                 <span data-lang-en>{currentStep.badge.textEn}</span>
                 <span data-lang-vi>{currentStep.badge.textVi}</span>
               </span>
