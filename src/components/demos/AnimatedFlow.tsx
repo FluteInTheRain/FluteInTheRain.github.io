@@ -91,143 +91,132 @@ export interface FlowScenario {
   nodes: FlowNode[];
   edges: FlowEdge[];
   steps: FlowStep[];
-  overallMetricEn: string;
-  overallMetricVi: string;
+  overallMetricEn?: string;
+  overallMetricVi?: string;
 }
 
 // Preset: Amazon Prime Video Architecture Comparison with generous spacing
 const PRIME_VIDEO_SCENARIOS: FlowScenario[] = [
   {
     id: 'serverless',
-    titleEn: '1. Serverless Architecture (Before)',
-    titleVi: '1. Kiến trúc Serverless (Trước đây)',
-    summaryEn: 'Thousands of micro-lambdas exchanging video frames through S3 storage and Step Functions. High latency, tier-1 request cost explosion.',
-    summaryVi: 'Hàng ngàn Lambda trao đổi frame video qua S3 và Step Functions. Chi phí đọc/ghi S3 bùng nổ, chạm trần giới hạn TPS.',
-    overallMetricEn: 'S3 Costs: $30,000+/mo · Step-Fn Triggers: High · Bottleneck: S3 I/O',
-    overallMetricVi: 'Chi phí S3: >$30,000/tháng · Trigger Step Functions liên tục · Nghẽn: S3 I/O',
+    titleEn: '1. Serverless, as first built',
+    titleVi: '1. Bản serverless ban đầu',
+    summaryEn: 'Separate serverless steps pass every frame through S3, and Step Functions orchestrates each one. It hit a hard limit at around 5% of the expected load.',
+    summaryVi: 'Các bước serverless riêng rẽ chuyền từng khung hình qua S3, Step Functions điều phối từng bước. Hệ thống đụng giới hạn cứng ở khoảng 5% tải dự kiến.',
     nodes: [
-      { id: 'video-source', labelEn: 'Live Feed', labelVi: 'Luồng Live', subEn: 'Video Input', subVi: 'Nguồn Video', x: 20, y: 160, width: 115, height: 80, icon: 'video', type: 'source' },
-      { id: 'converter', labelEn: 'Chunk Splitter', labelVi: 'Bộ chia Frame', subEn: 'Lambda Chunker', subVi: 'Lambda chia nhỏ', x: 235, y: 160, width: 130, height: 80, icon: 'scissors', type: 'worker' },
-      { id: 's3-bucket', labelEn: 'Amazon S3', labelVi: 'Amazon S3', subEn: 'S3 Transit (Bottleneck)', subVi: 'Lưu tạm S3 (Nút nghẽn)', x: 475, y: 160, width: 165, height: 80, icon: 'storage', type: 'bottleneck' },
-      { id: 'step-fn', labelEn: 'Step Functions', labelVi: 'Step Functions', subEn: 'State Machine & Poller', subVi: 'Máy trạng thái điều phối', x: 475, y: 24, width: 165, height: 80, icon: 'workflow', type: 'default' },
-      { id: 'defect-detector', labelEn: 'Defect Detector', labelVi: 'Bắt lỗi Video/Audio', subEn: 'Micro-Lambdas', subVi: 'Cụm Lambda phân tích', x: 745, y: 160, width: 145, height: 80, icon: 'scan', type: 'worker' },
+      { id: 'video-source', labelEn: 'Live stream', labelVi: 'Luồng trực tiếp', subEn: 'video input', subVi: 'nguồn video', x: 20, y: 160, width: 115, height: 80, icon: 'video', type: 'source' },
+      { id: 'converter', labelEn: 'Media converter', labelVi: 'Bộ chuyển đổi', subEn: 'frames and audio', subVi: 'tách khung hình, âm thanh', x: 235, y: 160, width: 130, height: 80, icon: 'scissors', type: 'worker' },
+      { id: 's3-bucket', labelEn: 'Amazon S3', labelVi: 'Amazon S3', subEn: 'every frame stops here', subVi: 'khung hình nào cũng ghé qua', x: 475, y: 160, width: 165, height: 80, icon: 'storage', type: 'bottleneck' },
+      { id: 'step-fn', labelEn: 'Step Functions', labelVi: 'Step Functions', subEn: 'orchestrates each step', subVi: 'điều phối từng bước', x: 475, y: 24, width: 165, height: 80, icon: 'workflow', type: 'default' },
+      { id: 'defect-detector', labelEn: 'Defect detectors', labelVi: 'Bộ bắt lỗi', subEn: 'video and audio', subVi: 'hình và tiếng', x: 745, y: 160, width: 145, height: 80, icon: 'scan', type: 'worker' },
     ],
     edges: [
-      { id: 'e1', from: 'video-source', to: 'converter', labelEn: 'Raw Stream', labelVi: 'Stream Gốc', curve: 'straight' },
-      { id: 'e2', from: 'converter', to: 's3-bucket', labelEn: 'PUTs/sec', labelVi: 'Ghi PUT/s', style: 'bottleneck', weight: 'heavy', curve: 'straight' },
-      { id: 'e3', from: 'step-fn', to: 's3-bucket', labelEn: 'Sync State', labelVi: 'Đồng bộ State', style: 'dashed', curve: 'vertical' },
-      { id: 'e4', from: 's3-bucket', to: 'defect-detector', labelEn: 'GETs/sec', labelVi: 'Đọc GET/s', style: 'bottleneck', weight: 'heavy', curve: 'straight' },
+      { id: 'e1', from: 'video-source', to: 'converter', labelEn: 'stream', labelVi: 'luồng video', curve: 'straight' },
+      { id: 'e2', from: 'converter', to: 's3-bucket', labelEn: 'write frames', labelVi: 'ghi khung hình', style: 'bottleneck', weight: 'heavy', curve: 'straight' },
+      { id: 'e3', from: 'step-fn', to: 's3-bucket', labelEn: 'state changes', labelVi: 'đổi trạng thái', style: 'dashed', curve: 'vertical' },
+      { id: 'e4', from: 's3-bucket', to: 'defect-detector', labelEn: 'read frames', labelVi: 'đọc khung hình', style: 'bottleneck', weight: 'heavy', curve: 'straight' },
     ],
     steps: [
       {
         stepIndex: 1,
         activeNodeIds: ['video-source', 'converter'],
         activeEdgeIds: ['e1'],
-        packet: { edgeId: 'e1', labelEn: 'Video Stream', labelVi: 'Luồng Video' },
-        metrics: { latency: '15ms', throughput: '1080p60 Stream', costImpact: '$0.001' },
-        badge: { textEn: 'Ingestion', textVi: 'Tiếp nhận', type: 'info' },
-        narrativeEn: 'Live video feed enters AWS infrastructure and is ingested by the chunking worker.',
-        narrativeVi: 'Luồng video trực tiếp đi vào hạ tầng AWS và được dịch vụ phân tách frame tiếp nhận.',
+        packet: { edgeId: 'e1', labelEn: 'stream', labelVi: 'luồng video' },
+        badge: { textEn: 'Take in the stream', textVi: 'Nhận luồng', type: 'info' },
+        narrativeEn: 'A live stream comes in, and the media converter splits it into video frames and audio.',
+        narrativeVi: 'Luồng trực tiếp đi vào, bộ chuyển đổi tách nó thành khung hình và âm thanh.',
       },
       {
         stepIndex: 2,
         activeNodeIds: ['converter', 's3-bucket'],
         activeEdgeIds: ['e2'],
         alertNodeId: 's3-bucket',
-        alertLabelEn: 'S3 request limit',
-        alertLabelVi: 'Chạm trần request S3',
-        packet: { edgeId: 'e2', labelEn: 'Chunk PUTs', labelVi: 'Ghi Frame lên S3' },
-        metrics: { latency: '120ms', throughput: '1,200 PUT/sec', costImpact: '$$ High API Cost' },
-        badge: { textEn: 'Bottleneck #1', textVi: 'Điểm nghẽn #1', type: 'warning' },
-        narrativeEn: 'Lambda splits video into individual image frames and writes each frame to S3. Writes rapidly overwhelm S3 Tier-1 API quotas.',
-        narrativeVi: 'Lambda chia video thành các frame ảnh riêng lẻ và ghi từng frame lên S3. Số lượng request PUT tăng phi mã, gây tốn kém chi phí giao dịch.',
+        alertLabelEn: 'Many small S3 calls',
+        alertLabelVi: 'Rất nhiều lần gọi S3',
+        packet: { edgeId: 'e2', labelEn: 'frames', labelVi: 'khung hình' },
+        badge: { textEn: 'Cost #1: S3 calls', textVi: 'Chi phí #1: gọi S3', type: 'warning' },
+        narrativeEn: 'Every frame is written to S3 so the next step can pick it up. Each write is a billed request.',
+        narrativeVi: 'Khung hình nào cũng được ghi lên S3 để bước sau lấy về. Mỗi lần ghi là một request tính tiền.',
       },
       {
         stepIndex: 3,
         activeNodeIds: ['s3-bucket', 'step-fn'],
         activeEdgeIds: ['e3'],
         alertNodeId: 'step-fn',
-        alertLabelEn: 'Cost climbs fast',
-        alertLabelVi: 'Chi phí tăng nhanh',
-        packet: { edgeId: 'e3', labelEn: 'State Polling', labelVi: 'Thăm dò trạng thái' },
-        metrics: { latency: '85ms', throughput: 'State transitions', costImpact: '$$ Step Fn pricing' },
-        badge: { textEn: 'Orchestration cost', textVi: 'Chi phí điều phối', type: 'warning' },
-        narrativeEn: 'AWS Step Functions polls S3 to orchestrate downstream worker jobs. Thousands of state transitions per minute pile up costs.',
-        narrativeVi: 'AWS Step Functions liên tục thăm dò S3 để điều phối chuỗi xử lý. Hàng ngàn bước chuyển trạng thái mỗi phút làm tăng vọt chi phí.',
+        alertLabelEn: 'Hits account limits',
+        alertLabelVi: 'Đụng giới hạn tài khoản',
+        packet: { edgeId: 'e3', labelEn: 'state change', labelVi: 'đổi trạng thái' },
+        badge: { textEn: 'Bottleneck: orchestration', textVi: 'Nút nghẽn: điều phối', type: 'danger' },
+        narrativeEn: 'Step Functions makes several state transitions for every second of every stream. That hit AWS account limits, and each transition is billed.',
+        narrativeVi: 'Step Functions chuyển trạng thái nhiều lần cho mỗi giây của mỗi luồng. Vậy là đụng giới hạn tài khoản AWS, mà lần chuyển nào cũng tính tiền.',
       },
       {
         stepIndex: 4,
         activeNodeIds: ['s3-bucket', 'defect-detector'],
         activeEdgeIds: ['e4'],
         alertNodeId: 's3-bucket',
-        alertLabelEn: 'Too many GETs',
-        alertLabelVi: 'Đọc S3 quá tải',
-        packet: { edgeId: 'e4', labelEn: 'Download Frame', labelVi: 'Tải Frame về Lambda' },
-        metrics: { latency: '240ms', throughput: 'Bandwidth saturation', costImpact: '$$$$ Critical S3 GET' },
-        badge: { textEn: 'Bottleneck #2: S3 reads', textVi: 'Điểm nghẽn #2: đọc S3', type: 'danger' },
-        narrativeEn: 'Defect-detecting Lambdas download frames back from S3. Read concurrency hits AWS account limits, throttling analysis pipelines.',
-        narrativeVi: 'Các Lambda phân tích phải đọc lại frame từ S3. Băng thông và số lượng GET request chạm trần tài khoản, gây nghẽn và chi phí đội lên gấp nhiều lần.',
+        alertLabelEn: 'Read back again',
+        alertLabelVi: 'Lại đọc về lần nữa',
+        packet: { edgeId: 'e4', labelEn: 'frames', labelVi: 'khung hình' },
+        badge: { textEn: 'Cost #2: reads', textVi: 'Chi phí #2: đọc lại', type: 'warning' },
+        narrativeEn: 'Each detector downloads the frames back from S3 to check them, so every frame pays for a write and several reads.',
+        narrativeVi: 'Từng bộ bắt lỗi lại tải khung hình từ S3 về để kiểm tra, nên mỗi khung hình tốn một lần ghi và vài lần đọc.',
       },
     ],
   },
   {
     id: 'monolith',
-    titleEn: '2. Consolidated In-Memory Monolith (After)',
-    titleVi: '2. Kiến trúc Monolith Trong Bộ Nhớ (Sau khi tái cấu trúc)',
-    summaryEn: 'Consolidated into a single Amazon EC2 / ECS process. Video frames pass via fast in-memory shared buffers. 90% cost drop and zero S3 IOPS.',
-    summaryVi: 'Hợp nhất thành một tiến trình chạy trên EC2 / ECS. Các frame truyền qua shared memory cực nhanh. Giảm 90% chi phí, xóa bỏ hoàn toàn I/O S3.',
-    overallMetricEn: 'S3 Costs: $0 (Eliminated) · Total Cost Reduction: -90% · Latency: Sub-10ms',
-    overallMetricVi: 'Chi phí S3: $0 (Triệt tiêu) · Tổng chi phí giảm: -90% · Độ trễ: <10ms',
+    titleEn: '2. One process, after the move',
+    titleVi: '2. Một process, sau khi gộp',
+    summaryEn: 'All components run in one process on Amazon ECS and EC2, and frames pass between them in memory. Infrastructure cost fell by over 90%.',
+    summaryVi: 'Mọi thành phần chạy trong một process trên Amazon ECS và EC2, khung hình chuyền giữa chúng ngay trong bộ nhớ. Chi phí hạ tầng giảm hơn 90%.',
     nodes: [
-      { id: 'video-source', labelEn: 'Live Feed', labelVi: 'Luồng Live', subEn: 'Video Input', subVi: 'Nguồn Video', x: 20, y: 125, width: 115, height: 80, icon: 'video', type: 'source' },
-      { id: 'monolith-container', labelEn: 'Amazon EC2 Instance (Single Monolithic Process)', labelVi: 'Máy chủ Amazon EC2 (Tiến trình Monolith duy nhất)', subEn: 'C6i Compute-Optimized', subVi: 'Instance tối ưu tính toán', x: 195, y: 12, width: 705, height: 268, icon: 'ec2', type: 'default' },
-      { id: 'mem-ingest', labelEn: 'Frame Demux', labelVi: 'Bộ nhận Frame', subEn: 'In-Memory Pipe', subVi: 'Ống dẫn RAM', x: 225, y: 125, width: 125, height: 80, icon: 'split', type: 'worker' },
-      { id: 'shared-mem', labelEn: 'Shared Memory', labelVi: 'Vùng nhớ chia sẻ', subEn: 'Zero-Copy Buffer', subVi: 'Ring Buffer RAM', x: 470, y: 125, width: 155, height: 80, icon: 'memory', type: 'success' },
-      { id: 'detector-video', labelEn: 'Video Detector', labelVi: 'Phân tích Video', subEn: 'Native C++ Thread', subVi: 'Thread C++ đồng thời', x: 735, y: 48, width: 145, height: 80, icon: 'film', type: 'worker' },
-      { id: 'detector-audio', labelEn: 'Audio Detector', labelVi: 'Phân tích Audio', subEn: 'Native C++ Thread', subVi: 'Thread C++ đồng thời', x: 735, y: 190, width: 145, height: 80, icon: 'audio', type: 'worker' },
+      { id: 'video-source', labelEn: 'Live stream', labelVi: 'Luồng trực tiếp', subEn: 'video input', subVi: 'nguồn video', x: 20, y: 125, width: 115, height: 80, icon: 'video', type: 'source' },
+      { id: 'monolith-container', labelEn: 'One process on Amazon ECS / EC2', labelVi: 'Một process trên Amazon ECS / EC2', subEn: 'scaled by running more copies', subVi: 'scale bằng cách chạy thêm bản sao', x: 195, y: 12, width: 705, height: 268, icon: 'ec2', type: 'default' },
+      { id: 'mem-ingest', labelEn: 'Media converter', labelVi: 'Bộ chuyển đổi', subEn: 'same code as before', subVi: 'vẫn là code cũ', x: 225, y: 125, width: 125, height: 80, icon: 'split', type: 'worker' },
+      { id: 'shared-mem', labelEn: 'Memory', labelVi: 'Bộ nhớ', subEn: 'frames stay here', subVi: 'khung hình ở lại đây', x: 470, y: 125, width: 155, height: 80, icon: 'memory', type: 'success' },
+      { id: 'detector-video', labelEn: 'Video detector', labelVi: 'Bắt lỗi hình', subEn: 'same process', subVi: 'cùng process', x: 735, y: 48, width: 145, height: 80, icon: 'film', type: 'worker' },
+      { id: 'detector-audio', labelEn: 'Audio detector', labelVi: 'Bắt lỗi tiếng', subEn: 'same process', subVi: 'cùng process', x: 735, y: 190, width: 145, height: 80, icon: 'audio', type: 'worker' },
     ],
     edges: [
-      { id: 'm1', from: 'video-source', to: 'mem-ingest', labelEn: 'TCP Ingest', labelVi: 'Nhận gói tin TCP', curve: 'straight' },
-      { id: 'm2', from: 'mem-ingest', to: 'shared-mem', labelEn: 'RAM Write', labelVi: 'Ghi vào RAM', weight: 'light', curve: 'straight' },
-      { id: 'm3', from: 'shared-mem', to: 'detector-video', labelEn: 'Pointer Read', labelVi: 'Đọc con trỏ', weight: 'light', curve: 'curved-up' },
-      { id: 'm4', from: 'shared-mem', to: 'detector-audio', labelEn: 'Pointer Read', labelVi: 'Đọc con trỏ', weight: 'light', curve: 'curved-down' },
+      { id: 'm1', from: 'video-source', to: 'mem-ingest', labelEn: 'stream', labelVi: 'luồng video', curve: 'straight' },
+      { id: 'm2', from: 'mem-ingest', to: 'shared-mem', labelEn: 'in memory', labelVi: 'trong bộ nhớ', weight: 'light', curve: 'straight' },
+      { id: 'm3', from: 'shared-mem', to: 'detector-video', labelEn: 'in memory', labelVi: 'trong bộ nhớ', weight: 'light', curve: 'curved-up' },
+      { id: 'm4', from: 'shared-mem', to: 'detector-audio', labelEn: 'in memory', labelVi: 'trong bộ nhớ', weight: 'light', curve: 'curved-down' },
     ],
     steps: [
       {
         stepIndex: 1,
         activeNodeIds: ['video-source', 'mem-ingest'],
         activeEdgeIds: ['m1'],
-        packet: { edgeId: 'm1', labelEn: 'TCP Ingest', labelVi: 'Nhận gói tin TCP' },
-        metrics: { latency: '8ms', throughput: '1080p60 Stream', costImpact: '$0 S3 API' },
-        badge: { textEn: 'Ingest', textVi: 'Nhận luồng', type: 'info' },
-        narrativeEn: 'Stream enters the monolithic daemon process running directly on the EC2 host.',
-        narrativeVi: 'Luồng video đi trực tiếp vào tiến trình daemon monolith chạy trên máy chủ EC2.',
+        packet: { edgeId: 'm1', labelEn: 'stream', labelVi: 'luồng video' },
+        badge: { textEn: 'Take in the stream', textVi: 'Nhận luồng', type: 'info' },
+        narrativeEn: 'The stream goes into one process that holds the converter and every detector.',
+        narrativeVi: 'Luồng video đi vào một process chứa cả bộ chuyển đổi lẫn mọi bộ bắt lỗi.',
       },
       {
         stepIndex: 2,
         activeNodeIds: ['mem-ingest', 'shared-mem'],
         activeEdgeIds: ['m2'],
         successNodeId: 'shared-mem',
-        successLabelEn: '0.1 ms, no copy',
-        successLabelVi: '0,1 ms, chỉ qua RAM',
-        packet: { edgeId: 'm2', labelEn: 'In-Memory Write', labelVi: 'Ghi vào Ring Buffer' },
-        metrics: { latency: '0.12ms', throughput: '12 GB/s RAM Bandwidth', costImpact: '$0 (Zero Disk I/O)' },
-        badge: { textEn: 'Write to RAM', textVi: 'Ghi vào RAM', type: 'success' },
-        narrativeEn: 'Frames are written straight into a shared memory ring buffer. No HTTP requests, no S3 calls, zero disk roundtrips.',
-        narrativeVi: 'Các frame được ghi thẳng vào vùng nhớ chia sẻ (Shared Memory Ring Buffer). Không cần HTTP, không gọi S3, không tốn I/O đĩa.',
+        successLabelEn: 'No S3 in between',
+        successLabelVi: 'Không qua S3 nữa',
+        packet: { edgeId: 'm2', labelEn: 'frames', labelVi: 'khung hình' },
+        badge: { textEn: 'Hand over in memory', textVi: 'Chuyền trong bộ nhớ', type: 'success' },
+        narrativeEn: 'Frames stay in memory. There is no S3 bucket between steps and no Step Functions state to pay for.',
+        narrativeVi: 'Khung hình nằm yên trong bộ nhớ. Giữa các bước không còn bucket S3, cũng không còn trạng thái Step Functions nào phải trả tiền.',
       },
       {
         stepIndex: 3,
         activeNodeIds: ['shared-mem', 'detector-video', 'detector-audio'],
         activeEdgeIds: ['m3', 'm4'],
         successNodeId: 'shared-mem',
-        successLabelEn: '90% cheaper',
-        successLabelVi: 'Rẻ hơn 90%',
-        packet: { edgeId: 'm3', labelEn: 'Thread Read', labelVi: 'Đọc song song qua RAM' },
-        metrics: { latency: '2ms', throughput: 'Real-time 60fps', costImpact: '90% Cost Cut' },
-        badge: { textEn: 'Read in parallel', textVi: 'Đọc song song', type: 'success' },
-        narrativeEn: 'Video and audio defect detectors run as concurrent threads in the same process, inspecting memory buffers simultaneously.',
-        narrativeVi: 'Các thuật toán phân tích video và âm thanh chạy dưới dạng các luồng đồng thời trong cùng tiến trình, phân tích dữ liệu ngay trên RAM.',
+        successLabelEn: 'Over 90% cheaper',
+        successLabelVi: 'Rẻ hơn trên 90%',
+        packet: { edgeId: 'm3', labelEn: 'frames', labelVi: 'khung hình' },
+        badge: { textEn: 'Check for defects', textVi: 'Kiểm tra lỗi', type: 'success' },
+        narrativeEn: 'The detectors read the frames from the same memory. To handle more streams, Prime Video runs more copies of the process, each with a subset of the detectors.',
+        narrativeVi: 'Các bộ bắt lỗi đọc khung hình từ chính vùng nhớ đó. Cần xử lý nhiều luồng hơn thì Prime Video chạy thêm bản sao của process, mỗi bản giữ một phần các bộ bắt lỗi.',
       },
     ],
   },
@@ -531,10 +520,12 @@ export default function AnimatedFlow({
           <span data-lang-en>{scenario.summaryEn}</span>
           <span data-lang-vi>{scenario.summaryVi}</span>
         </p>
-        <div className="flow-metric-badge">
-          <span data-lang-en>{scenario.overallMetricEn}</span>
-          <span data-lang-vi>{scenario.overallMetricVi}</span>
-        </div>
+        {scenario.overallMetricEn && (
+          <div className="flow-metric-badge">
+            <span data-lang-en>{scenario.overallMetricEn}</span>
+            <span data-lang-vi>{scenario.overallMetricVi}</span>
+          </div>
+        )}
       </div>
 
       {/* Interactive Flow Canvas (SVG based) */}
@@ -990,7 +981,10 @@ export default function AnimatedFlow({
                 <span data-lang-vi>{currentStep.badge.textVi}</span>
               </span>
             )}
-            <span className="telemetry-step-id">Stage #{currentStep.stepIndex} of {scenario.steps.length}</span>
+            <span className="telemetry-step-id">
+              <span data-lang-en>Step {currentStep.stepIndex} of {scenario.steps.length}</span>
+              <span data-lang-vi>Bước {currentStep.stepIndex}/{scenario.steps.length}</span>
+            </span>
           </div>
 
           {currentStep.metrics && (
