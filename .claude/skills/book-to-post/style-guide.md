@@ -8,11 +8,12 @@ The reader is a developer new to the topic. They should understand each idea on 
   Example: replication lag. Plain: "a replica can be a few seconds behind the leader." Analogy: "like a shared doc that syncs every few seconds: a colleague may still see the old line." Example: "you update your profile, refresh, and the old name comes back from a replica." Then the details: read-your-writes, monotonic reads.
 
 - [ ] **Every `##` section carries at least one visual: a diagram, a table, a code block or a `Callout`.**
+- [ ] **Every `##` section that introduces new terms ends with a `<Concepts>` box explaining them in plain words (EN and VI).**
   The two closing sections ("Key takeaways", "Review questions") are lists by design and are exempt.
 
-- [ ] **Which visual for what: a custom flow, sequence, or mental model → Excalidraw; a real benchmark chart, external architecture figure, live UI/docs screenshot, or real-world photograph → Real image (`fetch_real_image.py` + `sourceTitle`/`sourceUrl` on `Figure`); a conference talk explanation (`30s–5min`) → Timestamped `<YouTube start={...} end={...} />`; a short visual demo (`5–15s`, `< 2MB`) → `<Video autoplay loop />`; real open-source code → `<GitHubCode />`; community discussion or engineer insight → `<QuoteCard />`; external reference card → `<LinkCard />`; real local measurement/stdout → `<TerminalOutput />`; a comparison or trade-off → table; a warning or tip → `Callout`.**
+- [ ] **Which visual for what: a chart, distribution, formula or timeline → on-page Astro SVG component; an architecture or request flow → on-page SVG component or `<AnimatedFlow />`; a parameter the reader should play with → React island; a hand-drawn mental model → Excalidraw (no generated infographic PNGs, see SKILL.md Step 6 B); a real benchmark chart, external architecture figure, live UI/docs screenshot, or real-world photograph → Real image (`fetch_real_image.py` + `sourceTitle`/`sourceUrl` on `Figure`); a conference talk explanation (`30s–5min`) → Timestamped `<YouTube start={...} end={...} />`; a short visual demo (`5–15s`, `< 2MB`) → `<Video autoplay loop />`; real open-source code → `<GitHubCode />`; community discussion or engineer insight → `<QuoteCard />`; external reference card → `<LinkCard />`; real local measurement/stdout → `<TerminalOutput />`; a comparison or trade-off → table; a warning or tip → `Callout`.**
   Example: "how a write travels from client to replicas" is a diagram; "Cloudflare's p99 latency spike during leader election" is a real chart extracted from their post with `sourceTitle`/`sourceUrl`; "Martin Kleppmann explaining write skew at QCon" is `<YouTube start={...} end={...} />`; "how Postgres implements it" is `<GitHubCode />`; "what engineers ran into on HN" is `<QuoteCard />`; "actual query plan timings" is `<TerminalOutput />`.
-  Every visual must explain something. Mix at least 1–2 real-world sourced visuals or artifacts with Excalidraw diagrams so the post feels grounded in real engineering evidence. No decoration, no generic stock images, no AI-generated pictures.
+  Every visual must explain something. Mix at least 1–2 real-world sourced visuals or artifacts with the on-page diagrams so the post feels grounded in real engineering evidence. No decoration, no generic stock images, no AI-generated pictures.
 
 - [ ] **Short paragraphs (≤ 4 sentences), short sentences, terms defined on first use.**
   Example: "An idempotent operation (one you can run twice with the same result as once) …". Define the term in the same sentence, not three sections later.
@@ -88,29 +89,16 @@ Reading from a replica right after a write can return the old value.
 - `Callout` `type` is `note`, `tip` or `warning`; `title` is optional.
 - Keep each `<Figure … />`, `<YouTube … />`, `<Video … />`, and `<LinkCard … />` on one line, and keep `<GitHubCode>`, `<QuoteCard>`, `<TerminalOutput>` open/close tags on their own lines (the Step 7 check relies on it).
 - `alt` says what the picture shows; `caption` says the point. They are not the same sentence.
-- Tables are plain Markdown; the site styles them. Keep cells short; 2–5 columns.
+- Tables are plain Markdown; the site styles them (full column width on desktop, sideways scroll on phones). Keep cells short; 2–5 columns.
 
 ## Diagram Strategy & Visual Standards
 
-Always choose the appropriate diagram tool according to Khang's 4-tier decision matrix:
+Diagrams are drawn on the page as Astro SVG components or React islands, using the site's CSS tokens and font. Which tool for what, the reference components, and the rules (size, bilingual labels, unique SVG ids, phone scrolling, honesty about simulated numbers) are in `SKILL.md` Step 6 B. Never generate "infographic" PNGs (title banner, pill/badge labels, card grids, gradients, emoji): Khang rejected them as AI-looking.
 
-1. **System Architecture & Data Flows → ByteByteGo Style (`ByteByteGoHq/system-design-101`)**:
-   - Visual identity: Explicit system component icons, numbered step badges (`①`, `②`, `③`), data payload callouts, clear directional arrows, and high-contrast 3-level color depth.
-   - **Showdown / Solo comparisons**: When contrasting two paradigms (e.g., Row-Store vs. Column-Store, Kafka vs. RabbitMQ), design them as a clean, direct visual face-off ("solo" duel). Show the concrete tangible difference (e.g., sequential disk blocks vs. columnar chunks) rather than a wall of text boxes.
-   - **Anti-collision rules (Strict)**: 
-     - Minimum 75px–115px connector spacing between nodes/columns.
-     - Always wrap connector/edge text with a white background badge (`padding: 2px 6px; background: #fff; border: 1px solid #e2e8f0; border-radius: 4px;`) so lines and arrows never cut through typography.
-     - Never let labels overlap adjacent node cards, borders, or neighboring text.
-2. **Cloud Infrastructure & DevOps → `mingrammer/diagrams` (Python)**:
-   - Visual identity: Official AWS / GCP / Azure / Kubernetes / Docker icons, structured network clusters, clean modern vector output.
-   - **Anti-collision rules (Strict)**:
-     - Always configure `"nodesep": "0.9"` and `"ranksep": "1.2"` (or greater) in `graph_attr`.
-     - Shorten long node labels and break text across multiple lines with explicit `\n` to prevent labels from colliding with neighbor nodes or bounding clusters.
-3. **Brainstorming & Mental Models → Excalidraw**:
-   - Visual identity: Organic hand-drawn strokes (Rough.js), hand-drawn typography (Virgil/Cascadia), human intuition and mental models.
-4. **Interactive System Flows & Demos → Animated Flow (`<AnimatedFlow />`) / ReactFlow (`@xyflow/react`)**:
-   - Visual identity: For architecture trade-offs or pipeline journeys where data packets travel through services over time (e.g. Microservices vs. Monolith, OLTP to OLAP CDC pipeline), use `<AnimatedFlow />` (`src/components/mdx/AnimatedFlow.astro`).
-   - Features: Play/Pause controls, step scrubbing, speed selector (1x, 1.5x, 2x), before/after scenario comparison, and real-time telemetry log.
+- **Showdown / solo comparisons**: when contrasting two paradigms (Row-Store vs. Column-Store, a contained fault vs. a cascading failure), draw them as a direct visual face-off, top/bottom or left/right, showing the tangible difference rather than a wall of text boxes.
+- **No collisions**: no label crosses a line, box or other label; nothing is cut at the figure edge; Vietnamese labels (~20% longer) fit too. Place labels in empty space next to what they explain instead of boxing them.
+- **Motion only when it teaches**: `<AnimatedFlow />` packets moving along edges are fine; shaking, pulsing or blinking to signal "danger" is not. A static red outline says it.
+- **`mingrammer/diagrams` (Python)** stays for cloud infrastructure with official vendor icons: set `"nodesep": "0.9"` and `"ranksep": "1.2"` in `graph_attr` and break long labels with `\n`.
 
 ## The Hero Intro Hook & Centerpiece Visual
 
@@ -128,7 +116,9 @@ Every post must feature a high-impact intro that instantly hooks the reader befo
    - Keep all `##` headings punchy, short, and clear.
    - The sidebar Table of Contents (TOC) strictly renders H2 titles and strips technical prefixes/colons; concise headings ensure the sidebar remains elegant, readable, and never crowded.
 
-## Diagram colours (Excalidraw & ByteByteGo SVG)
+## Diagram colours (Excalidraw PNGs)
+
+On-page SVG figures use the CSS tokens instead (`--red`, `--text`, `--text-muted`, `--border`, ...) so they follow dark mode; the hex values below are the light-theme values of those tokens, for PNG tools that cannot read CSS.
 
 Use only these colors. They match the site, so a fresh machine needs no edit to the excalidraw skill's palette.
 
@@ -160,7 +150,8 @@ Go through the draft and fix every "no":
 - [ ] The angle from Step 4 is clear in the opening, and the sections follow it, not the chapter's order.
 - [ ] Each concept goes plain → analogy → example → details.
 - [ ] Comparisons between two architectures/paradigms (e.g. Row vs Column Store) are structured as direct visual showdowns ("solo"), focusing on tangible differences with minimal text clutter.
-- [ ] All diagrams pass the **Anti-Collision Rule**: NO overlapping text with boxes, nodes, or arrows; connectors have >= 75px-115px spacing; connector text is wrapped in white pill badges; Python/Graphviz diagrams have `nodesep: 0.9` and `ranksep: 1.2`.
+- [ ] All diagrams pass the **Anti-Collision Rule**: no text over boxes, lines or other text, nothing cut at the edge, in EN and VI; Python/Graphviz diagrams have `nodesep: 0.9` and `ranksep: 1.2`.
+- [ ] No generated infographic PNGs; every chart/diagram is an on-page component (or Excalidraw / mingrammer where SKILL.md Step 6 B allows), checked by screenshot in light, dark, VI and phone width.
 - [ ] Every `##` section (except the two closing ones) has a diagram, table, code block, animated flow (`<AnimatedFlow />`), or `Callout`.
 - [ ] No paragraph is over 4 sentences. No sentence needs a second read.
 - [ ] Every term is defined where it first appears.

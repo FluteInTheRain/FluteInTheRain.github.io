@@ -27,7 +27,8 @@ Posts with 100% AI-drawn diagrams can still feel synthetic. Real engineers mix t
 ## Never
 
 - Add a cluttered, multi-box text-heavy diagram as the hero image. The hero visual must be exactly ONE artistic, philosophical, or real-world metaphor (e.g. balance scale, solo face-off), placed directly at the top with NO preamble announcement.
-- Overlap text with boxes, nodes, or arrows in diagrams (always maintain >= 75px-115px connector spacing, wrap edge labels in white pill badges, and set `nodesep: 0.9` / `ranksep: 1.2` in Python diagrams).
+- Overlap text with boxes, nodes, or arrows in diagrams (keep labels in empty space next to what they explain, and set `nodesep: 0.9` / `ranksep: 1.2` in Python diagrams).
+- Add generated "infographic" PNGs (title banner, pill/badge labels, card grids, gradients, emoji). Diagrams and charts are drawn on the page; see `.claude/skills/book-to-post/SKILL.md` Step 6 B.
 - Copy a figure from a copyrighted book in `books/`.
 - Use generic decorative stock photos, unsourced memes, or AI-generated illustrations. Every image or video must explain a concrete technical point.
 - Embed an external image without inspecting it first using `Read` (to verify it is crisp, legible, and actually shows what the caption claims).
