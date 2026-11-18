@@ -16,7 +16,7 @@ if (progressBar) {
 
 // 2. Table of Contents Active Spy & Bilingual Sync
 const tocLinks = document.querySelectorAll<HTMLAnchorElement>('.toc-link');
-const articleHeadings = document.querySelectorAll<HTMLElement>('.prose h2');
+const articleHeadings = document.querySelectorAll<HTMLElement>('.prose h2, .prose h3');
 
 if (tocLinks.length > 0 && articleHeadings.length > 0) {
   const headingMap = new Map<string, HTMLAnchorElement>();

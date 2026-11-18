@@ -114,7 +114,7 @@ Every post must feature a high-impact intro that instantly hooks the reader befo
    - Explicitly list the 3–4 core engineering dilemmas the post resolves so readers and hiring managers know the exact depth of knowledge to expect.
 4. **Concise Section Headings (Clean TOC)**:
    - Keep all `##` headings punchy, short, and clear.
-   - The sidebar Table of Contents (TOC) strictly renders H2 titles and strips technical prefixes/colons; concise headings ensure the sidebar remains elegant, readable, and never crowded.
+   - The sidebar Table of Contents (TOC) shows `##` sections and the `###` sub-sections under them (indented). It cuts each title at the first `:` or `—`, except a generic "Approach 1: …" / "Cách tiếp cận 1: …" prefix, where it shows the part after the colon without a trailing `(…)`. So keep `##` and `###` headings short, and put the meaningful words before the colon.
 
 ## Diagram colours (Excalidraw PNGs)
 
@@ -151,6 +151,7 @@ Go through the draft and fix every "no":
 - [ ] Each concept goes plain → analogy → example → details.
 - [ ] Comparisons between two architectures/paradigms (e.g. Row vs Column Store) are structured as direct visual showdowns ("solo"), focusing on tangible differences with minimal text clutter.
 - [ ] All diagrams pass the **Anti-Collision Rule**: no text over boxes, lines or other text, nothing cut at the edge, in EN and VI; Python/Graphviz diagrams have `nodesep: 0.9` and `ranksep: 1.2`.
+- [ ] Callout titles, Concepts titles and every label inside figures are sentence case, plain and human: no Title Case, ALL CAPS, emoji or hype words, and the Vietnamese reads naturally. Flow nodes use colour icons (logos / colour pictograms), not line icons.
 - [ ] No generated infographic PNGs; every chart/diagram is an on-page component (or Excalidraw / mingrammer where SKILL.md Step 6 B allows), checked by screenshot in light, dark, VI and phone width.
 - [ ] Every `##` section (except the two closing ones) has a diagram, table, code block, animated flow (`<AnimatedFlow />`), or `Callout`.
 - [ ] No paragraph is over 4 sentences. No sentence needs a second read.
