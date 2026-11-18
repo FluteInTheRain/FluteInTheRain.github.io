@@ -386,8 +386,89 @@ const TWITTER_FANOUT_SCENARIOS: FlowScenario[] = [
   },
 ];
 
+// Preset: Stripe moves subscriptions out of Customer records into their own table, online.
+// Facts only from Jacqueline Xu, "Online migrations at scale" (stripe.com/blog/online-migrations, 2017).
+const STRIPE_MIGRATION_SCENARIOS: FlowScenario[] = [
+  {
+    id: 'stripe-migration',
+    titleEn: 'Stripe subscriptions migration',
+    titleVi: 'Stripe chuyển subscription sang bảng mới',
+    summaryEn: 'Subscriptions lived in an array inside each Customer record. Stripe moved hundreds of millions of them into a Subscriptions table while billing kept running.',
+    summaryVi: 'Subscription từng nằm trong một mảng bên trong mỗi bản ghi Customer. Stripe chuyển hàng trăm triệu subscription sang bảng Subscriptions trong khi billing vẫn chạy.',
+    nodes: [
+      { id: 'writes', labelEn: 'Write paths', labelVi: 'Luồng ghi', subEn: 'create, update, renew', subVi: 'tạo, sửa, gia hạn', x: 20, y: 115, width: 150, height: 80, icon: 'server', type: 'source' },
+      { id: 'customers', labelEn: 'Customers table', labelVi: 'Bảng Customers', subEn: 'subscriptions array inside', subVi: 'mảng subscriptions bên trong', x: 360, y: 34, width: 190, height: 80, icon: 'database', type: 'storage' },
+      { id: 'subs', labelEn: 'Subscriptions table', labelVi: 'Bảng Subscriptions', subEn: 'one row per subscription', subVi: 'mỗi subscription một dòng', x: 360, y: 196, width: 190, height: 80, icon: 'database', type: 'storage' },
+      { id: 'reads', labelEn: 'Read paths', labelVi: 'Luồng đọc', subEn: 'API and services', subVi: 'API và các service', x: 750, y: 115, width: 150, height: 80, icon: 'server', type: 'default' },
+    ],
+    edges: [
+      { id: 'w-old', from: 'writes', to: 'customers', labelEn: 'write old', labelVi: 'ghi cũ', curve: 'curved-up' },
+      { id: 'w-new', from: 'writes', to: 'subs', labelEn: 'write new', labelVi: 'ghi mới', curve: 'curved-down' },
+      { id: 'backfill', from: 'customers', to: 'subs', labelEn: 'backfill', labelVi: 'chép bù', style: 'dashed', weight: 'heavy', curve: 'vertical' },
+      { id: 'r-old', from: 'customers', to: 'reads', labelEn: 'read old', labelVi: 'đọc cũ', curve: 'curved-down' },
+      { id: 'r-new', from: 'subs', to: 'reads', labelEn: 'read new', labelVi: 'đọc mới', curve: 'curved-up' },
+    ],
+    steps: [
+      {
+        stepIndex: 1,
+        activeNodeIds: ['writes', 'customers', 'subs', 'reads'],
+        activeEdgeIds: ['w-old', 'w-new', 'r-old'],
+        packet: { edgeId: 'w-new', labelEn: 'new subscription', labelVi: 'subscription mới' },
+        badge: { textEn: 'Phase 1: dual write', textVi: 'Giai đoạn 1: ghi kép', type: 'info' },
+        narrativeEn: 'Every new subscription is written to both the Customers table and the new Subscriptions table. Stripe ramped up the share of objects written twice slowly, watching operational metrics. Reads still use the old array.',
+        narrativeVi: 'Mỗi subscription mới được ghi vào cả bảng Customers lẫn bảng Subscriptions mới. Stripe tăng dần tỷ lệ object được ghi hai lần, vừa tăng vừa theo dõi các chỉ số vận hành. Luồng đọc vẫn dùng mảng cũ.',
+      },
+      {
+        stepIndex: 2,
+        activeNodeIds: ['writes', 'customers', 'subs'],
+        activeEdgeIds: ['backfill', 'w-old', 'w-new'],
+        packet: { edgeId: 'backfill', labelEn: 'old subscriptions', labelVi: 'subscription cũ' },
+        badge: { textEn: 'Phase 1: backfill', textVi: 'Giai đoạn 1: chép bù', type: 'info' },
+        narrativeEn: 'Old subscriptions exist only inside Customer records. A Scalding job on Hadoop lists them from database snapshots, so production is not scanned. A fleet of processes copies them in parallel, then the job runs again to check that none are missing.',
+        narrativeVi: 'Subscription cũ chỉ nằm trong bản ghi Customer. Một job Scalding trên Hadoop liệt kê chúng từ snapshot của database, nên không phải quét production. Một loạt process chép chúng sang song song, rồi job chạy lại lần nữa để chắc không sót cái nào.',
+      },
+      {
+        stepIndex: 3,
+        activeNodeIds: ['writes', 'customers', 'subs', 'reads'],
+        activeEdgeIds: ['w-old', 'w-new', 'r-new', 'r-old'],
+        successNodeId: 'reads',
+        successLabelEn: 'Scientist: results match',
+        successLabelVi: 'Scientist: kết quả khớp',
+        packet: { edgeId: 'r-new', labelEn: 'read', labelVi: 'đọc' },
+        badge: { textEn: 'Phase 2: read from new', textVi: 'Giai đoạn 2: đọc bảng mới', type: 'success' },
+        narrativeEn: 'Reads move to the Subscriptions table. The Scientist library from GitHub reads both places in production, compares the results and alerts on any difference.',
+        narrativeVi: 'Luồng đọc chuyển sang bảng Subscriptions. Thư viện Scientist của GitHub đọc cả hai nơi ngay trên production, so kết quả và báo động khi có khác biệt.',
+      },
+      {
+        stepIndex: 4,
+        activeNodeIds: ['writes', 'subs', 'reads', 'customers'],
+        activeEdgeIds: ['w-new', 'r-new'],
+        alertNodeId: 'customers',
+        alertLabelEn: 'old array access = error',
+        alertLabelVi: 'đụng mảng cũ là báo lỗi',
+        packet: { edgeId: 'w-new', labelEn: 'update', labelVi: 'cập nhật' },
+        badge: { textEn: 'Phase 3: stop writing old', textVi: 'Giai đoạn 3: ngừng ghi bảng cũ', type: 'warning' },
+        narrativeEn: 'Write paths move to the new table one by one. The subscription logic spans thousands of lines across several services, so any code that still reads the old array raises an error, so no code keeps using it by mistake.',
+        narrativeVi: 'Các luồng ghi lần lượt chuyển sang bảng mới. Logic subscription trải qua hàng nghìn dòng code ở nhiều service, nên code nào còn đọc mảng cũ sẽ báo lỗi ngay, để không đoạn code nào lỡ dùng tiếp nó.',
+      },
+      {
+        stepIndex: 5,
+        activeNodeIds: ['writes', 'subs', 'reads'],
+        activeEdgeIds: ['w-new', 'r-new'],
+        successNodeId: 'subs',
+        successLabelEn: 'the only copy now',
+        successLabelVi: 'giờ là bản duy nhất',
+        packet: { edgeId: 'r-new', labelEn: 'read', labelVi: 'đọc' },
+        badge: { textEn: 'Phase 4: remove old', textVi: 'Giai đoạn 4: xoá dữ liệu cũ', type: 'success' },
+        narrativeEn: 'The arrays are emptied lazily each time a subscription loads, and a final Scalding job and migration find the rest. No step needed downtime.',
+        narrativeVi: 'Các mảng cũ được làm rỗng dần mỗi khi một subscription được nạp, rồi một job Scalding và đợt migration cuối dọn nốt phần còn lại. Không bước nào cần downtime.',
+      },
+    ],
+  },
+];
+
 interface AnimatedFlowProps {
-  preset?: 'prime-video' | 'twitter-fanout';
+  preset?: 'prime-video' | 'twitter-fanout' | 'stripe-migration';
   scenarioId?: string;
   title?: string;
   titleVi?: string;
@@ -404,7 +485,8 @@ export default function AnimatedFlow({
   const uid = `flow${useId().replace(/[^a-zA-Z0-9_-]/g, '')}`;
   const arrowId = (state: ArrowState, weight: EdgeWeight) => `${uid}-arrow-${state}-${weight}`;
 
-  const scenarios = preset === 'twitter-fanout' ? TWITTER_FANOUT_SCENARIOS : PRIME_VIDEO_SCENARIOS;
+  const scenarios =
+    preset === 'stripe-migration' ? STRIPE_MIGRATION_SCENARIOS : preset === 'twitter-fanout' ? TWITTER_FANOUT_SCENARIOS : PRIME_VIDEO_SCENARIOS;
   const initialScenario = scenarios.find((s) => s.id === scenarioId) || scenarios[0];
   const [activeScenarioId, setActiveScenarioId] = useState<string>(initialScenario.id);
   const scenario = scenarios.find((s) => s.id === activeScenarioId) || initialScenario;
