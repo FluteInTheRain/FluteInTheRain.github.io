@@ -1,8 +1,8 @@
 ---
 title: "Why distributed systems break in slow motion: networks, clocks, pauses, and fencing"
 title_vi: "Vì sao hệ thống phân tán hỏng âm thầm: mạng, đồng hồ, tiến trình khựng và fencing token"
-description: "Cloudflare's leap-second panic, GitHub's 24-hour split, HBase zombie writes: DDIA chapter 9 explains why networks, clocks, and pauses break locks—and how fencing fixes it."
-description_vi: "Sự cố giây nhuận Cloudflare, 24 giờ chia đôi cluster ở GitHub, zombie ghi đè ở HBase: chương 9 DDIA mổ xẻ vì sao mạng, đồng hồ và GC pause phá khóa phân tán—và cách chặn bằng fencing token."
+description: "Cloudflare's leap-second panic, GitHub's 24-hour split, HBase zombie writes: why networks, clocks, and pauses break distributed locks, and how fencing tokens fix it."
+description_vi: "Sự cố giây nhuận Cloudflare, 24 giờ chia đôi cluster ở GitHub, zombie ghi đè ở HBase: vì sao mạng, đồng hồ và GC pause phá khóa phân tán, và cách chặn bằng fencing token."
 date: 2026-11-19
 category: "system-design"
 tags: ["distributed-systems", "networks", "clocks", "fencing-tokens", "system-models", "ddia"]
@@ -32,6 +32,10 @@ import DistTimeoutTradeoff from '../../components/mdx/DistTimeoutTradeoff.astro'
 import DistTrueTimeIntervals from '../../components/mdx/DistTrueTimeIntervals.astro';
 import DistFencingTokens from '../../components/mdx/DistFencingTokens.astro';
 import DistLeaseFencing from '../../components/mdx/DistLeaseFencing.astro';
+import DistSilenceCauses from '../../components/mdx/DistSilenceCauses.astro';
+import DistGithubFailover from '../../components/mdx/DistGithubFailover.astro';
+import DistPauseTimeline from '../../components/mdx/DistPauseTimeline.astro';
+import DistSimulationHarness from '../../components/mdx/DistSimulationHarness.astro';
 import heroChronometer from '../../assets/blog/trouble-with-distributed-systems-networks-clocks-fencing/frodsham-chronometer-mechanism.jpg';
 import githubInvalidTopology from '../../assets/blog/trouble-with-distributed-systems-networks-clocks-fencing/github-invalid-topology.png';
 import cloudflareLeapSecond from '../../assets/blog/trouble-with-distributed-systems-networks-clocks-fencing/cloudflare-leap-second-chart.png';
@@ -41,7 +45,7 @@ import cloudflareLeapSecond from '../../assets/blog/trouble-with-distributed-sys
 <Figure src={heroChronometer} alt="Brass gearwork of Charles Frodsham marine chronometer #2299 inside a gimballed wooden box, fitted with a telegraph break circuit" caption="A 19th-century marine chronometer fitted with a telegraph circuit: precision timekeeping wired into an unreliable line. Distributed systems live at that exact seam. Photo: CC BY-SA 4.0." sourceTitle="Wikimedia Commons: Frodsham chronometer mechanism" sourceUrl="https://commons.wikimedia.org/wiki/File:Frodsham_chronometer_mechanism.jpg" />
 
 > "They're funny things, Accidents. You never have them till you're having them."
-> &mdash; *A.A. Milne*, *The House at Pooh Corner* (1928), opening Chapter 9 of DDIA
+> &mdash; *A.A. Milne*, *The House at Pooh Corner* (1928)
 
 ### When one-in-a-million happens every Tuesday
 
@@ -51,7 +55,7 @@ On a single laptop, code feels clean and mathematical: either a function returns
 - **GitHub, October 21, 2018.** Routine maintenance on 100G optical gear cut connectivity between a US East hub and its primary data center for just 43 seconds. Automated failover promoted MySQL primaries on the US West Coast while the East kept accepting local writes, forcing 24 hours and 11 minutes of recovery.
 - **Google, HBase, and the physical world.** Cows grazing above a fiber line bent it enough to drop links; sharks chewed undersea cables; and HBase hit split-brain corruption when a Java garbage-collection pause froze a leaseholder long enough for another client to take over.
 
-Chapter 9 of Kleppmann and Riccomini's *Designing Data-Intensive Applications* (2nd edition) turns pessimism up to maximum to map every assumption you cannot safely make. We will walk through the six pieces that separate fragile clusters from survivable ones:
+The safe way to design for all this is to turn pessimism up to maximum and map every assumption you cannot make. We will walk through the six pieces that separate fragile clusters from survivable ones:
 
 1. **Faults and partial failures**: why distributed uncertainty breaks single-machine intuition.
 2. **Unreliable networks**: why TCP is not an application guarantee, and why static timeouts misfire.
@@ -84,27 +88,6 @@ Because of that choice, single-node code is almost always **deterministic**: run
 
 Now put two clerks in separate rooms passing paper slips through a pneumatic tube. When you drop an order in the tube and hear nothing back, did the tube jam, did the second clerk faint, or did the receipt slip blow off the counter on the return trip?
 
-| Property | Single computer | Distributed system |
-|---|---|---|
-| Memory model | Shared RAM with mutexes and atomics | Shared-nothing: separate RAM and disks |
-| Failure style | Usually total stop (crash or panic) | Partial failure (some nodes fine, some broken) |
-| Determinism | Same input almost always gives same output | Nondeterministic delays, pauses, and orderings |
-| Feedback | Error code or crash happens locally | Silence hides lost request vs. lost reply |
-
-In his famous 2010 note, Coda Hale summed up the physical messiness operators face: switch failures, whole-rack power cycles, data center network splits, and even a driver crashing a Ford pickup truck into a data center's air-conditioning unit. Once you run across multiple machines, one-in-a-million events happen every day.
-
-That partial-failure nature is a double-edged sword. It makes coordination hard, yet it is also the only reason you can run a rolling upgrade—rebooting one server at a time while keeping users online—and build a system more reliable than any individual machine inside it.
-
-<Concepts>
-
-- **Shared-nothing architecture**: a cluster design where each machine owns its own CPU, RAM, and disk, communicating only by passing messages over a network.
-- **Deterministic**: producing the exact same state transitions and outputs whenever the same inputs arrive in the same order.
-- **Rolling upgrade**: updating software on one node or small batch at a time while the rest of the cluster continues serving traffic.
-
-</Concepts>
-
----
-
 </En>
 
 <Vi>
@@ -112,7 +95,7 @@ That partial-failure nature is a double-edged sword. It makes coordination hard,
 <Figure src={heroChronometer} alt="Bộ máy đồng hồ hàng hải bằng đồng thau Charles Frodsham số 2299 trong hộp gỗ khớp các-đăng, có gắn mạch ngắt điện báo" caption="Một chiếc đồng hồ hàng hải thế kỷ 19 được gắn thêm mạch điện báo: đo thời gian chính xác nối vào một đường dây bất ổn. Hệ thống phân tán nằm đúng ở ranh giới đó. Ảnh: CC BY-SA 4.0." sourceTitle="Wikimedia Commons: Frodsham chronometer mechanism" sourceUrl="https://commons.wikimedia.org/wiki/File:Frodsham_chronometer_mechanism.jpg" />
 
 > "Tai nạn là thứ kỳ quặc lắm. Bạn chẳng bao giờ gặp nó, cho tới đúng lúc bạn đang gặp."
-> &mdash; *A.A. Milne*, *The House at Pooh Corner* (1928), câu mở đầu chương 9 DDIA
+> &mdash; *A.A. Milne*, *The House at Pooh Corner* (1928)
 
 ### Khi chuyện một phần triệu xảy ra vào mỗi thứ Ba
 
@@ -122,7 +105,7 @@ Trên một máy tính đơn lẻ, code chạy khá ngoan: hoặc xong việc, h
 - **GitHub, ngày 21/10/2018.** Khi bảo trì thiết bị quang 100G, đường nối giữa hub bờ Đông Mỹ và data center chính bị đứt đúng 43 giây. Hệ thống failover tự động bầu primary MySQL mới ở bờ Tây trong khi bờ Đông vẫn nhận ghi cục bộ, dẫn tới 24 giờ 11 phút khắc phục hậu quả.
 - **Google, HBase và thế giới thực.** Bò giẫm làm cong cáp quang, cá mập cắn cáp biển, còn HBase từng bị hỏng dữ liệu kiểu split-brain khi một cú khựng garbage collection (GC pause) đóng băng máy giữ lease đủ lâu để máy khác nhảy vào thế chỗ.
 
-Chương 9 sách *Designing Data-Intensive Applications* (bản 2) của Kleppmann và Riccomini bật chế độ bi quan tối đa để chỉ ra mọi giả định bạn không được phép tin. Mình sẽ đi qua sáu mảnh ghép phân biệt một cụm máy mong manh với một hệ thống sống sót qua bão:
+Cách thiết kế an toàn là bật chế độ bi quan tối đa và liệt kê mọi giả định bạn không được phép tin. Mình sẽ đi qua sáu mảnh ghép phân biệt một cụm máy mong manh với một hệ thống sống sót qua bão:
 
 1. **Lỗi toàn phần và lỗi một phần**: vì sao sự bất định phân tán phá vỡ trực giác lập trình trên một máy.
 2. **Mạng không đáng tin**: vì sao TCP không bảo đảm app đã xử lý, và vì sao timeout cố định luôn dở.
@@ -154,6 +137,37 @@ Code chạy trên một máy tính được bảo bọc bởi một lời nói d
 Nhờ vậy, phần mềm trên một máy gần như luôn **tất định (deterministic)**: chạy cùng câu lệnh trên cùng trạng thái thì ra cùng kết quả. Cứ hình dung một chủ tiệm đứng một mình ở quầy thu ngân: hoặc tiệm mở cửa và in hóa đơn đàng hoàng, hoặc mất điện đóng cửa nghỉ bán.
 
 Giờ đặt hai nhân viên ở hai phòng khác nhau, liên lạc qua ống chuyển giấy khí nén. Bạn thả đơn hàng vào ống rồi đợi mãi không thấy hồi âm: ống bị kẹt, người bên kia ngất xỉu, hay tờ biên nhận đã bị thổi bay trên đường quay về?
+
+</Vi>
+
+<DistSilenceCauses />
+
+<En>
+
+| Property | Single computer | Distributed system |
+|---|---|---|
+| Memory model | Shared RAM with mutexes and atomics | Shared-nothing: separate RAM and disks |
+| Failure style | Usually total stop (crash or panic) | Partial failure (some nodes fine, some broken) |
+| Determinism | Same input almost always gives same output | Nondeterministic delays, pauses, and orderings |
+| Feedback | Error code or crash happens locally | Silence hides lost request vs. lost reply |
+
+In his famous 2010 note, Coda Hale summed up the physical messiness operators face: switch failures, whole-rack power cycles, data center network splits, and even a driver crashing a Ford pickup truck into a data center's air-conditioning unit. Once you run across multiple machines, one-in-a-million events happen every day.
+
+That partial-failure nature is a double-edged sword. It makes coordination hard, yet it is also the only reason you can run a rolling upgrade—rebooting one server at a time while keeping users online—and build a system more reliable than any individual machine inside it.
+
+<Concepts>
+
+- **Shared-nothing architecture**: a cluster design where each machine owns its own CPU, RAM, and disk, communicating only by passing messages over a network.
+- **Deterministic**: producing the exact same state transitions and outputs whenever the same inputs arrive in the same order.
+- **Rolling upgrade**: updating software on one node or small batch at a time while the rest of the cluster continues serving traffic.
+
+</Concepts>
+
+---
+
+</En>
+
+<Vi>
 
 | Thuộc tính | Một máy tính | Hệ thống phân tán |
 |---|---|---|
@@ -192,12 +206,13 @@ Real datacenter networks fail far more often than most developers expect. One me
 
 <Figure src={githubInvalidTopology} alt="GitHub October 21, 2018 invalid database topology diagram showing US West Coast promoted to primary while US East Coast primary is crossed out across a 60 ms link" caption="A 43-second optical link interruption between GitHub's US East hub and data center caused Orchestrator's Raft quorum to fail MySQL primaries over to US West, leaving divergent writes across a 60 ms cross-country link for over 24 hours." sourceTitle="GitHub Engineering — October 21 post-incident analysis" sourceUrl="https://github.blog/news-insights/company-news/oct21-post-incident-analysis/" />
 
-### Timeout trade-offs
+### Case: GitHub's 43 seconds
 
-When a remote node goes silent, your only fallback is a **timeout**. Yet fixed timeouts trap you between two bad choices:
+The figure above comes from a real incident, and it shows a majority being right and still causing harm. GitHub stores its metadata in MySQL clusters and uses Orchestrator, a tool built on Raft consensus, to manage them and fail over automatically. At 22:52 UTC on October 21, 2018, maintenance on optical equipment cut the link between its US East Coast network hub and its primary East Coast data center. The link came back after 43 seconds.
 
-- **Too short**: a temporary traffic burst or noisy neighbor on shared cloud hardware triggers a false alarm. Shifting load off a "dead" node that is merely busy piles extra traffic onto healthy nodes, risking a cascading failure.
-- **Too long**: users stare at spinners or errors while you wait to declare a genuinely crashed server dead.
+In those 43 seconds, the Orchestrator nodes in the West Coast data center and in an East Coast public cloud formed a quorum and moved the MySQL primaries to the West. The East data center still held a short stretch of writes that had not been replicated. When the link returned, the application tier began sending writes to the new West primaries. Now each side held writes the other lacked, so GitHub could not fail back safely.
+
+The quorum answered "who is the leader?" correctly by its own rules. It never asked "can the applications live with that leader?" They could not: East Coast apps could not cope with a cross-country round trip on most database calls. GitHub chose to protect the data, restored the East clusters from backups, and the service ran degraded for 24 hours and 11 minutes. Its fix was to configure Orchestrator so it no longer promotes a primary across a regional boundary.
 
 </En>
 
@@ -214,6 +229,31 @@ Một gói `ACK` của TCP chỉ chứng minh đúng một việc: **kernel hệ
 Mạng data center thật hỏng nhiều hơn lập trình viên vẫn tưởng. Một nghiên cứu ở data center cỡ vừa ghi nhận trung bình khoảng 12 sự cố mạng mỗi tháng, nửa làm đứt một máy, nửa làm đứt cả tủ rack. Cáp đường dài từng bị mỏ neo, hải ly hay bò giẫm làm gián đoạn, còn switch đôi khi dính **lỗi bất đối xứng (asymmetric fault)**: nhận gói đi vào bình thường nhưng âm thầm đánh rơi toàn bộ gói trả ra.
 
 <Figure src={githubInvalidTopology} alt="Sơ đồ topology lỗi ngày 21/10/2018 của GitHub cho thấy US West được nâng lên primary trong khi primary ở US East bị gạch bỏ qua đường truyền trễ 60 ms" caption="Chỉ 43 giây gián đoạn tuyến quang ở bờ Đông Mỹ đã khiến quorum Raft của Orchestrator chuyển quyền primary MySQL sang bờ Tây, tạo ra dữ liệu phân kỳ qua đường truyền 60 ms và mất hơn 24 giờ để đồng bộ lại." sourceTitle="GitHub Engineering — October 21 post-incident analysis" sourceUrl="https://github.blog/news-insights/company-news/oct21-post-incident-analysis/" />
+
+### Ca thực tế: 43 giây của GitHub
+
+Hình trên lấy từ một sự cố có thật, và nó cho thấy một đa số có thể đúng mà vẫn gây hại. GitHub lưu metadata trong các cụm MySQL và dùng Orchestrator, công cụ xây trên đồng thuận Raft, để quản lý cụm và tự động failover. Lúc 22:52 UTC ngày 21/10/2018, việc bảo trì thiết bị quang làm đứt đường nối giữa hub mạng bờ Đông Mỹ và data center chính ở bờ Đông. Đường nối trở lại sau 43 giây.
+
+Trong 43 giây đó, các node Orchestrator ở data center bờ Tây và ở một public cloud bờ Đông lập được quorum và chuyển primary MySQL sang bờ Tây. Data center bờ Đông vẫn giữ một đoạn ghi chưa kịp sao chép. Khi đường nối trở lại, tầng ứng dụng bắt đầu gửi lệnh ghi tới các primary mới ở bờ Tây. Lúc này mỗi bên đều có dữ liệu ghi mà bên kia thiếu, nên GitHub không thể chuyển ngược lại một cách an toàn.
+
+Theo luật của nó, quorum trả lời đúng câu "ai là leader?". Nó không hỏi "ứng dụng có sống nổi với leader đó không?". Mà ứng dụng không sống nổi: app ở bờ Đông không chịu được một vòng khứ hồi xuyên nước Mỹ cho phần lớn lệnh gọi database. GitHub chọn bảo vệ dữ liệu, dựng lại các cụm bờ Đông từ bản backup, và dịch vụ chạy suy giảm suốt 24 giờ 11 phút. Cách sửa của họ là cấu hình Orchestrator để không nâng primary xuyên ranh giới vùng nữa.
+
+</Vi>
+
+<DistGithubFailover />
+
+<En>
+
+### Timeout trade-offs
+
+When a remote node goes silent, your only fallback is a **timeout**. Yet fixed timeouts trap you between two bad choices:
+
+- **Too short**: a temporary traffic burst or noisy neighbor on shared cloud hardware triggers a false alarm. Shifting load off a "dead" node that is merely busy piles extra traffic onto healthy nodes, risking a cascading failure.
+- **Too long**: users stare at spinners or errors while you wait to declare a genuinely crashed server dead.
+
+</En>
+
+<Vi>
 
 ### Đánh đổi khi đặt timeout
 
@@ -373,6 +413,41 @@ Two bugs hide in those eight lines. First, `lease.expiryTimeMillis` came from th
 
 Second, and far subtler: **even if you rewrite this with a monotonic stopwatch, the line after `if (lease.isValid())` has no timing guarantee.** Nothing stops the runtime from freezing this thread for 15 seconds right between checking the lease and executing `process(request)`. By the time it wakes up, the lease has long expired and another leader has taken over—yet this thread has no clue it was asleep.
 
+
+
+</En>
+
+<Vi>
+
+## 4. Khi tiến trình bị đóng băng giữa chừng
+
+Giả sử một shard database chỉ cho phép duy nhất một node làm leader tại một thời điểm, giữ quyền bằng **lease** (khóa có hạn giờ). Vòng lặp xử lý request trông sẽ kiểu thế này:
+
+```java
+while (true) {
+    request = getIncomingRequest();
+    // Đảm bảo lease luôn còn ít nhất 10 giây
+    if (lease.expiryTimeMillis - System.currentTimeMillis() < 10000) {
+        lease = lease.renew();
+    }
+    if (lease.isValid()) {
+        process(request);
+    }
+}
+```
+
+Có tới hai cái bẫy nằm gọn trong tám dòng code trên. Thứ nhất, `lease.expiryTimeMillis` tính theo đồng hồ của lock service, còn `System.currentTimeMillis()` đọc wall-clock cục bộ — chỉ cần hai máy lệch giờ hoặc NTP giật lùi là phép tính sai bét.
+
+Thứ hai, tinh vi hơn nhiều: **kể cả khi bạn đổi toàn bộ sang đồng hồ monotonic, không có gì bảo đảm dòng lệnh ngay sau `if (lease.isValid())` sẽ chạy ngay lập tức.** Hệ điều hành hoặc runtime hoàn toàn có thể đóng băng luồng này suốt 15 giây đúng ngay khe hở giữa kiểm tra lease và `process(request)`. Lúc tỉnh dậy, lease đã hết hạn và node khác đã lên làm leader — nhưng luồng vừa thức giấc không hề biết mình vừa ngủ quên.
+
+
+
+</Vi>
+
+<DistPauseTimeline />
+
+<En>
+
 | Pause source | Why it stalls your thread | Typical mitigation |
 |---|---|---|
 | Stop-the-world GC | Runtime freezes all threads to trace/compact heap | Low-pause collectors (ZGC, Shenandoah), object pools, or Rust/Zig |
@@ -399,27 +474,6 @@ Some teams shrink the blast radius: Netflix and LinkedIn have experimented with 
 </En>
 
 <Vi>
-
-## 4. Khi tiến trình bị đóng băng giữa chừng
-
-Giả sử một shard database chỉ cho phép duy nhất một node làm leader tại một thời điểm, giữ quyền bằng **lease** (khóa có hạn giờ). Vòng lặp xử lý request trông sẽ kiểu thế này:
-
-```java
-while (true) {
-    request = getIncomingRequest();
-    // Đảm bảo lease luôn còn ít nhất 10 giây
-    if (lease.expiryTimeMillis - System.currentTimeMillis() < 10000) {
-        lease = lease.renew();
-    }
-    if (lease.isValid()) {
-        process(request);
-    }
-}
-```
-
-Có tới hai cái bẫy nằm gọn trong tám dòng code trên. Thứ nhất, `lease.expiryTimeMillis` tính theo đồng hồ của lock service, còn `System.currentTimeMillis()` đọc wall-clock cục bộ — chỉ cần hai máy lệch giờ hoặc NTP giật lùi là phép tính sai bét.
-
-Thứ hai, tinh vi hơn nhiều: **kể cả khi bạn đổi toàn bộ sang đồng hồ monotonic, không có gì bảo đảm dòng lệnh ngay sau `if (lease.isValid())` sẽ chạy ngay lập tức.** Hệ điều hành hoặc runtime hoàn toàn có thể đóng băng luồng này suốt 15 giây đúng ngay khe hở giữa kiểm tra lease và `process(request)`. Lúc tỉnh dậy, lease đã hết hạn và node khác đã lên làm leader — nhưng luồng vừa thức giấc không hề biết mình vừa ngủ quên.
 
 | Nguồn gây khựng | Vì sao luồng bị treo | Cách giảm nhẹ phổ biến |
 |---|---|---|
@@ -571,11 +625,52 @@ Within a model, correctness splits into two complementary guarantees (Alpern & S
 
 ### Testing with TLA+, Jepsen, and DST
 
-Because concurrency, delays, and pauses create astronomical state spaces, unit tests barely scratch the surface. DDIA's second edition highlights how leading infrastructure teams verify distributed correctness today:
+Because concurrency, delays, and pauses create astronomical state spaces, unit tests barely scratch the surface. Here is how leading infrastructure teams verify distributed correctness today:
 
 1. **Formal model checking (`TLA+`, `P`, `FizzBee`)**: write a concise mathematical specification of your protocol and let a model checker exhaustively explore bounded states for broken invariants. AWS famously used TLA+ on DynamoDB and S3, while Kafka, CockroachDB, and TiDB check protocol specs this way—catching subtle flaws like a Viewstamped Replication data-loss edge case hidden in prose. The catch: your specification can drift away from your actual code.
 2. **Fault injection (`Jepsen`, `Chaos Monkey`)**: run the real cluster and violently cut networks, pause processes with `SIGSTOP`, and unmount disks while checking whether linearizability or serializability holds. Jepsen has exposed data-loss bugs across dozens of production databases, though failures can be hard to replay deterministically.
 3. **Deterministic Simulation Testing (DST)**: run your **real production code** inside a simulator that replaces every source of nondeterminism—network sockets, disk I/O, timers, RNGs—with mocked, seeded deterministic shims.
+
+
+
+</En>
+
+<Vi>
+
+## 6. Mô hình hệ thống và kiểm chứng trước khi sập
+
+Để thiết kế hay chứng minh thuật toán mà không phụ thuộc chi tiết từng đời switch hay SSD, kỹ sư hình thức hóa những lỗi được phép xảy ra thành một **mô hình hệ thống (system model)**:
+
+| Mô hình thời gian | Trễ mạng & khựng tiến trình | Sai số đồng hồ | Độ khớp ngoài đời thực |
+|---|---|---|---|
+| **Synchronous (đồng bộ)** | Có trần trên tuyệt đối | Có giới hạn cứng | Phần cứng nhúng thời gian thực; không thực tế trên cloud |
+| **Partially synchronous** | Ổn định phần lớn thời gian, thỉnh thoảng vượt ngưỡng bất định | Ổn định trừ lúc trục trặc | **Mô tả đúng hầu hết cụm máy chủ và data center thật** |
+| **Asynchronous (bất đồng bộ)** | Trễ vô hạn; cấm dùng đồng hồ hay timeout | Không có đồng hồ | Chuẩn lý thuyết cực kỳ khắt khe |
+
+Đi kèm thời gian là mô hình lỗi node: **crash-stop** (sập là mất hút vĩnh viễn), **crash-recovery** (sập rồi mất RAM nhưng đĩa bền vững còn nguyên và có thể bật lại), **fail-slow / gray failure** (node "đi khập khiễng": card mạng tụt xuống 1 Kb/s hay luồng nền bị deadlock trong khi health check vẫn trả `200 OK`), hoặc **Byzantine**.
+
+Thực tế, cặp **partially synchronous + crash-recovery** phản ánh sát nhất hệ thống máy chủ — dù đời thực vẫn có lúc vượt cả mô hình, chẳng hạn lỗi firmware làm server quên sạch ổ cứng khi khởi động lại, phá vỡ giả định đĩa bền vững không bị mất trí nhớ.
+
+Trong mô hình đã chọn, tính đúng đắn chia làm hai tính chất bổ sung cho nhau (Alpern & Schneider, 1985):
+
+- **Safety ("điều xấu không bao giờ xảy ra")**: ví dụ không bao giờ có hai client nhận cùng fencing token, và token luôn tăng dần. Khi safety bị phá, ta chỉ ra được đúng khoảnh khắc hỏng và thiệt hại đã thành sự thật — nên thuật toán phân tán bắt buộc safety luôn đúng **trong mọi hoàn cảnh**, kể cả lúc mạng đứt sạch.
+- **Liveness ("điều tốt cuối cùng sẽ xảy ra")**: ví dụ client còn sống xin token rồi sẽ nhận được phản hồi, hay các replica cuối cùng sẽ hội tụ. Liveness được phép kèm điều kiện: nó chỉ giữ khi đa số node còn sống và mạng cuối cùng hồi phục.
+
+### Kiểm chứng bằng TLA+, Jepsen và DST
+
+Do song song hóa, độ trễ và các cú khựng tạo ra không gian trạng thái khổng lồ, unit test thông thường gần như bất lực. Đây là cách các đội ngũ hạ tầng hàng đầu kiểm chứng hệ thống phân tán ngày nay:
+
+1. **Kiểm tra mô hình hình thức (`TLA+`, `P`, `FizzBee`)**: viết đặc tả toán học gọn nhẹ của giao thức để công cụ duyệt vét cạn các trạng thái giới hạn tìm lỗi bất biến. AWS dùng TLA+ cho DynamoDB và S3; Kafka, CockroachDB và TiDB cũng kiểm tra thiết kế giao thức theo cách này — thậm chí phát hiện lỗ hổng mất dữ liệu trong bài báo gốc của Viewstamped Replication. Điểm yếu là bản đặc tả có thể dần lệch khỏi code chạy thật.
+2. **Tiêm lỗi (`Jepsen`, `Chaos Monkey`)**: dựng cụm chạy thật rồi thẳng tay cắt mạng, đóng băng tiến trình bằng `SIGSTOP` và gỡ ổ đĩa xem tính nhất quán có gãy không. Jepsen đã lôi ra lỗi mất dữ liệu ở hàng chục database nổi tiếng, nhưng lỗi bắt được lại khó tái hiện y hệt từng bước.
+3. **Mô phỏng tất định (`Deterministic Simulation Testing — DST`)**: chạy **chính code production của bạn** trong một bộ mô phỏng thay thế toàn bộ nguồn gây bất định — socket mạng, I/O đĩa, bộ đếm giờ, hàm ngẫu nhiên — bằng các bản giả lập chạy theo một hạt giống (seed) cố định.
+
+
+
+</Vi>
+
+<DistSimulationHarness />
+
+<En>
 
 FoundationDB pioneered application-level DST with its asynchronous **Flow** runtime, running an entire multi-node cluster inside one thread for 18 months before ever sending a real packet. **TigerBeetle** executes its state machine inside a single deterministic event loop and splits its simulator (**VOPR**) into safety mode and protocol-aware **liveness mode** so fault storms do not hide deadlock bugs. At the runtime and machine levels, **MadSim** swaps Rust's Tokio/S3/Kafka libraries for deterministic mocks, FrostDB patches Go's scheduler, and **Antithesis** runs unmodified containers inside a deterministic custom hypervisor that compresses simulated time and replays any bug from a single random seed. Even then, determinism takes discipline: random hash-map iteration order or sudden memory limits can still introduce surprises.
 
@@ -616,33 +711,6 @@ FoundationDB pioneered application-level DST with its asynchronous **Flow** runt
 </En>
 
 <Vi>
-
-## 6. Mô hình hệ thống và kiểm chứng trước khi sập
-
-Để thiết kế hay chứng minh thuật toán mà không phụ thuộc chi tiết từng đời switch hay SSD, kỹ sư hình thức hóa những lỗi được phép xảy ra thành một **mô hình hệ thống (system model)**:
-
-| Mô hình thời gian | Trễ mạng & khựng tiến trình | Sai số đồng hồ | Độ khớp ngoài đời thực |
-|---|---|---|---|
-| **Synchronous (đồng bộ)** | Có trần trên tuyệt đối | Có giới hạn cứng | Phần cứng nhúng thời gian thực; không thực tế trên cloud |
-| **Partially synchronous** | Ổn định phần lớn thời gian, thỉnh thoảng vượt ngưỡng bất định | Ổn định trừ lúc trục trặc | **Mô tả đúng hầu hết cụm máy chủ và data center thật** |
-| **Asynchronous (bất đồng bộ)** | Trễ vô hạn; cấm dùng đồng hồ hay timeout | Không có đồng hồ | Chuẩn lý thuyết cực kỳ khắt khe |
-
-Đi kèm thời gian là mô hình lỗi node: **crash-stop** (sập là mất hút vĩnh viễn), **crash-recovery** (sập rồi mất RAM nhưng đĩa bền vững còn nguyên và có thể bật lại), **fail-slow / gray failure** (node "đi khập khiễng": card mạng tụt xuống 1 Kb/s hay luồng nền bị deadlock trong khi health check vẫn trả `200 OK`), hoặc **Byzantine**.
-
-Thực tế, cặp **partially synchronous + crash-recovery** phản ánh sát nhất hệ thống máy chủ — dù đời thực vẫn có lúc vượt cả mô hình, chẳng hạn lỗi firmware làm server quên sạch ổ cứng khi khởi động lại, phá vỡ giả định đĩa bền vững không bị mất trí nhớ.
-
-Trong mô hình đã chọn, tính đúng đắn chia làm hai tính chất bổ sung cho nhau (Alpern & Schneider, 1985):
-
-- **Safety ("điều xấu không bao giờ xảy ra")**: ví dụ không bao giờ có hai client nhận cùng fencing token, và token luôn tăng dần. Khi safety bị phá, ta chỉ ra được đúng khoảnh khắc hỏng và thiệt hại đã thành sự thật — nên thuật toán phân tán bắt buộc safety luôn đúng **trong mọi hoàn cảnh**, kể cả lúc mạng đứt sạch.
-- **Liveness ("điều tốt cuối cùng sẽ xảy ra")**: ví dụ client còn sống xin token rồi sẽ nhận được phản hồi, hay các replica cuối cùng sẽ hội tụ. Liveness được phép kèm điều kiện: nó chỉ giữ khi đa số node còn sống và mạng cuối cùng hồi phục.
-
-### Kiểm chứng bằng TLA+, Jepsen và DST
-
-Do song song hóa, độ trễ và các cú khựng tạo ra không gian trạng thái khổng lồ, unit test thông thường gần như bất lực. Ấn bản thứ hai của DDIA dành riêng phần lớn cuối chương để giới thiệu cách các đội ngũ hạ tầng hàng đầu kiểm chứng hệ thống ngày nay:
-
-1. **Kiểm tra mô hình hình thức (`TLA+`, `P`, `FizzBee`)**: viết đặc tả toán học gọn nhẹ của giao thức để công cụ duyệt vét cạn các trạng thái giới hạn tìm lỗi bất biến. AWS dùng TLA+ cho DynamoDB và S3; Kafka, CockroachDB và TiDB cũng kiểm tra thiết kế giao thức theo cách này — thậm chí phát hiện lỗ hổng mất dữ liệu trong bài báo gốc của Viewstamped Replication. Điểm yếu là bản đặc tả có thể dần lệch khỏi code chạy thật.
-2. **Tiêm lỗi (`Jepsen`, `Chaos Monkey`)**: dựng cụm chạy thật rồi thẳng tay cắt mạng, đóng băng tiến trình bằng `SIGSTOP` và gỡ ổ đĩa xem tính nhất quán có gãy không. Jepsen đã lôi ra lỗi mất dữ liệu ở hàng chục database nổi tiếng, nhưng lỗi bắt được lại khó tái hiện y hệt từng bước.
-3. **Mô phỏng tất định (`Deterministic Simulation Testing — DST`)**: chạy **chính code production của bạn** trong một bộ mô phỏng thay thế toàn bộ nguồn gây bất định — socket mạng, I/O đĩa, bộ đếm giờ, hàm ngẫu nhiên — bằng các bản giả lập chạy theo một hạt giống (seed) cố định.
 
 FoundationDB mở đường cho DST ở tầng ứng dụng bằng runtime bất đồng bộ **Flow**, cho cả cụm nhiều node chạy giả lập trong một luồng suốt 18 tháng trước khi gửi gói tin thật đầu tiên. **TigerBeetle** thiết kế toàn bộ database như một máy trạng thái chạy trong một event loop đơn và tách bộ mô phỏng (**VOPR**) thành hai chế độ: Safety và **Liveness có nhận thức giao thức** để bão lỗi không che khuất bug deadlock. Ở tầng runtime và máy ảo, **MadSim** thay các thư viện Tokio/S3/Kafka của Rust bằng bản tất định, FrostDB vá bộ lập lịch goroutine của Go, còn **Antithesis** chạy nguyên các container không cần sửa code bên trong một hypervisor tùy biến tất định, tua nhanh thời gian và tái hiện mọi bug hiếm chỉ bằng một con số seed. Dù vậy, giữ được tính tất định vẫn đòi hỏi kỷ luật: thứ tự duyệt bảng băm ngẫu nhiên hay giới hạn bộ nhớ đột ngột vẫn có thể lọt bất định vào bài test.
 
