@@ -1,8 +1,8 @@
 ---
 title: "Unbundling the database: dataflow, read/write boundaries, and end-to-end correctness"
 title_vi: "Tháo rời database: luồng dữ liệu, ranh giới đọc/ghi và tính đúng đắn đầu-cuối"
-description: "Why ACID transactions still double-charge on retries, how unbundled logs replace 2PC across shards, and why integrity beats timeliness—DDIA chapter 13."
-description_vi: "Vì sao transaction ACID vẫn trừ tiền hai lần khi rớt mạng, cách log phân mảnh thay thế 2PC, và vì sao toàn vẹn dữ liệu quan trọng hơn tốc độ đồng bộ: chương 13 DDIA."
+description: "Why ACID transactions still double-charge on retries, how unbundled logs replace 2PC across shards, and why integrity beats timeliness."
+description_vi: "Vì sao transaction ACID vẫn trừ tiền hai lần khi rớt mạng, cách log phân mảnh thay thế 2PC, và vì sao toàn vẹn dữ liệu quan trọng hơn tốc độ đồng bộ."
 date: 2026-11-19
 category: "system-design"
 tags: ["distributed-systems", "streaming-architecture", "unbundling", "end-to-end", "idempotence", "local-first", "ddia"]
@@ -30,21 +30,24 @@ import YouTube from '../../components/mdx/YouTube.astro';
 import UnbundledWriteReadBoundary from '../../components/mdx/UnbundledWriteReadBoundary.astro';
 import UnbundledMultishardPayment from '../../components/mdx/UnbundledMultishardPayment.astro';
 import UnbundledPayment from '../../components/mdx/UnbundledPayment.astro';
+import UnbundledIdempotentRetry from '../../components/mdx/UnbundledIdempotentRetry.astro';
+import UnbundledDualView from '../../components/mdx/UnbundledDualView.astro';
+import UnbundledRpcVsJoin from '../../components/mdx/UnbundledRpcVsJoin.astro';
 import didcotMixedGauge from '../../assets/blog/philosophy-of-streaming-systems-unbundling-end-to-end-correctness/didcot-mixed-gauge.jpg';
 import worldPingTimes from '../../assets/blog/philosophy-of-streaming-systems-unbundling-end-to-end-correctness/world-ping-times.png';
 
 <En>
 
-<Figure src={didcotMixedGauge} alt="Three rails sharing the same wooden sleepers at Didcot Railway Centre so broad-gauge and standard-gauge trains run side by side" caption="In 19th-century Britain, adding a third rail let standard-gauge and broad-gauge trains share the same trackbed for years without shutting down the line. Chapter 13 treats database migrations, unbundled services, and derived views the same way. Photo: Chris Allen, CC BY-SA 2.0." sourceTitle="Wikimedia Commons: Didcot Railway Centre - mixed gauge" sourceUrl="https://commons.wikimedia.org/wiki/File:Didcot_Railway_Centre_-_mixed_gauge_-_geograph.org.uk_-_6532619.jpg" />
+<Figure src={didcotMixedGauge} alt="Three rails sharing the same wooden sleepers at Didcot Railway Centre so broad-gauge and standard-gauge trains run side by side" caption="In 19th-century Britain, adding a third rail let standard-gauge and broad-gauge trains share the same trackbed for years without shutting down the line. Database migrations, unbundled services, and derived views can follow the same pattern. Photo: Chris Allen, CC BY-SA 2.0." sourceTitle="Wikimedia Commons: Didcot Railway Centre - mixed gauge" sourceUrl="https://commons.wikimedia.org/wiki/File:Didcot_Railway_Centre_-_mixed_gauge_-_geograph.org.uk_-_6532619.jpg" />
 
 > "If the highest aim of a captain was to preserve his ship, he would keep it in port forever."
-> &mdash; *St. Thomas Aquinas, Summa Theologica* (quoted in DDIA chapter 13)
+> &mdash; *St. Thomas Aquinas, Summa Theologica*
 
 ### Why safe databases still fail users
 
 You put money transfers inside a serializable SQL transaction, yet a customer still gets billed twice on a bad subway ride. You wire services together over REST, yet an ex-partner still receives a notification for a post written after being unfriended. You add strict inventory locks, yet checkout stalls whenever one warehouse shard slows down.
 
-Chapter 13 of Martin Kleppmann and Chris Riccomini's *Designing Data-Intensive Applications* (2nd edition) ties together the whole book around one idea: **stop treating a single monolithic database as the center of your architecture, and build around immutable event logs and explicit dataflow instead.** These six shifts explain how that works in practice:
+One idea ties these failures together: **stop treating a single monolithic database as the center of your architecture, and build around immutable event logs and explicit dataflow instead.** These six shifts explain how that works in practice:
 
 1. **Data integration without total order**: deriving search indexes, caches, and analytics from one log, and why global ordering hits a wall.
 2. **Gradual evolution by reprocessing**: running old and new views side by side like dual-gauge railways, without big-bang migrations.
@@ -101,11 +104,11 @@ In distributed systems terms, enforcing a global total order is **total order br
 
 ### The ex-partner notification race
 
-When two events have nothing to do with each other, their order does not matter. The trouble starts when one action depends on another across different services—what DDIA calls a **causal dependency**.
+When two events have nothing to do with each other, their order does not matter. The trouble starts when one action depends on another across different services—called a **causal dependency**.
 
 Suppose Alice breaks up with Bob. First she removes Bob from her friend list (handled by the friendships service), then she posts a complaint meant only for her remaining friends (handled by the messages service). If the notification worker reads the message event before the unfriend event arrives from the other shard, it joins the post against stale friend data and emails Bob anyway.
 
-The chapter points to three imperfect tools for fixing causality without a global lock:
+There are three imperfect tools for fixing causality without a global lock:
 
 1. **Logical clocks**: Lamport timestamps give a partial order without central coordination, though recipients must buffer out-of-order messages and track extra metadata.
 2. **Explicit causal references**: log what state the user saw before acting (giving that observation a unique ID), then attach that ID to the action event so consumers wait until they have processed the prerequisite.
@@ -138,6 +141,8 @@ Engineers solved it by laying a **third rail** along the same wooden sleepers, c
 Immutable logs and **reprocessing** bring dual-gauge migrations to data systems. Without reprocessing, schema changes are cramped into adding nullable fields or ignoring old records. With an event log, you keep the old view running while spinning up a brand-new consumer that replays history from offset 0 into a completely restructured schema.
 
 Once both views are warm, you route 1% of users to the new view to measure latency and catch bugs, then gradually shift to 100%, and finally drop the old view. Every step is reversible in seconds—which makes teams far less terrified of evolving old schemas.
+
+<UnbundledDualView />
 
 ### From Lambda to unified reprocessing
 
@@ -184,16 +189,16 @@ Unix and relational databases split in the 1970s over two opposing philosophies.
 
 <Vi>
 
-<Figure src={didcotMixedGauge} alt="Ba đường ray nằm chung trên một dãy tà vẹt gỗ tại Didcot Railway Centre để tàu khổ rộng và tàu khổ chuẩn cùng chạy song song" caption="Ở Anh thế kỷ 19, người ta đặt thêm đường ray thứ ba để tàu khổ rộng và khổ tiêu chuẩn dùng chung tuyến đường suốt hàng chục năm mà không phải đóng cửa tuyến. Chương 13 nhìn migration dữ liệu, database tháo rời và các khung nhìn suy xuất theo đúng cách đó. Ảnh: Chris Allen, CC BY-SA 2.0." sourceTitle="Wikimedia Commons: Didcot Railway Centre - mixed gauge" sourceUrl="https://commons.wikimedia.org/wiki/File:Didcot_Railway_Centre_-_mixed_gauge_-_geograph.org.uk_-_6532619.jpg" />
+<Figure src={didcotMixedGauge} alt="Ba đường ray nằm chung trên một dãy tà vẹt gỗ tại Didcot Railway Centre để tàu khổ rộng và tàu khổ chuẩn cùng chạy song song" caption="Ở Anh thế kỷ 19, người ta đặt thêm đường ray thứ ba để tàu khổ rộng và khổ tiêu chuẩn dùng chung tuyến đường suốt hàng chục năm mà không phải đóng cửa tuyến. Migration dữ liệu, database tháo rời và các khung nhìn suy xuất cũng làm được y như vậy. Ảnh: Chris Allen, CC BY-SA 2.0." sourceTitle="Wikimedia Commons: Didcot Railway Centre - mixed gauge" sourceUrl="https://commons.wikimedia.org/wiki/File:Didcot_Railway_Centre_-_mixed_gauge_-_geograph.org.uk_-_6532619.jpg" />
 
 > "Nếu mục tiêu cao nhất của thuyền trưởng là giữ nguyên con tàu, ông ta sẽ neo nó trong cảng mãi mãi."
-> &mdash; *St. Thomas Aquinas, Summa Theologica* (trích dẫn đầu chương 13 DDIA)
+> &mdash; *St. Thomas Aquinas, Summa Theologica*
 
 ### Vì sao database an toàn vẫn làm hỏng dữ liệu
 
 Bạn gói lệnh chuyển tiền vào một transaction SQL ở mức serializable, vậy mà khách đi tàu điện ngầm rớt sóng vẫn bị trừ tiền hai lần. Bạn tách các microservice gọn gàng qua REST, vậy mà người yêu cũ vẫn nhận được thông báo bài đăng viết *sau khi* đã bị hủy kết bạn. Bạn siết khóa tồn kho thật chặt, vậy mà một shard kho hàng chậm lại là cả luồng thanh toán đứng hình.
 
-Chương 13 cuốn *Designing Data-Intensive Applications* (ấn bản thứ 2) của Martin Kleppmann và Chris Riccomini gom cả cuốn sách về một triết lý: **đừng đặt một database nguyên khối làm trung tâm kiến trúc nữa; hãy dựng hệ thống quanh log sự kiện bất biến và luồng dữ liệu tường minh.** Sáu bước dưới đây giải thích triết lý đó chạy ngoài thực tế ra sao:
+Các lỗi này có chung một hướng giải: **đừng đặt một database nguyên khối làm trung tâm kiến trúc nữa; hãy dựng hệ thống quanh log sự kiện bất biến và luồng dữ liệu tường minh.** Sáu bước dưới đây giải thích triết lý đó chạy ngoài thực tế ra sao:
 
 1. **Tích hợp dữ liệu không cần thứ tự toàn phần**: suy xuất index tìm kiếm, cache và bảng phân tích từ một log chung, và lý do thứ tự toàn cục không thể mở rộng.
 2. **Tiến hoá dần bằng cách xử lý lại dữ liệu**: chạy song song schema cũ và mới như đường ray ba thanh, không cần cắt chuyển một phát ăn ngay.
@@ -250,11 +255,11 @@ Về mặt lý thuyết, việc chốt một thứ tự toàn phần gọi là *
 
 ### Lỗi race condition khi hủy kết bạn
 
-Khi hai sự kiện chẳng liên quan gì nhau, thứ tự trước sau không quan trọng. Rắc rối nảy sinh khi hành động sau phụ thuộc vào hành động trước ở hai service tách rời — thứ mà sách gọi là **phụ thuộc nhân quả (causal dependency)**.
+Khi hai sự kiện chẳng liên quan gì nhau, thứ tự trước sau không quan trọng. Rắc rối nảy sinh khi hành động sau phụ thuộc vào hành động trước ở hai service tách rời — gọi là **phụ thuộc nhân quả (causal dependency)**.
 
-Ví dụ kinh điển trong sách: Alice chia tay Bob. Đầu tiên cô ấy hủy kết bạn với Bob (xử lý ở service danh sách bạn bè), sau đó đăng một tin nhắn nói xấu dành riêng cho "những người còn là bạn" (xử lý ở service tin nhắn). Nếu worker gửi thông báo đọc phải sự kiện đăng tin *trước khi* sự kiện hủy kết bạn từ shard kia tới nơi, nó join với danh sách bạn bè cũ và vẫn gửi thông báo thẳng cho Bob.
+Ví dụ kinh điển: Alice chia tay Bob. Đầu tiên cô ấy hủy kết bạn với Bob (xử lý ở service danh sách bạn bè), sau đó đăng một tin nhắn nói xấu dành riêng cho "những người còn là bạn" (xử lý ở service tin nhắn). Nếu worker gửi thông báo đọc phải sự kiện đăng tin *trước khi* sự kiện hủy kết bạn từ shard kia tới nơi, nó join với danh sách bạn bè cũ và vẫn gửi thông báo thẳng cho Bob.
 
-Chương 13 nêu ba hướng xử lý phụ thuộc nhân quả mà không cần khóa toàn hệ thống, dù chưa có cách nào hoàn hảo tuyệt đối:
+Có ba hướng xử lý phụ thuộc nhân quả mà không cần khóa toàn hệ thống, dù chưa có cách nào hoàn hảo tuyệt đối:
 
 1. **Đồng hồ logic (logical clocks)**: nhãn thời gian Lamport giúp lần ra quan hệ trước-sau mà không cần điều phối trung tâm, nhưng bên nhận phải biết giữ tạm sự kiện đến sớm và kẹp thêm metadata.
 2. **Đính kèm ID nhân quả tường minh**: ghi log lại trạng thái mà người dùng đã nhìn thấy trước khi bấm nút (gắn cho lần đọc đó một ID duy nhất), rồi đính ID đó vào sự kiện hành động để consumer biết đường chờ xử lý xong tiền đề mới chạy tiếp.
@@ -287,6 +292,8 @@ Các kỹ sư chọn cách đặt thêm **thanh ray thứ ba** trên cùng hàng
 Log bất biến kết hợp **xử lý lại dữ liệu (reprocessing)** mang đúng kỹ thuật đường ray ba thanh đó vào hệ thống phần mềm. Nếu không xử lý lại lịch sử được, việc nâng cấp schema bị bó hẹp ở vài chiêu chắp vá như thêm cột tùy chọn. Khi có log sự kiện, bạn cứ giữ nguyên khung nhìn cũ phục vụ khách, đồng thời bật một consumer mới tinh đọc lại toàn bộ log từ offset 0 để dựng ra một cấu trúc dữ liệu hoàn toàn mới.
 
 Khi khung nhìn mới đã bắt kịp hiện tại, bạn điều 1% người dùng sang đó đo độ trễ và dò lỗi, tăng dần lên 100%, rồi mới tắt khung nhìn cũ. Mỗi bước đều quay đầu lại trong vài giây — và chính sự an toàn khi rút lui ấy giúp đội kỹ sư dám cải tiến cấu trúc dữ liệu nhanh hơn hẳn.
+
+<UnbundledDualView />
 
 ### Từ kiến trúc Lambda sang xử lý lại hợp nhất
 
@@ -349,8 +356,10 @@ In a dataflow setup, checkout subscribes ahead of time to a stream of exchange-r
 | **If partner service is down** | Checkout stalls or fails immediately | Processes with local cached rate; catches up later |
 | **Replaying history** | Must query historical-rate API carefully | Joins purchase stream with timestamped rate stream |
 
+<UnbundledRpcVsJoin />
+
 <Callout type="note" title="Unbundling is about breadth, not raw single-workload speed">
-Kleppmann and Riccomini stress an honest trade-off: running Kafka, Flink, and three stores brings real operational overhead. If a single database like PostgreSQL already meets all your query and reliability needs, stick with it—unbundle only when no single engine covers all your access patterns well.
+There is an honest trade-off: running Kafka, Flink, and three stores brings real operational overhead. If a single database like PostgreSQL already meets all your query and reliability needs, stick with it—unbundle only when no single engine covers all your access patterns well.
 </Callout>
 
 <Concepts>
@@ -388,8 +397,10 @@ Với cách tiếp cận dataflow, dịch vụ thanh toán đăng ký sẵn (sub
 | **Khi dịch vụ đối tác sập** | Thanh toán lỗi hoặc nghẽn dây chuyền | Vẫn chạy từ bảng cục bộ; đồng bộ bù sau |
 | **Chạy lại dữ liệu cũ** | Phải hỏi lại API tỷ giá lịch sử rất cực | Join luồng đơn hàng với luồng tỷ giá theo event time |
 
+<UnbundledRpcVsJoin />
+
 <Callout type="note" title="Tháo rời để rộng đường, không phải để khoe kiến trúc">
-Kleppmann và Riccomini nói rất thẳng: kéo thêm Kafka, Flink và vài kho lưu trữ là kéo thêm gánh nặng vận hành. Nếu một mình PostgreSQL đã gánh gọn toàn bộ nhu cầu đọc ghi của bạn, đừng tháo rời sớm — chỉ tách mảnh khi một công cụ đơn lẻ không còn phục vụ nổi mọi kiểu truy cập.
+Cái giá khá thẳng: kéo thêm Kafka, Flink và vài kho lưu trữ là kéo thêm gánh nặng vận hành. Nếu một mình PostgreSQL đã gánh gọn toàn bộ nhu cầu đọc ghi của bạn, đừng tháo rời sớm — chỉ tách mảnh khi một công cụ đơn lẻ không còn phục vụ nổi mọi kiểu truy cập.
 </Callout>
 
 <Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
@@ -474,9 +485,17 @@ COMMIT;
 
 Because relational databases enforce `UNIQUE` constraints safely even below serializable isolation, a retry carrying the same `request_id` hits a constraint violation on `INSERT` and aborts cleanly—turning `$22.00` back into `$11.00`.
 
+### A real case: Stripe's idempotency keys
+
+A client sends a charge request to Stripe and the connection drops before the response arrives. The client cannot tell whether the charge went through, and Stripe's own write-up warns that calling it twice would double-charge the customer.
+
+The fix lives at the endpoints. The client generates a unique key per operation and sends it in the `Idempotency-Key` header of the `POST`. The server links that key to the request's state, so when the first attempt succeeded but the response was lost, a retry gets the cached result back and the customer is charged only once. Clients retry with exponential backoff plus random jitter so a struggling server is not hit by a thundering herd.
+
+<UnbundledIdempotentRetry />
+
 ### Multishard atomicity using partitioned logs
 
-What if Account A (`4321`) and Account B (`1234`) live on **different database shards**? A traditional SQL transaction across both shards requires 2PC, locking both shards together and hurting throughput. In Chapter 13 (expanded in Kleppmann, Beresford, and Svingen's *Online Event Processing*), unbundled stream processors achieve the exact same `$11.00` guarantee without cross-shard locks:
+What if Account A (`4321`) and Account B (`1234`) live on **different database shards**? A traditional SQL transaction across both shards requires 2PC, locking both shards together and hurting throughput. Following the approach in Kleppmann, Beresford, and Svingen's *Online Event Processing*, unbundled stream processors achieve the exact same `$11.00` guarantee without cross-shard locks:
 
 </En>
 
@@ -541,9 +560,17 @@ COMMIT;
 
 Nhờ database quan hệ giữ ràng buộc `UNIQUE` chính xác ngay cả ở các mức cô lập yếu hơn serializable, bản gửi lại mang cùng `request_id` sẽ đụng lỗi trùng khóa ngay ở lệnh `INSERT` và hủy sạch sẽ — kéo số tiền trừ từ `$22,00` về đúng `$11,00`.
 
+### Ca thực tế: idempotency key của Stripe
+
+Client gửi lệnh trừ tiền tới Stripe thì kết nối đứt trước khi phản hồi về tới nơi. Client không biết khoản trừ đã thành công hay chưa, và chính bài viết của Stripe cảnh báo rằng gọi hai lần sẽ khiến khách bị trừ tiền hai lần.
+
+Cách giải nằm ở hai đầu cuối. Client tạo một key duy nhất cho mỗi thao tác và gửi trong header `Idempotency-Key` của request `POST`. Server gắn key đó với trạng thái của request, nên nếu lần đầu đã thành công mà phản hồi bị mất, lần thử lại sẽ nhận về kết quả đã lưu và khách chỉ bị trừ một lần. Client thử lại với exponential backoff cộng thêm jitter ngẫu nhiên để server đang yếu không bị đổ dồn request cùng lúc (thundering herd).
+
+<UnbundledIdempotentRetry />
+
 ### Giao dịch nguyên tử liên shard không cần khóa 2PC
 
-Thế nếu Tài khoản A (`4321`) và Tài khoản B (`1234`) nằm ở **hai shard database khác nhau** thì sao? Cách truyền thống phải kéo 2PC khóa cứng cả hai shard cùng lúc làm tụt thông lượng. Trong chương 13 (và bài báo *Online Event Processing* của Kleppmann, Beresford và Svingen), kiến trúc stream tháo rời giữ nguyên tính đúng đắn `$11,00` mà chẳng cần khóa liên shard nào:
+Thế nếu Tài khoản A (`4321`) và Tài khoản B (`1234`) nằm ở **hai shard database khác nhau** thì sao? Cách truyền thống phải kéo 2PC khóa cứng cả hai shard cùng lúc làm tụt thông lượng. Theo hướng của bài báo *Online Event Processing* (Kleppmann, Beresford và Svingen), kiến trúc stream tháo rời giữ nguyên tính đúng đắn `$11,00` mà chẳng cần khóa liên shard nào:
 
 </Vi>
 
@@ -580,7 +607,7 @@ Notice where atomicity lives in the unbundled model: **appending the initial req
 
 ## 6. Timeliness, integrity, and audits
 
-People toss around the word "consistency" as if it meant one thing. Chapter 13 splits it cleanly into two distinct promises—and shows why confusing them leads to over-engineering in the wrong places:
+People toss around the word "consistency" as if it meant one thing. It helps to split it into two distinct promises—and shows why confusing them leads to over-engineering in the wrong places:
 
 - **Timeliness**: how fresh your read is (linearizability, read-your-writes). If timeliness slips, you see stale data for a few seconds—annoying, yet temporary, because waiting heals it.
 - **Integrity**: absence of data loss, double-billing, or contradictory balances. If integrity breaks, waiting does nothing; the ledger stays broken forever until someone writes a repair job.
@@ -659,7 +686,7 @@ Nhận ra điểm mấu chốt nơi tính nguyên tử trú ngụ trong mô hìn
 
 ## 6. Tính kịp thời, toàn vẹn và tự kiểm toán
 
-Người ta hay dùng từ "consistency" (nhất quán) như thể nó chỉ có một nghĩa. Chương 13 tách chữ đó ra thành hai cam kết rất rạch ròi — và giải thích vì sao nhầm hai thứ này khiến ta tối ưu sai chỗ:
+Người ta hay dùng từ "consistency" (nhất quán) như thể nó chỉ có một nghĩa. Nên tách chữ đó ra thành hai cam kết rất rạch ròi — và giải thích vì sao nhầm hai thứ này khiến ta tối ưu sai chỗ:
 
 - **Tính kịp thời (timeliness)**: dữ liệu bạn đọc tươi tới đâu (linearizability, đọc-thấy-thứ-mình-vừa-ghi). Kịp thời bị chậm thì thấy dữ liệu cũ vài giây — hơi khó chịu, nhưng chỉ tạm thời vì chờ một lát là tự đúng.
 - **Tính toàn vẹn (integrity)**: không mất dữ liệu, không trừ tiền hai lần, không lệch tổng số dư. Một khi toàn vẹn bị vỡ, chờ tới sang năm dữ liệu vẫn sai cho tới khi có người viết script đi sửa.
