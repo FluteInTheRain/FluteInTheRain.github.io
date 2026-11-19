@@ -5,7 +5,8 @@
 
 export interface L10n { en: string; vi: string }
 
-export type ActId = 'start' | 'structure' | 'surface' | 'craft';
+/** one column of the reading map; `id` is what `SeriesPart.act` refers to */
+export interface SeriesAct { id: string; label: L10n; blurb: L10n }
 
 export interface SeriesPart {
   slug: string;
@@ -13,7 +14,8 @@ export interface SeriesPart {
   topic: L10n;
   /** one line: what the reader walks away with */
   hook: L10n;
-  act: ActId;
+  /** id of one of the series' `acts` */
+  act: string;
   /** slugs this part builds on (drawn as the "builds on" hint) */
   builds: string[];
 }
@@ -35,7 +37,8 @@ export interface Series {
   pitch: L10n[];
   credit: L10n;
   outcomes: L10n[];
-  acts: Record<ActId, { label: L10n; blurb: L10n }>;
+  /** map columns, left to right */
+  acts: SeriesAct[];
   parts: SeriesPart[];
   paths: SeriesPath[];
 }
@@ -83,24 +86,28 @@ const refactoringUi: Series = {
       vi: 'Duyệt UI do AI tạo theo một checklist, rồi rèn mắt đi xa hơn các quy tắc.',
     },
   ],
-  acts: {
-    start: {
+  acts: [
+    {
+      id: 'start',
       label: { en: 'Start here', vi: 'Bắt đầu' },
       blurb: { en: 'Decide before you prompt', vi: 'Chốt trước khi prompt' },
     },
-    structure: {
+    {
+      id: 'structure',
       label: { en: 'Structure', vi: 'Cấu trúc' },
       blurb: { en: 'What goes where, how big', vi: 'Cái gì đặt đâu, to cỡ nào' },
     },
-    surface: {
+    {
+      id: 'surface',
       label: { en: 'Surface', vi: 'Bề mặt' },
       blurb: { en: 'How it looks and feels', vi: 'Nhìn và cảm ra sao' },
     },
-    craft: {
+    {
+      id: 'craft',
       label: { en: 'Craft', vi: 'Tay nghề' },
       blurb: { en: 'Polish and taste', vi: 'Độ hoàn thiện và gu' },
     },
-  },
+  ],
   parts: [
     {
       slug: 'design-before-you-prompt',
