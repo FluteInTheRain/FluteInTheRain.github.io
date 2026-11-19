@@ -1,8 +1,8 @@
 ---
 title: "What ACID actually promises: isolation anomalies, serializability, and two-phase commit"
 title_vi: "ACID thật sự hứa gì: các lỗi isolation, serializability và two-phase commit"
-description: "Why Flexcoin, Poloniex, and Horizon failed despite databases: DDIA chapter 8 on ACID myths, MVCC snapshots, lost updates, write skew, SSI, and two-phase commit."
-description_vi: "Vì sao Flexcoin, Poloniex và Horizon vẫn mất tiền dù dùng database: chương 8 DDIA mổ xẻ ACID, MVCC snapshot, lost update, write skew, SSI và two-phase commit."
+description: "Why Flexcoin, Poloniex, and Horizon failed despite databases: what ACID really guarantees: MVCC snapshots, lost updates, write skew, SSI, and two-phase commit."
+description_vi: "Vì sao Flexcoin, Poloniex và Horizon vẫn mất tiền dù dùng database: ACID thật sự bảo đảm gì: MVCC snapshot, lost update, write skew, SSI và two-phase commit."
 date: 2026-11-19
 category: "database"
 tags: ["database", "transactions", "acid", "isolation-levels", "serializability", "ssi", "2pc", "ddia"]
@@ -21,6 +21,7 @@ sources:
   - { title: "MySQL 8.0.34", author: "Peter Alvaro & Kyle Kingsbury (Jepsen, 2023)", url: "https://jepsen.io/analyses/mysql-8.0.34" }
   - { title: "What write skew looks like", author: "Justin Jaffray (Cockroach Labs, 2022)", url: "https://www.cockroachlabs.com/blog/what-write-skew-looks-like/" }
   - { title: "Snapshot Isolation vs Serializability", author: "Marc Brooker (2024)", url: "https://brooker.co.za/blog/2024/12/17/occ-and-isolation.html" }
+  - { title: "Hacking Starbucks for unlimited coffee (receipt photo)", author: "Egor Homakov (Sakurity, 2015)", url: "https://sakurity.com/img/sbcheck.jpg" }
   - { title: "Mechanical interlocking frame (Mechanisches Stellwerk, photo, CC BY-SA 4.0)", author: "W. Bulach", url: "https://commons.wikimedia.org/wiki/File:00_0250_Eisenbahntechnik_-_Mechanisches_Stellwerk.jpg" }
 ---
 
@@ -32,10 +33,14 @@ import GitHubCode from '../../components/mdx/GitHubCode.astro';
 import LinkCard from '../../components/mdx/LinkCard.astro';
 import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
 import Vi from '../../components/mdx/Vi.astro';
+import TxExactlyOnce from '../../components/mdx/TxExactlyOnce.astro';
 import TxIsolation from '../../components/mdx/TxIsolation.astro';
+import TxLostUpdate from '../../components/mdx/TxLostUpdate.astro';
 import TxMvccVisibility from '../../components/mdx/TxMvccVisibility.astro';
+import TxStarbucksRace from '../../components/mdx/TxStarbucksRace.astro';
 import TxTwoPhaseCommit from '../../components/mdx/TxTwoPhaseCommit.astro';
 import TxWriteSkewDoctors from '../../components/mdx/TxWriteSkewDoctors.astro';
+import starbucksReceipt from '../../assets/blog/transactions-acid-isolation-anomalies-serializability/starbucks-receipt-race.jpg';
 import heroInterlocking from '../../assets/blog/transactions-acid-isolation-anomalies-serializability/railway-mechanical-interlocking.jpg';
 
 <En>
@@ -43,7 +48,7 @@ import heroInterlocking from '../../assets/blog/transactions-acid-isolation-anom
 <Figure src={heroInterlocking} alt="A mechanical railway signal-box interlocking frame with iron levers and locking bars in the Bayerisch Eisenstein Railway Museum" caption="A railway interlocking frame physically prevents two conflicting routes from engaging at once. Database transactions promise the same safety for concurrent reads and writes, yet most default settings quietly leave several levers unlocked. Photo: W. Bulach, CC BY-SA 4.0." sourceTitle="Wikimedia Commons: Mechanisches Stellwerk" sourceUrl="https://commons.wikimedia.org/wiki/File:00_0250_Eisenbahntechnik_-_Mechanisches_Stellwerk.jpg" />
 
 > "We believe it is better to have application programmers deal with performance problems due to overuse of transactions as bottlenecks arise, rather than always coding around the lack of transactions."
-> &mdash; *James Corbett et al.*, "Spanner: Google's Globally-Distributed Database" (2012), quoted at the start of DDIA chapter 8
+> &mdash; *James Corbett et al.*, "Spanner: Google's Globally-Distributed Database" (2012), a sentence that sums up the argument for transactions
 
 ### When a database transaction still loses money
 
@@ -51,10 +56,10 @@ Developers love to reply "just use an ACID database" whenever a payments bug hit
 
 - **Flexcoin, March 2014.** Attackers fired concurrent transfer requests between accounts before the balance deduction ran, draining 896 BTC from the hot wallet and shutting the service down permanently.
 - **Poloniex, two days later.** Simultaneous withdrawal requests slipped past balance checks into negative numbers (`-8 BTC`), letting an attacker drain 12.3 percent of every bitcoin on the exchange.
-- **Starbucks gift cards, 2015.** Security researcher Egor Homakov sent concurrent transfer confirmations across two browser sessions (`session1` and `session2`) from one `$5` card and turned it into `$20` across two cards.
+- **Starbucks gift cards, 2015.** Security researcher Egor Homakov sent concurrent transfer confirmations from two browser sessions (`session1` and `session2`) against one `$5` card; two `$5` transfers went through and the cards ended up holding `$15` and `$5`.
 - **UK Post Office Horizon.** A High Court trial documented how a crash mid-transfer (`PEAK 0195561`) issued duplicate `£4,000` receipts while leaving a branch stock unit short by `£4,000`, contributing to wrongful criminal convictions of subpostmasters.
 
-Chapter 8 of Kleppmann and Riccomini's *Designing Data-Intensive Applications* (2nd edition) peels back what transactions actually guarantee across six layers:
+Below, we peel back what transactions actually guarantee across six layers:
 
 1. **What ACID promises (and leaves to you)**: why atomicity means abortability, not concurrency, and why durability has edges.
 2. **Weak isolation (Read Committed & MVCC)**: dirty reads, read skew, snapshot visibility rules, and the `REPEATABLE READ` naming mess.
@@ -95,7 +100,7 @@ Notice **atomicity** first. In multithreaded code, "atomic" means another thread
 **Consistency** in ACID is overloaded with five different meanings across distributed systems (eventual consistency, consistent snapshots, consistent hashing, linearizability in CAP, and schema invariants). In ACID, consistency is a property of your **application**, not the storage engine alone. If you forget a `CHECK (balance >= 0)` or `UNIQUE` constraint, the database will happily commit invalid business state.
 
 <Callout type="warning" title="Even fsync and durability have edges">
-Calling `fsync()` tells the OS to flush buffered writes to storage, yet chapter 8 points out real surprises: SSDs under sudden power cuts have violated durability guarantees, HPE shipped SAS SSDs with a firmware bug that failed drives at 32,768 hours, and PostgreSQL engineers discovered in 2018 that PostgreSQL had mishandled `fsync()` kernel errors for over 20 years. Combine WAL, checksums, replication, and tested backups instead of trusting any single disk guarantee.
+Calling `fsync()` tells the OS to flush buffered writes to storage, yet real incidents show surprises: SSDs under sudden power cuts have violated durability guarantees, HPE shipped SAS SSDs with a firmware bug that failed drives at 32,768 hours, and PostgreSQL engineers discovered in 2018 that PostgreSQL had mishandled `fsync()` kernel errors for over 20 years. Combine WAL, checksums, replication, and tested backups instead of trusting any single disk guarantee.
 </Callout>
 
 ### Single-object vs. multi-object writes
@@ -141,7 +146,7 @@ This anomaly is **read skew** (a nonrepeatable read), because Read Committed ref
 <Figure src={heroInterlocking} alt="Hệ thống cần gạt khoá liên động cơ khí trong phòng tín hiệu đường sắt tại bảo tàng Bayerisch Eisenstein" caption="Khung khoá liên động đường sắt ngăn hai tuyến tàu xung đột gạt cần cùng lúc bằng cơ khí thuần tuý. Transaction trong database cũng hứa điều tương tự cho đọc ghi song song, nhưng hầu hết cấu hình mặc định lại âm thầm bỏ ngỏ vài cần gạt. Ảnh: W. Bulach, CC BY-SA 4.0." sourceTitle="Wikimedia Commons: Mechanisches Stellwerk" sourceUrl="https://commons.wikimedia.org/wiki/File:00_0250_Eisenbahntechnik_-_Mechanisches_Stellwerk.jpg" />
 
 > "Chúng tôi tin rằng để lập trình viên xử lý các vấn đề hiệu năng do lạm dụng transaction khi cổ chai xuất hiện vẫn tốt hơn là lúc nào cũng phải code vòng vèo để bù đắp cho việc thiếu transaction."
-> &mdash; *James Corbett và cộng sự*, "Spanner: Google's Globally-Distributed Database" (2012), câu mở đầu chương 8 sách DDIA
+> &mdash; *James Corbett và cộng sự*, "Spanner: Google's Globally-Distributed Database" (2012), câu tóm gọn lý do nên dùng transaction
 
 ### Dùng database có transaction rồi mà vẫn mất tiền
 
@@ -149,10 +154,10 @@ Mỗi lần có sự cố thanh toán lên trang nhất Hacker News, câu bình 
 
 - **Flexcoin, tháng 3/2014.** Kẻ tấn công bắn hàng loạt lệnh chuyển tiền giữa các tài khoản cùng lúc trước khi số dư kịp trừ, rút cạn 896 BTC khỏi ví nóng và khiến dịch vụ phá sản ngay lập tức.
 - **Poloniex, hai ngày sau đó.** Hàng loạt lệnh rút tiền gửi vào gần như cùng một tích tắc đã lách qua bước kiểm tra số dư, đẩy tài khoản xuống số âm (`-8 BTC`) và rút mất 12,3% tổng lượng Bitcoin trên sàn.
-- **Thẻ quà tặng Starbucks, 2015.** Chuyên gia bảo mật Egor Homakov mở hai phiên trình duyệt (`session1` và `session2`), gửi lệnh xác nhận chuyển tiền song song từ một thẻ `$5` và biến nó thành `$20` chia trên hai thẻ.
+- **Thẻ quà tặng Starbucks, 2015.** Chuyên gia bảo mật Egor Homakov mở hai phiên trình duyệt (`session1` và `session2`), gửi lệnh xác nhận chuyển tiền song song từ một thẻ `$5`; hai lệnh chuyển `$5` đều lọt qua và hai thẻ cuối cùng chứa `$15` và `$5`.
 - **Hệ thống Horizon của Bưu điện Anh.** Hồ sơ phiên toà cấp cao ghi nhận lỗi crash giữa chừng (`PEAK 0195561`) đã in ra hai biên lai `£4.000` trùng số phiên trong khi một kho quỹ bị hụt mất `£4.000`, góp phần gây ra hàng trăm án oan cho các trưởng bưu cục.
 
-Chương 8 cuốn *Designing Data-Intensive Applications* (bản 2) của Kleppmann và Riccomini bóc tách những gì transaction thật sự bảo đảm qua sáu tầng:
+Phần dưới bóc tách những gì transaction thật sự bảo đảm qua sáu tầng:
 
 1. **ACID hứa gì và bỏ ngỏ gì**: vì sao atomicity nghĩa là huỷ sạch được khi lỗi (abortability), chứ không phải khoá tranh chấp đồng thời, và giới hạn của durability.
 2. **Isolation yếu (Read Committed & MVCC)**: dirty read, read skew, quy tắc nhìn thấy bản ghi snapshot và ma trận tên gọi `REPEATABLE READ`.
@@ -193,7 +198,7 @@ Hãy để ý chữ **atomicity** trước. Trong lập trình đa luồng, "ato
 Chữ **consistency** trong ACID bị quá tải vì mang tới năm nghĩa khác nhau (eventual consistency, snapshot nhất quán, consistent hashing, linearizability trong CAP, và tính đúng đắn nghiệp vụ). Ở đây consistency là trách nhiệm của **ứng dụng**, không phải của riêng database. Nếu bạn không khai báo `CHECK (balance >= 0)` hay ràng buộc `UNIQUE`, database vẫn vui vẻ commit dữ liệu sai nghiệp vụ.
 
 <Callout type="warning" title="Ngay cả fsync và durability cũng có điểm mù">
-Gọi `fsync()` yêu cầu hệ điều hành đẩy dữ liệu từ RAM xuống ổ lưu trữ, nhưng chương 8 chỉ ra hàng loạt sự cố thật: SSD mất điện đột ngột có thể làm rơi dữ liệu đã báo ghi xong, HPE từng gặp lỗi firmware làm SSD đồng loạt hỏng đúng mốc 32.768 giờ chạy, và đến năm 2018 cộng đồng PostgreSQL mới phát hiện Postgres đã xử lý sai lỗi `fsync()` của kernel suốt hơn 20 năm. Hãy kết hợp WAL, checksum, replication và bản sao lưu có kiểm thử thay vì tin tuyệt đối vào một lớp đơn lẻ.
+Gọi `fsync()` yêu cầu hệ điều hành đẩy dữ liệu từ RAM xuống ổ lưu trữ, nhưng đã có hàng loạt sự cố thật: SSD mất điện đột ngột có thể làm rơi dữ liệu đã báo ghi xong, HPE từng gặp lỗi firmware làm SSD đồng loạt hỏng đúng mốc 32.768 giờ chạy, và đến năm 2018 cộng đồng PostgreSQL mới phát hiện Postgres đã xử lý sai lỗi `fsync()` của kernel suốt hơn 20 năm. Hãy kết hợp WAL, checksum, replication và bản sao lưu có kiểm thử thay vì tin tuyệt đối vào một lớp đơn lẻ.
 </Callout>
 
 ### Ghi một đối tượng so với nhiều đối tượng
@@ -251,7 +256,7 @@ Watch out for SQL standard names here. Snapshot Isolation did not exist when ANS
 | **MySQL (InnoDB)** | `REPEATABLE READ` (default) | MVCC snapshots with weaker rules: Jepsen's 2023 test of MySQL 8.0.34 confirmed it allows lost updates, `G-single`, and non-monotonic atomic views. |
 | **IBM Db2** | `REPEATABLE READ` | Actually implements full serializability (via locking). |
 
-Martin Kleppmann built the **Hermitage** test suite while writing DDIA precisely because vendor labels conflicted so wildly across PostgreSQL, MySQL, Oracle, and SQL Server.
+Martin Kleppmann built the **Hermitage** test suite precisely because vendor labels conflicted so wildly across PostgreSQL, MySQL, Oracle, and SQL Server.
 
 <Concepts>
 
@@ -288,7 +293,7 @@ Hãy cẩn thận với tên gọi theo chuẩn SQL ở đây. Khi chuẩn ANSI 
 | **MySQL (InnoDB)** | `REPEATABLE READ` (mặc định) | Snapshot MVCC nhưng lỏng hơn: kiểm thử Jepsen năm 2023 trên MySQL 8.0.34 xác nhận vẫn để lọt lost update, `G-single` và vi phạm nhất quán đọc nguyên tử. |
 | **IBM Db2** | `REPEATABLE READ` | Thực chất là full serializability (dùng khoá). |
 
-Martin Kleppmann từng viết hẳn bộ test **Hermitage** lúc soạn DDIA chỉ vì tên gọi giữa PostgreSQL, MySQL, Oracle và SQL Server lệch nhau quá xa.
+Martin Kleppmann từng viết hẳn bộ test **Hermitage** chỉ vì tên gọi giữa PostgreSQL, MySQL, Oracle và SQL Server lệch nhau quá xa.
 
 <Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
 
@@ -310,7 +315,11 @@ Mẫu lỗi này gặp ở khắp nơi: tăng bộ đếm hay trừ số dư, đ
 
 </Vi>
 
+<TxLostUpdate />
+
 <En>
+
+To see how fast naive read-modify-write drops writes, I ran 4 Python threads in SQLite WAL mode doing 100 increments each (400 expected total):
 
 <TerminalOutput command="python3 lost_update_bench.py" label="SQLite WAL, 4 concurrent threads × 100 increments" caption="Measured locally on macOS (Apple Silicon, Python 3.15, SQLite WAL mode). Naive read-modify-write dropped 281 of 400 increments in under 50 ms; explicit write locking (BEGIN IMMEDIATE) and atomic SQL kept every single update.">
 ```text
@@ -320,7 +329,7 @@ atomic_update         expected 400  final 400  lost   0  ( 46.5 ms)
 ```
 </TerminalOutput>
 
-DDIA organizes lost-update defenses into four tools, ranked from simplest to most general:
+Lost-update defenses fall into four tools, ranked from simplest to most general:
 
 1. **Atomic write operations**: push the increment into the database with `UPDATE counters SET value = value + 1 WHERE key = 'foo'`. The engine takes an exclusive lock during execution (or runs single-threaded as in Redis), removing the round-trip read from your app. Watch out for ORMs: they frequently pull rows into objects and write back full values, accidentally smuggling read-modify-write cycles back in.
 2. **Explicit locking (`SELECT ... FOR UPDATE`)**: when business rules cannot fit in one SQL statement (like validating a chess move before updating coordinates), explicitly lock the fetched row until commit. You must remember the lock on every code path and retry deadlocks when two transactions lock rows in opposite orders.
@@ -330,6 +339,55 @@ DDIA organizes lost-update defenses into four tools, ranked from simplest to mos
 ### What changes under multi-leader and leaderless replication
 
 Locks and compare-and-set rely on a single authoritative copy of the row. In multi-leader or leaderless databases (such as Cassandra, Dynamo-style stores, or offline-first apps) where nodes accept concurrent writes asynchronously, there is no single lock manager to ask. Those systems preserve concurrent versions (**siblings**) and merge them with commutative data types like CRDTs — and if they fall back to **Last-Write-Wins (LWW)** based on wall-clock timestamps, silent lost updates come right back.
+
+### A real case: Starbucks gift cards
+
+**Setup.** In March 2015 the security researcher Egor Homakov bought three Starbucks gift cards at `$5` each. The website lets a signed-in user move money between cards in two requests: `POST /step1` stores the amount and both cards in the session, and `POST /step2?confirm` performs the transfer and clears the session. A second confirm inside the same session fails, so the flow looks protected.
+
+**What broke.** The protection lives in the session, and nothing stops the same account from holding two sessions. Homakov logged in from two browsers (`session1` and `session2`), prepared the same transfer in both, and fired both confirms at once. The first five attempts failed. The sixth created two `$5` transfers out of a card holding `$5`, leaving cards with `$15` and `$5`, `$20` in total. He then paid a `$16.70` bill at a store with the two cards, after putting in `$15`. The cause is the same check-then-act gap as in the earlier sections: each request read the `$5` balance, saw it was enough, and acted before the other request's debit became visible.
+
+<Figure src={starbucksReceipt} alt="A crumpled Starbucks receipt from a store on Market Street in San Francisco showing a 16.70 dollar total paid with two gift cards" caption="The receipt Homakov kept as proof: a $16.70 bill paid with two gift cards, after the race created the extra balance." sourceTitle="Egor Homakov, Sakurity: Hacking Starbucks for unlimited coffee" sourceUrl="https://sakurity.com/blog/2015/05/21/starbucks.html" />
+
+</En>
+
+<Vi>
+
+Để thấy lỗi này xảy ra dễ cỡ nào, mình cho 4 luồng Python chạy cùng lúc trên SQLite chế độ WAL, mỗi luồng tăng biến đếm 100 lần (kỳ vọng tổng cộng 400):
+
+<TerminalOutput command="python3 lost_update_bench.py" label="SQLite WAL, 4 luồng đồng thời × 100 lần tăng" caption="Đo trực tiếp trên macOS (Apple Silicon, Python 3.15, SQLite chế độ WAL). Cách đọc-rồi-ghi ngây thơ làm rơi tới 281 trên 400 lần tăng chỉ trong chưa đầy 50 ms; khoá ghi chủ động (BEGIN IMMEDIATE) và câu UPDATE nguyên tử giữ đủ cả 400.">
+```text
+read_modify_write     expected 400  final 119  lost 281  ( 49.5 ms)
+begin_immediate       expected 400  final 400  lost   0  ( 45.6 ms)
+atomic_update         expected 400  final 400  lost   0  ( 46.5 ms)
+```
+</TerminalOutput>
+
+Các cách chống lost update chia thành bốn vũ khí, xếp từ gọn nhất tới tổng quát nhất:
+
+1. **Thao tác ghi nguyên tử (atomic write)**: đẩy phép tính thẳng vào database bằng `UPDATE counters SET value = value + 1 WHERE key = 'foo'`. Database tự gắn lock độc quyền khi thực thi (hoặc chạy đơn luồng như Redis), bỏ hoàn toàn nhịp đọc-về-app. Hãy coi chừng ORM: rất nhiều ORM kéo cả object về RAM, sửa một thuộc tính rồi save lại toàn bộ cột, vô tình tạo ra vòng lặp đọc-sửa-ghi nguy hiểm.
+2. **Khoá tường minh (`SELECT ... FOR UPDATE`)**: khi logic kiểm tra quá phức tạp để nhét vào một câu SQL (như kiểm tra luật đi cờ trước khi dời quân), hãy khoá luôn các dòng vừa đọc cho tới khi commit. Nhớ đặt khoá ở mọi nhánh code đụng tới dữ liệu đó và viết vòng retry phòng khi gặp deadlock.
+3. **Tự động phát hiện lost update**: `REPEATABLE READ` của PostgreSQL, `SERIALIZABLE` của Oracle và `SNAPSHOT` của SQL Server cho ghi song song rồi tự huỷ bên commit sau nếu hai bên chạm cùng dòng (**first-committer-wins**). `REPEATABLE READ` của MySQL InnoDB lại không bắt lỗi này, nên Jepsen và Kleppmann đều lưu ý không nên đánh đồng nó với Snapshot Isolation chuẩn.
+4. **Ghi có điều kiện (compare-and-set / CAS)**: trong hệ thống không có transaction đầy đủ, thêm `WHERE version = old_ver` (optimistic locking) để lệnh ghi vô hiệu nếu có người nhanh tay sửa trước. Lưu ý một bẫy ngầm trong MVCC: nếu mệnh đề `WHERE` đọc theo snapshot cũ thay vì bản mới nhất trên đĩa thì kiểm tra vẫn lọt — nhiều engine MVCC phải làm ngoại lệ riêng cho mệnh đề `WHERE` của `UPDATE`/`DELETE` để vá lỗ hổng này.
+
+### Với sao chép đa node (multi-leader và leaderless)
+
+Khoá và CAS đều giả định có duy nhất một bản dữ liệu chuẩn để hỏi. Ở hệ thống đa chủ (multi-leader) hoặc không chủ (leaderless) nhận ghi bất đồng bộ ở nhiều node, không có bộ quản lý khoá trung tâm nào cả. Lúc đó hệ thống phải giữ lại các phiên bản xung đột (**siblings**) rồi gộp bằng cấu trúc giao hoán như CRDT — còn nếu chọn **Last-Write-Wins (LWW)** theo đồng hồ hệ thống thì lỗi lost update lại âm thầm quay về.
+
+### Một vụ thật: thẻ quà tặng Starbucks
+
+**Bối cảnh.** Tháng 3/2015, chuyên gia bảo mật Egor Homakov mua ba thẻ quà tặng Starbucks, mỗi thẻ `$5`. Website cho người đã đăng nhập chuyển tiền giữa các thẻ bằng hai request: `POST /step1` lưu số tiền và hai thẻ vào session, còn `POST /step2?confirm` mới chuyển tiền thật rồi xoá session. Gửi confirm lần hai trong cùng một session thì bị từ chối, nên luồng này trông có vẻ an toàn.
+
+**Chuyện gì đã vỡ.** Lớp bảo vệ nằm ở session, mà không gì ngăn một tài khoản có hai session. Homakov đăng nhập từ hai trình duyệt (`session1` và `session2`), chuẩn bị cùng một lệnh chuyển ở cả hai, rồi bắn hai lệnh confirm cùng lúc. Năm lần đầu thất bại. Lần thứ sáu tạo ra hai lệnh chuyển `$5` từ một thẻ chỉ có `$5`, để lại hai thẻ `$15` và `$5`, tổng `$20`. Sau đó anh trả một hoá đơn `$16,70` tại cửa hàng bằng hai thẻ, trong khi chỉ bỏ vào `$15`. Nguyên nhân vẫn là khoảng hở kiểm tra-rồi-mới-làm như ở các phần trước: mỗi request đọc số dư `$5`, thấy đủ, rồi hành động trước khi lệnh trừ tiền của request kia kịp hiện ra.
+
+<Figure src={starbucksReceipt} alt="Biên lai nhàu của một cửa hàng Starbucks trên phố Market, San Francisco, ghi tổng 16,70 đô la trả bằng hai thẻ quà tặng" caption="Biên lai Homakov giữ làm bằng chứng: hoá đơn $16,70 trả bằng hai thẻ quà tặng, sau khi lỗi race tạo ra số dư dư." sourceTitle="Egor Homakov, Sakurity: Hacking Starbucks for unlimited coffee" sourceUrl="https://sakurity.com/blog/2015/05/21/starbucks.html" />
+
+</Vi>
+
+<TxStarbucksRace />
+
+<En>
+
+**Which idea resolves it.** Rate limits per IP, random delays, and a transaction used the wrong way all leave the gap open. Homakov's verdict is that the only right fix is a pessimistic lock, the `FOR UPDATE` clause from this section. With it, the second confirm waits on the wallet row, re-reads the new balance, and is refused. An atomic `UPDATE ... SET balance = balance - 5 WHERE balance >= 5` closes the same gap in one statement. Disclosure was slow: he could find no technical contact at Starbucks, and he got the bug fixed in about 10 days.
 
 <Concepts>
 
@@ -353,24 +411,7 @@ Consider a hospital on-call roster where at least one doctor must always stay on
 
 <Vi>
 
-<TerminalOutput command="python3 lost_update_bench.py" label="SQLite WAL, 4 luồng đồng thời × 100 lần tăng" caption="Đo trực tiếp trên macOS (Apple Silicon, Python 3.15, SQLite chế độ WAL). Cách đọc-rồi-ghi ngây thơ làm rơi tới 281 trên 400 lần tăng chỉ trong chưa đầy 50 ms; khoá ghi chủ động (BEGIN IMMEDIATE) và câu UPDATE nguyên tử giữ đủ cả 400.">
-```text
-read_modify_write     expected 400  final 119  lost 281  ( 49.5 ms)
-begin_immediate       expected 400  final 400  lost   0  ( 45.6 ms)
-atomic_update         expected 400  final 400  lost   0  ( 46.5 ms)
-```
-</TerminalOutput>
-
-DDIA chia các cách chống lost update thành bốn vũ khí, xếp từ gọn nhất tới tổng quát nhất:
-
-1. **Thao tác ghi nguyên tử (atomic write)**: đẩy phép tính thẳng vào database bằng `UPDATE counters SET value = value + 1 WHERE key = 'foo'`. Database tự gắn lock độc quyền khi thực thi (hoặc chạy đơn luồng như Redis), bỏ hoàn toàn nhịp đọc-về-app. Hãy coi chừng ORM: rất nhiều ORM kéo cả object về RAM, sửa một thuộc tính rồi save lại toàn bộ cột, vô tình tạo ra vòng lặp đọc-sửa-ghi nguy hiểm.
-2. **Khoá tường minh (`SELECT ... FOR UPDATE`)**: khi logic kiểm tra quá phức tạp để nhét vào một câu SQL (như kiểm tra luật đi cờ trước khi dời quân), hãy khoá luôn các dòng vừa đọc cho tới khi commit. Nhớ đặt khoá ở mọi nhánh code đụng tới dữ liệu đó và viết vòng retry phòng khi gặp deadlock.
-3. **Tự động phát hiện lost update**: `REPEATABLE READ` của PostgreSQL, `SERIALIZABLE` của Oracle và `SNAPSHOT` của SQL Server cho ghi song song rồi tự huỷ bên commit sau nếu hai bên chạm cùng dòng (**first-committer-wins**). `REPEATABLE READ` của MySQL InnoDB lại không bắt lỗi này, nên Jepsen và Kleppmann đều lưu ý không nên đánh đồng nó với Snapshot Isolation chuẩn.
-4. **Ghi có điều kiện (compare-and-set / CAS)**: trong hệ thống không có transaction đầy đủ, thêm `WHERE version = old_ver` (optimistic locking) để lệnh ghi vô hiệu nếu có người nhanh tay sửa trước. Lưu ý một bẫy ngầm trong MVCC: nếu mệnh đề `WHERE` đọc theo snapshot cũ thay vì bản mới nhất trên đĩa thì kiểm tra vẫn lọt — nhiều engine MVCC phải làm ngoại lệ riêng cho mệnh đề `WHERE` của `UPDATE`/`DELETE` để vá lỗ hổng này.
-
-### Với sao chép đa node (multi-leader và leaderless)
-
-Khoá và CAS đều giả định có duy nhất một bản dữ liệu chuẩn để hỏi. Ở hệ thống đa chủ (multi-leader) hoặc không chủ (leaderless) nhận ghi bất đồng bộ ở nhiều node, không có bộ quản lý khoá trung tâm nào cả. Lúc đó hệ thống phải giữ lại các phiên bản xung đột (**siblings**) rồi gộp bằng cấu trúc giao hoán như CRDT — còn nếu chọn **Last-Write-Wins (LWW)** theo đồng hồ hệ thống thì lỗi lost update lại âm thầm quay về.
+**Ý tưởng nào giải quyết.** Giới hạn request theo IP, độ trễ ngẫu nhiên hay dùng transaction sai cách đều để hở khoảng trống đó. Kết luận của Homakov là cách sửa đúng duy nhất là khoá bi quan, tức mệnh đề `FOR UPDATE` của phần này. Có nó, lệnh confirm thứ hai phải chờ trên dòng ví, đọc lại số dư mới và bị từ chối. Một câu `UPDATE ... SET balance = balance - 5 WHERE balance >= 5` cũng bịt được khoảng hở đó trong một câu lệnh. Việc báo lỗi lại chậm: anh không tìm được đầu mối kỹ thuật nào ở Starbucks, và anh đã xử lý để lỗi được sửa trong khoảng 10 ngày.
 
 <Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
 
@@ -619,7 +660,7 @@ The blocking catch sits right after Phase 1. Once a participant replies `Yes`, i
 
 ### Heterogeneous XA vs. homogeneous Raft-backed 2PC
 
-DDIA draws a sharp line between two styles of 2PC that engineers often lump together:
+There is a sharp line between two styles of 2PC that engineers often lump together:
 
 - **XA transactions across heterogeneous systems** (such as Java JTA coordinating PostgreSQL plus ActiveMQ): XA is an old 1991 C API, not a network protocol, so the coordinator usually runs inside the **application process** itself using local disk logs and database client drivers. Because XA targets the lowest common denominator, it cannot detect deadlocks across two different products, fails with SSI, and breaks if the app machine crashes while locks are in doubt.
 - **Database-internal distributed transactions** (such as Google Spanner, CockroachDB, FoundationDB, TiDB, and YugabyteDB): every participant runs the same database software, coordinates directly over replicated Raft or Paxos consensus groups instead of fragile app-server local disks, and couples 2PC with distributed concurrency control so failover happens automatically without hanging locks.
@@ -633,6 +674,35 @@ You often hear that you need XA/2PC to consume a queue message and update a data
 3. Commit the database transaction first, then acknowledge the message to the broker (and delete old `message_id` records later if desired).
 
 If the worker crashes before acknowledging the broker, the redelivered message hits the `UNIQUE` constraint and deduplicates cleanly — giving you idempotent, exactly-once side effects without paying 2PC's latency and lock penalties across unrelated systems.
+
+</En>
+
+<Vi>
+
+Cái bẫy treo hệ thống nằm ngay sau Pha 1. Một khi nút tham gia đã trả lời `Yes`, nó cam kết phải sẵn sàng commit kể cả khi vừa khởi động lại, nghĩa là nó **bắt buộc phải giữ chặt mọi lock ghi trên các dòng liên quan** suốt trạng thái in-doubt. Nếu điều phối viên sập hoặc mất file log đĩa ngay lúc đó, các shard kia sẽ bị treo lock vô thời hạn — kể cả reboot database server cũng vẫn phải giữ lại các lock mồ côi đó cho tới khi điều phối viên sống lại hoặc kỹ sư buộc phải đánh liều atomicity bằng quyết định thủ công (heuristic decision). (Giao thức lý thuyết **Three-Phase Commit** né được việc treo bằng cách giả định mạng và máy có giới hạn độ trễ cứng, điều không tồn tại trên mạng thật.)
+
+### XA đa hệ thống so với 2PC nội bộ chạy trên Raft/Paxos
+
+Có một ranh giới rất rõ giữa hai kiểu 2PC thường bị gộp chung:
+
+- **XA xuyên nhiều công nghệ khác nhau** (ví dụ Java JTA điều phối giữa PostgreSQL và ActiveMQ): XA là một C API ra đời năm 1991 chứ không phải giao thức mạng, nên điều phối viên thường nhúng thẳng vào **tiến trình ứng dụng**, ghi log ra ổ đĩa máy app và nói chuyện qua driver. Vì phải hạ chuẩn cho mọi hãng tương thích, XA không phát hiện được deadlock xuyên hệ thống, không chạy được với SSI, và sẽ treo cứng lock nếu máy app sập giữa lúc in-doubt.
+- **Giao dịch phân tán nội bộ trong một database** (như Google Spanner, CockroachDB, FoundationDB, TiDB, YugabyteDB): toàn bộ node đều chạy chung một phần mềm database, điều phối trực tiếp qua nhóm đồng thuận Raft hoặc Paxos thay vì ổ đĩa đơn lẻ trên máy app, và gắn chặt 2PC với điều khiển đồng thời phân tán để tự chuyển dự phòng khi mất node.
+
+### Xử lý đúng một lần (exactly-once) mà không cần 2PC
+
+Người ta hay nghĩ muốn lấy một tin nhắn từ queue và ghi vào database "đúng một lần" thì bắt buộc phải dùng XA/2PC. Thực tế, bạn làm được hiệu ứng **exactly-once** hoàn chỉnh chỉ bằng một transaction cục bộ trong database:
+
+1. Gắn cho mỗi tin nhắn một mã `message_id` duy nhất.
+2. Trong cùng transaction ghi dữ liệu nghiệp vụ vào database, chèn `message_id` vào bảng `processed_messages` có khoá `UNIQUE` (nếu đã tồn tại thì bỏ qua bước xử lý nghiệp vụ).
+3. Commit transaction database trước, rồi mới gửi xác nhận (ack) cho broker (có thể dọn các `message_id` cũ sau).
+
+Nếu worker sập trước khi kịp báo ack cho broker, tin nhắn được gửi lại sẽ đụng ngay ràng buộc `UNIQUE` và bị loại bỏ sạch sẽ — đạt hiệu ứng xử lý đúng một lần mà không phải gánh chi phí độ trễ và nguy cơ treo lock của 2PC xuyên hệ thống.
+
+</Vi>
+
+<TxExactlyOnce />
+
+<En>
 
 <LinkCard url="https://martin.kleppmann.com/2014/11/25/hermitage-testing-the-i-in-acid.html" title="Hermitage: Testing the “I” in ACID" description="Martin Kleppmann's live test suite comparing how PostgreSQL, MySQL, Oracle, and SQL Server handle weak isolation anomalies in practice." tag="Reference" />
 
@@ -669,25 +739,6 @@ If the worker crashes before acknowledging the broker, the redelivered message h
 </En>
 
 <Vi>
-
-Cái bẫy treo hệ thống nằm ngay sau Pha 1. Một khi nút tham gia đã trả lời `Yes`, nó cam kết phải sẵn sàng commit kể cả khi vừa khởi động lại, nghĩa là nó **bắt buộc phải giữ chặt mọi lock ghi trên các dòng liên quan** suốt trạng thái in-doubt. Nếu điều phối viên sập hoặc mất file log đĩa ngay lúc đó, các shard kia sẽ bị treo lock vô thời hạn — kể cả reboot database server cũng vẫn phải giữ lại các lock mồ côi đó cho tới khi điều phối viên sống lại hoặc kỹ sư buộc phải đánh liều atomicity bằng quyết định thủ công (heuristic decision). (Giao thức lý thuyết **Three-Phase Commit** né được việc treo bằng cách giả định mạng và máy có giới hạn độ trễ cứng, điều không tồn tại trên mạng thật.)
-
-### XA đa hệ thống so với 2PC nội bộ chạy trên Raft/Paxos
-
-DDIA vạch ranh giới rất rõ giữa hai kiểu 2PC thường bị gộp chung:
-
-- **XA xuyên nhiều công nghệ khác nhau** (ví dụ Java JTA điều phối giữa PostgreSQL và ActiveMQ): XA là một C API ra đời năm 1991 chứ không phải giao thức mạng, nên điều phối viên thường nhúng thẳng vào **tiến trình ứng dụng**, ghi log ra ổ đĩa máy app và nói chuyện qua driver. Vì phải hạ chuẩn cho mọi hãng tương thích, XA không phát hiện được deadlock xuyên hệ thống, không chạy được với SSI, và sẽ treo cứng lock nếu máy app sập giữa lúc in-doubt.
-- **Giao dịch phân tán nội bộ trong một database** (như Google Spanner, CockroachDB, FoundationDB, TiDB, YugabyteDB): toàn bộ node đều chạy chung một phần mềm database, điều phối trực tiếp qua nhóm đồng thuận Raft hoặc Paxos thay vì ổ đĩa đơn lẻ trên máy app, và gắn chặt 2PC với điều khiển đồng thời phân tán để tự chuyển dự phòng khi mất node.
-
-### Xử lý đúng một lần (exactly-once) mà không cần 2PC
-
-Người ta hay nghĩ muốn lấy một tin nhắn từ queue và ghi vào database "đúng một lần" thì bắt buộc phải dùng XA/2PC. Thực tế, bạn làm được hiệu ứng **exactly-once** hoàn chỉnh chỉ bằng một transaction cục bộ trong database:
-
-1. Gắn cho mỗi tin nhắn một mã `message_id` duy nhất.
-2. Trong cùng transaction ghi dữ liệu nghiệp vụ vào database, chèn `message_id` vào bảng `processed_messages` có khoá `UNIQUE` (nếu đã tồn tại thì bỏ qua bước xử lý nghiệp vụ).
-3. Commit transaction database trước, rồi mới gửi xác nhận (ack) cho broker (có thể dọn các `message_id` cũ sau).
-
-Nếu worker sập trước khi kịp báo ack cho broker, tin nhắn được gửi lại sẽ đụng ngay ràng buộc `UNIQUE` và bị loại bỏ sạch sẽ — đạt hiệu ứng xử lý đúng một lần mà không phải gánh chi phí độ trễ và nguy cơ treo lock của 2PC xuyên hệ thống.
 
 <LinkCard url="https://martin.kleppmann.com/2014/11/25/hermitage-testing-the-i-in-acid.html" title="Hermitage: Testing the “I” in ACID" description="Bộ test mã nguồn mở của Martin Kleppmann đối chiếu thực tế cách PostgreSQL, MySQL, Oracle và SQL Server xử lý từng lỗi isolation." tag="Tài liệu tham khảo" />
 
