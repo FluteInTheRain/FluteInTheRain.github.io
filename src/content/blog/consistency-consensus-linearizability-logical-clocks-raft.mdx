@@ -1,0 +1,794 @@
+---
+title: "Consistency, logical clocks, and consensus: how distributed nodes agree on one truth"
+title_vi: "Nhất quán, đồng hồ logic và đồng thuận: cách các node phân tán chốt một sự thật chung"
+description: "Why Dynamo quorums still serve stale reads, how non-causal IDs leak private photos, and how Raft turns unreliable nodes into one shared log: DDIA chapter 10 in depth."
+description_vi: "Vì sao quorum vẫn đọc nhầm dữ liệu cũ, ID sai thứ tự làm lộ ảnh riêng tư, và cách Raft biến nhiều máy hay lỗi thành một nhật ký chung: giải phẫu chương 10 DDIA qua các sự cố thật."
+date: 2026-11-19
+category: "system-design"
+tags: ["distributed-systems", "linearizability", "consensus", "raft", "logical-clocks", "zookeeper", "ddia"]
+draft: true
+sources:
+  - { title: "Designing Data-Intensive Applications, 2nd Edition", author: "Martin Kleppmann & Chris Riccomini", chapters: "Ch. 10", url: "https://dataintensive.net/" }
+  - { title: "Jepsen: etcd 3.4.3", author: "Kyle Kingsbury", url: "https://jepsen.io/analyses/etcd-3.4.3" }
+  - { title: "Jepsen: MongoDB 4.2.6", author: "Kyle Kingsbury", url: "https://jepsen.io/analyses/mongodb-4.2.6" }
+  - { title: "Please stop calling databases CP or AP", author: "Martin Kleppmann", url: "https://martin.kleppmann.com/2015/05/11/please-stop-calling-databases-cp-or-ap.html" }
+  - { title: "Living without atomic clocks: Where CockroachDB and Spanner diverge", author: "Spencer Kimball & Irfan Sharif", url: "https://www.cockroachlabs.com/blog/living-without-atomic-clocks/" }
+  - { title: "RFC 9562: Universally Unique IDentifiers (UUIDs)", author: "Kyzer R. Davis, Brad G. Peabody, & Paul J. Leach", url: "https://www.rfc-editor.org/rfc/rfc9562" }
+  - { title: "Time, Clocks, and the Ordering of Events in a Distributed System", author: "Leslie Lamport", url: "https://lamport.azurewebsites.net/pubs/time-clocks.pdf" }
+  - { title: "Impossibility of Distributed Consensus with One Faulty Process", author: "Michael J. Fischer, Nancy A. Lynch, & Michael S. Paterson", url: "https://groups.csail.mit.edu/tds/papers/Lynch/jacm85.pdf" }
+  - { title: "In Search of an Understandable Consensus Algorithm", author: "Diego Ongaro & John Ousterhout", url: "https://raft.github.io/raft.pdf" }
+  - { title: "Paxos Made Simple", author: "Leslie Lamport", url: "https://lamport.azurewebsites.net/pubs/paxos-simple.pdf" }
+  - { title: "Apache Kafka Documentation: Topic-Level Configs", author: "Apache Kafka", url: "https://kafka.apache.org/documentation/" }
+  - { title: "etcd API guarantees", author: "etcd Documentation", url: "https://etcd.io/docs/v3.5/learning/api_guarantees/" }
+  - { title: "Distributed Systems 6.2: Raft", author: "Martin Kleppmann", url: "https://www.youtube.com/watch?v=uXEYuDwm7e4" }
+  - { title: "cockroachdb/cockroach — pkg/util/hlc/hlc.go (NowAsClockTimestamp)", author: "Cockroach Labs", url: "https://github.com/cockroachdb/cockroach/blob/d30c905fff79ef825adc96bcc647f1872a90f2ff/pkg/util/hlc/hlc.go#L417-L437" }
+  - { title: "etcd-io/raft — raft.go (becomePreCandidate)", author: "etcd Authors", url: "https://github.com/etcd-io/raft/blob/99f9ffb3d19c2dee73cc802737cd7e1e5f008986/raft.go#L916-L931" }
+  - { title: "Charles Frodsham marine chronometer, no. 1842 (photo, CC BY-SA 4.0)", author: "Wikimedia Commons", url: "https://commons.wikimedia.org/wiki/File:Charles_Frodsham_marine_chronometer,_no._1842.jpg" }
+---
+
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import En from '../../components/mdx/En.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import GitHubCode from '../../components/mdx/GitHubCode.astro';
+import LinkCard from '../../components/mdx/LinkCard.astro';
+import QuoteCard from '../../components/mdx/QuoteCard.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import YouTube from '../../components/mdx/YouTube.astro';
+import ConsensusLinearizabilityTimeline from '../../components/mdx/ConsensusLinearizabilityTimeline.astro';
+import ConsensusLamportVsHlc from '../../components/mdx/ConsensusLamportVsHlc.astro';
+import ConsensusRaftEpochs from '../../components/mdx/ConsensusRaftEpochs.astro';
+import ConsensusLinearizable from '../../components/mdx/ConsensusLinearizable.astro';
+import heroChronometer from '../../assets/blog/consistency-consensus-linearizability-logical-clocks-raft/frodsham-marine-chronometer.jpg';
+
+<En>
+
+<Figure src={heroChronometer} alt="Brass marine chronometer no. 1842 by Charles Frodsham mounted on gimbals inside a mahogany box" caption="At sea, one clock leaves you guessing if it broke and two leave you arguing which one drifted; only three let a majority outvote a liar. Distributed consensus turns the same arithmetic into software. Photo: Wikimedia Commons, CC BY-SA 4.0." sourceTitle="Wikimedia Commons: Charles Frodsham marine chronometer, no. 1842" sourceUrl="https://commons.wikimedia.org/wiki/File:Charles_Frodsham_marine_chronometer,_no._1842.jpg" />
+
+> "Never go to sea with two chronometers; take one or three."
+> &mdash; *Frederick P. Brooks Jr.*, *The Mythical Man-Month* (1995), quoted at the start of DDIA chapter 10
+
+### When two clocks disagree
+
+Most databases feel solid right up until a partition splits the cluster in half. Once two replicas lose touch, every guarantee hidden behind the phrase "strong consistency" gets tested at once. Real production teams and formal test suites keep hitting the same four surprises:
+
+- **Serving stale reads from a "leader" (`etcd 0.4.1`, `MongoDB`).** In 2014, Kyle Kingsbury's Jepsen tests caught `etcd 0.4.1` returning stale values because a partitioned leader answered reads locally without checking whether a newer leader had won election. His 2020 analysis of MongoDB 4.2.6 likewise showed that default single-node write acknowledgement and uncommitted reads silently rolled back writes on failover and broke causal sessions unless applications opted into `majority` on both.
+- **Overlapping Dynamo quorums (`w + r > n`).** Even when `w = 2`, `r = 2`, and `n = 3`, a reader who finishes seeing the new value can be followed by a second reader who sees only the old value if read repair is asynchronous.
+- **Non-causal IDs leaking private data.** Flipping an account to private on a laptop and then uploading an embarrassing photo from a phone can assign the photo an earlier timestamp than the privacy switch if those writes land on separate shards with skewed clocks.
+- **Silent data loss during "fast" failover.** Enabling Kafka's `unclean.leader.election.enable` brings an offline partition back quickly by promoting a lagging broker, then permanently overwrites committed messages when the old leader returns.
+
+Chapter 10 of Kleppmann and Riccomini's *Designing Data-Intensive Applications* (2nd edition) connects all four bugs under one roof: **linearizability**, **logical clocks**, and **consensus**. Here is the path through the chapter:
+
+1. **Linearizability**: what the single-copy illusion actually guarantees, and why it differs from serializability.
+2. **Where linearizability pays off (and what it costs)**: locks, uniqueness, cross-channel races, broken quorums, and why CAP misses half the cost.
+3. **ID generators and logical clocks**: why `UUIDv7` and NTP still break causality, and how Lamport clocks and HLC fix ordering.
+4. **Consensus and the FLP boundary**: why pure async agreement cannot guarantee termination, and why CAS, shared logs, and atomic commit are equivalent.
+5. **Raft, Paxos, and Zab in practice**: epoch fencing, overlapping quorums, pre-vote, and unclean elections.
+6. **Coordination services**: how ZooKeeper, `etcd`, and Consul turn consensus into leases, fencing tokens, and watches.
+
+<Callout type="note" title="TL;DR">
+Linearizability gives you the illusion of a single, always-up-to-date copy of an object, which you need for leader leases, unique usernames, and cross-channel races. You cannot fake it with wall clocks or standard `w + r > n` Dynamo quorums, and you always pay for it in network round-trip latency even when nothing is broken. When you need fault-tolerant linearizability without a single point of failure, you need a consensus protocol such as Raft or Paxos — or a coordination service built on top of one.
+</Callout>
+
+<Concepts>
+
+- **Replication lag**: the delay between a write landing on a leader and a follower copying it. Readers hitting a lagging follower see old state.
+- **Linearizability**: a recency guarantee making a distributed system act as if there is one copy of each object and every operation takes effect atomically.
+- **Quorum**: a minimum set of replicas (`w` for writes, `r` for reads out of `n` total) that must reply before an operation finishes.
+- **Clock skew**: the physical time difference between two machines' local clocks because hardware oscillators drift.
+- **Consensus**: getting multiple independent nodes to agree irreversibly on a single decision or ordered sequence of operations despite crashes and delays.
+
+</Concepts>
+
+---
+
+## 1. Linearizability: the single-copy illusion
+
+Strong consistency is a marketing phrase until you pin down what it forbids. **Linearizability** — also called atomic consistency or external consistency — gives a crisp rule: make a replicated object behave as if there were only one physical copy, and every operation on it happens atomically at a single instant.
+
+Think of a scorekeeper updating a single chalkboard in a crowded room. Once the keeper erases `0-0` and chalks `2-1`, nobody walking up afterward can still read `0-0`.
+
+The book opens with Aaliyah and Bryce checking a sports app in the same room. Seconds after the final whistle, Aaliyah refreshes her phone, sees the final score, and shouts it aloud. Bryce immediately taps refresh, hits a lagging database replica, and sees the game still in play — a clean violation of linearizability because his read started *after* Aaliyah's finished.
+
+### Operation bars and atomic flip points
+
+In distributed systems theory, a single key, row, or document is modeled as a **register** supporting `Read(x)`, `Write(x, v)`, and conditional **Compare-and-Set (`CAS(x, vold, vnew)`)**. Because network packets take variable time, each client only sees an interval bar stretching from when it sent the request to when the response came back.
+
+- A read strictly *before* a write completes must return the old value.
+- A read starting strictly *after* a write completes must return the new value.
+- A read *overlapping* a write may return old or new — **until** any single client observes the new value. Once one read flips to the new value, every subsequent read by any client must see the new value too.
+
+</En>
+
+<Vi>
+
+<Figure src={heroChronometer} alt="Chiếc đồng hồ hàng hải bằng đồng số 1842 của Charles Frodsham đặt trong hộp gỗ gụ trên khớp xoay" caption="Ra khơi mà mang một chiếc đồng hồ thì hỏng không biết; mang hai chiếc thì cãi nhau xem chiếc nào sai; chỉ có ba chiếc mới bỏ phiếu đa số loại được chiếc chạy lệch. Thuật toán đồng thuận biến đúng phép tính đó thành phần mềm. Ảnh: Wikimedia Commons, CC BY-SA 4.0." sourceTitle="Wikimedia Commons: Charles Frodsham marine chronometer, no. 1842" sourceUrl="https://commons.wikimedia.org/wiki/File:Charles_Frodsham_marine_chronometer,_no._1842.jpg" />
+
+> "Đừng bao giờ ra khơi với hai chiếc đồng hồ; hãy mang một hoặc ba chiếc."
+> &mdash; *Frederick P. Brooks Jr.*, *The Mythical Man-Month* (1995), câu mở đầu chương 10 của DDIA
+
+### Khi hai chiếc đồng hồ nói khác nhau
+
+Đa số database trông rất ngoan cho tới khi mạng bị đứt làm đôi. Một khi các bản sao (replica) mất liên lạc, mọi lời hứa nằm dưới chữ "nhất quán mạnh (strong consistency)" đều bị đem ra thử lửa cùng lúc. Các đội kỹ sư thật và bộ kiểm thử tự động liên tục vấp phải bốn bất ngờ giống hệt nhau:
+
+- **Đọc phải dữ liệu cũ ngay từ "leader" (`etcd 0.4.1`, `MongoDB`).** Năm 2014, bài test Jepsen của Kyle Kingsbury bắt quả tang `etcd 0.4.1` trả về dữ liệu cũ vì một leader bị cô lập mạng vẫn tự trả lời lệnh đọc từ RAM cục bộ mà không kiểm tra xem cụm đã bầu leader mới chưa. Báo cáo năm 2020 về MongoDB 4.2.6 cũng chỉ ra cấu hình mặc định chỉ xác nhận ghi ở một node và cho phép đọc dữ liệu chưa commit, khiến bản ghi bị hoàn tác khi đổi leader trừ khi ứng dụng bật `majority` cho cả hai chiều.
+- **Quorum kiểu Dynamo (`w + r > n`) vẫn rò rỉ giá trị cũ.** Ngay cả khi `w = 2`, `r = 2` trên `n = 3` node, một người vừa đọc được giá trị mới xong vẫn có thể kéo theo người đọc tiếp theo nhận về giá trị cũ nếu việc sửa bản sao (read repair) chạy bất đồng bộ.
+- **ID không theo nhân quả làm lộ ảnh riêng tư.** Bạn chuyển tài khoản sang riêng tư trên laptop rồi cầm điện thoại đăng một tấm ảnh nhạy cảm. Nếu hai lệnh ghi rơi vào hai shard riêng có đồng hồ lệch nhau, tấm ảnh có thể mang mốc thời gian sớm hơn lệnh khoá tài khoản và hiện công khai cho người lạ.
+- **Mất dữ liệu âm thầm khi chọn khôi phục "nhanh".** Bật cờ `unclean.leader.election.enable` trong Kafka giúp partition sống dậy tức thì bằng cách phong một broker tụt hậu lên làm leader, nhưng ngay khi broker leader cũ quay lại, mọi tin nhắn đã commit trước đó bị ghi đè mất trắng.
+
+Chương 10 cuốn *Designing Data-Intensive Applications* (bản 2) của Kleppmann và Riccomini gom cả bốn vụ trên vào chung một khung xương: **tính khả tuyến tính (linearizability)**, **đồng hồ logic (logical clocks)** và **đồng thuận (consensus)**. Bài viết đi qua theo đúng sáu mảnh ghép đó:
+
+1. **Tính khả tuyến tính**: ảo giác một bản sao duy nhất thực sự cam kết điều gì, và vì sao nó khác tuần tự hoá.
+2. **Khi nào cần — và cái giá phải trả**: khoá phân tán, ràng buộc duy nhất, đua dữ liệu chéo kênh, quorum bị gãy và mặt thật phía sau định lý CAP.
+3. **Sinh ID và đồng hồ logic**: vì sao `UUIDv7` cùng NTP vẫn đảo ngược nhân quả, và cách đồng hồ Lamport với HLC giữ thứ tự.
+4. **Đồng thuận và ranh giới bất khả thi FLP**: vì sao mạng bất đồng bộ thuần tuý không thể chốt chắc chắn lúc dừng, và vì sao CAS, log dùng chung với commit nguyên tử thực chất tương đương nhau.
+5. **Raft, Paxos và Zab ngoài thực tế**: chặn leader ma bằng số nhiệm kỳ, hai vòng quorum giao nhau, pre-vote và bầu leader không sạch.
+6. **Dịch vụ điều phối**: cách ZooKeeper, `etcd` và Consul biến đồng thuận thành lease, fencing token và thông báo thay đổi.
+
+<Callout type="note" title="Tóm tắt nhanh">
+Tính khả tuyến tính (linearizability) tạo ảo giác chỉ có một bản sao duy nhất luôn mới nhất của một đối tượng — thứ bạn bắt buộc phải có cho thuê bao leader (lease), tên đăng nhập duy nhất và tránh lỗi chéo kênh. Bạn không thể giả lập nó bằng đồng hồ vật lý hay quorum `w + r > n` mặc định của Dynamo, và bạn phải trả giá bằng độ trễ mạng trên mọi thao tác ngay cả khi hệ thống hoàn toàn khoẻ mạnh. Muốn vừa giữ được tính chất này vừa chịu lỗi tốt mà không có điểm chết đơn, bạn cần thuật toán đồng thuận như Raft hay Paxos — hoặc một dịch vụ điều phối xây sẵn trên chúng.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Replication lag (độ trễ sao chép)**: khoảng trễ giữa lúc leader ghi xong và lúc replica chép kịp. Đọc trúng replica chậm sẽ thấy dữ liệu cũ.
+- **Linearizability (tính khả tuyến tính)**: cam kết về tính mới nhất, khiến hệ thống phân tán hành xử như thể chỉ có một bản sao duy nhất và mọi thao tác diễn ra nguyên tử.
+- **Quorum (nhóm đại diện đa số)**: số lượng replica tối thiểu (`w` khi ghi, `r` khi đọc trên tổng `n` bản sao) phải phản hồi trước khi báo xong cho client.
+- **Clock skew (độ lệch đồng hồ)**: sự sai khác giờ vật lý giữa hai máy do bộ dao động thạch anh chạy nhanh chậm khác nhau.
+- **Consensus (đồng thuận)**: cơ chế để nhiều node độc lập chốt chung một quyết định hoặc một chuỗi lệnh bất biến, dù có máy sập hay mạng trễ.
+
+</Concepts>
+
+---
+
+## 1. Tính khả tuyến tính: ảo giác chỉ có một bản sao
+
+"Nhất quán mạnh" chỉ là khẩu hiệu cho tới khi bạn chỉ rõ nó cấm điều gì. **Tính khả tuyến tính (linearizability)** — còn gọi là tính nhất quán nguyên tử hay nhất quán bên ngoài — đưa ra quy tắc dứt khoát: hãy làm hệ thống nhiều bản sao hành xử hệt như chỉ tồn tại đúng một bản sao vật lý, và mỗi thao tác trên đó có hiệu lực tại một khoảnh khắc duy nhất.
+
+Hãy tưởng tượng một người ghi bảng tỉ số trong phòng. Ngay khi anh ta xoá `0-0` và viết `2-1` lên bảng, không ai bước tới sau đó lại đọc thấy `0-0` nữa.
+
+Sách mở đầu bằng cảnh Aaliyah và Bryce ngồi cùng phòng xem tỉ số trận đấu. Ngay sau tiếng còi mãn cuộc, Aaliyah bấm tải lại trang, thấy đội nhà thắng và reo to lên. Bryce lập tức bấm tải lại trên máy mình, nhưng request rơi vào một replica đang trễ nên màn hình vẫn báo trận đấu chưa xong — một pha vi phạm linearizability rõ mười mươi vì lệnh đọc của Bryce bắt đầu *sau* khi lệnh của Aaliyah đã kết thúc.
+
+### Thanh thời gian và điểm lật nguyên tử
+
+Trong lý thuyết hệ thống phân tán, mỗi khoá, dòng hay tài liệu được trừu tượng hoá thành một **thanh ghi (register)** với ba thao tác: `Read(x)`, `Write(x, v)` và **Compare-and-Set (`CAS(x, vold, vnew)`)**. Vì gói tin đi trên mạng mất thời gian bất định, từ góc nhìn client mỗi thao tác là một thanh nằm từ lúc gửi request tới lúc nhận phản hồi.
+
+- Lệnh đọc xong hoàn toàn *trước* khi lệnh ghi bắt đầu phải trả về giá trị cũ.
+- Lệnh đọc bắt đầu hoàn toàn *sau* khi lệnh ghi kết thúc phải trả về giá trị mới.
+- Lệnh đọc *chồng lấn* với lệnh ghi có thể trả về cũ hoặc mới — **cho tới khi** có bất kỳ một client nào đọc được giá trị mới. Kể từ khoảnh khắc đó, mọi lệnh đọc đến sau đều phải thấy giá trị mới.
+
+</Vi>
+
+<ConsensusLinearizabilityTimeline />
+
+<En>
+
+Visualize placing one vertical tick mark inside every operation's bar — the exact instant it atomically took effect. If you can connect those marks into a valid single-register history while moving strictly left to right in real time, the execution is linearizable.
+
+### Linearizability vs. serializability
+
+Engineers often treat "linearizable" and "serializable" as synonyms because both sound like "ordered in a line." They govern completely different dimensions:
+
+| Guarantee | Scope | What it actually promises | Examples |
+|---|---|---|---|
+| **Linearizability** | Single object (register) | Recency: a read starting after a write or newer read finishes must see the latest value. Does not group multiple objects into transactions. | `etcd` v3 reads, ZooKeeper writes |
+| **Serializability** | Multi-object transactions | Isolation: transactions behave as if run one at a time in *some* serial order, preventing write skew — even if that order disagrees with real time (stale reads allowed). | CockroachDB (default), PostgreSQL `SERIALIZABLE` |
+| **Strict serializability** | Multi-object + real time | Both together: transaction order respects real-time finish-before-start boundaries across the whole database. | Google Spanner, FoundationDB |
+
+CockroachDB gives a crisp real-world example of this split: it provides **serializable** transactions by default, yet does not enforce strict serializability across unrelated keys because coordinating every read and write across regions would erase its latency budget.
+
+<Concepts>
+
+- **Register**: theoretical name for one independently readable and writable data item (one key, row, or document).
+- **Compare-and-Set (`CAS`)**: a conditional write (`set x = new only if x == old`) that fails safely if someone else changed `x` first.
+- **Linearization point**: the single instant between request start and response receipt at which an operation appears to execute atomically.
+- **Serializability**: a transaction isolation level ensuring concurrent multi-object transactions match some serial run, without requiring real-time recency.
+- **Strict serializability (external consistency)**: serializability plus linearizability — multi-object transactions ordered strictly in agreement with real time.
+
+</Concepts>
+
+---
+
+## 2. When linearizability matters — and its cost
+
+Seeing a stale sports score for two seconds is annoying; seeing stale state in coordination logic corrupts your system. Three common backend designs genuinely require linearizability:
+
+- **Locks and leader election.** Two nodes must never both believe they hold the same leader lease (**split brain**). Services like ZooKeeper and `etcd` build leases out of linearizable writes, though note a subtle trap: ZooKeeper's writes are linearizable while its default reads can still be stale, whereas `etcd` v3 makes linearizable reads the default.
+- **Uniqueness constraints and hard invariants.** Rejecting duplicate usernames, preventing two files at the same path, keeping an account balance non-negative, or selling the last theater seat all act like acquiring an atomic lock via `CAS`. (Soft business rules like airline overbooking can skip linearizability and pay compensation later; hard unique constraints cannot.)
+- **Cross-channel timing dependencies.** Suppose a web server uploads a large video to object storage and then drops a "transcode job" onto Kafka or RabbitMQ. Because the message queue is faster than asynchronous storage replication, the worker can pull the job before the video reaches its read replica and transcode an old file or fail completely.
+
+### Which replication setups actually stay linearizable?
+
+Not every database advertised as "consistent" meets linearizability under faults or concurrency:
+
+| Replication design | Linearizable? | Where it holds or breaks |
+|---|---|---|
+| **Single-leader** | Potentially | Works only if every read and write hits a verified current leader; asynchronous failover can lose committed writes, and a paused zombie leader causes stale/split reads. |
+| **Consensus-based (`Raft`, `Paxos`, `Zab`)** | Yes (if configured) | Leader prevents split brain via terms and quorums, **provided** reads also verify leadership with a quorum or lease instead of reading locally. |
+| **Multi-leader** | No | Multiple nodes accept concurrent writes and replicate asynchronously, producing conflicting versions. |
+| **Leaderless Dynamo (`w + r > n`)** | Usually no | Concurrent writes plus variable network delays allow non-linearizable reads unless readers perform **synchronous read repair** *and* writers first read the max timestamp from a quorum. Even then, CAS is impossible without consensus. |
+
+Try the Dynamo `w + r > n` trap yourself in **Tab 1** below. On `n = 3` replicas with `w = 2` and `r = 2`, a write reaches `R1` immediately while packets to `R2` and `R3` lag in flight. Alice reads `{R1, R2}` and gets `x = 1`, then finishes; Bob starts afterward, reads `{R2, R3}`, and gets stale `x = 0` unless Alice repaired `R2` synchronously before returning.
+
+</En>
+
+<Vi>
+
+Hãy hình dung bạn đặt một vạch dọc nhỏ nằm đâu đó bên trong mỗi thanh thao tác — đúng thời khắc lệnh đó có hiệu lực nguyên tử. Nếu bạn nối các vạch đó thành một lịch sử hợp lệ mà đường nối luôn đi thuận từ trái sang phải theo thời gian thực, chuỗi thực thi đó là khả tuyến tính (linearizable).
+
+### Khả tuyến tính khác gì tuần tự hoá?
+
+Nhiều kỹ sư hay dùng lẫn "linearizable" và "serializable" vì nghe đều na ná "xếp thành một hàng". Thực chất chúng quản hai trục hoàn toàn khác nhau:
+
+| Cam kết | Phạm vi | Bảo đảm thực chất là gì | Ví dụ thực tế |
+|---|---|---|---|
+| **Linearizability** | Một đối tượng (thanh ghi) | Tính mới nhất: đọc bắt đầu sau khi ghi hoặc đọc mới kết thúc phải thấy giá trị mới. Không gom nhiều đối tượng vào giao dịch. | Đọc mặc định của `etcd` v3, ghi trong ZooKeeper |
+| **Serializability** | Giao dịch nhiều đối tượng | Tính cô lập: kết quả tương đương chạy tuần tự từng giao dịch, chặn lỗi write skew — dù thứ tự đó không khớp giờ thực (cho phép đọc dữ liệu cũ). | CockroachDB (mặc định), PostgreSQL `SERIALIZABLE` |
+| **Strict serializability** | Nhiều đối tượng + giờ thực | Cả hai gộp lại: thứ tự giao dịch vừa cô lập hoàn toàn vừa tuân thủ ranh giới kết thúc-trước-bắt-đầu ngoài đời thực. | Google Spanner, FoundationDB |
+
+CockroachDB là ví dụ rất rõ cho sự tách bạch này: mặc định nó bảo đảm giao dịch **serializable**, nhưng không ép strict serializability cho các khoá rời rạc nhau vì việc bắt mọi vùng địa lý đồng bộ thời gian thực sẽ đội độ trễ lên quá cao.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Register (thanh ghi)**: tên lý thuyết cho một đơn vị dữ liệu có thể đọc/ghi độc lập (một khoá, một dòng hoặc một document).
+- **Compare-and-Set (`CAS`)**: lệnh ghi có điều kiện (`gán x = mới nếu x == cũ`), tự báo lỗi an toàn nếu có người khác đã sửa `x` trước.
+- **Linearization point (điểm lật / điểm tuyến tính hoá)**: khoảnh khắc duy nhất nằm trong thanh thời gian của một lệnh, nơi lệnh đó được coi là diễn ra nguyên tử.
+- **Serializability (tính tuần tự hoá)**: mức cô lập giao dịch bảo đảm các giao dịch song song cho kết quả như chạy nối tiếp, không nhất thiết phản ánh giá trị mới nhất theo giờ thực.
+- **Strict serializability (tính tuần tự hoá nghiêm ngặt)**: gộp cả serializability lẫn linearizability trên toàn hệ thống.
+
+</Concepts>
+
+---
+
+## 2. Khi nào cần tính khả tuyến tính — và cái giá phải trả
+
+Tỉ số bóng đá chậm hai giây chỉ gây bực mình; trạng thái điều phối chậm hai giây đủ làm hỏng dữ liệu sản xuất. Có ba bài toán backend thực sự cần tính khả tuyến tính:
+
+- **Khoá phân tán và bầu leader.** Hai máy tuyệt đối không được cùng tin mình đang giữ quyền leader (**split brain**). Các dịch vụ như ZooKeeper và `etcd` dựng thuê bao (lease) từ lệnh ghi khả tuyến tính — nhưng lưu ý cái bẫy nhỏ: lệnh ghi của ZooKeeper khả tuyến tính còn lệnh đọc mặc định vẫn có thể trả dữ liệu cũ, trong khi `etcd` v3 bật khả tuyến tính cho cả lệnh đọc mặc định.
+- **Ràng buộc duy nhất và bất biến cứng.** Chặn hai người đăng ký trùng username, hai file trùng đường dẫn, số dư âm hay đặt trùng một ghế cuối cùng đều tương đương giành một chiếc khoá nguyên tử qua `CAS`. (Nghiệp vụ mềm như bán quá chỗ máy bay có thể bỏ qua bước này rồi đền bù sau; ràng buộc duy nhất cứng thì không.)
+- **Đua dữ liệu qua hai kênh song song.** Giả sử web server tải một video nặng lên hệ thống lưu trữ file, sau đó đẩy thông báo "hãy nén video này" vào Kafka hay RabbitMQ. Vì hàng đợi tin nhắn thường chạy nhanh hơn sao chép file ngầm, worker có thể nhận việc trước khi bản sao video tới nơi và nén nhầm bản cũ hoặc báo lỗi không thấy file.
+
+### Mô hình sao chép nào thực sự giữ được?
+
+Không phải hệ thống nào gắn mác "nhất quán cao" cũng đạt được tính khả tuyến tính khi gặp sự cố hay truy cập đồng thời:
+
+| Kiến trúc sao chép | Khả tuyến tính? | Giữ được hoặc gãy ở đâu |
+|---|---|---|
+| **Single-leader** | Có thể có | Chỉ đúng nếu mọi lệnh đọc/ghi đi qua leader đã xác thực; chuyển quyền bất đồng bộ có thể làm rơi bản ghi đã commit, còn leader cũ bị treo (zombie) sẽ trả dữ liệu sai. |
+| **Dựa trên đồng thuận (`Raft`, `Paxos`, `Zab`)** | Có (nếu cấu hình đúng) | Leader chống split brain nhờ số nhiệm kỳ và quorum, **với điều kiện** lệnh đọc cũng phải kiểm tra quorum hoặc lease thay vì đọc cục bộ. |
+| **Multi-leader** | Không | Nhiều node nhận ghi song song rồi đồng bộ ngầm, chắc chắn sinh xung đột phiên bản. |
+| **Không leader kiểu Dynamo (`w + r > n`)** | Thường là không | Ghi song song cộng độ trễ mạng làm lệnh đọc trả về giá trị cũ, trừ khi bên đọc **sửa đồng bộ trước khi trả lời** *và* bên ghi đọc timestamp mới nhất trước khi ghi. Dù vậy vẫn không làm được `CAS`. |
+
+Bạn tự thử cái bẫy `w + r > n` của Dynamo ở **Tab 1** ngay bên dưới. Trên cụm `n = 3` replica với `w = 2` và `r = 2`, lệnh ghi chạm `R1` ngay lập tức nhưng gói tin tới `R2` và `R3` còn kẹt trên đường. Alice đọc `{R1, R2}` thấy `x = 1` rồi xong việc; Bob đọc ngay sau từ `{R2, R3}` lại nhận về `x = 0` cũ mèm — trừ khi Alice sửa đồng bộ `R2` trước khi trả kết quả về ứng dụng.
+
+</Vi>
+
+<ConsensusLinearizable />
+
+<En>
+
+### Beyond the CAP theorem meme
+
+Textbooks used to summarize this trade-off with the **CAP theorem**: "Consistency, Availability, Partition Tolerance — pick two." As Kleppmann pointed out in his 2015 critique, that phrasing misleads engineers because you cannot "opt out" of network partitions. A partition is a fault, not a configuration dial.
+
+When the network works, a system can be both linearizable and available; when a partition hits, you choose between **consistent** (reject or stall requests on the minority side) or **available** (serve potentially stale or conflicting state). Even then, CAP's narrow formal definitions cover only linearizability and one fault type — network partitions, which Google production data puts at **under 8% of incidents**.
+
+Even on a healthy network with zero partitions, linearizability still pays a steep tax: **latency**. Multi-core CPUs drop linearizability in their L1/L2 caches unless you insert an explicit memory fence because waiting for coherence slows every read. Attiya and Welch proved the distributed version of this law: any linearizable read or write must pay response times bounded below by the network's delay uncertainty.
+
+<Concepts>
+
+- **Split brain**: a failure state where two nodes both believe they are the active leader and accept conflicting writes.
+- **Synchronous read repair**: forcing a read coordinator to write the newest seen version back to lagging replicas *before* returning the read response to the client.
+- **Network partition**: a fault where nodes in a cluster remain alive but packets between two subsets of nodes are dropped or delayed arbitrarily.
+- **Memory fence / barrier**: a CPU instruction forcing core caches to flush/sync with memory order, trading raw speed for cross-core visibility.
+
+</Concepts>
+
+---
+
+## 3. ID generators and logical clocks
+
+Every record needs a primary key, and applications constantly rely on ID order to reconstruct what happened first. A single-node `AUTO_INCREMENT` counter is linearizable — an atomic **fetch-and-add** instruction on one CPU — until that machine crashes, bottlenecks under write load, or forces users in Tokyo to wait on a round trip to Virginia for every row ID.
+
+Teams try four common ways to escape the single counter, and every wall-clock shortcut gives up causal ordering:
+
+| ID / Clock scheme | Unique? | Tracks wall time? | Causal order (`A → B ⇒ ts(A) < ts(B)`)? | Key trade-off |
+|---|---|---|---|---|
+| **Single-node counter** | Yes | No | Yes (linearizable) | Single point of failure; cross-region RTT per ID |
+| **Sharded counters / blocks** | Yes | No | No | Node B's ID `1001` can precede Node A's `17` |
+| **Random `UUIDv4`** | Yes | No | No | 128-bit random; destroys B-tree locality and order |
+| **`UUIDv7` / `ULID` / `Snowflake`** | Yes | Yes | Approximate only | NTP clock skew or backward jumps invert order |
+| **Lamport `(counter, nodeId)`** | Yes | No | Yes (when messages flow) | Tiny & causal, but useless for date-range queries |
+| **Hybrid Logical Clock (HLC)** | Yes | Yes (bounded) | Yes (when messages flow) | Needs only NTP; used by CockroachDB & MongoDB |
+| **Timestamp Oracle / TrueTime** | Yes | Yes | Yes (linearizable) | Single replicated oracle (TiDB) or GPS + atomic clocks (Spanner) |
+
+### How non-causal IDs leak a private photo
+
+Consider a subtle social-media bug from DDIA chapter 10. A user's account starts out public; using their laptop, they flip **account privacy = private** (`Node A`). Seconds later, using their phone, they upload an embarrassing **private photo** (`Node B` on a separate shard).
+
+If both shards timestamp writes using local NTP clocks and `Node B` lags `120 ms` behind `Node A`, the photo upload gets a *lower* timestamp (`130 ms`) than the privacy toggle (`200 ms`). Any stranger running an MVCC snapshot read at timestamp `150 ms` now sees a world where the photo already exists while the account still looks public!
+
+### Lamport clocks and Hybrid Logical Clocks (HLC)
+
+In 1978, Leslie Lamport showed you can order causal events across machines without physical clocks. Every node keeps an integer counter and embeds it with its unique node ID as `(counter, nodeId)`:
+
+1. Before generating an ID locally, increment `counter += 1`.
+2. Attach your current `counter` to every message sent to another node.
+3. On receiving a message carrying `c_remote`, raise `counter = max(counter, c_remote)` before ticking again.
+
+Because `(1, "acct") < (2, "photo")`, causal order always holds whenever information flows between nodes. Tie-breaking identical counters by `nodeId` makes every timestamp globally unique, though when two events never communicated, Lamport cannot tell whether they were concurrent — **vector clocks** track one counter per node if you need to detect concurrency explicitly, at the cost of much larger metadata.
+
+Pure Lamport counters still fail everyday queries like "show orders from Tuesday," because a counter has no link to real time. **Hybrid Logical Clocks (HLC)** solve this by packing `(wallTime, logical)` into one timestamp: wall time advances with NTP or the highest remote timestamp seen, and `logical` ticks upward whenever events arrive faster than the physical clock moves forward (or when NTP steps backward). Flip to **Tab 2** in the interactive playground above to inject clock skew and see how Wall Clock, Lamport, and HLC react.
+
+</En>
+
+<Vi>
+
+### Phía sau câu thần chú của định lý CAP
+
+Sách cũ hay tóm tắt đánh đổi này bằng **định lý CAP**: "Nhất quán (Consistency), Sẵn sàng (Availability), Chịu chia cắt mạng (Partition Tolerance) — chỉ được chọn hai." Như Kleppmann phân tích trong bài phê bình năm 2015, cách nói đó gây hiểu lầm tai hại vì bạn không thể "bỏ chọn" sự cố đứt mạng. Chia cắt mạng là tai nạn hạ tầng, không phải nút bật tắt trong file config.
+
+Khi mạng bình thường, hệ thống đạt được cả hai; khi mạng đứt, bạn mới phải chọn giữa **nhất quán** (tạm từ chối hoặc treo request bên cụm thiểu số) hoặc **sẵn sàng** (trả về dữ liệu có nguy cơ cũ hoặc mâu thuẫn). Ngay cả như vậy, định nghĩa hình thức của CAP cũng chỉ xét đúng linearizability và một loại lỗi duy nhất — đứt mạng, thứ mà thống kê vận hành tại Google cho thấy chỉ chiếm **dưới 8% số sự cố**.
+
+Ngay cả khi dây mạng chạy êm ru chẳng đứt bao giờ, linearizability vẫn đòi một khoản thuế cố định: **độ trễ**. CPU đa nhân thực tế cũng bỏ qua linearizability ở tầng cache L1/L2 trừ phi bạn chèn rào chắn bộ nhớ (memory fence), vì chờ đồng bộ mọi nhân sẽ kéo tụt tốc độ. Attiya và Welch đã chứng minh giới hạn toán học cho mạng phân tán: thời gian phản hồi của mọi lệnh đọc/ghi khả tuyến tính luôn bị chặn dưới bởi độ bất định của độ trễ mạng.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Split brain (chia đôi não)**: tình huống hai node cùng tin mình là leader hợp lệ và đều nhận ghi, làm dữ liệu rẽ nhánh mâu thuẫn.
+- **Synchronous read repair (sửa đồng bộ khi đọc)**: bắt node điều phối đọc phải ghi trả bản mới nhất sang các bản sao chậm *trước khi* trả kết quả về cho client.
+- **Network partition (chia cắt mạng)**: sự cố khi các máy vẫn sống nhưng gói tin giữa hai nhóm máy bị mất hoặc trễ vô hạn.
+- **Memory fence / barrier (rào chắn bộ nhớ)**: lệnh CPU buộc các bộ nhớ đệm phải đồng bộ thứ tự với RAM, đánh đổi tốc độ lấy tính nhất quán giữa các nhân.
+
+</Concepts>
+
+---
+
+## 3. Sinh ID phân tán và đồng hồ logic
+
+Bảng dữ liệu nào cũng cần khoá chính, và ứng dụng rất hay dựa vào thứ tự ID để đoán chuyện gì xảy ra trước. Bộ đếm `AUTO_INCREMENT` trên một máy đơn đạt chuẩn khả tuyến tính nhờ lệnh nguyên tử **fetch-and-add** của CPU — cho tới khi máy đó sập, nghẽn cổ chai ghi, hoặc bắt người dùng ở Tokyo chờ một vòng mạng sang tận Mỹ chỉ để xin một con số.
+
+Các đội kỹ sư thường dùng bốn lối thoát khỏi bộ đếm đơn, nhưng mọi mẹo gắn giờ đồng hồ đều đánh mất thứ tự nhân quả:
+
+| Cách sinh ID / Đồng hồ | Duy nhất? | Bám giờ thực? | Giữ thứ tự nhân quả (`A → B ⇒ ts(A) < ts(B)`)? | Đánh đổi cốt lõi |
+|---|---|---|---|---|
+| **Bộ đếm một node** | Có | Không | Có (khả tuyến tính) | Điểm chết đơn; tốn một vòng mạng xuyên vùng |
+| **Chia đoạn / chia chẵn lẻ** | Có | Không | Không | ID `1001` ở node B có thể có trước `17` ở node A |
+| **`UUIDv4` ngẫu nhiên** | Có | Không | Không | 128-bit ngẫu nhiên; phá tính cục bộ B-tree và mất thứ tự |
+| **`UUIDv7` / `ULID` / `Snowflake`** | Có | Có | Chỉ gần đúng | Lệch NTP hoặc đồng hồ nhảy lùi vẫn đảo ngược thứ tự |
+| **Lamport `(counter, nodeId)`** | Có | Không | Có (khi có truyền tin) | Gọn nhẹ, giữ nhân quả nhưng không lọc theo ngày được |
+| **Hybrid Logical Clock (HLC)** | Có | Có (có ngưỡng lệch) | Có (khi có truyền tin) | Chỉ cần NTP chuẩn; CockroachDB và MongoDB đang dùng |
+| **Timestamp Oracle / TrueTime** | Có | Có | Có (khả tuyến tính) | Một máy cấp số theo lô (TiDB) hoặc GPS + đồng hồ nguyên tử (Spanner) |
+
+### ID lệch nhân quả làm lộ ảnh riêng tư thế nào?
+
+Hãy xem tình huống thực tế trong chương 10 DDIA. Tài khoản của một người dùng ban đầu ở chế độ công khai; dùng laptop, họ bấm chuyển **tài khoản = riêng tư** (`Node A`). Vài giây sau, họ cầm điện thoại bấm đăng một **tấm ảnh nhạy cảm** (`Node B` ở shard khác).
+
+Nếu hai shard lấy mốc thời gian từ đồng hồ NTP cục bộ và `Node B` chạy chậm `120 ms` so với `Node A`, tấm ảnh lại nhận timestamp *nhỏ hơn* (`130 ms`) so với lệnh khoá riêng tư (`200 ms`). Một người lạ chạy đọc snapshot MVCC đúng vào mốc `150 ms` sẽ nhìn thấy bức ảnh đã hiện hữu trong khi tài khoản vẫn mang trạng thái công khai!
+
+### Đồng hồ Lamport và Đồng hồ Logic Lai (HLC)
+
+Năm 1978, Leslie Lamport chứng minh ta hoàn toàn xếp được thứ tự nhân quả mà chẳng cần đồng hồ vật lý. Mỗi node giữ một bộ đếm số nguyên và gắn kèm ID node thành cặp `(counter, nodeId)`:
+
+1. Trước khi sinh ID cục bộ, tăng `counter += 1`.
+2. Gắn `counter` hiện tại vào mọi thông điệp gửi sang node khác.
+3. Khi nhận thông điệp mang `c_remote`, nâng `counter = max(counter, c_remote)` trước lần tăng tiếp theo.
+
+Nhờ đó `(1, "acct") < (2, "photo")` luôn giữ đúng thứ tự hễ có luồng thông tin đi qua giữa hai node. Nếu hai bộ đếm bằng nhau, tên node đứng sau phân xử để đảm bảo không bao giờ trùng; còn nếu muốn phân biệt hai sự kiện xảy ra song song với sự kiện nhân quả khi không truyền tin, bạn phải dùng **vector clock** (lưu một bộ đếm cho *mỗi* node, tốn dung lượng hơn nhiều).
+
+Bộ đếm Lamport thuần tuý vẫn bó tay trước câu hỏi đời thường kiểu "lấy toàn bộ đơn hàng ngày thứ Ba" vì nó không biết ngày giờ thực. **Hybrid Logical Clock (HLC)** vá chỗ hổng này bằng cặp `(wallTime, logical)`: phần giờ vật lý nhảy theo NTP hoặc timestamp lớn nhất nhận được từ máy khác, còn phần đếm logic `logical` nhích lên mỗi khi nhiều sự kiện dồn vào cùng một tích tắc hoặc khi NTP lùi giờ. Bạn hãy chuyển sang **Tab 2** của khung demo phía trên để thử kéo độ lệch giờ và xem đồng hồ vật lý, Lamport và HLC phản ứng ra sao.
+
+</Vi>
+
+<ConsensusLamportVsHlc />
+
+<En>
+
+CockroachDB implements this exact HLC rule inside its `Clock` struct: whenever local physical time lags behind the highest wall timestamp seen so far, it keeps the higher `wallTime` and increments `Logical++`, ensuring monotonic timestamps without atomic clocks.
+
+<GitHubCode repo="cockroachdb/cockroach" path="pkg/util/hlc/hlc.go" lines="L417-L437" url="https://github.com/cockroachdb/cockroach/blob/d30c905fff79ef825adc96bcc647f1872a90f2ff/pkg/util/hlc/hlc.go#L417-L437" caption="CockroachDB's Hybrid Logical Clock advances Logical when wall time stalls or lags, resetting Logical to 0 only when physical time moves strictly ahead.">
+```go
+func (c *Clock) NowAsClockTimestamp() ClockTimestamp {
+	physicalClock := c.getPhysicalClockAndCheck(context.TODO())
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.mu.timestamp.WallTime >= physicalClock {
+		// The wall time is ahead, so the logical clock ticks.
+		c.mu.timestamp.Logical++
+	} else {
+		// Use the physical clock, and reset the logical one.
+		atomic.StoreInt64(&c.mu.timestamp.WallTime, physicalClock)
+		c.mu.timestamp.Logical = 0
+	}
+
+	c.enforceWallTimeWithinBoundLocked()
+	return c.mu.timestamp
+}
+```
+</GitHubCode>
+
+One catch remains: if the laptop (`Node A`) and the phone (`Node B`) never pass a causality token through the client or across shards, **even Lamport clocks and HLC cannot prevent the photo leak**. True linearizable ordering across uncommunicating shards still requires either a single replicated **Timestamp Oracle** (like TiDB's batching server inspired by Percolator) or **Google Spanner's TrueTime**, which uses GPS and atomic clocks to bound skew within ~`7 ms` and waits out the uncertainty interval before committing.
+
+<Concepts>
+
+- **UUIDv7 / ULID / Snowflake**: time-ordered distributed ID formats placing a millisecond wall-clock prefix ahead of shard/sequence or random bits.
+- **Happens-before (`A → B`)**: causal relationship where operation `B` depends on or happens after knowing the effect of `A`.
+- **Lamport clock**: a logical `(counter, nodeId)` timestamp guaranteeing `A → B ⇒ ts(A) < ts(B)` whenever nodes propagate counters on messages.
+- **Vector clock**: a map holding one logical counter per node so systems can tell concurrent writes apart from causally ordered writes.
+- **Hybrid Logical Clock (HLC)**: a timestamp combining NTP wall time with a monotonic logical sub-counter to stay close to real time while preserving causal order.
+
+</Concepts>
+
+---
+
+## 4. Consensus and the FLP impossibility boundary
+
+Suppose you build a linearizable ID generator (or Timestamp Oracle). Can you now run distributed locks or unique-username checks by handing out timestamps and picking whoever got the lowest number?
+
+**No.** Even if you hold timestamp `101`, you cannot tell whether another node holds `100` and is just slow — or crashed permanently — unless you wait to hear back from *every* node. One dead machine would freeze the entire cluster.
+
+What you actually need is **consensus**: getting a group of nodes to decide irreversibly on an outcome as long as a majority stays reachable.
+
+### Why FLP didn't stop Raft and Paxos
+
+In 1985, Fischer, Lynch, and Paterson proved the famous **FLP impossibility theorem**: in a purely asynchronous network where messages can be delayed indefinitely, no *deterministic* consensus algorithm can guarantee always terminating if even a single node can crash. The intuitive reason is simple — no protocol can tell with certainty whether a quiet peer has crashed or is merely experiencing a 10-second packet stall.
+
+Practical consensus protocols bypass FLP by relaxing two pure assumptions: they allow **timeouts** (suspect a peer may be dead, even if sometimes wrong — known as partial synchrony) and **randomness** (jittered election timers so candidates don't tie forever). Safety properties never depend on clocks; clocks only help the cluster make progress once the network settles down.
+
+### The many faces of consensus (and why Fetch-and-Add stops at 2)
+
+Every single-value consensus algorithm guarantees four rules: **uniform agreement** (no two nodes decide differently), **integrity** (no node changes its mind), **validity** (only a proposed value can be decided — disallowing trivial `null` answers), and **termination** (every non-crashed node eventually decides, provided a strict majority is alive).
+
+Remarkably, four seemingly different primitives are mathematically **equivalent** — any solution to one builds all the others for *any* number of nodes (`consensus number = ∞`):
+
+| Formulation | What it agrees on | Consensus number | Practical superpower |
+|---|---|---|---|
+| **Single-value consensus** | One winning value `v` among proposals | `∞` | Leader election, single seat/username claim |
+| **Linearizable `CAS`** | Conditional overwrite (`if x == null -> v`) | `∞` | Distributed locks, leases, conditional object-store writes |
+| **Shared log / Total order broadcast** | Exact append sequence seen by every replica | `∞` | State machine replication, Raft, Zab, event logs |
+| **Non-blocking atomic commit** | Commit vs. abort across shards (abort if *any* votes abort) | `∞` | Fault-tolerant replacement for single-coordinator 2PC |
+| **Linearizable `Fetch-and-Add`** | Increments counter atomically and returns old value | **`2`** | Works for 2 nodes only; with 3+ nodes, losers don't know *who* drew `0` if the winner crashes silently |
+
+That last row is one of Maurice Herlihy's sharpest results highlighted in DDIA 2nd edition. With two nodes, drawing `0` or `1` from atomic `fetch-and-add` lets both sides learn the winner if they share proposals upfront; with three or more nodes, the two losers know they failed to draw `0`, yet if the winner crashes before broadcasting its ticket, nobody knows whose value won!
+
+<Concepts>
+
+- **FLP impossibility**: proof that no deterministic algorithm can guarantee termination for async consensus under crash faults without timeouts or randomness.
+- **Safety vs. liveness**: safety means nothing bad ever happens (agreement, no split brain); liveness means good things eventually happen (termination, progress).
+- **Total order broadcast**: a shared log protocol guaranteeing reliable delivery and identical message order across all non-crashed replicas.
+- **Consensus number**: the maximum number of concurrent nodes for which an atomic primitive can solve consensus without blocking (2 for `fetch-and-add`; `∞` for `CAS` and shared logs).
+- **Atomic commit**: ensuring all shards in a distributed transaction unanimously commit or unanimously abort.
+
+</Concepts>
+
+---
+
+## 5. How Raft, Paxos, and Zab build a shared log
+
+Among all equivalent forms of consensus, production databases almost universally build **shared logs** (`Raft`, `Zab`, `Viewstamped Replication`, and `Multi-Paxos`). Feed every replica the same deterministic log entries in the same order and every replica lands in the same state — a pattern known as **State Machine Replication**.
+
+Building a shared log sounds circular at first: we need a single leader to serialize log writes, yet we need consensus to pick that leader without split brain.
+
+Consensus breaks that circle with two rules:
+
+1. **Epoch / term numbers (`at most one leader per term`).** Algorithms do not promise there is only one leader across all of history; they promise at most one leader per monotonically increasing epoch (**term** in Raft, **ballot** in Paxos, **view** in VR). Whenever a higher term appears, every older leader is automatically dethroned.
+2. **Two overlapping rounds of majority voting.** Round 1 elects a leader for term `T` from a majority quorum. Round 2 forces that leader to replicate every new log entry to a majority quorum before acknowledging the client. Because any two majorities out of `n` nodes must overlap by at least one node, a write quorum in an old term is guaranteed to hit at least one replica that already voted in the newer term — blocking any zombie leader.
+
+</En>
+
+<Vi>
+
+CockroachDB cài đặt đúng nguyên tắc HLC này trong struct `Clock` của nó: hễ giờ vật lý cục bộ bị tụt lại phía sau `WallTime` lớn nhất từng gặp, nó giữ nguyên `WallTime` cao hơn đó và tăng `Logical++`, bảo đảm timestamp luôn đi tới mà không cần đồng hồ nguyên tử.
+
+<GitHubCode repo="cockroachdb/cockroach" path="pkg/util/hlc/hlc.go" lines="L417-L437" url="https://github.com/cockroachdb/cockroach/blob/d30c905fff79ef825adc96bcc647f1872a90f2ff/pkg/util/hlc/hlc.go#L417-L437" caption="Code HLC thật của CockroachDB: khi giờ vật lý đứng yên hoặc tụt sau, nó tăng bộ đếm Logical và chỉ reset Logical về 0 khi đồng hồ vật lý vượt hẳn lên trước.">
+```go
+func (c *Clock) NowAsClockTimestamp() ClockTimestamp {
+	physicalClock := c.getPhysicalClockAndCheck(context.TODO())
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.mu.timestamp.WallTime >= physicalClock {
+		// The wall time is ahead, so the logical clock ticks.
+		c.mu.timestamp.Logical++
+	} else {
+		// Use the physical clock, and reset the logical one.
+		atomic.StoreInt64(&c.mu.timestamp.WallTime, physicalClock)
+		c.mu.timestamp.Logical = 0
+	}
+
+	c.enforceWallTimeWithinBoundLocked()
+	return c.mu.timestamp
+}
+```
+</GitHubCode>
+
+Nhưng vẫn còn một điểm chốt cực kỳ quan trọng: nếu laptop (`Node A`) và điện thoại (`Node B`) không truyền một dấu nhân quả (causality token) qua client hay giữa các shard, **ngay cả Lamport clock lẫn HLC cũng không chặn nổi vụ lộ ảnh**. Muốn ép thứ tự thời gian thực giữa các shard không trò chuyện với nhau, bạn vẫn buộc phải dùng **Timestamp Oracle** một cụm như TiDB, hoặc dùng **TrueTime** của Google Spanner (GPS kết hợp đồng hồ nguyên tử thu hẹp sai số về quanh `7 ms` rồi chờ hết khoảng bất định trước khi commit).
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **UUIDv7 / ULID / Snowflake**: các định dạng ID phân tán đặt phần mốc thời gian mili-giây lên đầu để sắp xếp gần theo thời gian.
+- **Happens-before (`A → B`)**: quan hệ nhân quả, khi thao tác `B` chỉ diễn ra sau khi đã biết hoặc chịu tác động từ kết quả của `A`.
+- **Lamport clock**: dấu thời gian logic `(counter, nodeId)` bảo đảm hễ `A → B` thì `ts(A) < ts(B)` nếu các node truyền bộ đếm theo thông điệp.
+- **Vector clock**: cấu trúc giữ một bộ đếm cho từng node, giúp nhận biết hai bản ghi được tạo song song hay có quan hệ trước-sau.
+- **Hybrid Logical Clock (HLC)**: dấu thời gian lai giữa đồng hồ vật lý NTP và bộ đếm logic đi tới, vừa bám sát giờ thực vừa giữ thứ tự nhân quả.
+
+</Concepts>
+
+---
+
+## 4. Đồng thuận và ranh giới bất khả thi FLP
+
+Giả sử bạn dựng xong một máy sinh ID khả tuyến tính (hoặc Timestamp Oracle). Liệu bây giờ bạn có dùng nó để cấp khoá phân tán hay kiểm tra trùng username bằng cách phát timestamp cho ai xin được số nhỏ nhất là thắng không?
+
+**Chưa đủ.** Ngay cả khi bạn cầm số `101`, làm sao bạn biết chắc không có máy nào khác đang cầm số `100` và chỉ bị nghẽn mạng — hay đã sập hẳn — trừ phi bạn chờ câu trả lời từ *tất cả* các máy? Chỉ một node chết là cả cụm đứng hình.
+
+Thứ bạn thực sự cần là **đồng thuận (consensus)**: cho phép một nhóm máy chốt không thể đảo ngược một kết quả miễn là phe đa số vẫn liên lạc được với nhau.
+
+### Vì sao định lý FLP không cản được Raft và Paxos
+
+Năm 1985, Fischer, Lynch và Paterson chứng minh **định lý bất khả thi FLP**: trong mô hình mạng bất đồng bộ thuần tuý (gói tin có thể trễ vô hạn), không có thuật toán đồng thuận *tất định* nào đảm bảo *luôn dừng được* nếu chỉ một máy có nguy cơ sập. Lý do rất tự nhiên — không giao thức nào phân biệt chắc chắn 100% được giữa một node đã tắt nguồn và một node chỉ đang bị kẹt gói tin 10 giây.
+
+Các thuật toán thực tế né được bẫy FLP bằng cách nới hai giả định thuần lý thuyết: chúng cho phép dùng **timeout** (nghi ngờ máy kia đã sập dù đôi lúc đoán nhầm — gọi là đồng bộ từng phần) và **tính ngẫu nhiên** (trộn thời gian chờ bầu cử để các ứng viên không kẹt hoà mãi). Tính an toàn (safety) không bao giờ phụ thuộc đồng hồ; đồng hồ chỉ giúp cụm tiếp tục tiến triển khi mạng ổn định lại.
+
+### Nhiều bộ mặt của đồng thuận (và vì sao Fetch-and-Add dừng ở 2)
+
+Mọi bài toán đồng thuận một giá trị đều phải thoả bốn điều kiện: **đồng thuận đồng nhất** (không hai node nào chốt hai giá trị khác nhau), **toàn vẹn** (đã chốt là không đổi ý), **hợp lệ** (giá trị chốt phải do một node đề xuất — loại trò lúc nào cũng trả về `null`), và **kết thúc** (mọi node còn sống đều chốt được miễn là quá bán node hoạt động).
+
+Điều kỳ diệu là bốn bài toán tưởng chẳng liên quan nhau lại **tương đương nhau về mặt toán học** — giải được một bài là dựng được cả ba bài còn lại cho *bao nhiêu node cũng được* (`chỉ số đồng thuận = ∞`):
+
+| Dạng bài toán | Thứ cần đồng thuận | Chỉ số đồng thuận | Sức mạnh thực tế |
+|---|---|---|---|
+| **Đồng thuận một giá trị** | Chọn một giá trị thắng `v` trong các đề xuất | `∞` | Bầu leader, chốt chủ nhân ghế cuối hay username |
+| **Linearizable `CAS`** | Ghi có điều kiện (`nếu x == null -> v`) | `∞` | Khoá phân tán, thuê bao (lease), ghi có điều kiện trên object storage |
+| **Log dùng chung / Total order broadcast** | Đúng thứ tự nối vào cuối log trên mọi replica | `∞` | Sao chép máy trạng thái (State Machine Replication), Raft, Zab |
+| **Commit nguyên tử không chặn** | Commit hay abort toàn bộ giao dịch (một bên abort là abort hết) | `∞` | Thay thế 2PC vốn phụ thuộc vào một điều phối viên dễ sập |
+| **Linearizable `Fetch-and-Add`** | Cộng bộ đếm nguyên tử và trả giá trị cũ | **`2`** | Chỉ giải được cho 2 node; từ 3 node trở lên, bên thua biết mình không bốc được số `0` nhưng nếu bên thắng sập trước khi báo tin thì cả nhóm treo cứng |
+
+Dòng cuối cùng là phát hiện kinh điển của Maurice Herlihy được nhấn mạnh trong DDIA bản 2. Nếu chỉ có 2 node, rút số `0` hay `1` từ phép tăng nguyên tử cho phép cả hai tự suy ra người thắng nếu đã trao đổi đề xuất trước; nhưng với từ 3 node trở lên, hai máy bốc số `1` và `2` biết mình thua mà không biết ai thắng nếu người rút số `0` im bặt giữa chừng.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **FLP impossibility (bất khả thi FLP)**: chứng minh không thuật toán tất định nào đảm bảo đồng thuận luôn kết thúc trong mạng bất đồng bộ thuần tuý nếu có máy sập.
+- **Safety vs. liveness (an toàn vs. tiến triển)**: an toàn nghĩa là không bao giờ ra kết quả sai (không chia đôi não); tiến triển nghĩa là hệ thống cuối cùng vẫn đi tiếp được.
+- **Total order broadcast (phát quảng bá toàn phần theo thứ tự)**: giao thức dựng log chung bảo đảm giao tin tin cậy và đúng y một thứ tự trên mọi máy sống.
+- **Consensus number (chỉ số đồng thuận)**: số máy tối đa mà một phép toán nguyên tử có thể giải quyết bài toán đồng thuận không chặn (`2` với `fetch-and-add`; `∞` với `CAS` và log chung).
+- **Atomic commit (commit nguyên tử)**: bảo đảm mọi shard tham gia giao dịch phân tán cùng commit hoặc cùng abort, không bao giờ làm nửa vời.
+
+</Concepts>
+
+---
+
+## 5. Raft, Paxos và Zab dựng nhật ký chung ra sao
+
+Trong tất cả các dạng tương đương của đồng thuận, các hệ thống thực tế gần như luôn chọn **log dùng chung (shared log)** (`Raft`, `Zab`, `Viewstamped Replication` và `Multi-Paxos`). Khi mọi bản sao đều nạp cùng một dãy lệnh tất định theo đúng một thứ tự, toàn bộ bản sao sẽ đi tới cùng một trạng thái — kỹ thuật này gọi là **State Machine Replication (sao chép máy trạng thái)**.
+
+Mới nghe thì hơi luẩn quẩn: muốn ghi log theo thứ tự cần có một leader duy nhất, mà muốn bầu leader không bị chia đôi não lại cần chính sự đồng thuận.
+
+Thuật toán đồng thuận phá vòng lặp này bằng đúng hai quy tắc thép:
+
+1. **Số nhiệm kỳ / epoch (`mỗi nhiệm kỳ tối đa một leader`).** Giao thức không hứa cả đời cụm chỉ có một leader; nó chỉ hứa trong một nhiệm kỳ đánh số tăng dần (**term** ở Raft, **ballot** ở Paxos, **view** ở VR) có tối đa một leader. Bất kỳ thông điệp nào mang số nhiệm kỳ cao hơn đều tước quyền leader cũ ngay lập tức.
+2. **Hai vòng bỏ phiếu đa số giao nhau.** Vòng 1 bầu leader mới cho nhiệm kỳ `T` từ một quorum đa số. Vòng 2 bắt leader đó nhân bản mọi mục log mới sang một quorum đa số khác trước khi báo OK cho client. Vì hai nhóm đa số bất kỳ trong cụm `n` node luôn giao nhau tại ít nhất một node, bất cứ quorum nào của leader cũ ở nhiệm kỳ cũ đều đụng phải ít nhất một máy đã biết nhiệm kỳ mới và bị từ chối thẳng tay.
+
+</Vi>
+
+<ConsensusRaftEpochs />
+
+<YouTube id="uXEYuDwm7e4" title="Distributed Systems 6.2: Raft" titleVi="Hệ thống phân tán 6.2: Giao thức Raft" start={0} end={457} caption="In the first 7.5 minutes of his Cambridge lecture, Martin Kleppmann walks through how Raft nodes transition between Follower, Candidate, and Leader across incrementing terms." captionVi="Trong 7 phút rưỡi đầu bài giảng tại Đại học Cambridge, Martin Kleppmann minh hoạ cách các node trong Raft chuyển trạng thái giữa Follower, Candidate và Leader qua các nhiệm kỳ (term) tăng dần." sourceTitle="Martin Kleppmann — Distributed Systems 6.2: Raft" />
+
+<En>
+
+### Subtleties that break naive implementations
+
+Even with two quorum rounds, real consensus engines handle edge cases that naive single-leader failover skips:
+
+- **Protecting already-committed entries.** Raft ensures safety by refusing to elect a candidate unless its log is at least as up-to-date as a majority of voters. Multi-Paxos takes the opposite route: any node can win leadership, then it collects and repairs uncommitted tail entries from a quorum before serving new writes.
+- **Linearizable reads still need quorum checks.** A partitioned leader with an expired lease can return stale data if it reads locally. Raft and `etcd` either route reads through a heartbeat quorum (`ReadIndex`) or use a lease synchronized carefully against bounded clock drift.
+- **Pre-Vote stops leadership ping-pong.** If a single node behind a flaky network link keeps timing out, its term climbs repeatedly; when packets briefly get through, its higher term forces a healthy leader to step down, halting the cluster. Adding a **Pre-Vote** phase checks whether a majority *would* vote before incrementing `Term`.
+- **Dynamic membership reconfiguration.** Adding or removing nodes safely requires two-phase joint consensus or single-server-at-a-time transitions so two disjoint majorities can never form during a resize.
+
+<GitHubCode repo="etcd-io/raft" path="raft.go" lines="L916-L931" url="https://github.com/etcd-io/raft/blob/99f9ffb3d19c2dee73cc802737cd7e1e5f008986/raft.go#L916-L931" caption="In etcd's Raft library, becomePreCandidate asks peers if they are ready for an election without bumping r.Term, preventing a partitioned node from disrupting a healthy leader.">
+```go
+func (r *raft) becomePreCandidate() {
+	// TODO(xiangli) remove the panic when the raft implementation is stable
+	if r.state == StateLeader {
+		panic("invalid transition [leader -> pre-candidate]")
+	}
+	// Becoming a pre-candidate changes our step functions and state,
+	// but doesn't change anything else. In particular it does not increase
+	// r.Term or change r.Vote.
+	r.step = stepCandidate
+	r.trk.ResetVotes()
+	r.tick = r.tickElection
+	r.lead = None
+	r.state = StatePreCandidate
+	r.logger.Infof("%x became pre-candidate at term %d", r.id, r.Term)
+}
+```
+</GitHubCode>
+
+<Callout type="warning" title="When systems break the rule on purpose: Kafka unclean leader election">
+Consensus forbids promoting an out-of-date replica to leader because doing so overwrites committed log entries. Apache Kafka exposes `unclean.leader.election.enable` for emergencies when every in-sync replica goes down: setting it to `true` keeps the partition available by promoting a lagging follower, at the cost of permanently dropping un-replicated messages when the old leader rejoins. Because silent data loss burned users, Kafka flipped the default from `true` to `false` in `0.11.0.0`.
+</Callout>
+
+Consensus is not free, which is why databases only run it where safety demands it: a 3-node cluster survives 1 crash, a 5-node cluster survives 2, adding more voting nodes *slows down* every write quorum, minority partitions stall completely, and mis-tuned heartbeat timeouts across WAN links can trap a cluster in endless re-elections.
+
+<Concepts>
+
+- **State Machine Replication**: keeping replicas identical by feeding each one the same deterministic sequence of log commands.
+- **Epoch / Term / Ballot**: a strictly increasing round number ensuring at most one valid leader exists per epoch.
+- **Quorum intersection**: the property that any two majority subsets of `n` nodes share at least one node in common.
+- **Pre-Vote**: a lightweight check before raising `Term` so a semi-disconnected node cannot repeatedly force a healthy leader to step down.
+- **Unclean leader election**: allowing an out-of-sync replica to become leader, trading consensus safety and durability for partition availability.
+
+</Concepts>
+
+---
+
+## 6. Coordination services: ZooKeeper, etcd, and Consul
+
+Running a Raft group across 1,000 database shards as one giant voting cluster would grind writes to a halt. Instead, large distributed systems **outsource consensus** to a tiny, dedicated 3- or 5-node **coordination service** (`ZooKeeper`, `etcd`, `Consul`), modeled on Google's Chubby lock service.
+
+Coordination services hold **small, slow-changing control metadata** (megabytes of shard maps, leader records, and config flags — never terabytes of user rows or thousands of writes per second). On top of their consensus log they layer four primitives that turn raw consensus into usable infrastructure:
+
+1. **Atomic CAS locks and leases** so only one worker claims a shard or leadership slot.
+2. **Monotonic fencing tokens** derived from the log index (`zxid` / `cversion` in ZooKeeper, `revision` in `etcd`) so storage servers reject delayed writes from paused zombie lock holders.
+3. **Ephemeral nodes and heartbeat sessions** that automatically release locks when a client crashes or misses lease renewals.
+4. **Watch notifications** pushing key changes to subscribers so nodes don't hammer the service with polling loops.
+
+| Coordination system | Consensus protocol | Reads linearizable by default? | Fencing token ID | Scaling read-only traffic |
+|---|---|---|---|---|
+| **ZooKeeper** | `Zab` | No (writes linearizable; reads may hit a lagging follower unless `sync()` runs) | `zxid` / `cversion` | **Observers** receive the log without voting |
+| **etcd (v3+)** | `Raft` | Yes (quorum/ReadIndex check by default; `Serializable` flag opts out for speed) | Global `revision` | Learner nodes + serializable local reads |
+| **Consul** | `Raft` | Configurable (`consistent` checks leader quorum; default allows bounded staleness) | `ModifyIndex` | Stale reads served locally with short staleness tolerance |
+
+<QuoteCard author="Kyle Kingsbury" role="Jepsen" sourceTitle="Jepsen: etcd 3.4.3" sourceUrl="https://jepsen.io/analyses/etcd-3.4.3">
+While the Raft paper discusses the need to thread reads through the consensus system to ensure liveness, etcd performed reads on any leader, locally, without checking to see whether a newer leader could have more recent state. The etcd team implemented an optional quorum flag, and in version 3.0 of the etcd API, made linearizability the default for all operations except for watches.
+</QuoteCard>
+
+### Service discovery doesn't need linearizability — use observers
+
+Think carefully before routing every microservice lookup through a consensus quorum. If your service discovery goes unavailable during a network hiccup, the whole platform stops calling downstream APIs, whereas caching a list of healthy IP addresses for a few seconds with a TTL (or falling back on connection error) keeps traffic moving.
+
+That is why ZooKeeper supports **observers** — non-voting replicas that copy the log asynchronously without slowing down write quorums. Reads from an observer can lag slightly behind, yet remain fast and available even across partitions.
+
+<LinkCard url="https://etcd.io/docs/v3.5/learning/api_guarantees/" title="etcd API guarantees — official consistency specification" description="How etcd v3 separates linearizable quorum reads from fast serializable reads, and how global revisions provide monotonic fencing." tag="Reference" />
+
+<Concepts>
+
+- **Coordination service**: a small (3- or 5-node) consensus-backed key-value store managing cluster metadata, leader leases, and shard ownership.
+- **Fencing token**: a monotonically increasing ID attached to a lock lease so downstream storage can reject late requests from an expired lock holder.
+- **Ephemeral node / lease**: a key tied to a client heartbeat session that automatically vanishes if the client stops renewing.
+- **Watch**: a server-pushed change stream notifying clients when watched keys or prefixes update.
+- **Observer**: a non-voting consensus replica that receives committed log entries to scale read throughput without slowing down quorum writes.
+
+</Concepts>
+
+---
+
+## Key takeaways
+
+- **Distinguish linearizability from serializability.** Linearizability guarantees real-time recency on a single object; serializability isolates multi-object transactions without guaranteeing real-time recency — only strict serializability delivers both.
+- **Never trust Dynamo quorums (`w + r > n`) or wall clocks for ordering.** Standard quorums still allow stale reads after newer reads unless synchronous read repair and pre-write reads are enabled, and `UUIDv7` or NTP clocks reverse causal events under clock skew.
+- **Use HLC for causal timestamps without atomic clocks, and consensus for locks.** Hybrid Logical Clocks keep `A → B` order across communicating nodes within NTP bounds, whereas fault-tolerant locks, unique keys, and fencing tokens require true consensus (not just `fetch-and-add`, which stops at consensus number 2).
+- **Keep your consensus cluster small and clean.** Let Raft/Paxos/Zab enforce unique leaders per term via overlapping quorums and Pre-Vote, keep `unclean.leader.election.enable=false` unless you knowingly accept data loss, and outsource cluster coordination to a 3- or 5-node service like `etcd` or ZooKeeper.
+- **Opt out of linearizability when speed and availability win.** For high-read service discovery or offline-capable clients, use TTL caches, serializable local reads, or ZooKeeper observers instead of paying a consensus round trip on every lookup.
+
+---
+
+## Review questions
+
+1. In a `n = 3, w = 2, r = 2` Dynamo setup, how can Bob read `0` *after* Alice has already finished reading `1`, and what synchronous step fixes that read anomaly without adding consensus? *(Section 2)*
+2. Why can a user flipping their account to private on a laptop and then uploading a photo on a phone still expose the photo to strangers even if both shards run Hybrid Logical Clocks? *(Section 3)*
+3. Why can `CAS` solve distributed consensus for 100 nodes while linearizable `fetch-and-add` fails above 2 nodes? *(Section 4)*
+4. Explain how Raft's two rounds of quorum voting plus term numbers stop an isolated old leader from overwriting committed entries once a network partition heals, and why disabling this check (`unclean.leader.election.enable=true`) risks data loss. *(Section 5)*
+5. Why should you avoid using a 3-node `etcd` or ZooKeeper cluster as your main application database, and when should service discovery read from an observer instead of linearizable quorum reads? *(Section 6)*
+
+</En>
+
+<Vi>
+
+### Những cái bẫy thực tế phá vỡ cài đặt ngây thơ
+
+Dù đã có hai vòng quorum, các engine đồng thuận thật vẫn phải xử lý những tình huống mà failover đơn giản hay bỏ qua:
+
+- **Bảo vệ các bản ghi đã commit.** Raft giữ an toàn bằng cách cấm bất kỳ node nào đắc cử nếu log của nó không mới bằng ít nhất đa số cử tri. Multi-Paxos đi hướng ngược lại: node nào thắng cũng được, nhưng trước khi nhận ghi mới nó phải đi hỏi quorum để vá lại phần đuôi log chưa chốt.
+- **Đọc khả tuyến tính vẫn phải kiểm tra quorum.** Một leader bị cô lập mạng và hết hạn lease vẫn có thể trả nhầm dữ liệu cũ nếu chỉ đọc trong RAM cục bộ. Raft và `etcd` xử lý bằng cách kiểm tra heartbeat qua quorum (`ReadIndex`) hoặc dùng lease bám chặt độ trôi đồng hồ cho phép.
+- **Pre-Vote chặn vòng lặp cướp quyền leader.** Nếu một node duy nhất bị chập chờn đường truyền liên tục hết timeout, số nhiệm kỳ của nó tăng vọt; chỉ cần mạng thông thoáng một giây, con số nhiệm kỳ cao hơn đó ép leader đang khoẻ phải thoái vị, làm cả cụm đứng hình. Pha **Pre-Vote** hỏi thử đa số trước khi thực sự tăng `Term`.
+- **Thay đổi thành viên cụm lúc đang chạy.** Thêm hoặc bớt máy mà không dừng hệ thống đòi hỏi cơ chế chuyển tiếp hai pha (joint consensus) hoặc thay từng máy một để hai nhóm đa số tách rời không bao giờ cùng tồn tại.
+
+<GitHubCode repo="etcd-io/raft" path="raft.go" lines="L916-L931" url="https://github.com/etcd-io/raft/blob/99f9ffb3d19c2dee73cc802737cd7e1e5f008986/raft.go#L916-L931" caption="Trong thư viện Raft của etcd, becomePreCandidate hỏi thăm các node khác trước xem có sẵn sàng bầu lại không mà chưa tăng r.Term, chặn đứng cảnh một node rớt mạng phá rối leader đang chạy tốt.">
+```go
+func (r *raft) becomePreCandidate() {
+	// TODO(xiangli) remove the panic when the raft implementation is stable
+	if r.state == StateLeader {
+		panic("invalid transition [leader -> pre-candidate]")
+	}
+	// Becoming a pre-candidate changes our step functions and state,
+	// but doesn't change anything else. In particular it does not increase
+	// r.Term or change r.Vote.
+	r.step = stepCandidate
+	r.trk.ResetVotes()
+	r.tick = r.tickElection
+	r.lead = None
+	r.state = StatePreCandidate
+	r.logger.Infof("%x became pre-candidate at term %d", r.id, r.Term)
+}
+```
+</GitHubCode>
+
+<Callout type="warning" title="Khi hệ thống cố ý phá luật: unclean leader election trong Kafka">
+Lý thuyết đồng thuận cấm tuyệt đối việc bầu một bản sao tụt hậu lên làm leader vì nó sẽ ghi đè lên các dòng log đã chốt. Apache Kafka có cờ `unclean.leader.election.enable` cho tình huống khẩn cấp khi toàn bộ replica đồng bộ (ISR) đều sập: bật `true` giúp partition nhận traffic lại ngay bằng cách chọn bừa một follower còn sống dù thiếu tin, chấp nhận mất vĩnh viễn các tin chưa kịp chép khi leader cũ hồi phục. Vì quá nhiều hệ thống mất dữ liệu do cờ này, từ bản `0.11.0.0` Kafka đã đổi mặc định về `false`.
+</Callout>
+
+Đồng thuận không hề miễn phí, nên các database chỉ dùng nó ở chỗ an toàn thực sự bắt buộc: cụm 3 node chịu được 1 máy hỏng, cụm 5 node chịu được 2 máy, càng thêm nhiều máy bỏ phiếu thì quorum ghi càng *chậm đi*, nửa thiểu số khi đứt mạng bị khoá cứng hoàn toàn, và đặt timeout quá gắt qua mạng liên lục địa dễ đẩy cụm vào vòng lặp bầu cử liên miên.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **State Machine Replication (sao chép máy trạng thái)**: giữ các bản sao giống hệt nhau bằng cách cho mọi máy chạy cùng một chuỗi lệnh tất định theo đúng thứ tự log.
+- **Epoch / Term / Ballot (số nhiệm kỳ)**: số thứ tự tăng nghiêm ngặt bảo đảm mỗi nhiệm kỳ chỉ có tối đa một leader hợp lệ.
+- **Quorum intersection (giao điểm quorum)**: tính chất hai nhóm đa số bất kỳ trong `n` node luôn chung ít nhất một node.
+- **Pre-Vote (tiền bỏ phiếu)**: bước thăm dò trước khi tăng số nhiệm kỳ, ngăn một node chập chờn mạng ép leader khoẻ phải nhường ghế.
+- **Unclean leader election (bầu leader không sạch)**: cho phép replica thiếu dữ liệu làm leader, đánh đổi an toàn đồng thuận lấy tính sẵn sàng khi sập toàn bộ ISR.
+
+</Concepts>
+
+---
+
+## 6. Dịch vụ điều phối: ZooKeeper, etcd và Consul
+
+Chạy một cụm Raft phủ lên toàn bộ 1.000 shard dữ liệu như một khối bỏ phiếu khổng lồ sẽ làm lệnh ghi lê lết. Thay vào đó, các hệ thống phân tán lớn **thuê ngoài phần đồng thuận** cho một **dịch vụ điều phối (coordination service)** gọn nhẹ gồm 3 hoặc 5 node (`ZooKeeper`, `etcd`, `Consul`), phỏng theo dịch vụ khoá Chubby của Google.
+
+Dịch vụ điều phối chỉ giữ **dữ liệu điều khiển nhỏ, ít đổi** (vài megabyte bản đồ shard, bản ghi leader, cờ cấu hình — tuyệt đối không chứa hàng terabyte dữ liệu người dùng hay hứng hàng nghìn lệnh ghi mỗi giây). Trên nền log đồng thuận, chúng gắn thêm bốn công cụ biến lý thuyết thành hạ tầng dùng ngay được:
+
+1. **Khoá và thuê bao (lease) qua `CAS` nguyên tử** để đúng một worker giành được shard hay ghế leader.
+2. **Fencing token tăng đơn điệu** lấy thẳng từ chỉ số log (`zxid` / `cversion` ở ZooKeeper, `revision` ở `etcd`) để tầng lưu trữ chặn đứng gói tin đi trễ của leader cũ vừa tỉnh lại sau cơn treo máy.
+3. **Nút tạm (ephemeral node) và phiên heartbeat** tự động thu hồi khoá ngay khi client sập hoặc hết hạn gia hạn lease.
+4. **Thông báo thay đổi (watch)** đẩy thẳng cập nhật tới client đăng ký, bỏ hoàn toàn vòng lặp hỏi thăm (polling).
+
+| Hệ thống điều phối | Giao thức đồng thuận | Đọc mặc định có khả tuyến tính? | Mã fencing token | Mở rộng tải đọc chỉ đọc |
+|---|---|---|---|---|
+| **ZooKeeper** | `Zab` | Không (ghi khả tuyến tính; đọc có thể trúng follower trễ trừ khi gọi `sync()`) | `zxid` / `cversion` | **Observer** nhận log ngầm nhưng không bỏ phiếu |
+| **etcd (v3+)** | `Raft` | Có (kiểm tra quorum/ReadIndex mặc định; cờ `Serializable` cho phép tắt để tăng tốc) | `revision` toàn cục | Node Learner + đọc cục bộ serializable |
+| **Consul** | `Raft` | Tuỳ cấu hình (`consistent` kiểm tra quorum leader; mặc định cho phép trễ nhẹ) | `ModifyIndex` | Đọc cục bộ với ngưỡng trễ giới hạn |
+
+<QuoteCard author="Kyle Kingsbury" role="Jepsen" sourceTitle="Jepsen: etcd 3.4.3" sourceUrl="https://jepsen.io/analyses/etcd-3.4.3">
+Dù bài báo Raft nhấn mạnh lệnh đọc phải đi qua hệ thống đồng thuận để bảo đảm an toàn, etcd từng xử lý lệnh đọc cục bộ ngay trên leader mà không kiểm tra xem đã có leader mới hơn hay chưa. Đội ngũ etcd sau đó thêm cờ quorum tuỳ chọn, và từ API bản 3.0 đã đặt tính khả tuyến tính làm mặc định cho mọi thao tác trừ watch.
+</QuoteCard>
+
+### Service discovery không cần khả tuyến tính — hãy dùng observer
+
+Đừng đẩy mọi truy vấn tìm địa chỉ microservice đi qua một vòng quorum đồng thuận. Nếu hệ thống service discovery ngừng trả lời mỗi khi mạng rung lắc, cả nền tảng sẽ tê liệt; trong khi cache danh sách IP khoẻ vài giây bằng TTL (và bỏ qua cache nếu kết nối lỗi) lại giúp lưu lượng chạy êm ru.
+
+Đó là lý do ZooKeeper hỗ trợ **observer** — những bản sao không có quyền bỏ phiếu, chép log bất đồng bộ để không làm chậm quorum ghi. Đọc từ observer có thể chậm hơn hiện tại một chút, nhưng đổi lại cực nhanh và vẫn phục vụ bình thường ngay cả khi mạng bị chia cắt.
+
+<LinkCard url="https://etcd.io/docs/v3.5/learning/api_guarantees/" title="etcd API guarantees — tài liệu cam kết nhất quán chính thức" description="Cách etcd v3 tách biệt lệnh đọc quorum khả tuyến tính với lệnh đọc serializable tốc độ cao, cùng cơ chế revision làm fencing token." tag="Tài liệu gốc" />
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Coordination service (dịch vụ điều phối)**: kho key-value nhỏ (3 hoặc 5 node) dùng đồng thuận để quản lý metadata cụm, lease leader và phân bổ shard.
+- **Fencing token (thẻ rào chắn)**: con số tăng đơn điệu gắn kèm khoá thuê bao để hệ thống lưu trữ từ chối request đi trễ từ máy đã mất quyền khoá.
+- **Ephemeral node / lease (nút tạm / thuê bao)**: khoá gắn với phiên heartbeat của client, tự động biến mất nếu client ngừng báo sống.
+- **Watch (theo dõi thay đổi)**: luồng thông báo đẩy từ server báo cho client ngay khi khoá đang theo dõi cập nhật.
+- **Observer (bản sao quan sát)**: replica không bỏ phiếu trong cụm đồng thuận, chỉ nhận log đã chốt để gánh tải đọc mà không làm chậm lệnh ghi.
+
+</Concepts>
+
+---
+
+## Điểm rút ra
+
+- **Phân biệt rạch ròi linearizability và serializability.** Linearizability bảo đảm tính mới nhất theo giờ thực trên một đối tượng; serializability cô lập giao dịch nhiều đối tượng nhưng vẫn cho phép đọc dữ liệu cũ — chỉ strict serializability mới cho cả hai.
+- **Đừng tin quorum kiểu Dynamo (`w + r > n`) hay đồng hồ vật lý để xếp thứ tự.** Quorum chuẩn vẫn trả nhầm giá trị cũ sau khi người khác vừa thấy giá trị mới nếu thiếu sửa đồng bộ khi đọc và đọc trước khi ghi, còn `UUIDv7` hay NTP sẽ đảo ngược nhân quả khi đồng hồ lệch.
+- **Dùng HLC để giữ nhân quả không cần đồng hồ nguyên tử, và dùng đồng thuận cho khoá.** HLC giữ được thứ tự `A → B` giữa các node có trao đổi thông điệp trong ngưỡng lệch NTP; còn khoá phân tán, ràng buộc duy nhất và fencing token bắt buộc phải có đồng thuận thực thụ (không phải `fetch-and-add`, vốn chỉ giải được cho tối đa 2 node).
+- **Giữ cụm đồng thuận nhỏ và sạch.** Hãy để Raft/Paxos/Zab bảo vệ ngôi leader duy nhất mỗi nhiệm kỳ qua quorum giao nhau và Pre-Vote, giữ `unclean.leader.election.enable=false` trừ phi bạn chủ đích chấp nhận mất dữ liệu, và thuê ngoài phần điều phối cho cụm 3 hoặc 5 node như `etcd` hay ZooKeeper.
+- **Chủ động bỏ qua khả tuyến tính ở nơi tốc độ và sẵn sàng là vua.** Với service discovery đọc nhiều hay ứng dụng chạy offline, hãy dùng TTL cache, đọc serializable cục bộ hoặc ZooKeeper observer thay vì tốn một vòng đồng thuận cho mọi lần tra cứu.
+
+---
+
+## Câu hỏi ôn tập
+
+1. Trong cụm Dynamo `n = 3, w = 2, r = 2`, vì sao Bob vẫn có thể đọc trúng `0` *sau khi* Alice đã đọc xong `1`, và bước đồng bộ nào khi đọc giải quyết được lỗi này mà chưa cần đồng thuận? *(Phần 2)*
+2. Vì sao khi người dùng chuyển tài khoản sang riêng tư trên laptop rồi đăng ảnh từ điện thoại, người lạ vẫn có nguy cơ thấy ảnh đó dù cả hai shard đều chạy Hybrid Logical Clock? *(Phần 3)*
+3. Vì sao `CAS` giải được đồng thuận phân tán cho 100 node trong khi `fetch-and-add` khả tuyến tính lại bó tay khi vượt quá 2 node? *(Phần 4)*
+4. Hãy giải thích cách hai vòng bỏ phiếu quorum cộng thêm số nhiệm kỳ trong Raft ngăn một leader cũ bị cô lập ghi đè log đã chốt khi mạng nối lại, và vì sao tắt kiểm tra này (`unclean.leader.election.enable=true`) dễ gây mất dữ liệu. *(Phần 5)*
+5. Vì sao không nên biến cụm `etcd` hay ZooKeeper 3 node thành database chính cho dữ liệu ứng dụng, và khi nào service discovery nên đọc từ observer thay vì ép đọc quorum khả tuyến tính? *(Phần 6)*
+
+</Vi>
