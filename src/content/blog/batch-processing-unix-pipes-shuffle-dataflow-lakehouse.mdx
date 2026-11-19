@@ -1,0 +1,733 @@
+---
+title: "Batch processing at scale: from Unix pipes and distributed shuffles to lakehouses"
+title_vi: "Xử lý theo lô (batch processing): từ Unix pipe, distributed shuffle tới data lakehouse"
+description: "Why a Unix pipe beat a 7-node Hadoop cluster by 235x, how the distributed shuffle breaks on hot keys, and why Spark, Iceberg, and Arrow replaced MapReduce."
+description_vi: "Vì sao một đường ống Unix chạy nhanh hơn cụm Hadoop 7 máy tới 235 lần, bước shuffle gãy ở đâu khi gặp hot key, và cách Spark, Iceberg cùng Arrow thay thế MapReduce."
+date: 2026-11-19
+category: "system-design"
+tags: ["distributed-systems", "batch-processing", "spark", "unix", "data-lakehouse", "iceberg", "ddia"]
+draft: true
+sources:
+  - { title: "Designing Data-Intensive Applications, 2nd Edition", author: "Martin Kleppmann & Chris Riccomini", chapters: "Ch. 11", url: "https://dataintensive.net/" }
+  - { title: "Command-line Tools can be 235x Faster than your Hadoop Cluster", author: "Adam Drake", url: "https://adamdrake.com/command-line-tools-can-be-235x-faster-than-your-hadoop-cluster.html" }
+  - { title: "MapReduce: Simplified Data Processing on Large Clusters", author: "Jeffrey Dean & Sanjay Ghemawat (Google)", url: "https://research.google/pubs/mapreduce-simplified-data-processing-on-large-clusters/" }
+  - { title: "JuiceFS Architecture", author: "JuiceFS Documentation", url: "https://juicefs.com/docs/community/architecture/" }
+  - { title: "3FS: Fire-Flyer File System", author: "DeepSeek", url: "https://github.com/deepseek-ai/3FS" }
+  - { title: "Amazon S3 now supports conditional writes", author: "AWS", url: "https://aws.amazon.com/about-aws/whats-new/2024/08/amazon-s3-conditional-writes/" }
+  - { title: "Performance Tuning: Adaptive Query Execution", author: "Apache Spark Documentation", url: "https://spark.apache.org/docs/latest/sql-performance-tuning.html" }
+  - { title: "Apache Iceberg Table Format Specification", author: "Apache Iceberg", url: "https://iceberg.apache.org/spec/" }
+  - { title: "Daft Documentation", author: "Eventual / Daft", url: "https://docs.daft.ai/en/stable/" }
+  - { title: "Ray Data Overview", author: "Anyscale / Ray Documentation", url: "https://docs.ray.io/en/latest/data/index.html" }
+  - { title: "Apache Arrow Overview", author: "Apache Arrow", url: "https://arrow.apache.org/overview/" }
+  - { title: "Open Sourcing Venice: LinkedIn's Derived Data Platform", author: "Félix GV (LinkedIn Engineering)", url: "https://www.linkedin.com/blog/engineering/open-source/open-sourcing-venice-linkedin-s-derived-data-platform" }
+  - { title: "HollerithMachine.CHM.jpg (photo, CC BY 2.0)", author: "Adam Schuster", url: "https://commons.wikimedia.org/wiki/File:HollerithMachine.CHM.jpg" }
+---
+
+import BatchShuffle from '../../components/mdx/BatchShuffle.astro';
+import BatchShuffleSortMerge from '../../components/mdx/BatchShuffleSortMerge.astro';
+import BatchUnixVsDataflow from '../../components/mdx/BatchUnixVsDataflow.astro';
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import En from '../../components/mdx/En.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import heroHollerith from '../../assets/blog/batch-processing-unix-pipes-shuffle-dataflow-lakehouse/hollerith-tabulator-sorter.jpg';
+import icebergSnapshot from '../../assets/blog/batch-processing-unix-pipes-shuffle-dataflow-lakehouse/iceberg-snapshot-metadata.png';
+import juicefsArch from '../../assets/blog/batch-processing-unix-pipes-shuffle-dataflow-lakehouse/juicefs-architecture.png';
+
+<En>
+
+<Figure src={heroHollerith} alt="Replica of an early Hollerith punched-card tabulator with clock-face counters and a mechanical card-sorting box at the Computer History Museum" caption="Before distributed clusters existed, Herman Hollerith's 1890 tabulator and sorting box already separated reading, grouping into bins, and counting. Every modern batch engine still runs that loop at petabyte scale. Photo: Adam Schuster, CC BY 2.0." sourceTitle="Wikimedia Commons: HollerithMachine.CHM.jpg" sourceUrl="https://commons.wikimedia.org/wiki/File:HollerithMachine.CHM.jpg" />
+
+> "A system cannot be successful if it is too strongly influenced by a single person. Once the initial design is complete and fairly robust, the real test begins as people with many different viewpoints undertake their own experiments."
+> &mdash; *Donald Knuth*, "The Errors of TeX" (1989), quoted at the start of DDIA chapter 11
+
+### A laptop pipeline vs. a seven-node cluster
+
+In 2014, data engineer Adam Drake read a tutorial that used a seven-node Hadoop cluster on Amazon EMR to aggregate roughly 1.75 GB of chess games. That cluster took **26 minutes**, grinding along at about 1.14 MB/s. Drake took the same dataset onto his laptop, chained `find`, `xargs`, and `mawk` with Unix pipes, and finished in **12 seconds** (~270 MB/s) — **235 times faster**.
+
+Hadoop was not broken; it was paying cluster startup, JVM launch, serialization, and network coordination taxes on data that fit comfortably on one SSD. Yet the opposite trap hurts just as badly when data grows past a single machine: throw a naive Python script at 100 million distinct URLs and the container dies with `OOMKilled`, or run a Spark join where one celebrity `user_id` holds 70% of clicks while spot nodes are reclaimed mid-stage and one straggler stalls 99 idle workers.
+
+Chapter 11 of Kleppmann and Riccomini's *Designing Data-Intensive Applications* (2nd edition) connects that humble Unix pipe to modern Spark, Flink, Ray, and Iceberg lakehouses. Here is the path we will trace:
+
+1. **Unix pipes and human fault tolerance**: why immutable inputs let you fix bad deploys, and why external sort beats a RAM hash table once key cardinality explodes.
+2. **Distributed filesystems and object stores**: moving from co-located HDFS blocks to decoupled S3 buckets, JuiceFS, DeepSeek 3FS, and conditional writes.
+3. **Orchestrators, spot retries, and DAGs**: gang scheduling, cgroup isolation, surviving cheap preemptible VMs, and Airflow/Dagster workflows.
+4. **From MapReduce to dataflow and the shuffle**: why Google retired MapReduce, how secondary sort eliminates database RPCs, and how hot keys break a shuffle.
+5. **SQL optimizers, DataFrames, and lakehouses**: Catalyst, Apache Arrow, Daft, Ray Data, and Iceberg's immutable snapshot tree.
+6. **Serving batch outputs without breaking OLTP**: why row-by-row database writes from Spark destroy production, and how Kafka buffers or LinkedIn Venice fix it.
+
+<Callout type="note" title="TL;DR">
+Batch processing optimizes for throughput over bounded, read-only inputs rather than millisecond response times. That single constraint buys you human fault tolerance: if buggy code corrupts output, fix the code and rerun from immutable files. Underneath, every batch engine relies on the same three layers as a Unix box: distributed storage (DFS or object stores like S3), a scheduler (Kubernetes, YARN, Airflow), and a dataflow execution engine built around external sorting and shuffling. Know where working memory fills, where skewed keys stall reducers, and never let 200 parallel batch workers hammer a live OLTP database row by row.
+</Callout>
+
+<Concepts>
+
+- **Online vs. batch system**: an online system serves a request right now and is judged by response time; a batch job chews through a bounded dataset offline and is judged by throughput (bytes processed per second).
+- **System of record vs. derived data**: the system of record holds the authoritative source of truth; derived data is computed from it, so you can delete and rebuild derived output anytime.
+- **Human fault tolerance**: the ability to recover cleanly from buggy code deployed by engineers, because read-only inputs are never overwritten in place.
+- **Cardinality**: the count of distinct keys (such as unique URLs) in a dataset; high cardinality blows up in-memory hash tables even when raw file size looks small.
+- **Data skew / hot key**: an uneven distribution where one popular key (like a celebrity account) carries far more records than all other keys combined.
+- **Spot / preemptible instance**: spare cloud compute capacity sold at a sharp discount that the provider can terminate with little warning when higher-priority demand arrives.
+
+</Concepts>
+
+---
+
+## 1. Unix pipes and human fault tolerance
+
+Before touching distributed clusters, look at why batch jobs feel so forgiving compared to online services. An online microservice writes directly into a read/write database: ship a bug that writes wrong prices for ten minutes, and rolling back the binary leaves corrupted rows sitting in production.
+
+A batch job takes **read-only inputs** and writes **brand-new output** to a separate location. Think of editing a photo on a duplicate layer instead of painting over the original negative. If a broken deploy produces garbage, you roll back the code, point downstream readers to yesterday's snapshot (**time travel**), and rerun the job.
+
+DDIA calls this **human fault tolerance**: mistakes stay cheap and reversible, so teams ship faster without fearing permanent corruption. The catch is latency — downstream readers normally wait until the entire job completes, and changing a single byte in the input can force a full recomputation unless partitioned carefully.
+
+### Sorting on disk vs. hashing in RAM
+
+Suppose you want the top five requested paths from an NGINX access log. In Unix, you chain five single-purpose tools with pipes (`|`):
+
+```bash
+cat /var/log/nginx/access.log |
+  awk '{print $7}' |
+  sort |
+  uniq -c |
+  sort -rn |
+  head -n 5
+```
+
+Every program reads `stdin` and streams to `stdout` through a tiny in-memory ring buffer. If `uniq -c` falls behind, the pipe fills and the kernel automatically pauses `sort` (**backpressure**).
+
+In Python, you might instead count URLs inside a `defaultdict(int)` hash table. That looks cleaner, yet both approaches behave totally differently once unique URLs multiply:
+
+- **In-memory hash table**: working memory scales with **distinct keys**. Ten million hits across 500 URLs need almost no RAM; ten million hits across ten million unique query strings blow past container limits and crash with `OOMKilled`.
+- **External merge sort (`sort -S`)**: GNU and BSD `sort` cap working RAM, sort fixed-size chunks in memory, spill them sequentially to temporary files on local disk, and finish with a sequential multi-way merge. Because `uniq -c` only compares adjacent lines, it keeps a single counter in memory regardless of key count.
+
+I measured both on 1,000,000 synthetic NGINX access lines (107 MiB raw text) on an Apple M2 MacBook, bounding `sort` with `-S 8M`:
+
+</En>
+
+<Vi>
+
+<Figure src={heroHollerith} alt="Bản phục dựng máy lập bảng đục lỗ Hollerith với các mặt đồng hồ đếm và hộp phân loại thẻ cơ học tại Bảo tàng Lịch sử Máy tính" caption="Từ trước khi có cụm máy chủ phân tán, cỗ máy năm 1890 của Herman Hollerith đã tách bạch ba bước: đọc thẻ, chia theo ngăn và đếm tổng. Mọi engine batch hiện đại vẫn lặp lại đúng vòng đời đó ở quy mô petabyte. Ảnh: Adam Schuster, CC BY 2.0." sourceTitle="Wikimedia Commons: HollerithMachine.CHM.jpg" sourceUrl="https://commons.wikimedia.org/wiki/File:HollerithMachine.CHM.jpg" />
+
+> "Một hệ thống không thể thành công nếu bị chi phối quá nặng bởi một cá nhân duy nhất. Khi thiết kế ban đầu đã hoàn chỉnh và khá vững chắc, bài kiểm tra thật sự mới bắt đầu khi nhiều người với những góc nhìn khác nhau tự thực hiện thí nghiệm của riêng họ."
+> &mdash; *Donald Knuth*, "The Errors of TeX" (1989), câu mở đầu chương 11 của DDIA
+
+### Một đường ống trên laptop đấu với cụm 7 máy Hadoop
+
+Năm 2014, kỹ sư dữ liệu Adam Drake đọc một bài hướng dẫn dùng cụm Hadoop 7 node trên Amazon EMR để tổng hợp khoảng 1,75 GB dữ liệu ván cờ vua. Cụm máy đó mất tới **26 phút**, lết với tốc độ khoảng 1,14 MB/giây. Drake tải đúng tập dữ liệu ấy về laptop, ghép `find`, `xargs` và `mawk` qua đường ống Unix (`pipe`), và chạy xong trong **12 giây** (~270 MB/giây) — **nhanh hơn 235 lần**.
+
+Hadoop không hề hỏng; nó chỉ phải trả đủ thứ thuế cố định — cấp phát cụm, bật JVM, tuần tự hoá (serialization) và điều phối mạng — cho khối dữ liệu vốn nằm gọn trên một ổ SSD. Nhưng cái bẫy ngược lại cũng đau không kém khi dữ liệu phình to: ném một đoạn Python ngây thơ vào 100 triệu URL khác nhau là container chết ngay với lỗi `OOMKilled`, hoặc chạy lệnh join trên Spark khi một `user_id` nổi tiếng chiếm 70% lượt click trên dàn máy spot dễ bị thu hồi, khiến 99 task ngồi không chờ một kẻ tụt hậu.
+
+Chương 11 cuốn *Designing Data-Intensive Applications* (bản 2) của Kleppmann và Riccomini nối sợi dây từ đường ống Unix giản dị tới Spark, Flink, Ray và kiến trúc data lakehouse trên Iceberg ngày nay. Bài viết này đi qua sáu mảnh ghép cốt lõi đó:
+
+1. **Unix pipe và khả năng chịu lỗi do con người**: vì sao đầu vào bất biến (immutable) giúp sửa sai sau khi deploy lỗi, và vì sao sort tràn đĩa thắng bảng băm trong RAM khi số khoá riêng biệt tăng vọt.
+2. **Hệ thống file phân tán và Object Store**: chuyển dịch từ block HDFS gắn chung máy tính sang S3 tách rời compute, JuiceFS, DeepSeek 3FS và conditional writes.
+3. **Điều phối job, spot instance và đồ thị DAG**: gang scheduling, cô lập bằng cgroup, sống sót qua thu hồi VM giá rẻ và workflow bằng Airflow/Dagster.
+4. **Từ MapReduce tới dataflow và thuật toán shuffle**: vì sao Google khai tử MapReduce, cách secondary sort xoá sổ các lần gọi RPC vào database, và hot key phá nát bước shuffle thế nào.
+5. **Trình tối ưu SQL, DataFrame và data lakehouse**: bộ tối ưu Catalyst, Apache Arrow, Daft, Ray Data và cây snapshot bất biến của Iceberg.
+6. **Phục vụ đầu ra batch mà không đánh sập OLTP**: vì sao 200 worker ghi từng dòng thẳng vào database production là thảm hoạ, và cách đẩy qua Kafka hoặc LinkedIn Venice giải quyết gọn.
+
+<Callout type="note" title="Tóm tắt nhanh">
+Xử lý theo lô (batch processing) tối ưu cho thông lượng (throughput) trên tập dữ liệu đầu vào hữu hạn, chỉ đọc, thay vì độ trễ vài mili-giây. Chính ràng buộc này mang lại khả năng chịu lỗi do con người (human fault tolerance): lỡ deploy code lỗi làm hỏng đầu ra, bạn chỉ việc sửa code và chạy lại từ dữ liệu gốc bất biến. Bên dưới, mọi hệ thống batch đều xoay quanh ba tầng giống một máy Unix: tầng lưu trữ phân tán (DFS hoặc object store như S3), bộ điều phối tài nguyên (Kubernetes, YARN, Airflow), và engine luồng dữ liệu (dataflow) dựng trên thuật toán external sort và shuffle. Hiểu rõ chỗ nào tràn RAM, chỗ nào lệch khoá (skew), và đừng bao giờ để hàng trăm worker batch bắn ghi thẳng từng dòng vào database OLTP đang phục vụ khách hàng.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Online vs. batch system (hệ thống trực tuyến vs. xử lý theo lô)**: hệ thống online trả lời từng request tức thì và đo bằng độ trễ (latency); hệ thống batch xử lý trọn một tập dữ liệu hữu hạn ở chế độ nền và đo bằng thông lượng (throughput).
+- **System of record vs. derived data (dữ liệu gốc vs. dữ liệu dẫn xuất)**: dữ liệu gốc giữ nguồn sự thật duy nhất; dữ liệu dẫn xuất được tính toán ra từ đó, nên bạn có thể xoá đi dựng lại bất cứ lúc nào.
+- **Human fault tolerance (chịu lỗi do con người)**: khả năng khôi phục sạch sẽ khi kỹ sư lỡ deploy code sai logic, nhờ dữ liệu đầu vào chỉ đọc không bao giờ bị sửa đè tại chỗ.
+- **Cardinality (độ đa dạng khoá)**: số lượng giá trị riêng biệt (ví dụ số URL duy nhất) trong dữ liệu; cardinality cao làm bảng băm trong RAM phình to ngay cả khi file gốc không quá nặng.
+- **Data skew / hot key (lệch dữ liệu / khoá nóng)**: phân bố không đều khi một khoá phổ biến (như tài khoản người nổi tiếng) gánh phần lớn bản ghi trong cả tập dữ liệu.
+- **Spot / preemptible instance**: máy ảo chạy trên tài nguyên nhàn rỗi của cloud với giá rẻ hơn nhiều, nhưng nhà cung cấp có quyền thu hồi (preempt) bất cứ lúc nào khi có nhu cầu ưu tiên cao hơn.
+
+</Concepts>
+
+---
+
+## 1. Unix pipe và khả năng chịu lỗi do con người
+
+Trước khi chạm tới cụm máy phân tán, hãy nhìn xem vì sao job batch lại "dễ tha thứ" hơn hệ thống online. Một microservice online ghi thẳng vào database đọc/ghi: chỉ cần deploy nhầm đoạn code tính sai giá trong 10 phút, việc rollback phiên bản code cũ cũng không tự dọn được đống dòng sai đã lọt vào database.
+
+Ngược lại, job batch nhận **đầu vào chỉ đọc (read-only)** và sinh ra **đầu ra mới hoàn toàn** ở một thư mục hay bảng khác. Giống như chỉnh ảnh trên một layer nhân bản thay vì tô thẳng lên phim âm bản gốc. Nếu bản deploy mới làm hỏng kết quả, bạn chỉ việc lùi code, trỏ hệ thống đọc về phiên bản ảnh chụp (snapshot) hôm qua (**time travel**) rồi chạy lại job.
+
+DDIA gọi tính chất này là **human fault tolerance (khả năng chịu lỗi do con người)**: sai sót trở nên rẻ và đảo ngược được, giúp team đẩy tính năng nhanh hơn mà không nơm nớp sợ hỏng dữ liệu vĩnh viễn. Đánh đổi là độ trễ — hệ thống phía sau thường phải đợi cả job chạy xong, và chỉ sửa một byte đầu vào cũng có thể buộc chạy lại từ đầu nếu không chia phân vùng khéo.
+
+### Sắp xếp tràn đĩa đấu với bảng băm trong RAM
+
+Giả sử bạn muốn tìm 5 đường dẫn được truy cập nhiều nhất từ file access log của NGINX. Trên Unix, bạn nối năm công cụ đơn nhiệm bằng dấu ống (`|`):
+
+```bash
+cat /var/log/nginx/access.log |
+  awk '{print $7}' |
+  sort |
+  uniq -c |
+  sort -rn |
+  head -n 5
+```
+
+Mỗi lệnh đọc từ `stdin` và đẩy ra `stdout` qua một bộ đệm vòng (ring buffer) nhỏ trong RAM. Nếu `uniq -c` xử lý chậm, ống bị đầy và nhân hệ điều hành tự cho `sort` ngủ tạm (**backpressure — điều tiết ngược**).
+
+Viết bằng Python, có lẽ bạn sẽ dùng `defaultdict(int)` làm bảng băm đếm URL. Code Python trông gọn hơn, nhưng hai cách chạy khác một trời một vực khi số URL riêng biệt tăng mạnh:
+
+- **Bảng băm trong RAM (`defaultdict`)**: dung lượng RAM cần dùng tăng tuyến tính theo **số khoá riêng biệt**. Mười triệu lượt truy cập vào 500 URL tốn rất ít RAM; nhưng mười triệu lượt vào mười triệu query string khác nhau sẽ vượt trần RAM của container và chết tức tưởi với lỗi `OOMKilled`.
+- **External merge sort (`sort -S`)**: lệnh `sort` trong GNU/BSD giới hạn sẵn lượng RAM được dùng, sắp xếp từng khúc vừa bộ nhớ, xả tuần tự ra các file tạm trên đĩa cục bộ rồi trộn tuần tự nhiều nhánh (multi-way merge). Nhờ đó `uniq -c` chỉ việc so sánh hai dòng kề nhau với đúng một biến đếm trong RAM.
+
+Mình chạy thử cả hai cách trên 1.000.000 dòng NGINX log giả lập (file thô 107 MiB) trên laptop Apple M2, ép `sort` chỉ dùng bộ đệm `-S 8M`:
+
+</Vi>
+
+<En>
+
+<TerminalOutput command="python3 bench_log.py  # 1,000,000 NGINX lines (107 MiB), macOS Apple Silicon" label="In-memory hash table vs. bounded sort -S 8M" caption="Measured locally with /usr/bin/time -l and resource.getrusage. When unique URLs jump 2,000x, Python's hash table balloons 13.5x in RAM while the sort-merge pipe stays under 18 MiB.">
+```text
+=== 500 unique URLs  (1M lines, 107 MiB) ===
+python_hash    0.51 s   peak RSS   14.2 MiB   keys=500
+unix_pipeline  4.53 s   peak RSS   17.7 MiB   sort -S 8M spill-to-disk
+=== 1M unique URLs   (1M lines, 107 MiB) ===
+python_hash    1.14 s   peak RSS  191.6 MiB   keys=1,000,000
+unix_pipeline  3.00 s   peak RSS   13.8 MiB   sort -S 8M spill-to-disk
+```
+</TerminalOutput>
+
+Notice the crossover. When distinct keys fit in RAM (500 URLs), the Python hash table wins on wall time (0.51 s vs. 4.53 s) and uses just 14.2 MiB. Once every row introduces a new key, the same 107 MiB text file swells to **191.6 MiB** in Python objects and hash buckets — nearly double the raw file on disk — while the Unix sort-merge pipeline caps memory under **18 MiB** by spilling sorted runs to disk sequentially.
+
+One machine eventually hits a wall when data outgrows local NVMe or needs dozens of cores. That is where distributed batch systems step in, mirroring the exact three pieces of an operating system: a filesystem, a job scheduler, and a pipe or network shuffle between programs.
+
+<Concepts>
+
+- **Unix pipe (`|`)**: an in-memory kernel buffer linking one process's `stdout` to the next process's `stdin`, naturally pausing fast producers when slow consumers fill the buffer.
+- **Backpressure**: slowing down an upstream producer automatically when the downstream consumer cannot keep pace, preventing unbounded memory growth.
+- **External merge sort**: sorting a dataset larger than RAM by sorting fixed-size chunks in memory, writing each sorted run to disk, and sequentially merging the runs.
+- **Time travel**: querying or rolling back to an earlier snapshot of a table or object directory rather than mutating historical state.
+
+</Concepts>
+
+---
+
+## 2. Distributed filesystems and object stores
+
+A local filesystem like ext4 breaks files into tiny **4,096-byte** blocks and maps them through an OS kernel interface (**VFS**). At petabyte scale across hundreds of machines, tracking 4 KB blocks would overwhelm any metadata server and waste seek overhead.
+
+Distributed filesystems (**DFSs**) solve this by making blocks huge: **128 MB** in HDFS, or **4 MB** in JuiceFS and many cloud object stores. Larger blocks shrink metadata tables dramatically and amortize seek latency across megabytes of sequential reads.
+
+To survive commodity disk failures without expensive SAN/NAS appliances, DFS clusters follow a **shared-nothing** design across standard datacenter networks:
+
+- **Data nodes & metadata service**: worker daemons store block files on local disks (and reuse OS page caches), while a coordinator tracks block placement and permissions — Hadoop's `NameNode`, or **DeepSeek's 3FS** (Fire-Flyer File System), which stores metadata transactionally in **FoundationDB** over NVMe and RDMA networks.
+- **Replication vs. erasure coding**: HDFS defaults to keeping three full copies of every block; erasure coding (such as Reed–Solomon) splits blocks with parity shards so clusters survive node failures at roughly 1.5× storage overhead instead of 3×.
+
+### The cloud shift: HDFS vs. object stores (S3, GCS)
+
+Over the last decade, batch storage moved sharply from co-located DFS clusters toward **cloud object stores** such as Amazon S3, Google Cloud Storage, and Azure Blob Storage. Understanding where they differ prevents nasty surprises when migrating Spark or Python jobs to S3:
+
+| Property | Distributed filesystem (HDFS, DeepSeek 3FS) | Cloud object store (Amazon S3, GCS) |
+|---|---|---|
+| Storage vs. compute | Often co-located; tasks scheduled near data blocks | Decoupled; compute & storage scale independently |
+| Directory model | Real directories, POSIX paths, atomic renames | Flat `bucket/key` namespace; `/` is just string convention |
+| Mutability | Appends supported; some expose POSIX via FUSE | Immutable objects; rewrite whole object on update |
+| Small-file listing | Fast metadata lookup in RAM/KV store | `list` behaves like recursive `ls -R` by prefix |
+| Latency optimization | Local NVMe / page cache (sub-ms to ms) | Built for MB–GB blobs (S3 Express One Zone adds ms tier) |
+
+Because object stores have no real folders, renaming a directory of 10,000 Parquet files on S3 is **not atomic**: the client must copy all 10,000 objects to new keys and delete the old ones. Worse, until **August 2024**, S3 lacked native atomic "create-if-not-exists" writes, forcing lakehouse formats like Iceberg to coordinate commits through DynamoDB or external catalogs; today S3 conditional writes (`If-None-Match: *` and `If-Match` ETag checks) reject racing writers directly with `412 Precondition Failed`.
+
+Many AI and analytics teams bridge both worlds with layered designs like **JuiceFS**: applications talk POSIX through FUSE, Python, or Ray clients backed by local NVMe caches, while metadata lives in Redis, PostgreSQL, TiKV, or FoundationDB and raw 4 MB data chunks rest cheaply in S3 or GCS.
+
+</En>
+
+<Vi>
+
+<TerminalOutput command="python3 bench_log.py  # 1,000,000 dòng NGINX (107 MiB), macOS Apple Silicon" label="Bảng băm trong RAM vs. sort -S 8M giới hạn bộ nhớ" caption="Đo trực tiếp bằng /usr/bin/time -l và resource.getrusage. Khi số URL riêng biệt tăng gấp 2.000 lần, bảng băm Python phình RAM gấp 13,5 lần, trong khi đường ống sort-merge giữ đỉnh RAM dưới 18 MiB.">
+```text
+=== 500 unique URLs  (1M lines, 107 MiB) ===
+python_hash    0.51 s   peak RSS   14.2 MiB   keys=500
+unix_pipeline  4.53 s   peak RSS   17.7 MiB   sort -S 8M spill-to-disk
+=== 1M unique URLs   (1M lines, 107 MiB) ===
+python_hash    1.14 s   peak RSS  191.6 MiB   keys=1,000,000
+unix_pipeline  3.00 s   peak RSS   13.8 MiB   sort -S 8M spill-to-disk
+```
+</TerminalOutput>
+
+Điểm đảo chiều nằm ngay trước mắt. Khi mọi khoá nằm gọn trong RAM (500 URL), bảng băm Python chạy rất nhanh (0,51 giây so với 4,53 giây) và chỉ ăn 14,2 MiB. Nhưng chỉ cần mỗi dòng là một URL mới, chính file text 107 MiB ấy đã nở thành **191,6 MiB** trong các object và bucket của Python — gần gấp đôi dung lượng file gốc — còn đường ống Unix `sort -S 8M` khoá chặt RAM dưới **18 MiB** nhờ xả tuần tự các đoạn đã sắp ra đĩa.
+
+Dĩ nhiên một máy đơn rồi cũng chạm trần khi dữ liệu vượt sức chứa NVMe hoặc cần hàng trăm nhân CPU. Lúc đó ta bước sang hệ thống batch phân tán — nơi tái hiện đúng ba mảnh ghép của một hệ điều hành: hệ thống file, bộ lập lịch và kênh truyền dữ liệu giữa các tiến trình.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Unix pipe (`|`)**: bộ đệm vòng trong nhân hệ điều hành nối `stdout` của lệnh trước vào `stdin` của lệnh sau, tự hãm lệnh nhanh khi lệnh chậm chưa đọc kịp.
+- **Backpressure (điều tiết ngược)**: cơ chế tự làm chậm bên tạo dữ liệu khi bên tiêu thụ xử lý không kịp, giúp RAM không bị tràn vô hạn.
+- **External merge sort (sắp xếp trộn ngoài RAM)**: sắp xếp tập dữ liệu lớn hơn RAM bằng cách sắp từng khúc vừa bộ nhớ, ghi thành từng đoạn ra đĩa rồi trộn tuần tự lại.
+- **Time travel (du hành thời gian)**: khả năng truy vấn hoặc quay về đúng một bản chụp (snapshot) dữ liệu cũ thay vì ghi đè làm mất dấu lịch sử.
+
+</Concepts>
+
+---
+
+## 2. Hệ thống file phân tán và Object Store
+
+Hệ thống file cục bộ như ext4 chia file thành các khối (block) tí hon **4.096 byte** và giao tiếp qua lớp **VFS (Virtual Filesystem)** của nhân Linux. Ở quy mô petabyte trên hàng trăm máy, việc theo dõi hàng nghìn tỉ block 4 KB sẽ đánh sập mọi máy chủ siêu dữ liệu (metadata) và tốn quá nhiều công tìm kiếm trên đĩa.
+
+Hệ thống file phân tán (**DFS**) giải quyết bằng cách phóng to kích thước block: **128 MB** trong HDFS, hoặc **4 MB** ở JuiceFS và nhiều object store. Block lớn giúp bảng metadata gọn đi hàng chục nghìn lần và gộp chi phí truy xuất đĩa vào những lượt đọc tuần tự nhiều megabyte.
+
+Để chịu được cảnh ổ đĩa phần cứng phổ thông lăn ra chết mà không cần tủ lưu trữ SAN/NAS đắt đỏ, DFS dùng kiến trúc **shared-nothing (không dùng chung phần cứng)** qua mạng datacenter thông thường:
+
+- **Data node & metadata service**: các daemon trên từng máy giữ block dưới dạng file cục bộ (hưởng ké page cache của OS), còn một dịch vụ trung tâm quản lý vị trí block và quyền truy cập — như `NameNode` của Hadoop, hoặc **3FS (Fire-Flyer File System)** của DeepSeek lưu metadata nhất quán giao dịch (transactional) trên **FoundationDB** kết hợp NVMe và mạng RDMA tốc độ cao.
+- **Sao chép bản sao (replication) vs. erasure coding**: HDFS mặc định nhân 3 bản cho mỗi block; kỹ thuật erasure coding (như mã Reed–Solomon) chia dữ liệu kèm mã chẵn lẻ (parity) giúp chịu lỗi tương đương mà chỉ tốn khoảng 1,5× dung lượng thay vì 3×.
+
+### Làn sóng cloud: HDFS đối đầu Object Store (S3, GCS)
+
+Mười năm gần đây, nơi cất dữ liệu batch dịch chuyển mạnh từ cụm HDFS gắn liền compute sang **cloud object store** như Amazon S3, Google Cloud Storage hay Azure Blob Storage. Nắm rõ điểm khác biệt giúp bạn né được hàng loạt lỗi oái oăm khi chuyển job Spark hay Python lên S3:
+
+| Tiêu chí | Hệ thống file phân tán (HDFS, DeepSeek 3FS) | Cloud object store (Amazon S3, GCS) |
+|---|---|---|
+| Compute & lưu trữ | Thường đặt chung máy để đọc gần dữ liệu | Tách rời hoàn toàn; mở rộng compute và storage độc lập |
+| Mô hình thư mục | Có thư mục thật, chuẩn POSIX, đổi tên nguyên tử | Không gian khoá phẳng `bucket/key`; dấu `/` chỉ là quy ước tên |
+| Khả năng sửa file | Hỗ trợ nối đuôi (append); có thể gắn POSIX qua FUSE | Object bất biến; muốn sửa phải `put` ghi lại toàn bộ object |
+| Liệt kê file nhỏ | Tra cứu nhanh trong metadata server / KV store | Lệnh `list` hoạt động như `ls -R` quét đệ quy theo tiền tố |
+| Tối ưu độ trễ | NVMe cục bộ / page cache (dưới ms tới vài ms) | Tối ưu cho blob cỡ MB–GB (S3 Express One Zone bổ sung mức ms) |
+
+Vì object store không có khái niệm thư mục thật, việc đổi tên một "thư mục" chứa 10.000 file Parquet trên S3 **không có tính nguyên tử (atomic)**: client phải copy cả 10.000 object sang key mới rồi xoá bản cũ. Tệ hơn, trước **tháng 8/2024**, S3 chưa có ghi có điều kiện (conditional writes), buộc các format như Iceberg phải mượn DynamoDB hoặc catalog ngoài để khoá khi commit; nay S3 đã hỗ trợ `If-None-Match: *` và `If-Match` theo ETag, trả ngay `412 Precondition Failed` nếu có hai job ghi đè nhau.
+
+Nhiều hệ thống AI và phân tích dung hoà hai thế giới bằng kiến trúc phân tầng như **JuiceFS**: ứng dụng bên trên dùng giao diện POSIX qua FUSE, Python hay Ray kèm cache trên NVMe cục bộ, trong khi metadata nằm ở Redis/PostgreSQL/TiKV/FoundationDB còn các mảnh dữ liệu 4 MB nằm gọn giá rẻ trên S3 hoặc GCS.
+
+</Vi>
+
+<Figure src={juicefsArch} alt="JuiceFS architecture showing POSIX FUSE, Ray, Hadoop, and Kubernetes clients talking to local metadata and data caches backed by a metadata engine such as Redis or FoundationDB and object storage such as S3 or GCS" altVi="Kiến trúc JuiceFS cho thấy các client POSIX FUSE, Ray, Hadoop và Kubernetes đi qua cache cục bộ, tách metadata sang Redis hoặc FoundationDB và lưu các khối dữ liệu xuống S3 hoặc GCS" caption="How modern batch storage bridges POSIX ergonomics and cheap cloud object storage: JuiceFS keeps a fast metadata tier (Redis, TiKV, PostgreSQL, or FoundationDB) separate from immutable 4 MB chunks persisted in S3 or GCS." captionVi="Cách lưu trữ batch hiện đại kết hợp sự tiện lợi của chuẩn POSIX với giá rẻ của object store: JuiceFS tách tầng metadata tốc độ cao (Redis, TiKV, PostgreSQL, FoundationDB) khỏi các khối dữ liệu 4 MB bất biến trên S3 hoặc GCS." sourceTitle="JuiceFS Documentation — Architecture" sourceUrl="https://juicefs.com/docs/community/architecture/" />
+
+<En>
+
+<Concepts>
+
+- **Distributed filesystem (DFS)**: software that spreads large files in fixed-size blocks across many commodity machines while exposing a shared namespace and metadata service.
+- **Erasure coding**: splitting data into fragments with mathematical parity shards (like RAID across a network) to tolerate disk/node loss with far less space than 3× full copies.
+- **Object store**: a storage service (such as S3 or GCS) addressing immutable blobs by `bucket` and string `key` over HTTP, without true directories or random-offset writes.
+- **Conditional write (`If-None-Match` / `If-Match`)**: an HTTP precondition telling an object store to fail the `put` if the key already exists or its ETag changed, enabling lock-free atomic commits.
+- **Data locality**: scheduling compute tasks on the exact machine storing the input block to save network bandwidth — central to HDFS, largely traded away for independent scaling on S3.
+
+</Concepts>
+
+---
+
+## 3. Orchestrators, spot retries, and DAGs
+
+On a laptop, the OS kernel decides which process gets CPU slices, isolates memory, and routes pipes. On a cluster of hundreds of machines, that job splits into two layers that engineers often mix up: **cluster job orchestrators** and **workflow orchestrators**.
+
+A cluster orchestrator such as **Kubernetes** or **Hadoop YARN** manages raw compute for individual jobs through three parts:
+
+- **Task executors** (`kubelet`, YARN `NodeManager`): run on each node, launch containers, enforce CPU/memory boundaries via **Linux cgroups**, and send heartbeats.
+- **Resource manager**: tracks cluster-wide hardware state and availability inside a coordination store (`etcd` for Kubernetes, `ZooKeeper` for YARN).
+- **Scheduler**: places requested tasks (`CPU`, `RAM`, `GPU`) onto matching nodes using heuristics like FIFO, bin-packing, or Dominant Resource Fairness (DRF) — exact optimal packing is NP-hard.
+
+Sometimes one job cannot progress piecemeal. Distributed deep learning or MPI jobs require **gang scheduling**: all 64 GPUs must start together or none can communicate. Reserving GPUs until all 64 free up cuts cluster utilization and risks deadlock if two large jobs each hold half the cluster waiting for the other; waiting passively without reservations causes **starvation** as small jobs continuously snag freed slots.
+
+### Job orchestrators vs. workflow orchestrators
+
+Even a smart YARN or Spark scheduler only sees inside a single job. Real data platforms wire 50 to 100 jobs across multiple engines — Spark transforms raw logs, Trino joins warehouse tables, Python trains embeddings — into a **Directed Acyclic Graph (DAG)** managed by tools like **Airflow**, **Dagster**, or **Prefect**:
+
+| Layer | Examples | Scope & unit of work | How stages connect |
+|---|---|---|---|
+| Cluster / job orchestrator | Kubernetes, Hadoop YARN | Tasks inside one job (containers, executors) | Local memory, network shuffle, cgroup limits |
+| Workflow orchestrator | Airflow, Dagster, Prefect | Multi-job DAG across engines and teams | Writes outputs to S3 / Iceberg / warehouse between steps |
+
+Writing outputs to S3 or Iceberg between DAG jobs decouples teams and schedules: downstream jobs wake up only after all upstream parents succeed.
+
+### Surviving spot instances and task preemption
+
+Because batch jobs tolerate minutes or hours of delay, teams love running them on cheap **EC2 Spot** or **GCP Preemptible** VMs. The catch is that cloud providers reclaim spot capacity far more often than real hardware fails.
+
+To survive frequent preemptions without restarting a six-hour job from byte zero, frameworks execute tasks independently so a killed task retries alone on another worker. That recovery model rests on one strict discipline: **tasks must have no external side effects** until commit.
+
+<Callout type="warning" title="When spot retries corrupt external state">
+If a Spark task sends confirmation emails, charges a card, or fires `INSERT` statements into an external API as it processes records, a spot preemption right before completion makes the scheduler retry that partition on a healthy node — executing those side effects a second time. Keep tasks pure over immutable inputs and only expose final output atomically when the whole stage succeeds.
+</Callout>
+
+<Concepts>
+
+- **Linux cgroups**: a kernel feature that caps how much CPU, memory, and I/O a container can consume so one noisy batch task cannot starve neighbors on the same host.
+- **Gang scheduling**: an all-or-nothing scheduling rule where every task of a parallel job (such as multi-node ML training) must run simultaneously.
+- **Preemption**: intentionally killing a lower-priority running task so higher-priority work (or a cloud spot reclamation) can reclaim its machine.
+- **Directed Acyclic Graph (DAG)**: a dependency map of jobs with no cycles, ensuring downstream transforms never start until upstream inputs finish cleanly.
+
+</Concepts>
+
+---
+
+## 4. From MapReduce to dataflow and the shuffle
+
+In 2004, Google's **MapReduce** paper proved you could process terabytes on unreliable commodity hardware using two pure functional callbacks (`map` and `reduce`) separated by an automatic sort. Yet by **2019**, Google engineering chief Urs Hölzle announced Google had deleted its remaining internal MapReduce codebase. Why did the model that launched big data become obsolete?
+
+Two flaws held MapReduce back:
+
+1. **Rigid alternating steps & fresh JVMs**: chaining a filter, a join, and a top-N sort forced engineers to write separate MapReduce jobs, spinning up fresh JVMs for every single task.
+2. **DFS barrier between every job**: Job 1 had to finish 100% of its tasks and replicate intermediate files 3× across HDFS before Job 2 could read line one.
+
+Modern **dataflow engines** — **Apache Spark** and **Apache Flink** — brought Unix-style pipelining back at cluster scale. They treat an entire multi-stage DAG as one job, fuse consecutive narrow operators (`map` + `filter`) into a single process, stream data over memory or local disks without 3× DFS replication, and recover from preempted workers either by recomputing lost shards from **lineage** (Spark) or rolling back to periodic asynchronous **checkpoints** (Flink).
+
+</En>
+
+<Vi>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Distributed filesystem (DFS — hệ thống file phân tán)**: phần mềm trải các file lớn dưới dạng các block cố định qua nhiều máy chủ phổ thông, nhưng vẫn cho người dùng thấy một không gian tên và dịch vụ metadata thống nhất.
+- **Erasure coding (mã hoá xoá)**: chia nhỏ dữ liệu kèm các mảnh kiểm tra chẵn lẻ (như RAID qua mạng) để chịu hỏng ổ cứng/máy mà tốn ít dung lượng hơn hẳn sao chép 3 bản.
+- **Object store**: dịch vụ lưu trữ (như S3, GCS) đánh địa chỉ các khối dữ liệu bất biến theo `bucket` và chuỗi `key` qua HTTP, không có thư mục thật hay thao tác ghi chèn giữa file.
+- **Conditional write (`If-None-Match` / `If-Match`)**: cờ điều kiện HTTP ra lệnh cho object store từ chối lệnh `put` nếu key đã tồn tại hoặc ETag đã bị đổi, giúp commit nguyên tử không cần khoá ngoài.
+- **Data locality (cục bộ hoá dữ liệu)**: xếp task tính toán chạy ngay trên máy đang giữ block dữ liệu đầu vào để tiết kiệm băng thông mạng — thế mạnh của HDFS mà kiến trúc S3 chấp nhận đánh đổi để tách rời compute và storage.
+
+</Concepts>
+
+---
+
+## 3. Điều phối job, spot instance và đồ thị DAG
+
+Trên laptop, nhân hệ điều hành quyết định tiến trình nào được chạy CPU, cô lập RAM và nối các đường ống. Trên cụm hàng trăm máy chủ, vai trò đó tách làm hai tầng mà kỹ sư rất hay nhầm với nhau: **bộ điều phối job cụm máy** và **bộ điều phối workflow**.
+
+Một bộ điều phối cấp cụm như **Kubernetes** hay **Hadoop YARN** quản lý tài nguyên thô cho từng job qua ba thành phần:
+
+- **Task executor** (`kubelet`, `NodeManager` của YARN): chạy trên từng máy vật lý, khởi chạy container, siết trần CPU/RAM bằng **Linux cgroups** và gửi tín hiệu sống (heartbeat).
+- **Resource manager**: nắm bức tranh phần cứng toàn cụm bên trong một kho điều phối (`etcd` với Kubernetes, `ZooKeeper` với YARN).
+- **Scheduler**: ghép các task đang chờ (`CPU`, `RAM`, `GPU`) vào đúng node trống bằng các thuật toán phỏng đoán (heuristic) như FIFO, xếp thùng (bin-packing) hay công bằng tài nguyên trội (DRF) — vì tìm phương án tối ưu tuyệt đối là bài toán NP-hard.
+
+Có những lúc một job không thể chạy kiểu "có mảnh nào chạy mảnh nấy". Huấn luyện mô hình AI phân tán hay MPI đòi hỏi **gang scheduling**: cả 64 GPU phải cùng sẵn sàng một lượt, không thì chẳng máy nào đồng bộ được với máy nào. Giữ chỗ 32 GPU để đợi 32 GPU còn lại vừa làm cụm ngồi chơi vừa dễ gây khóa chết (deadlock) nếu hai job lớn giữ chéo tài nguyên của nhau; còn không giữ chỗ thì job nhỏ cứ nhảy vào hớt hết tài nguyên trống, gây **đói tài nguyên (starvation)**.
+
+### Điều phối job vs. điều phối workflow DAG
+
+Ngay cả bộ lập lịch thông minh của YARN hay Spark cũng chỉ nhìn thấy bên trong một job đơn lẻ. Pipeline thực tế ngoài doanh nghiệp thường nối 50 tới 100 job xuyên qua nhiều engine khác nhau — Spark làm sạch log, Trino join bảng kho dữ liệu, Python tính embedding — thành một **đồ thị có hướng không chu trình (DAG)** được quản lý bởi **Airflow**, **Dagster** hoặc **Prefect**:
+
+| Tầng điều phối | Công cụ tiêu biểu | Phạm vi & đơn vị quản lý | Cách các bước nối với nhau |
+|---|---|---|---|
+| Cluster / job orchestrator | Kubernetes, Hadoop YARN | Các task bên trong một job (container, executor) | RAM cục bộ, network shuffle, giới hạn cgroup |
+| Workflow orchestrator | Airflow, Dagster, Prefect | Đồ thị DAG nhiều job xuyên suốt nhiều team & engine | Ghi đầu ra xuống S3 / Iceberg / warehouse giữa các bước |
+
+Việc ghi đầu ra xuống S3 hay Iceberg giữa các bước DAG tách rời hoàn toàn lịch chạy và sự phụ thuộc giữa các team: job phía sau chỉ kích hoạt khi toàn bộ nhánh đầu vào phía trên đã báo thành công.
+
+### Sống sót qua spot instance và thu hồi tài nguyên
+
+Vì job batch chịu được trễ vài phút tới vài tiếng, các team cực thích chạy chúng trên máy ảo giá rẻ như **EC2 Spot** hay **GCP Preemptible**. Cái giá phải trả là nhà cung cấp thu hồi (preempt) máy spot thường xuyên hơn nhiều so với tỉ lệ hỏng phần cứng thật.
+
+Để không phải chạy lại cả job 6 tiếng từ vạch xuất phát mỗi khi rụng một node, framework batch giữ cho các task song song chạy độc lập với nhau, hỏng task nào thì chạy lại đúng task đó trên máy khác. Cơ chế này đứng vững nhờ một kỷ luật thép: **task không được gây tác dụng phụ (side effect) ra bên ngoài** trước khi commit.
+
+<Callout type="warning" title="Khi cơ chế chạy lại trên spot làm hỏng dữ liệu ngoài">
+Nếu một task Spark vừa đọc dòng vừa gửi email xác nhận, trừ tiền thẻ hay bắn lệnh `INSERT` vào API bên ngoài, thì chỉ cần máy spot bị thu hồi ngay sát lúc hoàn thành, bộ điều phối sẽ khởi động lại phân mảnh đó trên worker khác — và thực hiện toàn bộ tác dụng phụ thêm một lần nữa. Hãy giữ task thuần khiết trên dữ liệu bất biến, và chỉ công bố kết quả nguyên tử khi cả bước đã xong.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Linux cgroups**: tính năng của nhân Linux giới hạn mức CPU, RAM và I/O tối đa mỗi container được dùng, tránh cảnh một task batch ngốn hết tài nguyên của các dịch vụ chạy chung máy.
+- **Gang scheduling (lập lịch đồng loạt)**: quy tắc "được ăn cả, ngã về không" buộc toàn bộ task của một job song song (như training nhiều GPU) phải được cấp phát cùng một thời điểm.
+- **Preemption (thu hồi cưỡng bức)**: hành động chủ động giết một task ưu tiên thấp đang chạy để nhường máy cho tác vụ ưu tiên cao hơn hoặc lệnh thu hồi spot của cloud.
+- **DAG (đồ thị có hướng không chu trình)**: sơ đồ các bước phụ thuộc một chiều không quay vòng, bảo đảm bước sau chỉ chạy khi mọi bước tiền đề đã hoàn tất sạch sẽ.
+
+</Concepts>
+
+---
+
+## 4. Từ MapReduce tới dataflow và thuật toán shuffle
+
+Năm 2004, bài báo **MapReduce** của Google chứng minh bạn có thể xử lý hàng terabyte dữ liệu trên phần cứng rẻ tiền hay hỏng chỉ bằng hai hàm thuần khiết (`map` và `reduce`) nối với nhau qua bước sắp xếp tự động. Thế nhưng tới **năm 2019**, giám đốc kỹ thuật Urs Hölzle thông báo Google đã xoá bỏ hoàn toàn phần mã nguồn MapReduce nội bộ cuối cùng. Vì sao mô hình khai sinh kỷ nguyên big data lại lỗi thời?
+
+Hai điểm nghẽn chí mạng kìm chân MapReduce:
+
+1. **Cấu trúc cứng nhắc & bật JVM liên tục**: nối một bước lọc, một phép join và một lệnh sắp xếp top-N ép kỹ sư tách thành nhiều job MapReduce rời rạc, mỗi task lại phải khởi động một tiến trình JVM mới tinh.
+2. **Rào chắn DFS giữa mọi job**: Job 1 phải chạy xong 100% số task và nhân 3 bản dữ liệu trung gian xuống HDFS trước khi Job 2 được phép đọc dòng đầu tiên.
+
+Các **engine dataflow** hiện đại — tiêu biểu là **Apache Spark** và **Apache Flink** — mang cơ chế đường ống kiểu Unix trở lại ở quy mô cụm máy. Chúng gộp cả đồ thị DAG nhiều bước thành một job duy nhất, nhập các phép toán hẹp đi liền nhau (`map` + `filter`) vào chung một tiến trình, truyền dữ liệu trung gian qua RAM hoặc đĩa cục bộ thay vì ghi HDFS nhân 3, và khôi phục khi mất worker spot bằng cách tính lại từ **đồ thị phả hệ (lineage)** ở Spark hoặc lùi về **bản chụp bất đồng bộ (checkpoint)** ở Flink.
+
+</Vi>
+
+<BatchUnixVsDataflow />
+
+<En>
+
+### The shuffle: distributed sorting and secondary sort joins
+
+Notice a small naming trap in batch systems: shuffling a deck of cards creates chaos, whereas a **distributed shuffle** creates **sorted order** across machines.
+
+Suppose you want to join two huge sharded datasets: a clickstream log of user activity (`fact` table) and a table of user profiles (`dimension` table, holding date of birth). You could make reducers send a network RPC to the user database on every click, which would melt the database and stall on network round trips.
+
+Instead, a **sort-merge join** with **secondary sort** avoids network lookups entirely:
+
+1. **Tag keys on the map side**: activity mappers emit `(user_id, 1_<timestamp>) -> url`; user-profile mappers emit `(user_id, 0_prof) -> birth_year`.
+2. **Hash-partition & spill sorted runs**: each mapper routes records into one bucket per reducer using `hash(user_id) % N`, sorting by `(user_id, tag)` in memory and spilling sorted segments to local disk if the buffer fills.
+3. **Multi-way merge at the reducer**: each reducer fetches its slice from every mapper and merges them sequentially (mergesort style). Because `0_prof` always sorts ahead of `1_`, the reducer reads the user's birth year into **one local variable** and streams every click for that user immediately behind it — `O(1)` RAM per key and zero RPCs.
+
+</En>
+
+<Vi>
+
+### Thuật toán Shuffle: sắp xếp phân tán và Secondary Sort Join
+
+Có một cái tên dễ gây hiểu lầm trong hệ thống batch: xào bài (shuffle) ngoài đời tạo ra sự lộn xộn, còn **shuffle phân tán** lại tạo ra **thứ tự đã sắp xếp** xuyên suốt nhiều máy chủ.
+
+Giả sử bạn cần join hai tập dữ liệu khổng lồ đã bị chia mảnh: nhật ký click chuột của người dùng (bảng `fact`) và bảng hồ sơ user chứa năm sinh (bảng `dimension`). Nếu để worker vừa đọc từng cú click vừa gọi RPC sang database hồ sơ, bạn sẽ đánh sập database và nghẽn cổ chai vì độ trễ mạng.
+
+Thay vào đó, thuật toán **sort-merge join** kết hợp **secondary sort (sắp xếp phụ)** xoá sạch mọi cuộc gọi mạng ngẫu nhiên:
+
+1. **Gắn thẻ thứ tự ở phía Map**: mapper đọc click xuất ra `(user_id, 1_<timestamp>) -> url`; mapper đọc hồ sơ xuất `(user_id, 0_prof) -> năm_sinh`.
+2. **Băm khoá (hash-partition) & xả đoạn đã xếp**: mỗi mapper dùng `hash(user_id) % N` chia bản ghi vào `N` giỏ tương ứng với `N` reducer, sắp xếp theo cặp `(user_id, thẻ)` trong RAM rồi xả thành từng đoạn đã xếp ra đĩa cục bộ nếu tràn bộ nhớ.
+3. **Trộn tuần tự tại Reducer**: từng reducer kéo phần dữ liệu thuộc về mình từ các mapper về và trộn (mergesort). Vì `0_prof` luôn đứng trước `1_`, reducer đọc ngay năm sinh vào **đúng một biến cục bộ** rồi tuôn toàn bộ lượt click của user đó nối tiếp phía sau — tốn RAM `O(1)` cho mỗi user và bằng không lần gọi RPC.
+
+</Vi>
+
+<BatchShuffleSortMerge />
+
+<En>
+
+### When the shuffle breaks: hot keys and broadcast joins
+
+Sorting everything across the network is expensive, and it shares one Achilles' heel with hash partitioning: **key skew**. Imagine one celebrity account receives 70% of all clicks in a campaign. Because `hash("@star")` always lands on the exact same reducer, 3 reducers finish in a second while 1 unlucky reducer chokes on 70% of the cluster's data — slowing the whole stage to that single straggler's speed or crashing it with OOM.
+
+Modern engines fight skew and shuffle cost in two primary ways:
+
+- **Broadcast hash join (map-side join)**: if the `users` table is small (say a few megabytes or under Apache Spark's default 10 MB `autoBroadcastJoinThreshold`), copy the whole small table into RAM on every map worker. Every mapper joins its own local slice of the clickstream with **zero shuffling** of the giant fact table.
+- **Adaptive Query Execution (AQE) skew splitting**: introduced in Spark 3.0, AQE measures real byte counts after map stages finish. It switches a Sort-Merge Join to a Broadcast Join on the fly if filters shrank one side, and automatically splits any partition exceeding **5× the median size** (and **256 MB** by default) into parallel sub-tasks, replicating matching blocks from the other side.
+
+Try both trade-offs yourself in the interactive simulator below: watch what happens when high-cardinality URLs hit a worker's memory ceiling, then switch to the 4-reducer shuffle tab to compare uniform keys, a 70% celebrity hot-key straggler, and a Broadcast Hash Join.
+
+</En>
+
+<Vi>
+
+### Khi bước Shuffle gãy cánh: hot key và Broadcast Join
+
+Đẩy toàn bộ dữ liệu đi sắp xếp qua mạng vừa đắt đỏ vừa mang chung một gót chân Achilles với phân mảnh băm (hash partitioning): **lệch khoá (key skew)**. Thử tưởng tượng một tài khoản người nổi tiếng nhận tới 70% tổng số click của cả chiến dịch. Vì `hash("@star")` luôn rơi vào đúng một reducer duy nhất, 3 reducer còn lại chạy xong trong chớp mắt rồi ngồi chơi, trong khi 1 reducer xấu số phải gồng gánh 70% lượng dữ liệu của cả cụm — kéo chậm toàn bộ stage hoặc chết vì tràn RAM.
+
+Các engine hiện đại xử lý nỗi đau này theo hai hướng chính:
+
+- **Broadcast hash join (join ngay phía Map)**: nếu bảng `users` đủ nhỏ (vài megabyte, hoặc dưới ngưỡng mặc định 10 MB `autoBroadcastJoinThreshold` của Spark), hãy sao chép toàn bộ bảng nhỏ đó vào RAM của mọi mapper. Mỗi worker tự join ngay trên mảnh dữ liệu click cục bộ mà **không phải shuffle một byte nào** của bảng sự kiện khổng lồ.
+- **Adaptive Query Execution (AQE) tự động chia khoá lệch**: có mặt từ Spark 3.0, AQE đo kích thước thật sau khi các bước map hoàn tất. Nếu sau khi lọc mà một bên teo nhỏ dưới ngưỡng, AQE tự đổi Sort-Merge Join sang Broadcast Join ngay lúc đang chạy; đồng thời tự động chẻ nhỏ mọi phân mảnh phình to quá **5 lần kích thước trung vị** (và vượt ngưỡng **256 MB** mặc định) thành nhiều task con song song.
+
+Bạn có thể tự thử cả hai tình huống đánh đổi ngay dưới đây: quan sát chuyện gì xảy ra khi tập URL quá đa dạng chạm trần RAM worker, rồi chuyển sang tab thứ hai để so sánh shuffle 4 reducer khi khoá đều, khi dính hot key 70%, và khi dùng Broadcast Hash Join.
+
+</Vi>
+
+<BatchShuffle />
+
+<En>
+
+<Concepts>
+
+- **Dataflow engine**: a batch processor (such as Spark or Flink) that models an entire DAG of operators as one job, keeping intermediate state in memory or local disk instead of writing replicated DFS files after every step.
+- **Lineage**: Spark's recipe of transformations linking each output partition back to its input files, allowing lost partitions to be recomputed without replicating intermediate data.
+- **Shuffle**: the distributed all-to-all transfer that hash-partitions and sorts records by key across mappers and reducers.
+- **Sort-merge join**: joining two large sharded datasets by shuffling and sorting both sides on the join key, then merging matching keys in one sequential scan.
+- **Secondary sort**: adding a tag or timestamp behind the primary partition key so records for the same key arrive at the reducer in a guaranteed order.
+- **Broadcast hash join**: copying a small dimension table to every mapper's memory so the large fact table joins in place without shuffling.
+
+</Concepts>
+
+---
+
+## 5. SQL optimizers, DataFrames, and lakehouses
+
+Hand-coding MapReduce mappers and joins felt like writing assembly over petabytes. Once clusters could survive failures at 10,000-node scale, attention swung toward developer productivity — and surprisingly, back to **SQL** and relational query optimizers.
+
+Modern engines like **Spark SQL (Catalyst)**, **Trino**, and **Flink** (often using **Apache Calcite**) translate declarative SQL into physical execution plans. Because you declare *what* you want rather than *how* to sort and join, a **Cost-Based Optimizer (CBO)** inspects table statistics to reorder joins, push filters down into Parquet row groups, and pick Broadcast vs. Sort-Merge joins automatically.
+
+### The convergence: DataFrames, Arrow, and Iceberg
+
+At the same time, cloud data warehouses (**Snowflake**, **BigQuery**) moved onto object storage and borrowed distributed shuffle and fault-tolerance tricks from batch engines — while adding DataFrame APIs (`Snowpark`, `BigQuery DataFrames`) for Python teams. Still, SQL struggles with iterative ML pipelines and multimodal AI workloads (images, audio, video embeddings), which keeps programmatic **Distributed DataFrames** thriving.
+
+Choosing a DataFrame tool requires spotting hidden execution differences:
+
+| Tool | Execution model | Indexing & row order | Sweet spot |
+|---|---|---|---|
+| **Pandas** | Eager (runs immediately), single node | Ordered row index in local RAM | Datasets fitting comfortably on one machine |
+| **Spark DataFrame** | Lazy DAG + Catalyst CBO, JVM cluster | Unordered distributed partitions | Massive tabular ETL & SQL-friendly pipelines |
+| **Daft / Ray Data** | Lazy/streaming over Rust/Ray workers | Unordered distributed Arrow batches | Multimodal AI (images, video), LLM prep, Python ML |
+| **Cloud Warehouse** | Managed SQL + elastic compute (BigQuery, Snowflake) | Abstracted managed storage / Iceberg | Enterprise BI, ad-hoc SQL, curated analytics |
+
+Under the hood, **Apache Arrow** gave Python, Rust, C++, and JVM engines one shared in-memory columnar format so workers pass zero-copy Arrow batches directly into PyTorch or DuckDB without serializing JSON or Pickle rows.
+
+And to turn raw Parquet files sitting on immutable S3 buckets into reliable ACID tables without a warehouse lock-in, teams converged on **open table formats** like **Apache Iceberg** (born at Netflix). Instead of trusting slow `list` calls over bucket prefixes, Iceberg commits each table change as a new immutable snapshot tree: an atomic **Catalog** pointer (`If-None-Match` / CAS swap) points to a **metadata file**, which points to a **manifest list** and **manifest files** carrying per-column min/max bounds so engines prune irrelevant Parquet files before reading a byte.
+
+</En>
+
+<Vi>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Dataflow engine**: hệ thống xử lý batch (như Spark, Flink) xem cả chuỗi biến đổi DAG như một job thống nhất, giữ dữ liệu trung gian trong RAM hoặc đĩa cục bộ thay vì ghi DFS nhân 3 sau mỗi bước.
+- **Lineage (phả hệ dữ liệu)**: công thức các phép biến đổi mà Spark ghi nhớ để biết một phân mảnh dữ liệu được tạo từ đầu vào nào, giúp tính lại phần bị mất mà không cần sao chép dữ liệu trung gian.
+- **Shuffle**: bước luân chuyển dữ liệu toàn mạng nhằm phân mảnh theo hàm băm và sắp xếp bản ghi theo khoá giữa các mapper và reducer.
+- **Sort-merge join**: phép join hai bảng lớn đã chia mảnh bằng cách shuffle và sắp xếp cả hai phía theo khoá join, rồi trộn tuần tự các bản ghi trùng khoá.
+- **Secondary sort (sắp xếp phụ)**: gắn thêm thẻ hoặc mốc thời gian phía sau khoá chính để các bản ghi cùng khoá đến tay reducer đúng thứ tự mong muốn.
+- **Broadcast hash join**: phát tán toàn bộ bảng phụ nhỏ vào RAM của từng mapper để bảng chính khổng lồ được join tại chỗ mà không cần shuffle.
+
+</Concepts>
+
+---
+
+## 5. Trình tối ưu SQL, DataFrame và data lakehouse
+
+Tự viết tay từng hàm `map` và thuật toán join trên MapReduce chẳng khác nào viết hợp ngữ trên quy mô petabyte. Khi bài toán vận hành cụm 10.000 máy coi như đã được giải quyết ổn thoả, tâm điểm chuyển sang năng suất kỹ sư — và thật thú vị, cả ngành lại quay về với **SQL** cùng các bộ tối ưu truy vấn quan hệ.
+
+Các engine như **Spark SQL (Catalyst)**, **Trino** và **Flink** (thường dùng **Apache Calcite**) dịch câu lệnh SQL khai báo thành kế hoạch chạy vật lý. Vì bạn chỉ mô tả *kết quả* muốn lấy thay vì ép cách sắp xếp, **Cost-Based Optimizer (CBO — bộ tối ưu dựa trên chi phí)** dựa vào thống kê bảng để tự đảo thứ tự join, đẩy bộ lọc xuống tận từng nhóm dòng Parquet và tự chọn Broadcast hay Sort-Merge join.
+
+### Điểm giao thoa: DataFrame, Arrow và Iceberg
+
+Song song đó, các kho dữ liệu đám mây (**Snowflake**, **BigQuery**) cũng chuyển lên object store và vay mượn kỹ thuật shuffle, chịu lỗi của hệ thống batch — đồng thời mở thêm thư viện DataFrame (`Snowpark`, `BigQuery DataFrames`) cho dân Python. Dẫu vậy, SQL vẫn rất chật vật với các pipeline học máy lặp đi lặp lại hoặc dữ liệu AI đa phương thức (ảnh, âm thanh, video), giữ cho **Distributed DataFrame** tiếp tục phát triển mạnh.
+
+Khi chọn công cụ DataFrame, cần tránh một cái bẫy ngầm về cách thực thi:
+
+| Công cụ | Cơ chế chạy | Chỉ mục & thứ tự dòng | Phù hợp nhất với |
+|---|---|---|---|
+| **Pandas** | Chạy ngay (eager), một máy | Có index và thứ tự dòng trong RAM | Dữ liệu nhỏ vừa gọn trong RAM một máy |
+| **Spark DataFrame** | DAG lười (lazy) + Catalyst CBO, cụm JVM | Phân mảnh phân tán không giữ thứ tự | ETL bảng lớn và pipeline thiên về SQL |
+| **Daft / Ray Data** | Lazy/streaming trên worker Rust/Ray | Lô dữ liệu Apache Arrow không thứ tự | AI đa phương thức (ảnh, video), chuẩn bị dữ liệu LLM |
+| **Cloud Warehouse** | SQL quản trị sẵn (BigQuery, Snowflake) | Lưu trữ đóng gói hoặc Iceberg | Báo cáo BI doanh nghiệp, truy vấn SQL tuỳ biến |
+
+Ở tầng bộ nhớ, **Apache Arrow** đem lại cho Python, Rust, C++ và JVM một định dạng lưu theo cột chung trong RAM, giúp worker đẩy thẳng các lô Arrow sang PyTorch hoặc DuckDB mà không tốn công tuần tự hoá (zero-copy).
+
+Còn để biến đống file Parquet rời rạc trên S3 thành những bảng có giao dịch ACID mà không bị khoá chặt vào một nhà cung cấp kho dữ liệu, các team hội tụ về **open table format** như **Apache Iceberg** (khởi nguồn từ Netflix). Thay vì phụ thuộc lệnh `list` chậm chạp trên tiền tố S3, Iceberg commit mỗi thay đổi như một cây ảnh chụp bất biến mới: con trỏ nguyên tử ở **Catalog** trỏ tới **metadata file**, xuống **manifest list** và các **manifest file** chứa sẵn giá trị min/max từng cột — cho phép engine bỏ qua hàng loạt file Parquet thừa trước khi tải bất kỳ byte nào.
+
+</Vi>
+
+<Figure src={icebergSnapshot} alt="Apache Iceberg snapshot metadata hierarchy: an atomic Catalog pointer references a metadata file, which tracks snapshots s0 and s1 pointing to manifest lists, manifest files, and immutable Parquet data files" altVi="Cây siêu dữ liệu của Apache Iceberg: con trỏ nguyên tử tại Catalog trỏ tới metadata file chứa các snapshot s0 và s1, đi xuống manifest list, manifest file rồi mới tới các file dữ liệu bất biến" caption="How Apache Iceberg builds ACID tables on immutable object stores: writers build new manifest lists and Parquet files quietly in the background, then flip a single atomic pointer in the Catalog for clean time travel and zero partial reads." captionVi="Cách Apache Iceberg dựng bảng chuẩn ACID trên object store bất biến: luồng ghi tạo sẵn manifest list và file Parquet mới ở chế độ nền, rồi lật đúng một con trỏ nguyên tử trong Catalog để có time travel và không bao giờ lộ dữ liệu dở dang." sourceTitle="Apache Iceberg — Table Format Specification" sourceUrl="https://iceberg.apache.org/spec/" />
+
+<En>
+
+<Concepts>
+
+- **Cost-Based Optimizer (CBO)**: the query planner component that estimates input sizes and row selectivity to pick join strategies (Broadcast vs. Sort-Merge) and join order automatically.
+- **Apache Arrow**: an open in-memory columnar format shared across Python, Rust, C++, and Java so engines exchange tabular batches with zero-copy serialization overhead.
+- **Data lakehouse**: an architecture storing open columnar files (like Parquet) in cheap object storage while adding warehouse features — schemas, ACID transactions, and time travel — via metadata formats such as Apache Iceberg.
+- **Predicate pushdown**: passing `WHERE` filters down to the file reader or Iceberg manifest layer so irrelevant files and row groups are skipped completely without network transfer.
+
+</Concepts>
+
+---
+
+## 6. Serving batch outputs without breaking OLTP
+
+Where do batch outputs actually go? In DDIA's survey, most pipelines land in one of four buckets:
+
+1. **ETL and lakehouse layers**: cleaning raw operational dumps, enforcing data contracts, and publishing curated Iceberg tables.
+2. **Analytics**: feeding scheduled OLAP cubes (Apache Pinot, Druid) or interactive ad-hoc DuckDB and Trino queries.
+3. **AI training and iterative graphs**: deduplicating and tokenizing web text for LLMs (OpenAI runs **Ray** for large training prep), or traversing graphs in synchronized supersteps using the **Bulk Synchronous Parallel (BSP / Pregel)** model in Giraph, GraphX, or Flink Gelly.
+4. **Serving derived data to users**: computing search indexes, product recommendations, or ML feature stores offline and exposing them at low latency to live traffic.
+
+That fourth bucket triggers one of the costliest production mistakes in data engineering: **opening a Postgres, MySQL, or DynamoDB client inside Spark and writing results row by row**.
+
+Why does direct OLTP writing fail so badly? First, millions of individual network writes run orders of magnitude slower than sequential batch throughput. Second, 200 parallel Spark tasks writing simultaneously will saturate connection pools, lock rows, and spike tail latency for real checkout or login queries. Third, if one task fails halfway and retries on another node, external `INSERT` or `UPDATE` calls leak partial or duplicate state, shattering batch processing's all-or-nothing guarantee.
+
+### Two safe ways to serve batch outputs
+
+Instead of hammering a live database directly, production teams decouple the batch job from the serving tier:
+
+| Pattern | How data moves | Atomicity & serving impact | Best when |
+|---|---|---|---|
+| **Direct OLTP row writes** | 200 batch tasks send row-by-row SQL/RPCs | Leaks partial writes on retries; degrades live p99 | Almost never (toy tables only) |
+| **Kafka buffer + commit signal** | Batch publishes sequential stream; serving DBs pull at own pace | DMZ security isolation; consumers hide data until "done" event | Incremental updates across multiple search/OLAP sinks |
+| **Bulk-built immutable files (Venice / RocksDB SST)** | Batch builds complete SSTables/index files in S3, then swaps atomically | Zero query disruption; instant atomic rollback to old version | Full snapshots or hybrid batch + stream stores at scale |
+
+Building the actual database files offline is surprisingly practical. RocksDB supports ingesting pre-sorted SSTable files built inside Spark, TiDB Lightning and Apache Pinot import pre-built segments directly, and LinkedIn's open-source **Venice** combines bulk batch dataset pushes (atomically swapping versions without touching live reads) with Kafka streams for incremental updates in between batch runs.
+
+<Callout type="tip" title="The decoupling test for every new pipeline">
+Before wiring a Spark or Python job to an operational database, ask: if 50 workers retry simultaneously at 3 a.m., will live user latency flinch, and will half-written rows leak into the UI? If either answer is yes, buffer through Kafka or bulk-build immutable files offline.
+</Callout>
+
+<Concepts>
+
+- **Bulk Synchronous Parallel (BSP / Pregel)**: an iterative graph processing model running in lockstep rounds ("supersteps"), where vertices exchange messages along edges in bulk between synchronization barriers.
+- **Derived datastore**: a read-optimized database (such as search indexes, Pinot, or LinkedIn Venice) populated purely from batch or stream outputs rather than direct user writes.
+- **Bulk SSTable ingestion**: building sorted RocksDB/LSM data files inside a batch cluster and loading them directly into a serving engine, bypassing normal write paths and compaction overhead.
+- **DMZ (demilitarized zone) stream**: placing a message broker like Kafka between offline batch networks and production OLTP networks so serving stores pull updates at their own safe pace.
+
+</Concepts>
+
+---
+
+## Key takeaways
+
+- **Keep inputs immutable so humans stay fault-tolerant.** Batch jobs read fixed inputs and produce separate derived outputs, turning bad deploys into cheap reruns or snapshot rollbacks instead of corrupted production tables.
+- **Know when working set cardinality beats RAM.** In-memory hash tables win while distinct keys stay small, but external sort-merge pipelines (`sort -S`, Spark spills) bound memory linearly and protect containers from `OOMKilled`.
+- **Treat object stores as key-value blob stores, not POSIX folders.** On S3 or GCS, prefixes are not atomic directories; rely on open table formats like Iceberg (or S3 conditional writes) instead of non-atomic directory renames.
+- **Watch for key skew before blaming cluster size.** A 70% hot key collapses a 100-node shuffle down to the speed of one straggler reducer; use Broadcast Hash Joins for small dimension tables or enable Spark AQE skew splitting.
+- **Never write row-by-row from batch workers into a live OLTP database.** Route outputs through a rate-limiting Kafka DMZ or bulk-build immutable SSTables (like RocksDB ingestion or LinkedIn Venice) to preserve all-or-nothing semantics and protect p99 latency.
+
+---
+
+## Review questions
+
+1. On 1,000,000 NGINX log lines (107 MiB), why did Python's `defaultdict` use less than 15 MiB for 500 unique URLs yet jump to 191.6 MiB for 1,000,000 unique URLs, whereas `sort -S 8M | uniq -c` stayed under 18 MiB? *(Section 1)*
+2. You migrate an old HDFS pipeline to Amazon S3 and notice a job renaming an output folder of 50,000 Parquet files suddenly takes minutes and exposes partial files to downstream readers. Why does that happen, and how do Iceberg catalogs or S3 `If-None-Match` headers solve it? *(Section 2, Section 5)*
+3. A Spark job running on cheap EC2 Spot instances posts webhook updates as each mapper finishes rows. Why will spot preemptions corrupt downstream systems even though Spark claims task-level fault tolerance? *(Section 3)*
+4. Explain how secondary sort lets a distributed sort-merge join match millions of click events with user profiles using `O(1)` state per user and zero database RPCs — and describe what breaks if one celebrity `user_id` generates 70% of all clicks. *(Section 4)*
+5. Why can writing recommendations directly from 200 Spark tasks into a production PostgreSQL table cause both p99 latency spikes for live users and inconsistent recommendation lists? *(Section 6)*
+
+</En>
+
+<Vi>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Cost-Based Optimizer (CBO — bộ tối ưu dựa trên chi phí)**: thành phần của trình lập lịch truy vấn ước lượng kích thước đầu vào và độ chọn lọc để tự chọn chiến lược join (Broadcast hay Sort-Merge) cùng thứ tự join tối ưu.
+- **Apache Arrow**: định dạng lưu theo cột trong RAM được dùng chung giữa Python, Rust, C++ và Java, giúp các engine trao đổi dữ liệu theo lô mà không cần tuần tự hoá (zero-copy).
+- **Data lakehouse**: kiến trúc lưu file cột mở (như Parquet) trên object store giá rẻ nhưng có đủ tính năng kho dữ liệu — schema, giao dịch ACID và time travel — nhờ tầng metadata như Apache Iceberg.
+- **Predicate pushdown (đẩy bộ lọc xuống tầng lưu trữ)**: đưa điều kiện `WHERE` xuống thẳng trình đọc file hoặc tầng manifest của Iceberg để bỏ qua hoàn toàn các file không liên quan trước khi tải qua mạng.
+
+</Concepts>
+
+---
+
+## 6. Phục vụ đầu ra batch mà không đánh sập OLTP
+
+Cuối cùng thì dữ liệu batch đi về đâu? Theo khảo sát trong DDIA, hầu hết pipeline đổ về một trong bốn đích sau:
+
+1. **ETL và các tầng lakehouse**: làm sạch dữ liệu thô từ hệ thống giao dịch, kiểm tra hợp đồng dữ liệu (data contract) và xuất bản thành bảng Iceberg chuẩn chỉnh.
+2. **Phân tích (Analytics)**: nạp dữ liệu định kỳ vào các khối OLAP (Apache Pinot, Druid) hoặc phục vụ truy vấn tuỳ biến bằng DuckDB và Trino.
+3. **Huấn luyện AI & đồ thị lặp**: lọc trùng và tách token văn bản web cho mô hình ngôn ngữ lớn (OpenAI dùng **Ray** cho quy trình tiền xử lý dữ liệu huấn luyện), hoặc duyệt đồ thị theo từng nhịp đồng bộ bằng mô hình **Bulk Synchronous Parallel (BSP / Pregel)** trên Giraph, GraphX hay Flink Gelly.
+4. **Phục vụ dữ liệu dẫn xuất cho người dùng cuối**: tính trước danh sách gợi ý sản phẩm, chỉ mục tìm kiếm hoặc kho đặc trưng ML (feature store) ở chế độ nền rồi mở ra cho lưu lượng truy cập thực tế.
+
+Chính đích thứ tư này hay dính một sai lầm đốt tiền bậc nhất trong kỹ thuật dữ liệu: **mở kết nối Postgres, MySQL hay DynamoDB ngay bên trong Spark rồi bắn lệnh ghi từng dòng một**.
+
+Vì sao ghi thẳng vào database OLTP lại nguy hiểm tới vậy? Thứ nhất, hàng triệu cuộc gọi mạng lẻ tẻ chạy chậm hơn hàng trăm lần so với thông lượng tuần tự của batch. Thứ hai, 200 task Spark chạy song song cùng đè vào ghi sẽ làm nghẽn connection pool, tranh chấp khoá dòng và kéo độ trễ p99 của màn hình thanh toán hay đăng nhập lên trời. Thứ ba, chỉ cần một task rụng giữa đường rồi chạy lại trên worker khác, lệnh `INSERT` hay `UPDATE` bên ngoài sẽ làm lộ dữ liệu dở dang hoặc trùng lặp — phá nát cam kết "được ăn cả, ngã về không" của job batch.
+
+### Hai cách an toàn để phục vụ đầu ra batch
+
+Thay vì xông thẳng vào database đang chạy production, các team tách riêng mạng xử lý batch khỏi tầng phục vụ khách hàng:
+
+| Phương án | Cách dữ liệu chảy | Tính nguyên tử & tác động phục vụ | Khi nào nên dùng |
+|---|---|---|---|
+| **Ghi từng dòng thẳng vào OLTP** | 200 task batch gửi SQL/RPC từng bản ghi | Lộ dữ liệu dở dang khi retry; đánh sập p99 người dùng | Hầu như không bao giờ (trừ bảng cực nhỏ) |
+| **Đệm qua Kafka + tín hiệu commit** | Batch đẩy tuần tự vào Kafka; DB đích tự kéo theo nhịp an toàn | Cách ly qua mạng DMZ; chỉ hiển thị bản mới khi có cờ hoàn tất | Cần cập nhật gia tăng tới nhiều hệ thống tìm kiếm/OLAP |
+| **Dựng sẵn file bất biến (Venice / RocksDB SST)** | Batch tạo trọn vẹn file SSTable/index trên S3 rồi tráo con trỏ nguyên tử | Không làm chậm truy vấn đọc; lùi về bản cũ tức thì | Snapshot toàn phần hoặc mô hình lai batch + stream quy mô lớn |
+
+Tự dựng sẵn file database ở chế độ nền thực tế lại rất gọn nhẹ. RocksDB hỗ trợ nạp trực tiếp các file SSTable đã sắp xếp sẵn từ Spark, TiDB Lightning hay Apache Pinot nhập thẳng phân mảnh dựng trước, còn nền tảng mã nguồn mở **Venice** của LinkedIn kết hợp cả hai thế giới: đẩy dữ liệu batch toàn phần (tráo phiên bản nguyên tử không làm gián đoạn luồng đọc) song song với luồng Kafka để cập nhật từng dòng phát sinh giữa hai kỳ chạy batch.
+
+<Callout type="tip" title="Bài kiểm tra tách lớp cho mọi pipeline mới">
+Trước khi nối một job Spark hay Python vào database vận hành, hãy tự hỏi: nếu lúc 3 giờ sáng có 50 worker cùng chạy lại một lượt, độ trễ của người dùng đang online có nhấp nhổm không, và dữ liệu ghi nửa chừng có lọt ra giao diện không? Nếu một trong hai câu trả lời là có, hãy đẩy qua Kafka hoặc dựng sẵn file bất biến ở ngoài rồi nạp nguyên tử.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Bulk Synchronous Parallel (BSP / Pregel)**: mô hình xử lý đồ thị lặp theo từng vòng đồng bộ ("superstep"), nơi các đỉnh trao đổi thông điệp dọc theo cạnh thành từng đợt lớn giữa các rào chắn đồng bộ.
+- **Derived datastore (kho dữ liệu dẫn xuất)**: cơ sở dữ liệu tối ưu cho truy vấn đọc (như search engine, Pinot hay LinkedIn Venice) chỉ nhận dữ liệu tính toán sẵn từ batch hoặc stream chứ không nhận lệnh ghi trực tiếp từ user.
+- **Bulk SSTable ingestion (nạp hàng loạt SSTable)**: tạo sẵn các file dữ liệu RocksDB/LSM đã sắp xếp ngay bên trong cụm batch rồi nạp thẳng vào engine phục vụ, bỏ qua đường ghi thông thường và gánh nặng compaction.
+- **DMZ (demilitarized zone) stream**: đặt hàng đợi thông điệp như Kafka làm vùng đệm giữa mạng xử lý batch và mạng OLTP production để các hệ thống phục vụ tự kéo dữ liệu theo tốc độ an toàn của riêng mình.
+
+</Concepts>
+
+---
+
+## Điểm rút ra
+
+- **Giữ đầu vào bất biến để bảo vệ hệ thống trước lỗi con người.** Job batch đọc đầu vào cố định và tạo đầu ra riêng biệt, biến sự cố deploy sai code thành một lần chạy lại hoặc quay snapshot rẻ tiền thay vì làm bẩn bảng production.
+- **Nắm rõ lúc nào số lượng khoá riêng biệt vượt trần RAM.** Bảng băm trong RAM thắng thế khi số khoá ít, nhưng đường ống sort-merge ngoài RAM (`sort -S`, cơ chế spill của Spark) khoá chặt bộ nhớ để bảo vệ container khỏi `OOMKilled`.
+- **Xem object store là kho blob khoá-giá trị, đừng đối xử như thư mục POSIX.** Trên S3 hay GCS, tiền tố không phải thư mục có tính nguyên tử; hãy dùng open table format như Iceberg (hoặc conditional writes của S3) thay vì đổi tên thư mục thủ công.
+- **Kiểm tra lệch khoá (key skew) trước khi đổ lỗi cho kích thước cụm.** Một hot key chiếm 70% dữ liệu có thể kéo tụt bước shuffle của cụm 100 máy xuống ngang tốc độ một reducer duy nhất; hãy dùng Broadcast Hash Join cho bảng nhỏ hoặc bật AQE chia phân mảnh nóng trên Spark.
+- **Đừng bao giờ ghi từng dòng từ worker batch thẳng vào database OLTP đang phục vụ.** Hãy đẩy qua vùng đệm Kafka hoặc dựng sẵn các file SSTable bất biến (như nạp SST của RocksDB hoặc LinkedIn Venice) để giữ tính toàn vẹn tất cả-hoặc-không-gì và bảo vệ độ trễ p99.
+
+---
+
+## Câu hỏi ôn tập
+
+1. Trên cùng 1.000.000 dòng log NGINX (107 MiB), vì sao `defaultdict` của Python chỉ tốn chưa tới 15 MiB với 500 URL nhưng vọt lên 191,6 MiB với 1.000.000 URL riêng biệt, trong khi `sort -S 8M | uniq -c` giữ đỉnh RAM dưới 18 MiB? *(Phần 1)*
+2. Bạn chuyển một pipeline HDFS cũ lên Amazon S3 và thấy bước đổi tên thư mục đầu ra gồm 50.000 file Parquet bỗng mất vài phút và làm lộ file dở dang cho job phía sau. Chuyện gì đang xảy ra, và Iceberg catalog hoặc header `If-None-Match` của S3 giải quyết ra sao? *(Phần 2, Phần 5)*
+3. Một job Spark chạy trên dàn EC2 Spot giá rẻ bắn webhook cập nhật ngay khi mỗi mapper xử lý xong từng dòng. Vì sao cơ chế thu hồi spot vẫn gây sai dữ liệu cho hệ thống nhận webhook dù Spark có khả năng tự chạy lại từng task? *(Phần 3)*
+4. Giải thích cách secondary sort giúp sort-merge join phân tán ghép hàng triệu lượt click với hồ sơ người dùng chỉ với bộ nhớ `O(1)` mỗi user và không cần gọi RPC sang database — và điều gì gãy vỡ nếu một `user_id` người nổi tiếng tạo ra 70% lượng click? *(Phần 4)*
+5. Vì sao việc để 200 task Spark ghi trực tiếp danh sách gợi ý sản phẩm vào bảng PostgreSQL production vừa làm vọt độ trễ p99 của người dùng thật vừa có nguy cơ sinh ra danh sách gợi ý thiếu nhất quán? *(Phần 6)*
+
+</Vi>
