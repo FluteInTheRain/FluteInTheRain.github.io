@@ -557,3 +557,10 @@ export function seriesOfPost(slug: string) {
 }
 
 export const seriesUrl = (id: string) => `/blog/series/${id}/`;
+
+/** position of an act in its series (0-based); drives the per-act colour classes `act-0`…`act-3` */
+export function actIndex(series: Series, actId: string): number {
+  const i = series.acts.findIndex((a) => a.id === actId);
+  if (i < 0) throw new Error(`Series "${series.id}": unknown act "${actId}"`);
+  return i;
+}
