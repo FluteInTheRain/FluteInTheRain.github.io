@@ -1,8 +1,8 @@
 ---
 title: "How a database stores your rows, and why that decides what is fast"
 title_vi: "Database cất dữ liệu của bạn thế nào, và vì sao điều đó quyết định thao tác nào nhanh"
-description: "Discord's tombstones, Uber's index writes, Shopify's random keys, GitHub's grep math: DDIA chapter 4 on how storage engines lay out data, told through real cases."
-description_vi: "Vì sao một kênh Discord mất 20 giây mới mở, Uber bỏ Postgres, Shopify đổi UUID sang ULID: chương 4 DDIA giải thích database cất dữ liệu xuống đĩa ra sao, kể qua các sự cố thật."
+description: "Discord's tombstones, Uber's index writes, Shopify's random keys, GitHub's grep math. How storage engines lay out data, told through real cases."
+description_vi: "Vì sao một kênh Discord mất 20 giây mới mở, Uber bỏ Postgres, Shopify đổi UUID sang ULID: database cất dữ liệu xuống đĩa ra sao, kể qua các sự cố thật."
 date: 2026-11-18
 category: "database"
 tags: ["database", "storage-engines", "lsm-tree", "b-tree", "column-store", "indexing", "ddia"]
@@ -36,17 +36,38 @@ import StorageLsmPath from '../../components/mdx/StorageLsmPath.astro';
 import StorageBtreeInserts from '../../components/mdx/StorageBtreeInserts.astro';
 import StorageUpdateFanout from '../../components/mdx/StorageUpdateFanout.astro';
 import StorageSortedRuns from '../../components/mdx/StorageSortedRuns.astro';
+import StorageBitcask from '../../components/mdx/StorageBitcask.astro';
+import StorageTombstoneScan from '../../components/mdx/StorageTombstoneScan.astro';
+import StorageNgramLookup from '../../components/mdx/StorageNgramLookup.astro';
 import LsmPlayground from '../../components/mdx/LsmPlayground.astro';
 import BtreeInsertSim from '../../components/mdx/BtreeInsertSim.astro';
+import StorageBWriteAmp from '../../components/mdx/StorageBWriteAmp.astro';
+import StorageBReplicaFanout from '../../components/mdx/StorageBReplicaFanout.astro';
+import StorageBInnodbBytes from '../../components/mdx/StorageBInnodbBytes.astro';
+import StorageBRowVsColumn from '../../components/mdx/StorageBRowVsColumn.astro';
+import StorageBUberLogs from '../../components/mdx/StorageBUberLogs.astro';
+import StorageBThreeQuestions from '../../components/mdx/StorageBThreeQuestions.astro';
+import StorageBGrepMath from '../../components/mdx/StorageBGrepMath.astro';
+import StorageBVectorSpace from '../../components/mdx/StorageBVectorSpace.astro';
 import figureCardCatalog from '../../assets/blog/storage-engines-logs-lsm-btree-columns/library-of-congress-card-catalog.jpg';
+import figureGithubIngest from '../../assets/blog/storage-engines-logs-lsm-btree-columns/github-code-search-ingest.png';
+import figureGithubQuery from '../../assets/blog/storage-engines-logs-lsm-btree-columns/github-code-search-query-path.png';
 import figureMyRocksWrites from '../../assets/blog/storage-engines-logs-lsm-btree-columns/myrocks-kb-written-per-query.jpg';
+import StorageAIncidents from '../../components/mdx/StorageAIncidents.astro';
+import StorageALogNotebook from '../../components/mdx/StorageALogNotebook.astro';
+import StorageABitcaskWalk from '../../components/mdx/StorageABitcaskWalk.astro';
+import StorageASortFirst from '../../components/mdx/StorageASortFirst.astro';
+import StorageADiscordTimeline from '../../components/mdx/StorageADiscordTimeline.astro';
+import StorageACompactionStrategies from '../../components/mdx/StorageACompactionStrategies.astro';
+import StorageABtreeLookup from '../../components/mdx/StorageABtreeLookup.astro';
+import StorageAInsertCost from '../../components/mdx/StorageAInsertCost.astro';
 
 <En>
 
-<Figure src={figureCardCatalog} alt="Rows of numbered wooden card-catalog drawers in the Library of Congress" caption="A card catalogue is an index: sorted, numbered, and separate from the books it points to. Every storage engine in this post is a different answer to how such drawers should be kept up to date. Photo: Rochelle Hartman, CC BY 2.0." sourceTitle="Wikimedia Commons: Library Of Congress Card Catalog" sourceUrl="https://commons.wikimedia.org/wiki/File:Library_Of_Congress_Card_Catalog.jpg" />
+<Figure src={figureCardCatalog} alt="Rows of numbered wooden card-catalog drawers in the Library of Congress" caption="A card catalogue is an index: sorted, numbered, and separate from the shelves it points to. Every storage engine in this post is a different answer to how such drawers should be kept up to date. Photo: Rochelle Hartman, CC BY 2.0." sourceTitle="Wikimedia Commons: Library Of Congress Card Catalog" sourceUrl="https://commons.wikimedia.org/wiki/File:Library_Of_Congress_Card_Catalog.jpg" />
 
 > "A computer does not primarily compute in the sense of doing arithmetic. […] They primarily are filing systems."
-> &mdash; *Richard Feynman*, quoted at the start of DDIA chapter 4
+> &mdash; *Richard Feynman*
 
 ### What real teams ran into
 
@@ -57,7 +78,9 @@ You will probably never write a storage engine. You will pick one, choose its ke
 - **Shopify, 2022.** Switching idempotency keys from random UUIDv4 to time-sortable ULIDs cut INSERT duration by 50 percent in one high-throughput system.
 - **GitHub, 2023.** Running grep over 115 TB of code would keep 2,048 CPU cores busy for 96 seconds per query. An n-gram index answers in about 100 ms per shard.
 
-Chapter 4 of Kleppmann and Riccomini's *Designing Data-Intensive Applications* (2nd edition) explains the machinery under each of these. This post goes through it in the order the cases need:
+<StorageAIncidents />
+
+Each of these comes from the machinery under the database. This post goes through it in the order the cases need:
 
 1. **The simplest database is a log**: append to a file, and why reading it back needs an index.
 2. **LSM-trees**: write fast now, pay for sorting later in the background.
@@ -91,6 +114,8 @@ Reading is the problem. To find the latest value of a key you scan the whole fil
 
 It is like a notebook where you never erase: to update a friend's phone number you write a new line at the bottom, and to look it up you read from page one.
 
+<StorageALogNotebook />
+
 ### Bitcask: a log plus a hash table in memory
 
 Bitcask is the storage engine Basho wrote for the Riak database, described in a short 2010 paper by Justin Sheehy and David Smith. It is the log above with one addition:
@@ -100,6 +125,10 @@ Bitcask is the storage engine Basho wrote for the Riak database, described in a 
 - An in-memory hash table, the **keydir**, maps every key to the file, offset and size of its newest value. A read, in the paper's words, "doesn't ever require more than a single disk seek".
 - Old values pile up, so a background **merge** rewrites the closed files keeping only the latest value of each key. It also writes a **hint file** per data file, so a restart can rebuild the keydir without reading every value.
 
+<StorageABitcaskWalk />
+
+<StorageBitcask />
+
 The catch is in the keydir. The paper says it "must fit entirely in RAM", one entry per key. And a hash table has no order, so a range query such as "all keys from 10000 to 19999" means looking up each key on its own.
 
 To see the gap between scanning and using the index, I ran a small Python version of both. Keys repeat, so later writes overwrite earlier ones, exactly like the notebook.
@@ -108,10 +137,10 @@ To see the gap between scanning and using the index, I ran a small Python versio
 
 <Vi>
 
-<Figure src={figureCardCatalog} alt="Những dãy ngăn kéo tủ phiếu thư mục bằng gỗ, đánh số, ở Thư viện Quốc hội Mỹ" caption="Tủ phiếu thư mục chính là một index: được sắp xếp, đánh số, và nằm riêng khỏi những cuốn sách nó trỏ tới. Mỗi storage engine trong bài là một cách khác nhau để giữ cho các ngăn kéo ấy luôn đúng. Ảnh: Rochelle Hartman, CC BY 2.0." sourceTitle="Wikimedia Commons: Library Of Congress Card Catalog" sourceUrl="https://commons.wikimedia.org/wiki/File:Library_Of_Congress_Card_Catalog.jpg" />
+<Figure src={figureCardCatalog} alt="Những dãy ngăn kéo tủ phiếu thư mục bằng gỗ, đánh số, ở Thư viện Quốc hội Mỹ" caption="Tủ phiếu thư mục chính là một index: được sắp xếp, đánh số, và nằm riêng khỏi các kệ mà nó trỏ tới. Mỗi storage engine trong bài là một cách khác nhau để giữ cho các ngăn kéo ấy luôn đúng. Ảnh: Rochelle Hartman, CC BY 2.0." sourceTitle="Wikimedia Commons: Library Of Congress Card Catalog" sourceUrl="https://commons.wikimedia.org/wiki/File:Library_Of_Congress_Card_Catalog.jpg" />
 
 > "Máy tính về cơ bản không tính toán theo nghĩa làm số học. […] Về cơ bản chúng là những hệ thống lưu trữ hồ sơ."
-> &mdash; *Richard Feynman*, câu mở đầu chương 4 của DDIA
+> &mdash; *Richard Feynman*
 
 ### Các team thật đã vấp phải gì
 
@@ -122,7 +151,9 @@ Có lẽ bạn sẽ không bao giờ tự viết một storage engine. Nhưng b�
 - **Shopify, 2022.** Đổi idempotency key từ UUIDv4 ngẫu nhiên sang ULID sắp xếp được theo thời gian giúp thời gian chạy lệnh INSERT giảm 50% trong một hệ thống tải cao.
 - **GitHub, 2023.** Chạy grep trên 115 TB code sẽ chiếm 2.048 nhân CPU trong 96 giây cho mỗi truy vấn. Một index n-gram trả lời trong khoảng 100 ms mỗi shard.
 
-Chương 4 cuốn *Designing Data-Intensive Applications* (bản 2) của Kleppmann và Riccomini giải thích cỗ máy nằm dưới từng chuyện trên. Bài này đi qua theo thứ tự mà các vụ việc cần:
+<StorageAIncidents />
+
+Mỗi chuyện trên đều xuất phát từ cỗ máy nằm dưới database. Bài này đi qua theo thứ tự mà các vụ việc cần:
 
 1. **Database đơn giản nhất là một file log**: ghi nối vào cuối file, và vì sao đọc lại thì cần index.
 2. **LSM-tree**: ghi nhanh trước, trả giá sắp xếp sau ở chế độ nền.
@@ -156,6 +187,8 @@ Database có hai việc: giữ thứ bạn đưa, và trả lại khi bạn hỏ
 
 Giống một cuốn sổ không bao giờ tẩy: đổi số điện thoại của bạn bè thì viết thêm một dòng ở cuối, còn muốn tra thì đọc lại từ trang một.
 
+<StorageALogNotebook />
+
 ### Bitcask: một file log cộng một bảng băm trong RAM
 
 Bitcask là storage engine mà Basho viết cho database Riak, được mô tả trong một bài báo ngắn năm 2010 của Justin Sheehy và David Smith. Nó chính là file log ở trên, thêm đúng một thứ:
@@ -164,6 +197,10 @@ Bitcask là storage engine mà Basho viết cho database Riak, được mô tả
 - Xoá cũng chỉ là một lần ghi: một giá trị đặc biệt gọi là **tombstone (bia mộ)**, báo rằng "khoá này đã mất".
 - Một bảng băm trong RAM tên **keydir** trỏ mỗi khoá tới file, vị trí (offset) và kích thước của giá trị mới nhất. Theo lời bài báo, một lần đọc "không bao giờ cần quá một lần seek đĩa".
 - Giá trị cũ cứ chất đống, nên một tiến trình **merge** chạy ngầm viết lại các file đã đóng, chỉ giữ giá trị mới nhất của mỗi khoá. Nó cũng viết thêm một **hint file** cho mỗi file dữ liệu, để lúc khởi động lại có thể dựng keydir mà không cần đọc hết mọi giá trị.
+
+<StorageABitcaskWalk />
+
+<StorageBitcask />
 
 Cái giá nằm ở keydir. Bài báo nói nó "phải nằm trọn trong RAM", mỗi khoá một entry. Và bảng băm không có thứ tự, nên truy vấn theo khoảng (range query) như "mọi khoá từ 10000 tới 19999" nghĩa là phải tra từng khoá một.
 
@@ -181,7 +218,7 @@ Cái giá nằm ở keydir. Bài báo nói nó "phải nằm trọn trong RAM", 
 ```
 </TerminalOutput>
 
-The index is not free, though. Every write now updates the hash table too, and every extra index on real data is one more thing to update on each write. The chapter comes back to this trade-off again and again: indexes speed up reads and slow down writes, so databases make you choose which ones to build.
+The index is not free, though. Every write now updates the hash table too, and every extra index on real data is one more thing to update on each write. This trade-off keeps coming back: indexes speed up reads and slow down writes, so databases make you choose which ones to build.
 
 <Concepts>
 
@@ -207,6 +244,8 @@ The **LSM-tree** (log-structured merge-tree, published in 1996) solves this by s
 3. A read checks the memtable, then the SSTables from newest to oldest, and stops at the first match.
 4. In the background, **compaction** merges SSTables into bigger ones and drops old values and tombstones.
 
+<StorageASortFirst />
+
 Think of an inbox tray on a desk. New paper goes on top immediately; someone files it into sorted drawers later. Finding a document means checking the tray first, then the drawers.
 
 </En>
@@ -221,7 +260,7 @@ Think of an inbox tray on a desk. New paper goes on top immediately; someone fil
 ```
 </TerminalOutput>
 
-Nhưng index không miễn phí. Mỗi lần ghi giờ phải cập nhật thêm bảng băm, và mỗi index thêm vào dữ liệu thật là thêm một thứ phải cập nhật ở mỗi lần ghi. Chương sách quay lại sự đánh đổi này nhiều lần: index làm đọc nhanh và làm ghi chậm, nên database bắt bạn tự chọn index nào cần dựng.
+Nhưng index không miễn phí. Mỗi lần ghi giờ phải cập nhật thêm bảng băm, và mỗi index thêm vào dữ liệu thật là thêm một thứ phải cập nhật ở mỗi lần ghi. Sự đánh đổi này cứ quay lại mãi: index làm đọc nhanh và làm ghi chậm, nên database bắt bạn tự chọn index nào cần dựng.
 
 <Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
 
@@ -247,6 +286,8 @@ Giới hạn của Bitcask nằm ở bảng băm. Nếu giữ file **được s�
 3. Lệnh đọc xem memtable trước, rồi tới các SSTable từ mới nhất tới cũ nhất, gặp khoá là dừng.
 4. Ở chế độ nền, **compaction** trộn các SSTable thành file lớn hơn và bỏ đi giá trị cũ cùng tombstone.
 
+<StorageASortFirst />
+
 Hình dung khay giấy tờ trên bàn làm việc. Giấy mới đặt ngay lên trên cùng; lát nữa sẽ có người xếp vào các ngăn kéo theo thứ tự. Tìm một giấy tờ thì xem khay trước, rồi mới tới ngăn kéo.
 
 </Vi>
@@ -255,7 +296,7 @@ Hình dung khay giấy tờ trên bàn làm việc. Giấy mới đặt ngay lê
 
 <En>
 
-A read for a key that was written long ago, or that does not exist, may have to check many files. So each SSTable carries a **Bloom filter**, a small bit array that can say "definitely not in this file" without touching the file. The book's rule of thumb: about 10 bits of filter per key gives a 1% false-positive rate, and every 5 extra bits cut that tenfold.
+A read for a key that was written long ago, or that does not exist, may have to check many files. So each SSTable carries a **Bloom filter**, a small bit array that can say "definitely not in this file" without touching the file. A common rule of thumb: about 10 bits of filter per key gives a 1% false-positive rate, and every 5 extra bits cut that tenfold.
 
 This design is what runs inside RocksDB, Cassandra, ScyllaDB and HBase. Writes are fast because nothing on disk is rewritten in place. The cost arrives later, in compaction, which is where Discord ran into trouble.
 
@@ -265,7 +306,7 @@ Try it below. Write the same key a few times, delete one, then read it with the 
 
 <Vi>
 
-Đọc một khoá được ghi từ lâu, hoặc khoá không tồn tại, có thể phải xem rất nhiều file. Vì vậy mỗi SSTable mang theo một **Bloom filter**, một dãy bit nhỏ có thể nói "chắc chắn không có trong file này" mà không cần mở file. Quy tắc ước lượng trong sách: khoảng 10 bit cho mỗi khoá thì tỉ lệ báo nhầm là 1%, và cứ thêm 5 bit thì tỉ lệ đó giảm mười lần.
+Đọc một khoá được ghi từ lâu, hoặc khoá không tồn tại, có thể phải xem rất nhiều file. Vì vậy mỗi SSTable mang theo một **Bloom filter**, một dãy bit nhỏ có thể nói "chắc chắn không có trong file này" mà không cần mở file. Quy tắc ước lượng thường dùng: khoảng 10 bit cho mỗi khoá thì tỉ lệ báo nhầm là 1%, và cứ thêm 5 bit thì tỉ lệ đó giảm mười lần.
 
 Thiết kế này chạy bên trong RocksDB, Cassandra, ScyllaDB và HBase. Ghi nhanh vì không có gì trên đĩa bị ghi đè tại chỗ. Cái giá tới sau, ở compaction, và Discord gặp rắc rối đúng ở chỗ đó.
 
@@ -283,7 +324,9 @@ In 2017, Discord's CTO Stanislav Vishnevskiy wrote up why they moved messages to
 
 Then Cassandra started "running 10 second 'stop-the-world' GC constantly". The trail led to one channel that took 20 seconds to load. Its owners had deleted millions of messages through the API, leaving one. To return that one message, Cassandra "had to effectively scan millions of message tombstones". The fix was operational: they cut how long tombstones live from 10 days to 2, since they repair the cluster every night anyway.
 
-Six years later Bo Ingram described the next chapter. By early 2022 the cluster had grown to 177 nodes holding trillions of messages, and "we were prone to falling behind on compactions". Their workaround had a name, the "gossip dance": take a node out of rotation so it could compact without traffic, bring it back, repeat until the backlog cleared. During the migration, the last token ranges timed out because they held "gigantic ranges of tombstones that were never compacted away".
+Six years later Bo Ingram described what happened next. By early 2022 the cluster had grown to 177 nodes holding trillions of messages, and "we were prone to falling behind on compactions". Their workaround had a name, the "gossip dance": take a node out of rotation so it could compact without traffic, bring it back, repeat until the backlog cleared. During the migration, the last token ranges timed out because they held "gigantic ranges of tombstones that were never compacted away".
+
+<StorageADiscordTimeline />
 
 | Discord message cluster | Cassandra (early 2022) | ScyllaDB (after May 2022) |
 |---|---|---|
@@ -294,11 +337,13 @@ Six years later Bo Ingram described the next chapter. By early 2022 the cluster 
 
 ScyllaDB is also an LSM engine, compatible with Cassandra, so the move does not prove LSM-trees wrong. Two other things changed: ScyllaDB is written in C++ with no garbage collector, and Discord put new Rust data services in front of the database that coalesce identical requests. The part that is about LSM design is this: deletes are writes, and old data keeps costing disk space and read time until compaction catches up.
 
+<StorageTombstoneScan />
+
 <Callout type="warning" title="Engines slow writers down on purpose">
 RocksDB's wiki describes "write stalls": when flushes or compaction cannot keep up, RocksDB slows writes and, past a hard limit, stops them, logging lines such as "Stopping writes because we have 20 level-0 files". Without that brake the database would keep accepting writes until reads got slow and the disk filled up.
 </Callout>
 
-How the engine picks files to merge is called the **compaction strategy**, and most LSM engines let you choose. The book's rule of thumb:
+How the engine picks files to merge is called the **compaction strategy**, and most LSM engines let you choose. A common rule of thumb:
 
 | | Size-tiered | Leveled |
 |---|---|---|
@@ -306,6 +351,8 @@ How the engine picks files to merge is called the **compaction strategy**, and m
 | Good for | Mostly writes, few reads | Reads dominate |
 | Disk space | More, especially while a big merge runs | Less |
 | Reads | Check more files | Check fewer files |
+
+<StorageACompactionStrategies />
 
 <Concepts>
 
@@ -324,9 +371,9 @@ How the engine picks files to merge is called the **compaction strategy**, and m
 
 ## 3. B-trees: pages you overwrite in place
 
-The other big family is older (1970) and far more common: almost every relational database stores its tables and indexes as **B-trees**. A B-tree also keeps keys sorted, but it splits the disk into fixed-size **pages** and overwrites them in place. The book notes pages were traditionally 4 KiB; PostgreSQL uses 8 KiB and MySQL 16 KiB by default.
+The other big family is older (1970) and far more common: almost every relational database stores its tables and indexes as **B-trees**. A B-tree also keeps keys sorted, but it splits the disk into fixed-size **pages** and overwrites them in place. Pages were traditionally 4 KiB; PostgreSQL uses 8 KiB and MySQL 16 KiB by default.
 
-Pages point to other pages and form a tree. The root page holds a handful of keys that split the key space into ranges, each with a pointer to a child page for that range. You follow pointers down until you reach a **leaf page** that holds the keys themselves. Each page has several hundred children, so the tree stays shallow: the book's example is a four-level tree of 4 KiB pages with 500 children per page, which can hold up to 250 TB.
+Pages point to other pages and form a tree. The root page holds a handful of keys that split the key space into ranges, each with a pointer to a child page for that range. You follow pointers down until you reach a **leaf page** that holds the keys themselves. Each page has several hundred children, so the tree stays shallow: for example, a four-level tree of 4 KiB pages with 500 children per page, which can hold up to 250 TB.
 
 </En>
 
@@ -340,6 +387,8 @@ Rồi Cassandra bắt đầu "liên tục chạy GC 'stop-the-world' 10 giây". 
 
 Sáu năm sau, Bo Ingram kể tiếp. Đầu năm 2022, cluster đã lên 177 node chứa hàng nghìn tỉ tin nhắn, và "bọn mình hay bị tụt lại phía sau với compaction". Cách chữa cháy của họ có hẳn tên gọi, "gossip dance": rút một node khỏi vòng phục vụ để nó compact khi không có traffic, đưa nó vào lại, rồi lặp tới khi hết tồn đọng. Lúc migrate, mấy dải token cuối cùng bị timeout vì chứa "những dải tombstone khổng lồ chưa bao giờ được compact đi".
 
+<StorageADiscordTimeline />
+
 | Cluster tin nhắn của Discord | Cassandra (đầu 2022) | ScyllaDB (sau tháng 5/2022) |
 |---|---|---|
 | Số node | 177 | 72 |
@@ -349,11 +398,13 @@ Sáu năm sau, Bo Ingram kể tiếp. Đầu năm 2022, cluster đã lên 177 no
 
 ScyllaDB cũng là engine LSM, tương thích với Cassandra, nên vụ chuyển này không chứng minh LSM-tree sai. Còn hai thứ khác cũng thay đổi: ScyllaDB viết bằng C++, không có garbage collector, và Discord đặt thêm các data service viết bằng Rust phía trước database để gộp các request giống nhau. Phần thuộc về thiết kế LSM là thế này: xoá cũng là ghi, và dữ liệu cũ vẫn tốn chỗ trên đĩa lẫn thời gian đọc cho tới khi compaction đuổi kịp.
 
+<StorageTombstoneScan />
+
 <Callout type="warning" title="Engine cố ý làm chậm người ghi">
 Wiki của RocksDB mô tả "write stall": khi flush hoặc compaction không theo kịp, RocksDB làm chậm lệnh ghi, và qua một ngưỡng cứng thì dừng hẳn, ghi log kiểu "Stopping writes because we have 20 level-0 files". Không có cái phanh này, database sẽ cứ nhận ghi cho tới khi đọc chậm hẳn và đĩa đầy.
 </Callout>
 
-Cách engine chọn file nào để trộn gọi là **compaction strategy (chiến lược compaction)**, và đa số engine LSM cho bạn chọn. Quy tắc ước lượng trong sách:
+Cách engine chọn file nào để trộn gọi là **compaction strategy (chiến lược compaction)**, và đa số engine LSM cho bạn chọn. Quy tắc ước lượng thường dùng:
 
 | | Size-tiered | Leveled |
 |---|---|---|
@@ -361,6 +412,8 @@ Cách engine chọn file nào để trộn gọi là **compaction strategy (chi�
 | Hợp với | Chủ yếu ghi, ít đọc | Đọc là chính |
 | Dung lượng đĩa | Tốn hơn, nhất là lúc đang trộn file lớn | Ít hơn |
 | Đọc | Phải xem nhiều file hơn | Xem ít file hơn |
+
+<StorageACompactionStrategies />
 
 <Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
 
@@ -379,9 +432,9 @@ Cách engine chọn file nào để trộn gọi là **compaction strategy (chi�
 
 ## 3. B-tree: ghi đè từng trang tại chỗ
 
-Họ còn lại lâu đời hơn (1970) và phổ biến hơn nhiều: gần như mọi database quan hệ đều lưu bảng và index dưới dạng **B-tree**. B-tree cũng giữ khoá theo thứ tự, nhưng nó chia đĩa thành các **trang (page)** cỡ cố định và ghi đè chúng tại chỗ. Sách ghi rằng trang truyền thống là 4 KiB; PostgreSQL mặc định dùng 8 KiB còn MySQL dùng 16 KiB.
+Họ còn lại lâu đời hơn (1970) và phổ biến hơn nhiều: gần như mọi database quan hệ đều lưu bảng và index dưới dạng **B-tree**. B-tree cũng giữ khoá theo thứ tự, nhưng nó chia đĩa thành các **trang (page)** cỡ cố định và ghi đè chúng tại chỗ. Trang truyền thống là 4 KiB; PostgreSQL mặc định dùng 8 KiB còn MySQL dùng 16 KiB.
 
-Các trang trỏ tới nhau thành một cái cây. Trang gốc giữ vài khoá chia không gian khoá thành các khoảng, mỗi khoảng có một con trỏ tới trang con phụ trách khoảng đó. Bạn đi theo con trỏ xuống dần tới **trang lá (leaf page)**, nơi chứa chính các khoá. Mỗi trang có vài trăm trang con, nên cây rất nông: ví dụ trong sách là cây bốn tầng, trang 4 KiB, mỗi trang 500 con, chứa được tới 250 TB.
+Các trang trỏ tới nhau thành một cái cây. Trang gốc giữ vài khoá chia không gian khoá thành các khoảng, mỗi khoảng có một con trỏ tới trang con phụ trách khoảng đó. Bạn đi theo con trỏ xuống dần tới **trang lá (leaf page)**, nơi chứa chính các khoá. Mỗi trang có vài trăm trang con, nên cây rất nông: ví dụ một cây bốn tầng, trang 4 KiB, mỗi trang 500 con, chứa được tới 250 TB.
 
 </Vi>
 
@@ -391,11 +444,15 @@ To change a value you find its leaf page and write the whole page back. To inser
 
 Picture a phone book with letter tabs. You open the right tab, then the right page. Squeezing a new name into a full page means splitting that page in two and updating the tab.
 
+<StorageABtreeLookup />
+
 ### Shopify: the order of your keys
 
 Bart de Water's 2022 post on Shopify's payment systems has one paragraph on this. Shopify sends an idempotency key with every payment request, and the database stores it with a B-tree index. They prefer a ULID to a random UUIDv4 because its timestamp prefix makes keys sortable, "which works much better with the b-tree data structure databases use for indexing". The result: "a 50 percent decrease in INSERT statement duration" in one high-throughput system.
 
 The reason is where each new key lands. A time-ordered key is always the largest so far, so it goes into the rightmost leaf, the same page every time, which stays in memory. A random key can land in any leaf. Once the table is bigger than the cache, almost every insert has to fetch a different page, change it, and write it back.
+
+<StorageAInsertCost />
 
 </En>
 
@@ -405,11 +462,15 @@ Muốn sửa một giá trị, bạn tìm trang lá chứa nó rồi ghi lại n
 
 Hình dung cuốn danh bạ có các tab chữ cái. Bạn mở đúng tab, rồi lật đúng trang. Muốn nhét thêm một tên vào trang đã kín thì phải tách trang đó làm hai và sửa lại tab.
 
+<StorageABtreeLookup />
+
 ### Shopify: thứ tự của khoá
 
 Bài viết năm 2022 của Bart de Water về hệ thống thanh toán ở Shopify có một đoạn về đúng chuyện này. Shopify gửi một idempotency key kèm mỗi request thanh toán, và database lưu nó với một index B-tree. Họ chọn ULID thay vì UUIDv4 ngẫu nhiên vì phần mốc thời gian ở đầu giúp khoá sắp xếp được, "hợp với cấu trúc b-tree mà database dùng để đánh index hơn nhiều". Kết quả: "thời gian chạy lệnh INSERT giảm 50 phần trăm" trong một hệ thống tải cao.
 
 Lý do nằm ở chỗ khoá mới rơi vào đâu. Khoá theo thời gian luôn lớn nhất từ trước tới giờ, nên luôn vào trang lá ngoài cùng bên phải, lần nào cũng đúng trang đó, và trang đó luôn nằm sẵn trong RAM. Khoá ngẫu nhiên thì có thể rơi vào bất kỳ trang lá nào. Khi bảng lớn hơn cache, gần như lần insert nào cũng phải lấy một trang khác lên, sửa, rồi ghi trả xuống.
+
+<StorageAInsertCost />
 
 </Vi>
 
@@ -478,9 +539,11 @@ If you generate IDs in the app, use a format whose first bits are a timestamp: U
 
 ## 4. What one write really costs
 
-Both families turn one logical write into several physical ones. The book calls the ratio **write amplification**: the bytes the disk actually writes, divided by the bytes you would write if you just appended your data to a log. An LSM-tree writes each value to its log, again when the memtable is flushed, and again in every compaction that touches it. A B-tree writes it to the log and to its page, and rewrites the whole page even if only a few bytes changed.
+Both families turn one logical write into several physical ones. The ratio is called **write amplification**: the bytes the disk actually writes, divided by the bytes you would write if you just appended your data to a log. An LSM-tree writes each value to its log, again when the memtable is flushed, and again in every compaction that touches it. A B-tree writes it to the log and to its page, and rewrites the whole page even if only a few bytes changed.
 
 When disk bandwidth is the bottleneck, higher write amplification means fewer writes per second. On SSDs it also means the drive wears out sooner.
+
+<StorageBWriteAmp />
 
 ### Uber: one column, every index
 
@@ -511,9 +574,11 @@ Nếu bạn tự sinh ID trong app, hãy chọn định dạng có mấy bit đ�
 
 ## 4. Một lần ghi thật ra tốn bao nhiêu
 
-Cả hai họ đều biến một lần ghi logic thành nhiều lần ghi vật lý. Sách gọi tỉ lệ này là **write amplification (khuếch đại ghi)**: số byte ổ đĩa thật sự ghi, chia cho số byte bạn sẽ ghi nếu chỉ nối dữ liệu vào một file log. LSM-tree ghi mỗi giá trị vào log, ghi lần nữa khi memtable được flush, và ghi thêm ở mỗi lần compaction đụng tới nó. B-tree ghi vào log và vào trang của nó, và ghi lại nguyên cả trang dù chỉ vài byte thay đổi.
+Cả hai họ đều biến một lần ghi logic thành nhiều lần ghi vật lý. Tỉ lệ này gọi là **write amplification (khuếch đại ghi)**: số byte ổ đĩa thật sự ghi, chia cho số byte bạn sẽ ghi nếu chỉ nối dữ liệu vào một file log. LSM-tree ghi mỗi giá trị vào log, ghi lần nữa khi memtable được flush, và ghi thêm ở mỗi lần compaction đụng tới nó. B-tree ghi vào log và vào trang của nó, và ghi lại nguyên cả trang dù chỉ vài byte thay đổi.
 
 Khi băng thông đĩa là nút thắt, write amplification càng cao thì mỗi giây ghi được càng ít. Với SSD, nó còn làm ổ mòn nhanh hơn.
+
+<StorageBWriteAmp />
 
 ### Uber: một cột, mọi index
 
@@ -526,6 +591,8 @@ Bài viết năm 2016 của Evan Klitzke cho Uber giải thích vì sao họ chu
 <En>
 
 So changing only `birth_year` "had to issue at least four physical updates": the new row, plus a new entry in each of the three indexes, because all of them must point at the new `ctid`. Each of those writes goes to the WAL as well. With a dozen indexes, "an update to a field that is only covered by a single index must be propagated into all 12 indexes". Postgres replicas replay that WAL, so the same bytes also cross the network to every replica; Klitzke calls it "a replication amplification problem".
+
+<StorageBReplicaFanout />
 
 InnoDB, MySQL's default engine, does it differently. The row lives inside the primary-key B-tree (a **clustered index**), and "InnoDB secondary index records hold a pointer to the primary key value", not to a disk location. Moving the row does not touch other indexes; only indexes on changed columns get new entries. The price is an extra lookup on reads through a secondary index: find the primary key first, then the row.
 
@@ -542,6 +609,8 @@ Facebook kept MySQL but swapped the engine under it. Yoshinori Matsunobu's 2016 
 - Compressed pages have a fixed size: a 16 KB page that compresses to 5 KB still takes 8 KB on disk.
 - Each row carries 13 bytes of uncompressed metadata, which is a lot for small rows.
 
+<StorageBInnodbBytes />
+
 After moving one region's user database tier to MyRocks, they used "50 percent less storage for the same amount of data compared with compressed InnoDB". In a 24-hour LinkBench run on identical machines, the MyRocks instance was 3.5 times smaller than uncompressed InnoDB and two times smaller than compressed InnoDB, and it wrote far fewer bytes per query:
 
 </En>
@@ -549,6 +618,8 @@ After moving one region's user database tier to MyRocks, they used "50 percent l
 <Vi>
 
 Thế nên chỉ đổi `birth_year` thôi mà "phải phát ra ít nhất bốn lần cập nhật vật lý": dòng mới, cộng một entry mới trong cả ba index, vì index nào cũng phải trỏ tới `ctid` mới. Mỗi lần ghi đó cũng đi vào WAL. Bảng có chục index thì "một lần update một trường chỉ nằm trong một index vẫn phải lan ra cả 12 index". Replica của Postgres chạy lại chính WAL đó, nên cũng chừng ấy byte phải đi qua mạng tới mọi replica; Klitzke gọi đây là "bài toán khuếch đại sao chép (replication amplification)".
+
+<StorageBReplicaFanout />
 
 InnoDB, engine mặc định của MySQL, làm khác. Dòng nằm ngay trong B-tree của khoá chính (gọi là **clustered index**), và "entry của index phụ trong InnoDB giữ con trỏ tới giá trị khoá chính", chứ không trỏ tới vị trí trên đĩa. Dời dòng đi không đụng tới các index khác; chỉ index nào chứa cột bị đổi mới có entry mới. Cái giá là khi đọc qua index phụ phải tra thêm một bước: tìm khoá chính trước, rồi mới tới dòng.
 
@@ -565,6 +636,8 @@ Facebook vẫn giữ MySQL nhưng thay engine bên dưới. Bài năm 2016 của
 - Trang nén có kích thước cố định: trang 16 KB nén còn 5 KB vẫn chiếm 8 KB trên đĩa.
 - Mỗi dòng mang 13 byte metadata không nén, khá nặng với dòng nhỏ.
 
+<StorageBInnodbBytes />
+
 Sau khi chuyển tầng database người dùng ở một vùng sang MyRocks, họ dùng "ít hơn 50 phần trăm dung lượng cho cùng lượng dữ liệu so với InnoDB có nén". Trong một lần chạy LinkBench 24 giờ trên các máy giống hệt nhau, instance MyRocks nhỏ hơn InnoDB không nén 3,5 lần và nhỏ hơn InnoDB có nén hai lần, và ghi ít byte hơn hẳn cho mỗi truy vấn:
 
 </Vi>
@@ -573,7 +646,7 @@ Sau khi chuyển tầng database người dùng ở một vùng sang MyRocks, h�
 
 <En>
 
-Put the two families side by side and you get the book's rule of thumb: LSM-trees for write-heavy work, B-trees for reads. The book is quick to add that benchmarks depend on the workload, so test with yours.
+Put the two families side by side and you get a common rule of thumb: LSM-trees for write-heavy work, B-trees for reads. Benchmarks depend on the workload, though, so test with yours.
 
 | | B-tree (InnoDB, Postgres, SQLite) | LSM-tree (RocksDB, Cassandra, ScyllaDB) |
 |---|---|---|
@@ -601,7 +674,9 @@ Put the two families side by side and you get the book's rule of thumb: LSM-tree
 
 ## 5. Columns for analytics
 
-Everything so far serves an app that reads and writes a few rows at a time. Analytics is the opposite: a few huge queries, each scanning millions of rows but only a few columns. [Chapter 1's post](/blog/trade-offs-in-data-systems-architecture/) shows the basic idea of storing each column on its own. Chapter 4 goes further: once columns are separate, you can sort and compress them.
+Everything so far serves an app that reads and writes a few rows at a time. Analytics is the opposite: a few huge queries, each scanning millions of rows but only a few columns. [An earlier post](/blog/trade-offs-in-data-systems-architecture/) shows the basic idea of storing each column on its own. Going further: once columns are separate, you can sort and compress them.
+
+<StorageBRowVsColumn />
 
 ### Uber's logs: aggregations over a few fields
 
@@ -609,13 +684,15 @@ In 2021 Chao Wang and Xiaobing Li described moving Uber's log platform from Elas
 
 On the column store they report a compression ratio of 3x, up to 30x in some cases. A single ClickHouse node ingested 300K logs per second, about ten times a single Elasticsearch node, and hardware cost dropped by more than half compared with the old stack.
 
+<StorageBUberLogs />
+
 To see where those gains come from, I built a 10-million-row sales table with ten columns in DuckDB (an embedded column-store database) and stored it three ways: as CSV text, one row per line; as Parquet, a columnar file format; and as Parquet sorted by `sale_date`, then `product_id`. Then I asked one question of all three: units sold per store in March.
 
 </En>
 
 <Vi>
 
-Đặt hai họ cạnh nhau thì ra quy tắc ước lượng trong sách: LSM-tree cho việc ghi nhiều, B-tree cho việc đọc. Sách cũng nói ngay rằng benchmark phụ thuộc workload, nên hãy thử với workload của chính bạn.
+Đặt hai họ cạnh nhau thì ra quy tắc ước lượng thường dùng: LSM-tree cho việc ghi nhiều, B-tree cho việc đọc. Tuy vậy benchmark phụ thuộc workload, nên hãy thử với workload của chính bạn.
 
 | | B-tree (InnoDB, Postgres, SQLite) | LSM-tree (RocksDB, Cassandra, ScyllaDB) |
 |---|---|---|
@@ -643,13 +720,17 @@ To see where those gains come from, I built a 10-million-row sales table with te
 
 ## 5. Lưu theo cột cho phân tích
 
-Mọi thứ nãy giờ phục vụ một app đọc ghi vài dòng mỗi lần. Phân tích thì ngược lại: ít truy vấn nhưng truy vấn nào cũng khổng lồ, quét hàng triệu dòng mà chỉ cần vài cột. [Bài về chương 1](/blog/trade-offs-in-data-systems-architecture/) đã nói ý cơ bản là lưu riêng từng cột. Chương 4 đi xa hơn: khi các cột đã tách riêng, bạn có thể sắp xếp và nén chúng.
+Mọi thứ nãy giờ phục vụ một app đọc ghi vài dòng mỗi lần. Phân tích thì ngược lại: ít truy vấn nhưng truy vấn nào cũng khổng lồ, quét hàng triệu dòng mà chỉ cần vài cột. [Một bài trước](/blog/trade-offs-in-data-systems-architecture/) đã nói ý cơ bản là lưu riêng từng cột. Đi xa hơn: khi các cột đã tách riêng, bạn có thể sắp xếp và nén chúng.
+
+<StorageBRowVsColumn />
 
 ### Log của Uber: tổng hợp trên vài trường
 
 Năm 2021, Chao Wang và Xiaobing Li kể lại việc chuyển nền tảng log của Uber từ Elasticsearch sang ClickHouse, "một DBMS lưu theo cột, phân tán, mã nguồn mở". Hai phát hiện về truy vấn của họ giải thích lựa chọn này. Hơn 80% là truy vấn tổng hợp (aggregation): đếm, histogram, phân vị. Và "chỉ 5% số trường được đánh index là thật sự được dùng", nên đánh index mọi trường phần lớn là việc thừa.
 
 Trên column store, họ báo tỉ lệ nén 3 lần, có trường hợp tới 30 lần. Một node ClickHouse nhận được 300 nghìn log mỗi giây, khoảng gấp mười một node Elasticsearch, và chi phí phần cứng giảm hơn một nửa so với hệ cũ.
+
+<StorageBUberLogs />
 
 Để thấy những lợi ích đó đến từ đâu, mình dựng một bảng bán hàng 10 triệu dòng, mười cột trong DuckDB (một database lưu theo cột chạy nhúng trong process) và lưu theo ba cách: CSV dạng chữ, mỗi dòng một hàng; Parquet, một định dạng file lưu theo cột; và Parquet đã sắp theo `sale_date` rồi tới `product_id`. Sau đó hỏi cả ba cùng một câu: mỗi cửa hàng bán được bao nhiêu sản phẩm trong tháng 3.
 
@@ -672,7 +753,7 @@ sales_sorted.parquet Row Groups Scanned: 8 / 82
 ```
 </TerminalOutput>
 
-Three effects show up here, all described in the chapter.
+Three effects show up here, all well known.
 
 - Parquet reads only the columns the query uses, three of ten. The CSV reader has to get through every byte of every line.
 - Sorting makes columns compress. Sorted by date, the 10 million `sale_date` values become 366 long runs of the same value. That column shrank from 11,368 KB to 8 KB. The second sort key, `product_id`, gained less (17,199 KB to 7,455 KB), and the columns after it are in effect random.
@@ -697,7 +778,7 @@ sales_sorted.parquet Row Groups Scanned: 8 / 82
 ```
 </TerminalOutput>
 
-Có ba hiệu ứng ở đây, chương sách đều đã nói tới.
+Có ba hiệu ứng ở đây.
 
 - Parquet chỉ đọc những cột truy vấn dùng tới, ba trên mười cột. Còn trình đọc CSV phải đi qua từng byte của từng dòng.
 - Sắp xếp giúp cột nén được. Khi sắp theo ngày, 10 triệu giá trị `sale_date` thành 366 đoạn dài lặp cùng một giá trị. Cột đó co từ 11.368 KB xuống 8 KB. Cột sắp xếp thứ hai là `product_id` được lợi ít hơn (17.199 KB xuống 7.455 KB), còn các cột phía sau thì coi như ngẫu nhiên.
@@ -709,7 +790,7 @@ Có ba hiệu ứng ở đây, chương sách đều đã nói tới.
 
 <En>
 
-The book adds two more pieces. Column stores do not insert rows one at a time into the middle of sorted, compressed files; they collect writes in memory and merge them into new files in bulk, the same log-structured idea from section 2. And their query engines process a batch of values from one column per step (**vectorized processing**) or compile the query to machine code, instead of interpreting it row by row.
+Two more pieces matter. Column stores do not insert rows one at a time into the middle of sorted, compressed files; they collect writes in memory and merge them into new files in bulk, the same log-structured idea from section 2. And their query engines process a batch of values from one column per step (**vectorized processing**) or compile the query to machine code, instead of interpreting it row by row.
 
 <Concepts>
 
@@ -730,9 +811,13 @@ The book adds two more pieces. Column stores do not insert rows one at a time in
 
 B-trees and LSM-trees answer "find this key" or "find keys in this range". Searching text for a word or a substring, or searching documents by meaning, needs different indexes. They are built from the same parts, though.
 
+<StorageBThreeQuestions />
+
 ### GitHub code search: grep does not scale
 
 Timothy Clem's 2023 post on GitHub's new code search starts with the obvious question: "Why don't you just use grep?" The napkin maths: ripgrep scans about 0.6 GB per second per core. The search covers almost 45 million repositories, 115 TB of code in 15.5 billion documents. Even with all of it in memory and perfect parallelism, one query would "saturate 2,048 CPU cores for 96 seconds", which works out to 0.01 queries per second.
+
+<StorageBGrepMath />
 
 The answer is an **inverted index**: a map from each term to the list of documents that contain it (a **postings list**). For code you cannot split on words, because people search for fragments such as `limits` inside `rate_limits_v2`. So GitHub indexes **n-grams**, every run of n characters. With trigrams, the word `cache` is stored as three entries:
 
@@ -744,11 +829,13 @@ The answer is an **inverted index**: a map from each term to the list of documen
 
 A search for `cache` looks up all three lists and intersects them: only documents in every list (3, 8 and 41 here) can contain the word, and those few are checked for real. GitHub uses grams of varying length instead of plain trigrams, because common trigrams are not selective enough at their scale.
 
+<StorageNgramLookup />
+
 </En>
 
 <Vi>
 
-Sách còn thêm hai mảnh. Column store không chèn từng dòng vào giữa các file đã sắp xếp và nén; nó gom lệnh ghi trong RAM rồi trộn thành file mới theo lô, đúng ý tưởng kiểu log ở phần 2. Và query engine của nó xử lý một lô giá trị của một cột trong mỗi bước (**vectorized processing**) hoặc biên dịch truy vấn ra mã máy, thay vì thông dịch từng dòng một.
+Còn hai mảnh nữa. Column store không chèn từng dòng vào giữa các file đã sắp xếp và nén; nó gom lệnh ghi trong RAM rồi trộn thành file mới theo lô, đúng ý tưởng kiểu log ở phần 2. Và query engine của nó xử lý một lô giá trị của một cột trong mỗi bước (**vectorized processing**) hoặc biên dịch truy vấn ra mã máy, thay vì thông dịch từng dòng một.
 
 <Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
 
@@ -769,9 +856,13 @@ Sách còn thêm hai mảnh. Column store không chèn từng dòng vào giữa 
 
 B-tree và LSM-tree trả lời "tìm khoá này" hoặc "tìm các khoá trong khoảng này". Tìm một từ hay một chuỗi con trong văn bản, hoặc tìm tài liệu theo ý nghĩa, cần loại index khác. Dù vậy, chúng vẫn được ghép từ những mảnh quen thuộc.
 
+<StorageBThreeQuestions />
+
 ### Code search của GitHub: grep không chịu nổi
 
 Bài năm 2023 của Timothy Clem về code search mới của GitHub mở đầu bằng câu hỏi hiển nhiên: "Sao không dùng grep cho xong?" Tính nhẩm: ripgrep quét khoảng 0,6 GB mỗi giây trên mỗi nhân. Kho tìm kiếm có gần 45 triệu repository, 115 TB code trong 15,5 tỉ tài liệu. Kể cả khi nhét hết vào RAM và song song hoá hoàn hảo, một truy vấn sẽ "chiếm trọn 2.048 nhân CPU trong 96 giây", tức là 0,01 truy vấn mỗi giây.
+
+<StorageBGrepMath />
 
 Lời giải là **inverted index (chỉ mục ngược)**: một bảng ánh xạ từ mỗi term tới danh sách tài liệu chứa nó (**postings list**). Với code thì không tách theo từ được, vì người ta hay tìm một mẩu như `limits` nằm trong `rate_limits_v2`. Nên GitHub đánh index các **n-gram**, tức mọi chuỗi n ký tự liên tiếp. Với trigram (n = 3), từ `cache` được lưu thành ba entry:
 
@@ -783,13 +874,25 @@ Lời giải là **inverted index (chỉ mục ngược)**: một bảng ánh x�
 
 Tìm `cache` thì tra cả ba danh sách rồi lấy giao: chỉ tài liệu có mặt trong mọi danh sách (ở đây là 3, 8 và 41) mới có thể chứa từ đó, và chỉ vài tài liệu đó mới bị kiểm tra thật. GitHub dùng gram có độ dài thay đổi thay vì trigram thuần, vì ở quy mô của họ, những trigram phổ biến lọc chưa đủ gắt.
 
+<StorageNgramLookup />
+
 </Vi>
 
 <En>
 
-The index itself is built like an LSM-tree. Indexer shards collect documents, build index files, flush them to disk "when enough work has accumulated", and then "run compaction to collapse up smaller indices into larger ones". The book makes the same point about Lucene, the engine inside Elasticsearch: term-to-postings maps in SSTable-like files, merged in the background.
+The index itself is built like an LSM-tree. Indexer shards collect documents, build index files, flush them to disk "when enough work has accumulated", and then "run compaction to collapse up smaller indices into larger ones". The same holds for Lucene, the engine inside Elasticsearch: term-to-postings maps in SSTable-like files, merged in the background.
+
+Around the index sits an ordinary pipeline. Events such as a `git push` go through Kafka to crawlers, which fetch the changed blobs from Git, extract symbols and publish documents to a second Kafka topic. Each shard consumes one partition of that topic, so it indexes at its own pace. GitHub shards by Git blob object ID, which spreads documents evenly and stores identical blobs only once.
+
+<Figure src={figureGithubIngest} alt="Diagram of GitHub code search ingest: GitHub.com publishes events and an admin service decides what to index, both through Kafka to Blackbird ingest crawlers backed by MySQL, Git and a symbol analysis service, then a second Kafka topic to the Blackbird search engine shards" caption="The indexing side of GitHub's code search. Kafka sits twice in the path, so crawling and indexing run at different speeds without blocking each other." sourceTitle="GitHub Engineering: The technology behind GitHub's new code search" sourceUrl="https://github.blog/engineering/architecture-optimization/the-technology-behind-githubs-new-code-search/" />
+
 
 The results, from the post: deduplication brought 115 TB of content down to about 28 TB of unique content, and the whole index, including a compressed copy of that content, is 25 TB. A query takes about 100 ms of one CPU core on a shard (p99), so a 64-core host can serve roughly 640 queries per second, against 0.01 for grep.
+
+On the query side, the Blackbird query service parses the query into a syntax tree and fans the request out to every host in the search cluster. Redis holds quotas and cached permission data, and Git is asked whether a blob is accessible to the user.
+
+<Figure src={figureGithubQuery} alt="Diagram of the GitHub code search query path: GitHub.com calls the Blackbird query service, which uses Redis for repository permissions and rate-limit quotas, Git to validate blob accessibility, and fans out to the Blackbird search engine shards" caption="The query path. One request fans out from the query service to every shard in the search cluster." sourceTitle="GitHub Engineering: The technology behind GitHub's new code search" sourceUrl="https://github.blog/engineering/architecture-optimization/the-technology-behind-githubs-new-code-search/" />
+
 
 ### Vector search: answers that are nearly right
 
@@ -803,6 +906,8 @@ R-trees and other map indexes break down at that many dimensions, so vector inde
 | Results | Exact, "perfect recall" | Approximate | Approximate |
 | Build time and memory | None | Faster build, less memory | Slower build, more memory |
 | Query speed for a given recall | Slowest | Lower than HNSW | Better than IVFFlat |
+
+<StorageBVectorSpace />
 
 The README also warns about the surprise this brings: "Unlike typical indexes, you will see different results for queries after adding an approximate index." A B-tree never changes your answer, only how fast you get it. A vector index can change the answer, so you monitor recall like any other metric.
 
@@ -843,9 +948,19 @@ The README also warns about the surprise this brings: "Unlike typical indexes, y
 
 <Vi>
 
-Bản thân index được dựng giống một LSM-tree. Các shard của bộ đánh index gom tài liệu, dựng file index, ghi ra đĩa "khi đã gom đủ việc", rồi "chạy compaction để gộp các index nhỏ thành index lớn hơn". Sách cũng nói y vậy về Lucene, engine nằm trong Elasticsearch: bảng ánh xạ term sang postings nằm trong các file kiểu SSTable, được trộn ở chế độ nền.
+Bản thân index được dựng giống một LSM-tree. Các shard của bộ đánh index gom tài liệu, dựng file index, ghi ra đĩa "khi đã gom đủ việc", rồi "chạy compaction để gộp các index nhỏ thành index lớn hơn". Lucene, engine nằm trong Elasticsearch, cũng vậy: bảng ánh xạ term sang postings nằm trong các file kiểu SSTable, được trộn ở chế độ nền.
+
+Quanh index là một pipeline khá bình thường. Các sự kiện như `git push` đi qua Kafka tới các crawler, chúng lấy blob đã đổi từ Git, trích xuất symbol rồi đẩy tài liệu vào một topic Kafka thứ hai. Mỗi shard đọc một partition của topic đó, nên tự lập index theo nhịp của mình. GitHub chia shard theo Git blob object ID, nhờ vậy tài liệu rải đều và blob giống hệt nhau chỉ được lưu một lần.
+
+<Figure src={figureGithubIngest} alt="Sơ đồ phần ingest của code search GitHub: GitHub.com phát sự kiện và một dịch vụ admin quyết định index gì, cả hai đi qua Kafka tới các Blackbird ingest crawler dựa trên MySQL, Git và dịch vụ phân tích symbol, rồi qua một topic Kafka thứ hai tới các shard của Blackbird search engine" caption="Phía lập index của code search GitHub. Kafka xuất hiện hai lần trên đường đi, nên việc crawl và việc lập index chạy với tốc độ khác nhau mà không chặn nhau." sourceTitle="GitHub Engineering: The technology behind GitHub's new code search" sourceUrl="https://github.blog/engineering/architecture-optimization/the-technology-behind-githubs-new-code-search/" />
+
 
 Kết quả theo bài viết: khử trùng lặp đưa 115 TB nội dung xuống khoảng 28 TB nội dung duy nhất, và toàn bộ index, kể cả một bản nén của chừng ấy nội dung, là 25 TB. Một truy vấn tốn khoảng 100 ms của một nhân CPU trên một shard (p99), nên một máy 64 nhân phục vụ được tầm 640 truy vấn mỗi giây, so với 0,01 của grep.
+
+Ở phía truy vấn, Blackbird query service phân tích câu tìm thành cây cú pháp rồi phát yêu cầu tới mọi máy trong cụm tìm kiếm. Redis giữ quota và dữ liệu quyền truy cập được cache, còn Git được hỏi xem người dùng có truy cập được blob hay không.
+
+<Figure src={figureGithubQuery} alt="Sơ đồ đường truy vấn của code search GitHub: GitHub.com gọi Blackbird query service, dịch vụ này dùng Redis cho quyền của repository và quota giới hạn tốc độ, dùng Git để kiểm tra blob có truy cập được không, và phát yêu cầu tới các shard của Blackbird search engine" caption="Đường truy vấn. Một yêu cầu toả từ query service ra mọi shard trong cụm tìm kiếm." sourceTitle="GitHub Engineering: The technology behind GitHub's new code search" sourceUrl="https://github.blog/engineering/architecture-optimization/the-technology-behind-githubs-new-code-search/" />
+
 
 ### Tìm kiếm vector: chấp nhận câu trả lời gần đúng
 
@@ -859,6 +974,8 @@ R-tree và các index bản đồ khác bó tay khi số chiều lớn như vậ
 | Kết quả | Chính xác, "recall hoàn hảo" | Gần đúng | Gần đúng |
 | Thời gian dựng và RAM | Không có | Dựng nhanh hơn, ít RAM hơn | Dựng chậm hơn, tốn RAM hơn |
 | Tốc độ truy vấn ở cùng mức recall | Chậm nhất | Thấp hơn HNSW | Tốt hơn IVFFlat |
+
+<StorageBVectorSpace />
 
 README còn cảnh báo điều bất ngờ đi kèm: "Không giống index thông thường, bạn sẽ thấy kết quả truy vấn khác đi sau khi thêm một index gần đúng." B-tree không bao giờ đổi câu trả lời, chỉ đổi tốc độ. Index vector thì có thể đổi câu trả lời, nên bạn phải theo dõi recall như mọi metric khác.
 
