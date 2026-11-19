@@ -572,6 +572,20 @@ The catch is network latency. An interactive client/server transaction spends mo
 
 </En>
 
+<Vi>
+
+## 5. Ba cách đạt serializability
+
+Suốt nhiều thập kỷ, sách giáo khoa chỉ có một câu trả lời cho các cái bẫy của isolation yếu: bật **serializable isolation**, để các transaction chạy đồng thời luôn cho kết quả giống như chạy lần lượt từng cái một theo một thứ tự nào đó. Ngày nay database đạt serializability thật sự bằng ba kiến trúc khác nhau: một cái cũ, một cái cực kỳ tối giản và một cái lạc quan.
+
+### 1. Chạy tuần tự thật sự (một luồng + stored procedure)
+
+Sao phải vật lộn với race condition khi có thể bỏ luôn sự đồng thời? Vì RAM giờ đủ rẻ để chứa toàn bộ dữ liệu OLTP đang dùng, và các lệnh ghi OLTP vốn ngắn, nên những engine như **VoltDB/H-Store**, **Redis** và **Datomic** chạy mọi transaction ghi lần lượt trên **một lõi CPU** cho mỗi partition (còn các truy vấn phân tích chỉ-đọc dài thì chạy riêng trên snapshot).
+
+Cái khó là độ trễ mạng. Một transaction tương tác kiểu client/server dành phần lớn thời gian ngồi chờ qua các vòng TCP để app gửi câu truy vấn kế tiếp, và điều đó sẽ bóp nghẹt thông lượng của một luồng đơn. Vì vậy engine tuần tự không cho phép transaction tương tác nhiều câu lệnh: app phải gửi trọn transaction ngay từ đầu dưới dạng một **stored procedure** có tính xác định (viết bằng Java, Lua hoặc Clojure thay vì PL/SQL kiểu cũ). Thông lượng chỉ tăng tuyến tính theo số lõi CPU *khi* transaction nằm gọn trong một shard; VoltDB cho biết ghi xuyên shard tụt xuống khoảng 1.000 lệnh mỗi giây bất kể cụm lớn cỡ nào.
+
+</Vi>
+
 <TxSerialExec />
 
 <En>
@@ -586,6 +600,18 @@ For 30 years, strong strict **two-phase locking (2PL)** was the only practical g
 
 </En>
 
+<Vi>
+
+### 2. Two-Phase Locking (2PL / SS2PL)
+
+Trong 30 năm, **two-phase locking (2PL)** nghiêm ngặt là lựa chọn thực tế duy nhất, và nó vẫn đang chạy sau `SERIALIZABLE` của MySQL InnoDB và SQL Server, cùng `REPEATABLE READ` của IBM Db2. Khác với Snapshot Isolation, ở đây **người đọc chặn người ghi và người ghi chặn người đọc**:
+
+- Mỗi đối tượng có một **khoá chia sẻ** (`S-lock`, cho nhiều người đọc cùng lúc) và một **khoá độc quyền** (`X-lock`, chỉ cho một người ghi và chặn mọi người đọc).
+- Transaction xin khoá trong lúc chạy (pha tăng) và giữ toàn bộ cho tới khi commit hoặc abort (pha giảm).
+- Để bắt **phantom** khi dòng chưa tồn tại, 2PL dùng **predicate lock** hoặc bản xấp xỉ nhanh hơn là **index-range (next-key) lock** gắn vào các mục chỉ mục (hoặc khoá cả bảng nếu không có chỉ mục phù hợp).
+
+</Vi>
+
 <TxLockPhases />
 
 <En>
@@ -599,6 +625,18 @@ Introduced in 2008 and shipped in **PostgreSQL**, **CockroachDB**, **FoundationD
 SSI checks two clues: reading a stale MVCC version whose uncommitted writer commits before you do, and writes that land *after* another transaction's `SELECT` read that range. To catch the second case without blocking, PostgreSQL attaches non-blocking **predicate tripwires** (`SIREAD` locks) to tuples, index ranges, or tables — and waits until commit before aborting so read-only transactions never cause needless retries (and `BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE READ ONLY DEFERRABLE` avoids SSI overhead completely).
 
 </En>
+
+<Vi>
+
+Cái đau của 2PL là độ trễ đuôi (tail latency) thất thường và deadlock xảy ra thường xuyên. Một lần quét bảng chậm xin khoá chia sẻ trên hàng loạt dòng và làm các lệnh ghi đồng thời xếp hàng đứng chờ. (Nhớ thêm: **2PL** là thuật toán khoá điều khiển đồng thời, còn **2PC** ở phần sau là giao thức atomic commit phân tán; hai thứ không liên quan dù viết tắt nghe giống nhau.)
+
+### 3. Serializable Snapshot Isolation (SSI)
+
+Ra đời năm 2008 và có mặt trong **PostgreSQL**, **CockroachDB**, **FoundationDB** và SQL Server Hekaton, **Serializable Snapshot Isolation (SSI)** cho serializability đầy đủ mà không bắt người đọc chờ người ghi. Thay vì chặn từ đầu, SSI **lạc quan**: nó chạy transaction trên các snapshot MVCC, theo dõi những tiền đề đã lỗi thời, và chỉ abort (`SQLSTATE 40001`) lúc commit khi hai transaction tạo thành một vòng `rw-antidependency` nguy hiểm.
+
+SSI kiểm tra hai dấu hiệu: đọc một phiên bản MVCC cũ mà người ghi chưa commit lại commit trước bạn, và những lệnh ghi rơi vào vùng mà `SELECT` của transaction khác đã đọc *trước đó*. Để bắt trường hợp thứ hai mà không chặn ai, PostgreSQL gắn các **bẫy predicate không chặn** (`SIREAD` lock) lên tuple, dải chỉ mục hoặc cả bảng, và đợi tới lúc commit mới abort để transaction chỉ-đọc không bao giờ bị thử lại vô ích (còn `BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE READ ONLY DEFERRABLE` thì tránh hẳn chi phí của SSI).
+
+</Vi>
 
 <TxSsiFlow />
 
