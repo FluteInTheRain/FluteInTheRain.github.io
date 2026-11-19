@@ -1,8 +1,8 @@
 ---
 title: "Consistency, logical clocks, and consensus: how distributed nodes agree on one truth"
 title_vi: "Nhất quán, đồng hồ logic và đồng thuận: cách các node phân tán chốt một sự thật chung"
-description: "Why Dynamo quorums still serve stale reads, how non-causal IDs leak private photos, and how Raft turns unreliable nodes into one shared log: DDIA chapter 10 in depth."
-description_vi: "Vì sao quorum vẫn đọc nhầm dữ liệu cũ, ID sai thứ tự làm lộ ảnh riêng tư, và cách Raft biến nhiều máy hay lỗi thành một nhật ký chung: giải phẫu chương 10 DDIA qua các sự cố thật."
+description: "Why Dynamo quorums still serve stale reads, how non-causal IDs leak private photos, and how Raft turns unreliable nodes into one shared log, told through real incidents."
+description_vi: "Vì sao quorum vẫn đọc nhầm dữ liệu cũ, ID sai thứ tự làm lộ ảnh riêng tư, và cách Raft biến nhiều máy hay lỗi thành một nhật ký chung: kể lại qua các sự cố thật."
 date: 2026-11-19
 category: "system-design"
 tags: ["distributed-systems", "linearizability", "consensus", "raft", "logical-clocks", "zookeeper", "ddia"]
@@ -39,6 +39,12 @@ import ConsensusLinearizabilityTimeline from '../../components/mdx/ConsensusLine
 import ConsensusLamportVsHlc from '../../components/mdx/ConsensusLamportVsHlc.astro';
 import ConsensusRaftEpochs from '../../components/mdx/ConsensusRaftEpochs.astro';
 import ConsensusLinearizable from '../../components/mdx/ConsensusLinearizable.astro';
+import ConsensusWaitVsQuorum from '../../components/mdx/ConsensusWaitVsQuorum.astro';
+import ConsensusStaleLeaderRead from '../../components/mdx/ConsensusStaleLeaderRead.astro';
+import ConsensusLockFencing from '../../components/mdx/ConsensusLockFencing.astro';
+import kleppmannNonLin from '../../assets/blog/consistency-consensus-linearizability-logical-clocks-raft/kleppmann-nonlinearizable.png';
+import kleppmannCap from '../../assets/blog/consistency-consensus-linearizability-logical-clocks-raft/kleppmann-cap-partition.png';
+import cockroachCausal from '../../assets/blog/consistency-consensus-linearizability-logical-clocks-raft/cockroach-spanner-timeline.png';
 import heroChronometer from '../../assets/blog/consistency-consensus-linearizability-logical-clocks-raft/frodsham-marine-chronometer.jpg';
 
 <En>
@@ -46,7 +52,7 @@ import heroChronometer from '../../assets/blog/consistency-consensus-linearizabi
 <Figure src={heroChronometer} alt="Brass marine chronometer no. 1842 by Charles Frodsham mounted on gimbals inside a mahogany box" caption="At sea, one clock leaves you guessing if it broke and two leave you arguing which one drifted; only three let a majority outvote a liar. Distributed consensus turns the same arithmetic into software. Photo: Wikimedia Commons, CC BY-SA 4.0." sourceTitle="Wikimedia Commons: Charles Frodsham marine chronometer, no. 1842" sourceUrl="https://commons.wikimedia.org/wiki/File:Charles_Frodsham_marine_chronometer,_no._1842.jpg" />
 
 > "Never go to sea with two chronometers; take one or three."
-> &mdash; *Frederick P. Brooks Jr.*, *The Mythical Man-Month* (1995), quoted at the start of DDIA chapter 10
+> &mdash; *Frederick P. Brooks Jr.*, *The Mythical Man-Month* (1995)
 
 ### When two clocks disagree
 
@@ -57,7 +63,7 @@ Most databases feel solid right up until a partition splits the cluster in half.
 - **Non-causal IDs leaking private data.** Flipping an account to private on a laptop and then uploading an embarrassing photo from a phone can assign the photo an earlier timestamp than the privacy switch if those writes land on separate shards with skewed clocks.
 - **Silent data loss during "fast" failover.** Enabling Kafka's `unclean.leader.election.enable` brings an offline partition back quickly by promoting a lagging broker, then permanently overwrites committed messages when the old leader returns.
 
-Chapter 10 of Kleppmann and Riccomini's *Designing Data-Intensive Applications* (2nd edition) connects all four bugs under one roof: **linearizability**, **logical clocks**, and **consensus**. Here is the path through the chapter:
+One small set of ideas ties all four bugs together: **linearizability**, **logical clocks**, and **consensus**. Here is the path through the post:
 
 1. **Linearizability**: what the single-copy illusion actually guarantees, and why it differs from serializability.
 2. **Where linearizability pays off (and what it costs)**: locks, uniqueness, cross-channel races, broken quorums, and why CAP misses half the cost.
@@ -88,7 +94,9 @@ Strong consistency is a marketing phrase until you pin down what it forbids. **L
 
 Think of a scorekeeper updating a single chalkboard in a crowded room. Once the keeper erases `0-0` and chalks `2-1`, nobody walking up afterward can still read `0-0`.
 
-The book opens with Aaliyah and Bryce checking a sports app in the same room. Seconds after the final whistle, Aaliyah refreshes her phone, sees the final score, and shouts it aloud. Bryce immediately taps refresh, hits a lagging database replica, and sees the game still in play — a clean violation of linearizability because his read started *after* Aaliyah's finished.
+Picture Aaliyah and Bryce checking a sports app in the same room. Seconds after the final whistle, Aaliyah refreshes her phone, sees the final score, and shouts it aloud. Bryce immediately taps refresh, hits a lagging database replica, and sees the game still in play — a clean violation of linearizability because his read started *after* Aaliyah's finished.
+
+<Figure src={kleppmannNonLin} alt="Message diagram: a referee writes the final score to a leader; Alice reads it from an up-to-date follower and cheers, then Bob reads from a lagging follower and sees the game still going" caption="The same race as a message diagram: Alice's read finishes with the new score, Bob's read starts afterwards yet lands on a follower the insert has not reached." sourceTitle="Martin Kleppmann: Please stop calling databases CP or AP" sourceUrl="https://martin.kleppmann.com/2015/05/11/please-stop-calling-databases-cp-or-ap.html" />
 
 ### Operation bars and atomic flip points
 
@@ -105,7 +113,7 @@ In distributed systems theory, a single key, row, or document is modeled as a **
 <Figure src={heroChronometer} alt="Chiếc đồng hồ hàng hải bằng đồng số 1842 của Charles Frodsham đặt trong hộp gỗ gụ trên khớp xoay" caption="Ra khơi mà mang một chiếc đồng hồ thì hỏng không biết; mang hai chiếc thì cãi nhau xem chiếc nào sai; chỉ có ba chiếc mới bỏ phiếu đa số loại được chiếc chạy lệch. Thuật toán đồng thuận biến đúng phép tính đó thành phần mềm. Ảnh: Wikimedia Commons, CC BY-SA 4.0." sourceTitle="Wikimedia Commons: Charles Frodsham marine chronometer, no. 1842" sourceUrl="https://commons.wikimedia.org/wiki/File:Charles_Frodsham_marine_chronometer,_no._1842.jpg" />
 
 > "Đừng bao giờ ra khơi với hai chiếc đồng hồ; hãy mang một hoặc ba chiếc."
-> &mdash; *Frederick P. Brooks Jr.*, *The Mythical Man-Month* (1995), câu mở đầu chương 10 của DDIA
+> &mdash; *Frederick P. Brooks Jr.*, *The Mythical Man-Month* (1995)
 
 ### Khi hai chiếc đồng hồ nói khác nhau
 
@@ -116,7 +124,7 @@ In distributed systems theory, a single key, row, or document is modeled as a **
 - **ID không theo nhân quả làm lộ ảnh riêng tư.** Bạn chuyển tài khoản sang riêng tư trên laptop rồi cầm điện thoại đăng một tấm ảnh nhạy cảm. Nếu hai lệnh ghi rơi vào hai shard riêng có đồng hồ lệch nhau, tấm ảnh có thể mang mốc thời gian sớm hơn lệnh khoá tài khoản và hiện công khai cho người lạ.
 - **Mất dữ liệu âm thầm khi chọn khôi phục "nhanh".** Bật cờ `unclean.leader.election.enable` trong Kafka giúp partition sống dậy tức thì bằng cách phong một broker tụt hậu lên làm leader, nhưng ngay khi broker leader cũ quay lại, mọi tin nhắn đã commit trước đó bị ghi đè mất trắng.
 
-Chương 10 cuốn *Designing Data-Intensive Applications* (bản 2) của Kleppmann và Riccomini gom cả bốn vụ trên vào chung một khung xương: **tính khả tuyến tính (linearizability)**, **đồng hồ logic (logical clocks)** và **đồng thuận (consensus)**. Bài viết đi qua theo đúng sáu mảnh ghép đó:
+Một bộ khái niệm nhỏ giải thích cả bốn vụ trên: **tính khả tuyến tính (linearizability)**, **đồng hồ logic (logical clocks)** và **đồng thuận (consensus)**. Bài viết đi qua theo đúng sáu mảnh ghép đó:
 
 1. **Tính khả tuyến tính**: ảo giác một bản sao duy nhất thực sự cam kết điều gì, và vì sao nó khác tuần tự hoá.
 2. **Khi nào cần — và cái giá phải trả**: khoá phân tán, ràng buộc duy nhất, đua dữ liệu chéo kênh, quorum bị gãy và mặt thật phía sau định lý CAP.
@@ -147,7 +155,9 @@ Tính khả tuyến tính (linearizability) tạo ảo giác chỉ có một b�
 
 Hãy tưởng tượng một người ghi bảng tỉ số trong phòng. Ngay khi anh ta xoá `0-0` và viết `2-1` lên bảng, không ai bước tới sau đó lại đọc thấy `0-0` nữa.
 
-Sách mở đầu bằng cảnh Aaliyah và Bryce ngồi cùng phòng xem tỉ số trận đấu. Ngay sau tiếng còi mãn cuộc, Aaliyah bấm tải lại trang, thấy đội nhà thắng và reo to lên. Bryce lập tức bấm tải lại trên máy mình, nhưng request rơi vào một replica đang trễ nên màn hình vẫn báo trận đấu chưa xong — một pha vi phạm linearizability rõ mười mươi vì lệnh đọc của Bryce bắt đầu *sau* khi lệnh của Aaliyah đã kết thúc.
+Hình dung Aaliyah và Bryce ngồi cùng phòng xem tỉ số trận đấu. Ngay sau tiếng còi mãn cuộc, Aaliyah bấm tải lại trang, thấy đội nhà thắng và reo to lên. Bryce lập tức bấm tải lại trên máy mình, nhưng request rơi vào một replica đang trễ nên màn hình vẫn báo trận đấu chưa xong — một pha vi phạm linearizability rõ mười mươi vì lệnh đọc của Bryce bắt đầu *sau* khi lệnh của Aaliyah đã kết thúc.
+
+<Figure src={kleppmannNonLin} alt="Sơ đồ thông điệp: trọng tài ghi tỉ số chung cuộc vào leader; Alice đọc từ follower đã cập nhật và reo lên, sau đó Bob đọc từ follower còn trễ và thấy trận vẫn đang diễn ra" caption="Cùng cuộc đua đó dưới dạng sơ đồ thông điệp: lệnh đọc của Alice kết thúc với tỉ số mới, lệnh của Bob bắt đầu sau nhưng rơi vào follower mà lệnh insert chưa tới." sourceTitle="Martin Kleppmann: Please stop calling databases CP or AP" sourceUrl="https://martin.kleppmann.com/2015/05/11/please-stop-calling-databases-cp-or-ap.html" />
 
 ### Thanh thời gian và điểm lật nguyên tử
 
@@ -271,6 +281,8 @@ Bạn tự thử cái bẫy `w + r > n` của Dynamo ở **Tab 1** ngay bên dư
 
 Textbooks used to summarize this trade-off with the **CAP theorem**: "Consistency, Availability, Partition Tolerance — pick two." As Kleppmann pointed out in his 2015 critique, that phrasing misleads engineers because you cannot "opt out" of network partitions. A partition is a fault, not a configuration dial.
 
+<Figure src={kleppmannCap} alt="Two datacenters, each with an application and a database, joined by a replication link that is cut by a network partition, with clients on both sides" caption="The partition behind the CAP debate: each datacenter keeps its own clients, and the replication link between them is down." sourceTitle="Martin Kleppmann: Please stop calling databases CP or AP" sourceUrl="https://martin.kleppmann.com/2015/05/11/please-stop-calling-databases-cp-or-ap.html" />
+
 When the network works, a system can be both linearizable and available; when a partition hits, you choose between **consistent** (reject or stall requests on the minority side) or **available** (serve potentially stale or conflicting state). Even then, CAP's narrow formal definitions cover only linearizability and one fault type — network partitions, which Google production data puts at **under 8% of incidents**.
 
 Even on a healthy network with zero partitions, linearizability still pays a steep tax: **latency**. Multi-core CPUs drop linearizability in their L1/L2 caches unless you insert an explicit memory fence because waiting for coherence slows every read. Attiya and Welch proved the distributed version of this law: any linearizable read or write must pay response times bounded below by the network's delay uncertainty.
@@ -304,9 +316,11 @@ Teams try four common ways to escape the single counter, and every wall-clock sh
 
 ### How non-causal IDs leak a private photo
 
-Consider a subtle social-media bug from DDIA chapter 10. A user's account starts out public; using their laptop, they flip **account privacy = private** (`Node A`). Seconds later, using their phone, they upload an embarrassing **private photo** (`Node B` on a separate shard).
+Consider a subtle social-media bug. A user's account starts out public; using their laptop, they flip **account privacy = private** (`Node A`). Seconds later, using their phone, they upload an embarrassing **private photo** (`Node B` on a separate shard).
 
 If both shards timestamp writes using local NTP clocks and `Node B` lags `120 ms` behind `Node A`, the photo upload gets a *lower* timestamp (`130 ms`) than the privacy toggle (`200 ms`). Any stranger running an MVCC snapshot read at timestamp `150 ms` now sees a world where the photo already exists while the account still looks public!
+
+<Figure src={cockroachCausal} alt="Diagram: transaction T1 commits on node N1, a causal relation arrow leads to transaction T2 on node N2, whose lagging clock stamps it earlier on the time axis" caption="Causal reverse as Cockroach Labs draws it: T1 commits on N1, the client then starts T2 on N2, and N2's lagging clock stamps T2 before T1." sourceTitle="Cockroach Labs: Living without atomic clocks" sourceUrl="https://www.cockroachlabs.com/blog/living-without-atomic-clocks/" />
 
 ### Lamport clocks and Hybrid Logical Clocks (HLC)
 
@@ -327,6 +341,8 @@ Pure Lamport counters still fail everyday queries like "show orders from Tuesday
 ### Phía sau câu thần chú của định lý CAP
 
 Sách cũ hay tóm tắt đánh đổi này bằng **định lý CAP**: "Nhất quán (Consistency), Sẵn sàng (Availability), Chịu chia cắt mạng (Partition Tolerance) — chỉ được chọn hai." Như Kleppmann phân tích trong bài phê bình năm 2015, cách nói đó gây hiểu lầm tai hại vì bạn không thể "bỏ chọn" sự cố đứt mạng. Chia cắt mạng là tai nạn hạ tầng, không phải nút bật tắt trong file config.
+
+<Figure src={kleppmannCap} alt="Hai datacenter, mỗi nơi có một ứng dụng và một database, nối với nhau bằng đường sao chép bị đứt do chia cắt mạng, client ở cả hai phía" caption="Chia cắt mạng trong cuộc tranh luận về CAP: mỗi datacenter vẫn có client của riêng mình, còn đường sao chép giữa hai nơi đã đứt." sourceTitle="Martin Kleppmann: Please stop calling databases CP or AP" sourceUrl="https://martin.kleppmann.com/2015/05/11/please-stop-calling-databases-cp-or-ap.html" />
 
 Khi mạng bình thường, hệ thống đạt được cả hai; khi mạng đứt, bạn mới phải chọn giữa **nhất quán** (tạm từ chối hoặc treo request bên cụm thiểu số) hoặc **sẵn sàng** (trả về dữ liệu có nguy cơ cũ hoặc mâu thuẫn). Ngay cả như vậy, định nghĩa hình thức của CAP cũng chỉ xét đúng linearizability và một loại lỗi duy nhất — đứt mạng, thứ mà thống kê vận hành tại Google cho thấy chỉ chiếm **dưới 8% số sự cố**.
 
@@ -361,9 +377,11 @@ Các đội kỹ sư thường dùng bốn lối thoát khỏi bộ đếm đơn
 
 ### ID lệch nhân quả làm lộ ảnh riêng tư thế nào?
 
-Hãy xem tình huống thực tế trong chương 10 DDIA. Tài khoản của một người dùng ban đầu ở chế độ công khai; dùng laptop, họ bấm chuyển **tài khoản = riêng tư** (`Node A`). Vài giây sau, họ cầm điện thoại bấm đăng một **tấm ảnh nhạy cảm** (`Node B` ở shard khác).
+Hãy xem một lỗi tinh vi trên mạng xã hội. Tài khoản của một người dùng ban đầu ở chế độ công khai; dùng laptop, họ bấm chuyển **tài khoản = riêng tư** (`Node A`). Vài giây sau, họ cầm điện thoại bấm đăng một **tấm ảnh nhạy cảm** (`Node B` ở shard khác).
 
 Nếu hai shard lấy mốc thời gian từ đồng hồ NTP cục bộ và `Node B` chạy chậm `120 ms` so với `Node A`, tấm ảnh lại nhận timestamp *nhỏ hơn* (`130 ms`) so với lệnh khoá riêng tư (`200 ms`). Một người lạ chạy đọc snapshot MVCC đúng vào mốc `150 ms` sẽ nhìn thấy bức ảnh đã hiện hữu trong khi tài khoản vẫn mang trạng thái công khai!
+
+<Figure src={cockroachCausal} alt="Sơ đồ: giao dịch T1 commit trên node N1, mũi tên quan hệ nhân quả dẫn tới giao dịch T2 trên node N2, đồng hồ chậm của N2 khiến T2 bị đóng dấu sớm hơn trên trục thời gian" caption="Hiện tượng đảo nhân quả (causal reverse) qua hình của Cockroach Labs: T1 commit trên N1, client rồi mới chạy T2 trên N2, và đồng hồ chậm của N2 đóng dấu T2 sớm hơn T1." sourceTitle="Cockroach Labs: Living without atomic clocks" sourceUrl="https://www.cockroachlabs.com/blog/living-without-atomic-clocks/" />
 
 ### Đồng hồ Lamport và Đồng hồ Logic Lai (HLC)
 
@@ -428,6 +446,8 @@ Suppose you build a linearizable ID generator (or Timestamp Oracle). Can you now
 
 What you actually need is **consensus**: getting a group of nodes to decide irreversibly on an outcome as long as a majority stays reachable.
 
+<ConsensusWaitVsQuorum lang="en" />
+
 ### Why FLP didn't stop Raft and Paxos
 
 In 1985, Fischer, Lynch, and Paterson proved the famous **FLP impossibility theorem**: in a purely asynchronous network where messages can be delayed indefinitely, no *deterministic* consensus algorithm can guarantee always terminating if even a single node can crash. The intuitive reason is simple — no protocol can tell with certainty whether a quiet peer has crashed or is merely experiencing a 10-second packet stall.
@@ -448,7 +468,7 @@ Remarkably, four seemingly different primitives are mathematically **equivalent*
 | **Non-blocking atomic commit** | Commit vs. abort across shards (abort if *any* votes abort) | `∞` | Fault-tolerant replacement for single-coordinator 2PC |
 | **Linearizable `Fetch-and-Add`** | Increments counter atomically and returns old value | **`2`** | Works for 2 nodes only; with 3+ nodes, losers don't know *who* drew `0` if the winner crashes silently |
 
-That last row is one of Maurice Herlihy's sharpest results highlighted in DDIA 2nd edition. With two nodes, drawing `0` or `1` from atomic `fetch-and-add` lets both sides learn the winner if they share proposals upfront; with three or more nodes, the two losers know they failed to draw `0`, yet if the winner crashes before broadcasting its ticket, nobody knows whose value won!
+That last row is one of Maurice Herlihy's sharpest results. With two nodes, drawing `0` or `1` from atomic `fetch-and-add` lets both sides learn the winner if they share proposals upfront; with three or more nodes, the two losers know they failed to draw `0`, yet if the winner crashes before broadcasting its ticket, nobody knows whose value won!
 
 <Concepts>
 
@@ -522,6 +542,8 @@ Giả sử bạn dựng xong một máy sinh ID khả tuyến tính (hoặc Time
 
 Thứ bạn thực sự cần là **đồng thuận (consensus)**: cho phép một nhóm máy chốt không thể đảo ngược một kết quả miễn là phe đa số vẫn liên lạc được với nhau.
 
+<ConsensusWaitVsQuorum lang="vi" />
+
 ### Vì sao định lý FLP không cản được Raft và Paxos
 
 Năm 1985, Fischer, Lynch và Paterson chứng minh **định lý bất khả thi FLP**: trong mô hình mạng bất đồng bộ thuần tuý (gói tin có thể trễ vô hạn), không có thuật toán đồng thuận *tất định* nào đảm bảo *luôn dừng được* nếu chỉ một máy có nguy cơ sập. Lý do rất tự nhiên — không giao thức nào phân biệt chắc chắn 100% được giữa một node đã tắt nguồn và một node chỉ đang bị kẹt gói tin 10 giây.
@@ -542,7 +564,7 @@ Mọi bài toán đồng thuận một giá trị đều phải thoả bốn đi
 | **Commit nguyên tử không chặn** | Commit hay abort toàn bộ giao dịch (một bên abort là abort hết) | `∞` | Thay thế 2PC vốn phụ thuộc vào một điều phối viên dễ sập |
 | **Linearizable `Fetch-and-Add`** | Cộng bộ đếm nguyên tử và trả giá trị cũ | **`2`** | Chỉ giải được cho 2 node; từ 3 node trở lên, bên thua biết mình không bốc được số `0` nhưng nếu bên thắng sập trước khi báo tin thì cả nhóm treo cứng |
 
-Dòng cuối cùng là phát hiện kinh điển của Maurice Herlihy được nhấn mạnh trong DDIA bản 2. Nếu chỉ có 2 node, rút số `0` hay `1` từ phép tăng nguyên tử cho phép cả hai tự suy ra người thắng nếu đã trao đổi đề xuất trước; nhưng với từ 3 node trở lên, hai máy bốc số `1` và `2` biết mình thua mà không biết ai thắng nếu người rút số `0` im bặt giữa chừng.
+Dòng cuối cùng là phát hiện kinh điển của Maurice Herlihy. Nếu chỉ có 2 node, rút số `0` hay `1` từ phép tăng nguyên tử cho phép cả hai tự suy ra người thắng nếu đã trao đổi đề xuất trước; nhưng với từ 3 node trở lên, hai máy bốc số `1` và `2` biết mình thua mà không biết ai thắng nếu người rút số `0` im bặt giữa chừng.
 
 <Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
 
@@ -642,6 +664,18 @@ Coordination services hold **small, slow-changing control metadata** (megabytes 
 <QuoteCard author="Kyle Kingsbury" role="Jepsen" sourceTitle="Jepsen: etcd 3.4.3" sourceUrl="https://jepsen.io/analyses/etcd-3.4.3">
 While the Raft paper discusses the need to thread reads through the consensus system to ensure liveness, etcd performed reads on any leader, locally, without checking to see whether a newer leader could have more recent state. The etcd team implemented an optional quorum flag, and in version 3.0 of the etcd API, made linearizability the default for all operations except for watches.
 </QuoteCard>
+
+<ConsensusStaleLeaderRead lang="en" />
+
+### Case: when an etcd lock did not keep the second writer out
+
+**Setup.** A team uses a lock service so only one worker at a time updates a shared resource. etcd ships exactly that: a lock bound to a lease, which the client keeps alive with heartbeats. The maintainers' own example locked an `etcdctl put`, but nothing tied the lock key to the write itself.
+
+**What broke.** In January 2020, Kyle Kingsbury's [Jepsen analysis of etcd 3.4.3](https://jepsen.io/analyses/etcd-3.4.3) showed that multiple clients can hold the same etcd lock at once, even in a healthy cluster with synchronized clocks. Locks with 1, 2, or 3-second lease TTLs generally failed to provide mutual exclusion after only a few minutes of testing. In a test that used the lock to protect updates to a shared set, with 2-second TTLs, five processes, and a process pause every five seconds, about 18% of acknowledged updates were lost. A server-side bug made it worse: after a client waited for a lock and lost its lease in the meantime, the server did not re-check the lease before telling it the lock was now its own.
+
+**Which idea resolves it.** A lock service must be able to take a lock away from a client that looks dead, so it can never promise that the old holder has really stopped. The fix lives at the resource, as in the fencing-token pattern above: every write carries the lock key's revision, a number that only grows, and the resource rejects anything older than what it has already seen. Jepsen's recommended form is a transaction that checks the lock key's version is above zero, so a write cannot take effect once the lock is gone. Jepsen notes this isolates a single guarded write but does not make a multi-step update atomic.
+
+<ConsensusLockFencing lang="en" />
 
 ### Service discovery doesn't need linearizability — use observers
 
@@ -752,6 +786,18 @@ Dịch vụ điều phối chỉ giữ **dữ liệu điều khiển nhỏ, ít 
 <QuoteCard author="Kyle Kingsbury" role="Jepsen" sourceTitle="Jepsen: etcd 3.4.3" sourceUrl="https://jepsen.io/analyses/etcd-3.4.3">
 Dù bài báo Raft nhấn mạnh lệnh đọc phải đi qua hệ thống đồng thuận để bảo đảm an toàn, etcd từng xử lý lệnh đọc cục bộ ngay trên leader mà không kiểm tra xem đã có leader mới hơn hay chưa. Đội ngũ etcd sau đó thêm cờ quorum tuỳ chọn, và từ API bản 3.0 đã đặt tính khả tuyến tính làm mặc định cho mọi thao tác trừ watch.
 </QuoteCard>
+
+<ConsensusStaleLeaderRead lang="vi" />
+
+### Tình huống thật: khi khoá etcd không chặn nổi người ghi thứ hai
+
+**Bối cảnh.** Một nhóm dùng dịch vụ khoá để mỗi lúc chỉ có một worker cập nhật tài nguyên chung. etcd có sẵn món đó: một khoá gắn với lease, client giữ lease sống bằng heartbeat. Ví dụ của chính nhóm duy trì etcd khoá một lệnh `etcdctl put`, nhưng không buộc khoá đó vào chính lệnh ghi.
+
+**Cái gì hỏng.** Tháng 1 năm 2020, [bản phân tích Jepsen về etcd 3.4.3](https://jepsen.io/analyses/etcd-3.4.3) của Kyle Kingsbury cho thấy nhiều client có thể cùng giữ một khoá etcd, kể cả trong cụm khoẻ mạnh với đồng hồ đồng bộ. Khoá có lease TTL 1, 2 hoặc 3 giây thường mất tính loại trừ lẫn nhau chỉ sau vài phút chạy thử. Trong bài thử dùng khoá bảo vệ việc cập nhật một tập hợp dùng chung, với TTL 2 giây, năm tiến trình và một lần tạm dừng tiến trình mỗi năm giây, khoảng 18% cập nhật đã được xác nhận bị mất. Một lỗi phía server làm tệ thêm: khi client chờ khoá rồi mất lease trong lúc chờ, server không kiểm tra lại lease trước khi báo rằng khoá giờ đã thuộc về nó.
+
+**Ý tưởng nào giải quyết.** Dịch vụ khoá buộc phải có khả năng giật khoá khỏi client trông như đã chết, nên nó không bao giờ hứa được rằng người giữ cũ đã thật sự dừng. Cách sửa nằm ở tài nguyên, đúng như mẫu fencing token ở trên: mỗi lệnh ghi mang theo revision của khoá, một con số chỉ tăng, và tài nguyên từ chối mọi thứ cũ hơn mức nó đã thấy. Dạng Jepsen khuyến nghị là một transaction kiểm tra version của khoá lớn hơn không, để lệnh ghi không thể có hiệu lực khi khoá đã mất. Jepsen lưu ý cách này cô lập được một lệnh ghi đơn có bảo vệ, nhưng không làm cho một cập nhật nhiều bước thành nguyên tử.
+
+<ConsensusLockFencing lang="vi" />
 
 ### Service discovery không cần khả tuyến tính — hãy dùng observer
 
