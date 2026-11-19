@@ -5,7 +5,7 @@ import { CATEGORY_IDS } from './data/categories';
 
 const blog = defineCollection({
   loader: glob({ pattern: '**/[^_]*.{md,mdx}', base: './src/content/blog' }),
-  schema: z.object({
+  schema: ({ image }) => z.object({
     title: z.string(),
     title_vi: z.string().optional(),
     description: z.string().max(180),
@@ -14,6 +14,9 @@ const blog = defineCollection({
     updated: z.coerce.date().optional(),
     category: z.enum(CATEGORY_IDS),
     tags: z.array(z.string()).default([]),
+    cover: image().optional(),
+    cover_alt: z.string().optional(),
+    featured: z.boolean().default(false),
     draft: z.boolean().default(false),
     sources: z
       .array(

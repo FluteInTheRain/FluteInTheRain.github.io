@@ -1,5 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import { buildIndexLayout, shortTitle, normalizeSearch, formatHours } from './blog-index.ts';
 
 const p = (id: string, iso: string, category: string, featured = false) => ({ id, date: new Date(iso), category, featured });
@@ -101,4 +103,19 @@ test('formatHours', () => {
   assert.equal(formatHours(570), '9.5h');
   assert.equal(formatHours(60), '1h');
   assert.equal(formatHours(25), '0.4h');
+});
+
+test('every post except ag-grid has a cover', () => {
+  const dir = path.join(import.meta.dirname, '../content/blog');
+  for (const f of fs.readdirSync(dir).filter((x) => x.endsWith('.mdx'))) {
+    const src = fs.readFileSync(path.join(dir, f), 'utf8');
+    const m = src.match(/^cover:\s*"([^"]+)"\s*$/m);
+    if (f === 'ag-grid-realtime-streaming.mdx') {
+      assert.equal(m, null, `${f} should have no cover`);
+      continue;
+    }
+    assert.ok(m, `${f} has no cover`);
+    assert.ok(fs.existsSync(path.resolve(dir, m[1])), `${f}: cover file missing: ${m[1]}`);
+    assert.match(src, /^cover_alt:\s*"[^"]+"/m, `${f} has no cover_alt`);
+  }
 });
