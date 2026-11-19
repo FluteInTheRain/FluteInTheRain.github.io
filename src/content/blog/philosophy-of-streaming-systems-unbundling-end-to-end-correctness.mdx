@@ -1,0 +1,749 @@
+---
+title: "Unbundling the database: dataflow, read/write boundaries, and end-to-end correctness"
+title_vi: "Tháo rời database: luồng dữ liệu, ranh giới đọc/ghi và tính đúng đắn đầu-cuối"
+description: "Why ACID transactions still double-charge on retries, how unbundled logs replace 2PC across shards, and why integrity beats timeliness."
+description_vi: "Vì sao transaction ACID vẫn trừ tiền hai lần khi rớt mạng, cách log phân mảnh thay thế 2PC, và vì sao toàn vẹn dữ liệu quan trọng hơn tốc độ đồng bộ."
+date: 2026-11-19
+category: "system-design"
+tags: ["distributed-systems", "streaming-architecture", "unbundling", "end-to-end", "idempotence", "local-first", "ddia"]
+draft: true
+sources:
+  - { title: "Designing Data-Intensive Applications, 2nd Edition", author: "Martin Kleppmann & Chris Riccomini", chapters: "Ch. 13", url: "https://dataintensive.net/" }
+  - { title: "End-to-End Arguments in System Design", author: "Jerome H. Saltzer, David P. Reed & David D. Clark (ACM TOCS, 1984)", url: "https://web.mit.edu/Saltzer/www/publications/endtoend/endtoend.pdf" }
+  - { title: "Designing robust and predictable APIs with idempotency", author: "Brandur Leach (Stripe)", url: "https://stripe.com/blog/idempotency" }
+  - { title: "The Log: What every software engineer should know about real-time data's unifying abstraction (archived)", author: "Jay Kreps (LinkedIn Engineering, 2013)", url: "https://web.archive.org/web/20231202121914/https://engineering.linkedin.com/distributed-systems/log-what-every-software-engineer-should-know-about-real-time-datas-unifying" }
+  - { title: "Turning the database inside-out with Apache Samza", author: "Martin Kleppmann (Strange Loop / Confluent)", url: "https://www.confluent.io/blog/turning-the-database-inside-out-with-apache-samza/" }
+  - { title: "Turning the database inside out with Apache Samza (talk)", author: "Martin Kleppmann (Strange Loop Conference)", url: "https://www.youtube.com/watch?v=fU9hR3kiOK0" }
+  - { title: "Local-first software: You own your data, in spite of the cloud", author: "Martin Kleppmann, Adam Wiggins, Peter van Hardenberg & Mark McGranaghan (Ink & Switch)", url: "https://www.inkandswitch.com/essay/local-first/" }
+  - { title: "Life Beyond Distributed Transactions: An Apostate's Opinion", author: "Pat Helland (CIDR, 2007)", url: "https://www.cidrdb.org/cidr2007/papers/cidr07p15.pdf" }
+  - { title: "Building on Quicksand", author: "Pat Helland & David Campbell (CIDR, 2009)", url: "https://arxiv.org/abs/0909.1788" }
+  - { title: "RFC 9162: Certificate Transparency Version 2.0", author: "B. Laurie, E. Messeri & R. Stradling (IETF)", url: "https://www.rfc-editor.org/info/rfc9162" }
+  - { title: "Didcot Railway Centre - mixed gauge (photo, CC BY-SA 2.0)", author: "Chris Allen", url: "https://commons.wikimedia.org/wiki/File:Didcot_Railway_Centre_-_mixed_gauge_-_geograph.org.uk_-_6532619.jpg" }
+---
+
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import En from '../../components/mdx/En.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import YouTube from '../../components/mdx/YouTube.astro';
+import UnbundledWriteReadBoundary from '../../components/mdx/UnbundledWriteReadBoundary.astro';
+import UnbundledMultishardPayment from '../../components/mdx/UnbundledMultishardPayment.astro';
+import UnbundledPayment from '../../components/mdx/UnbundledPayment.astro';
+import UnbundledIdempotentRetry from '../../components/mdx/UnbundledIdempotentRetry.astro';
+import UnbundledDualView from '../../components/mdx/UnbundledDualView.astro';
+import UnbundledRpcVsJoin from '../../components/mdx/UnbundledRpcVsJoin.astro';
+import didcotMixedGauge from '../../assets/blog/philosophy-of-streaming-systems-unbundling-end-to-end-correctness/didcot-mixed-gauge.jpg';
+import worldPingTimes from '../../assets/blog/philosophy-of-streaming-systems-unbundling-end-to-end-correctness/world-ping-times.png';
+
+<En>
+
+<Figure src={didcotMixedGauge} alt="Three rails sharing the same wooden sleepers at Didcot Railway Centre so broad-gauge and standard-gauge trains run side by side" caption="In 19th-century Britain, adding a third rail let standard-gauge and broad-gauge trains share the same trackbed for years without shutting down the line. Database migrations, unbundled services, and derived views can follow the same pattern. Photo: Chris Allen, CC BY-SA 2.0." sourceTitle="Wikimedia Commons: Didcot Railway Centre - mixed gauge" sourceUrl="https://commons.wikimedia.org/wiki/File:Didcot_Railway_Centre_-_mixed_gauge_-_geograph.org.uk_-_6532619.jpg" />
+
+> "If the highest aim of a captain was to preserve his ship, he would keep it in port forever."
+> &mdash; *St. Thomas Aquinas, Summa Theologica*
+
+### Why safe databases still fail users
+
+You put money transfers inside a serializable SQL transaction, yet a customer still gets billed twice on a bad subway ride. You wire services together over REST, yet an ex-partner still receives a notification for a post written after being unfriended. You add strict inventory locks, yet checkout stalls whenever one warehouse shard slows down.
+
+One idea ties these failures together: **stop treating a single monolithic database as the center of your architecture, and build around immutable event logs and explicit dataflow instead.** These six shifts explain how that works in practice:
+
+1. **Data integration without total order**: deriving search indexes, caches, and analytics from one log, and why global ordering hits a wall.
+2. **Gradual evolution by reprocessing**: running old and new views side by side like dual-gauge railways, without big-bang migrations.
+3. **Unbundling the database**: composing storage engines via logs like Unix pipes, and replacing brittle RPC calls with local stream joins.
+4. **Shifting the write/read boundary**: extending precomputed state all the way onto offline-capable devices, and treating read queries as events.
+5. **End-to-end correctness without 2PC**: propagating client-generated `request_id` tokens across partitioned shards so retries never double-charge.
+6. **Timeliness, integrity, and audits**: separating freshness from data corruption, compensating apologies when constraints are loose, and verifying logs with Merkle trees.
+
+<Callout type="note" title="TL;DR">
+No single storage engine fits OLTP, full-text search, caching, and analytics at once. Instead of fragile dual-writes or slow two-phase commit (2PC) across tools, write inputs once to an append-only log and derive every other store asynchronously. Push that derived state toward the user device for instant, offline-ready reads, enforce correctness end to end with client `request_id` keys rather than relying on TCP or database transactions alone, and verify your own pipelines continuously because hardware and database software still have bugs.
+</Callout>
+
+<Concepts>
+
+- **System of record**: the one authoritative store where new user inputs are recorded first, and from which other copies are built.
+- **Derived data**: any copy shaped for a specific job—like a search index, cache, materialized view, or analytics table—that you can rebuild from the system of record.
+- **Total order**: putting every event in the entire system into one single timeline where every node agrees which event came first.
+- **Two-phase commit (2PC)**: a protocol where a coordinator locks multiple databases or shards so they all commit together or all abort together.
+- **Unbundling**: taking jobs usually hidden inside one database (logs, indexes, caches, triggers) and wiring specialized tools together explicitly over streams.
+- **Idempotence**: arranging an operation so running it twice has the exact same effect as running it once.
+
+</Concepts>
+
+---
+
+## 1. Data integration without total order
+
+One database rarely solves every job in a growing product. You might use PostgreSQL for orders, Elasticsearch for fuzzy keyword search, Redis for hot sessions, and a warehouse for revenue reports. The hard part is not picking each tool, but keeping all of them in sync when data changes.
+
+If application code writes straight to PostgreSQL and then straight to Elasticsearch (a **dual write**), two concurrent requests can land in opposite orders on the two stores. Neither store knows who won, so your search index silently disagrees with your database forever.
+
+### Funnel writes through one log
+
+Think of an accounting ledger and the tax summary sheets compiled from it. Every receipt goes into the ledger first; every summary sheet is built by reading that ledger in order. In software, feeding all writes through a single **system of record** (via Change Data Capture or an event log) ensures every derived system sees changes in the exact same order.
+
+As Jay Kreps argued in his 2013 essay *The Log*, you can squint at an entire company's systems—databases, caches, search clusters—as one distributed database where the log is the source of truth and every downstream store is a specialized index. Updating those stores asynchronously also isolates faults: if the search cluster restarts for five minutes, the log buffers events and your checkout flow keeps running.
+
+| Integration method | How consistency works | What happens if one store is slow | Best fit |
+|---|---|---|---|
+| **Dual writes in app code** | App calls Store A and Store B separately | Concurrent writes diverge permanently | Avoid for critical data |
+| **Distributed transactions (XA / 2PC)** | Atomic commit locks all participants together | Whole transaction stalls or aborts | Single datacenter, homogeneous tools |
+| **Async log + idempotent consumers** | Single log orders writes; consumers replay safely | Lag increases locally; fault stays contained | Heterogeneous stores across teams |
+
+### Why total ordering breaks down
+
+Putting every event in a strict global line works fine on one machine. As soon as a system grows, that single line becomes a bottleneck:
+
+- **Sharded throughput**: once writes exceed one server, you split the log across shards, and events in two shards have no defined order between them.
+- **Multiple regions**: cross-datacenter round trips take tens or hundreds of milliseconds, so each region usually runs its own leader and creates concurrent events independently.
+- **Microservices**: each service owns its own database with no shared log, leaving events from two services unordered relative to each other.
+- **Offline clients**: mobile apps update local state right away on tap, long before the server sees the event.
+
+In distributed systems terms, enforcing a global total order is **total order broadcast**, which is equivalent to **consensus**. Almost all consensus algorithms funnel the stream through one leader, so you cannot scale a single totally ordered line horizontally across machines.
+
+### The ex-partner notification race
+
+When two events have nothing to do with each other, their order does not matter. The trouble starts when one action depends on another across different services—called a **causal dependency**.
+
+Suppose Alice breaks up with Bob. First she removes Bob from her friend list (handled by the friendships service), then she posts a complaint meant only for her remaining friends (handled by the messages service). If the notification worker reads the message event before the unfriend event arrives from the other shard, it joins the post against stale friend data and emails Bob anyway.
+
+There are three imperfect tools for fixing causality without a global lock:
+
+1. **Logical clocks**: Lamport timestamps give a partial order without central coordination, though recipients must buffer out-of-order messages and track extra metadata.
+2. **Explicit causal references**: log what state the user saw before acting (giving that observation a unique ID), then attach that ID to the action event so consumers wait until they have processed the prerequisite.
+3. **Conflict resolution (CRDTs)**: great for converging state after reordered edits, but useless once an external side effect (like sending an email or firing a push notification) has already left the building.
+
+<Callout type="warning" title="Eventual consistency still needs rules">
+Saying "eventual consistency is inevitable, just deal with it" does not help engineers debug a leaked notification. Asynchronous pipelines need explicit causality tokens or user-visible session guarantees (such as reading your own writes) when order carries real user risk.
+</Callout>
+
+<Concepts>
+
+- **Dual write**: application code writing to two separate stores directly; if they interleave or one fails mid-way, the two stores drift out of sync.
+- **Change Data Capture (CDC)**: streaming every insert, update, and delete out of a primary database's transaction log so other tools can react to them.
+- **Total order broadcast**: a messaging guarantee where every node delivers the exact same messages in the exact same order, equivalent to consensus.
+- **Causal dependency**: when event B happened *because* of event A (unfriending someone before posting), so any observer must see A before B.
+- **Lamport timestamp**: a simple logical counter passed between nodes to track "happened-before" relationships without relying on wall-clock time.
+
+</Concepts>
+
+---
+
+## 2. Gradual evolution by reprocessing
+
+Imagine trying to widen a busy highway while keeping every lane open to traffic. In 19th-century England, different railway companies built tracks to incompatible widths—**gauges**. After Parliament passed the Gauge Act of 1846, Britain's Great Western Railway faced a massive schema migration: converting its 7-foot broad gauge tracks to the 4 ft 8½ in standard gauge without shutting down rail service for years.
+
+Engineers solved it by laying a **third rail** along the same wooden sleepers, creating **mixed-gauge (dual-gauge)** track like the stretch preserved at Didcot Railway Centre in the hero photo above. Both old broad-gauge locomotives and new standard-gauge trains ran side by side on the same route for decades until the final weekend conversion in 1892 (a reminder of cost too—San Francisco's BART system still uses a nonstandard gauge today).
+
+### Two derived views side by side
+
+Immutable logs and **reprocessing** bring dual-gauge migrations to data systems. Without reprocessing, schema changes are cramped into adding nullable fields or ignoring old records. With an event log, you keep the old view running while spinning up a brand-new consumer that replays history from offset 0 into a completely restructured schema.
+
+Once both views are warm, you route 1% of users to the new view to measure latency and catch bugs, then gradually shift to 100%, and finally drop the old view. Every step is reversible in seconds—which makes teams far less terrified of evolving old schemas.
+
+<UnbundledDualView />
+
+### From Lambda to unified reprocessing
+
+Early big-data pipelines tried to combine historical batch jobs and live streams using Nathan Marz's **Lambda architecture**: an immutable raw store processed by both a slow batch engine (like Hadoop) and a separate fast stream engine (like Storm), merged at read time. In practice, maintaining identical business logic in two completely different frameworks doubled bugs and operational pain.
+
+Modern systems unify batch reprocessing and live streaming in one engine—sometimes called the **Kappa architecture**, a term coined by Jay Kreps:
+
+| Architecture | Processing codebases | How historical backfill works | Main weakness |
+|---|---|---|---|
+| **Lambda** | Two (batch engine + speed stream engine) | Batch job overwrites serving view from raw dump | Logic drift between batch and stream code |
+| **Unified / Kappa** | One stream operator codebase | Replay retained log or object archive through same code | Requires durable replayable input and event-time windows |
+
+Unifying both jobs in one tool requires three building blocks: a replayable input log (or object storage feed into the stream processor), **exactly-once output semantics** so crashed tasks discard partial writes, and **event-time windowing** (used in Apache Beam, Apache Flink, and Google Cloud Dataflow) because replaying last year's events using today's wall clock would scramble every time window.
+
+<Callout type="tip" title="Reversibility buys speed">
+When schema migrations are dual-gauge—two derived views running side by side off the same log—engineers ship cleaner data models because rolling back a mistake is just flipping a router flag back to the old view.
+</Callout>
+
+<Concepts>
+
+- **Reprocessing**: reading historical events from the beginning of a log or archive to rebuild a derived store under updated logic or a new schema.
+- **Lambda architecture**: running two parallel pipelines—one batch, one streaming—and stitching their outputs together on read.
+- **Kappa architecture**: keeping a single streaming codebase and handling historical backfills by replaying an immutable log from offset 0.
+- **Event time vs. processing time**: *event time* is when an action actually happened (stamped in the event); *processing time* is when a worker server happens to see it. Reprocessing must window by event time.
+
+</Concepts>
+
+---
+
+## 3. Unbundling the database
+
+Look closely at what a relational database actually does when you run `CREATE INDEX`. First it scans a consistent snapshot of the table, sorts the indexed column values, and writes the index tree. Then it catches up on every transaction committed while that snapshot was scanning, and finally it subscribes to every future write to keep the index fresh.
+
+Notice that sequence: **snapshot + replay backlog + ongoing change stream.** That is the exact same dance a database performs to add a follower replica, and the exact same bootstrap Debezium performs when hooking Change Data Capture onto Kafka.
+
+### Unix pipes vs. monolithic engines
+
+Unix and relational databases split in the 1970s over two opposing philosophies. Unix gave programmers small, composable tools wired by byte-stream pipes; relational databases hid storage structures, indexes, and locking behind declarative SQL. Unbundling brings Unix composition to databases:
+
+- **Federated databases (unifying reads)**: tools like Postgres Foreign Data Wrappers (FDW) or Trino put one SQL engine in front of many separate stores. Great for read-only cross-system analytics, weak at keeping writes synchronized across them.
+- **Unbundled databases (unifying writes)**: an ordered event log acts as the pipe, and stream operators act as Unix filters, continuously writing into specialized stores (Redis, Elasticsearch, ClickHouse) with idempotent consumers.
+
+</En>
+
+<Vi>
+
+<Figure src={didcotMixedGauge} alt="Ba đường ray nằm chung trên một dãy tà vẹt gỗ tại Didcot Railway Centre để tàu khổ rộng và tàu khổ chuẩn cùng chạy song song" caption="Ở Anh thế kỷ 19, người ta đặt thêm đường ray thứ ba để tàu khổ rộng và khổ tiêu chuẩn dùng chung tuyến đường suốt hàng chục năm mà không phải đóng cửa tuyến. Migration dữ liệu, database tháo rời và các khung nhìn suy xuất cũng làm được y như vậy. Ảnh: Chris Allen, CC BY-SA 2.0." sourceTitle="Wikimedia Commons: Didcot Railway Centre - mixed gauge" sourceUrl="https://commons.wikimedia.org/wiki/File:Didcot_Railway_Centre_-_mixed_gauge_-_geograph.org.uk_-_6532619.jpg" />
+
+> "Nếu mục tiêu cao nhất của thuyền trưởng là giữ nguyên con tàu, ông ta sẽ neo nó trong cảng mãi mãi."
+> &mdash; *St. Thomas Aquinas, Summa Theologica*
+
+### Vì sao database an toàn vẫn làm hỏng dữ liệu
+
+Bạn gói lệnh chuyển tiền vào một transaction SQL ở mức serializable, vậy mà khách đi tàu điện ngầm rớt sóng vẫn bị trừ tiền hai lần. Bạn tách các microservice gọn gàng qua REST, vậy mà người yêu cũ vẫn nhận được thông báo bài đăng viết *sau khi* đã bị hủy kết bạn. Bạn siết khóa tồn kho thật chặt, vậy mà một shard kho hàng chậm lại là cả luồng thanh toán đứng hình.
+
+Các lỗi này có chung một hướng giải: **đừng đặt một database nguyên khối làm trung tâm kiến trúc nữa; hãy dựng hệ thống quanh log sự kiện bất biến và luồng dữ liệu tường minh.** Sáu bước dưới đây giải thích triết lý đó chạy ngoài thực tế ra sao:
+
+1. **Tích hợp dữ liệu không cần thứ tự toàn phần**: suy xuất index tìm kiếm, cache và bảng phân tích từ một log chung, và lý do thứ tự toàn cục không thể mở rộng.
+2. **Tiến hoá dần bằng cách xử lý lại dữ liệu**: chạy song song schema cũ và mới như đường ray ba thanh, không cần cắt chuyển một phát ăn ngay.
+3. **Tháo rời các mảnh của database**: ghép các storage engine qua log như pipe trong Unix, và thay RPC mong manh bằng stream join cục bộ.
+4. **Dịch ranh giới giữa đường ghi và đường đọc**: đẩy trạng thái đã tính sẵn xuống tận thiết bị chạy offline được, và coi cả lệnh đọc như một sự kiện.
+5. **Tính đúng đắn đầu-cuối không cần 2PC**: truyền `request_id` do client tạo xuyên qua từng shard log để retry không bao giờ trừ tiền hai lần.
+6. **Tính kịp thời, toàn vẹn và tự kiểm toán**: tách độ tươi dữ liệu khỏi lỗi hỏng dữ liệu, dùng quy trình bù trừ và xin lỗi khi nới lỏng ràng buộc, và kiểm chứng log bằng Merkle tree.
+
+<Callout type="note" title="Tóm tắt nhanh">
+Không một storage engine đơn lẻ nào làm tốt cả giao dịch OLTP, tìm kiếm toàn văn, cache lẫn phân tích số liệu. Thay vì ghi đồng thời (dual write) dễ lệch hoặc khóa two-phase commit (2PC) nặng nề giữa các công cụ khác nhau, hãy ghi dữ liệu đầu vào một lần vào log chỉ nối thêm (append-only log) rồi để mọi kho khác tự suy xuất bất đồng bộ. Đẩy trạng thái đã tính sẵn ra sát thiết bị người dùng để đọc tức thì kể cả khi mất mạng, giữ tính đúng đắn đầu-cuối (end-to-end) bằng `request_id` từ phía client thay vì tin mù quáng vào TCP hay transaction đơn lẻ, và tự kiểm toán hệ thống liên tục vì phần cứng lẫn phần mềm database đều có thể lỗi.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **System of record (kho lưu trữ gốc)**: nơi duy nhất ghi nhận dữ liệu đầu vào đầu tiên, làm gốc để dựng ra mọi bản sao khác.
+- **Derived data (dữ liệu suy xuất)**: mọi bản sao được biến đổi cho một mục đích riêng — như search index, cache, materialized view hay bảng phân tích — có thể xóa đi dựng lại từ kho gốc.
+- **Total order (thứ tự toàn phần)**: xếp mọi sự kiện trong toàn hệ thống vào một dòng thời gian duy nhất mà mọi máy đều đồng ý cái nào tới trước.
+- **Two-phase commit (2PC — commit hai pha)**: giao thức dùng một bộ điều phối khóa nhiều database hoặc nhiều shard cùng lúc để tất cả cùng commit hoặc cùng hủy.
+- **Unbundling (tháo rời database)**: tách những chức năng thường giấu bên trong một database (log, index, cache, trigger) ra thành các công cụ chuyên biệt nối với nhau qua stream.
+- **Idempotence (tính lũy đẳng / chống lặp)**: thiết kế thao tác sao cho chạy hai lần hay mười lần vẫn cho kết quả hệt như chạy đúng một lần.
+
+</Concepts>
+
+---
+
+## 1. Tích hợp dữ liệu không cần thứ tự toàn phần
+
+Một database duy nhất hiếm khi gánh nổi mọi nhu cầu khi sản phẩm lớn dần. Bạn dùng PostgreSQL lưu đơn hàng, Elasticsearch để tìm kiếm mờ theo từ khoá, Redis cho phiên đăng nhập nóng, và data warehouse cho báo cáo doanh thu. Chuyện khó không nằm ở khâu chọn từng công cụ, mà ở chỗ giữ chúng không bị vênh nhau khi dữ liệu thay đổi.
+
+Nếu code ứng dụng ghi thẳng vào PostgreSQL rồi ghi tiếp sang Elasticsearch (**dual write**), hai request chạy song song rất dễ cập nhật theo hai thứ tự ngược nhau ở hai nơi. Không hệ thống nào biết ai thắng, nên search index cứ thế lệch vĩnh viễn khỏi database gốc.
+
+### Đưa mọi lệnh ghi qua một file log chung
+
+Hãy hình dung cuốn sổ kế toán gốc và các bảng tổng hợp thuế lập từ cuốn sổ đó. Hóa đơn nào cũng ghi vào sổ gốc trước; các bảng tổng hợp chỉ việc đọc lần lượt từ sổ gốc ra. Trong phần mềm, dồn toàn bộ lệnh ghi qua một **kho gốc (system of record)** — nhờ Change Data Capture (CDC) hoặc event log — đảm bảo mọi kho suy xuất đều thấy các thay đổi theo cùng một thứ tự.
+
+Như Jay Kreps từng viết trong bài luận kinh điển *The Log* năm 2013, nếu nheo mắt lại một chút, bạn sẽ thấy toàn bộ hệ thống của công ty — database, cache, cụm tìm kiếm — giống như một database phân tán khổng lồ: log chính là nguồn sự thật, còn từng kho phía sau chỉ là một loại index chuyên biệt. Cập nhật bất đồng bộ còn giúp cô lập sự cố: nếu cụm search bảo trì năm phút, log giữ hộ sự kiện ở giữa để luồng thanh toán vẫn chạy bình thường.
+
+| Cách tích hợp dữ liệu | Cách giữ đồng bộ | Chuyện gì xảy ra khi một kho chậm | Phù hợp nhất khi |
+|---|---|---|---|
+| **Dual write trong code app** | App gọi riêng sang Kho A và Kho B | Hai lệnh song song ghi ngược thứ tự, lệch vĩnh viễn | Tránh dùng cho dữ liệu quan trọng |
+| **Transaction phân tán (XA / 2PC)** | Giao thức commit nguyên tử khóa mọi bên cùng lúc | Cả transaction kẹt hoặc hủy theo bên chậm | Một datacenter, cùng hệ sinh thái |
+| **Log bất đồng bộ + consumer chống lặp** | Một log xếp thứ tự ghi; consumer chạy lại an toàn | Độ trễ tăng cục bộ ở một nhánh; lỗi không lan | Nhiều công nghệ khác nhau, nhiều team |
+
+### Vì sao thứ tự toàn phần đụng trần
+
+Xếp mọi sự kiện thành một hàng dọc duy nhất chạy rất êm trên một máy chủ. Hệ thống vừa phình ra, hàng dọc ấy lập tức hóa thành nút cổ chai:
+
+- **Vượt tải một máy (sharding)**: khi lượng ghi vượt quá sức một node, bạn phải chia log thành nhiều shard, và hai sự kiện ở hai shard khác nhau không còn thứ tự rõ ràng với nhau nữa.
+- **Nhiều vùng địa lý**: truyền tin qua lại giữa các datacenter mất hàng chục tới hàng trăm mili-giây, nên mỗi vùng thường tự có leader riêng và sinh sự kiện song song.
+- **Microservices**: mỗi service tự giữ database riêng không chung log, nên sự kiện phát ra từ hai service không có thứ tự xác định trước.
+- **Client chạy offline**: app điện thoại cập nhật giao diện ngay khi người dùng bấm, rất lâu trước khi server nhận được gói tin.
+
+Về mặt lý thuyết, việc chốt một thứ tự toàn phần gọi là **total order broadcast (phát quảng bá thứ tự toàn phần)**, tương đương với bài toán **consensus (đồng thuận)**. Gần như mọi thuật toán đồng thuận đều phải dồn luồng sự kiện qua một leader duy nhất, nên không thể mở rộng hàng ngang một hàng đợi toàn cục trên nhiều máy được.
+
+### Lỗi race condition khi hủy kết bạn
+
+Khi hai sự kiện chẳng liên quan gì nhau, thứ tự trước sau không quan trọng. Rắc rối nảy sinh khi hành động sau phụ thuộc vào hành động trước ở hai service tách rời — gọi là **phụ thuộc nhân quả (causal dependency)**.
+
+Ví dụ kinh điển: Alice chia tay Bob. Đầu tiên cô ấy hủy kết bạn với Bob (xử lý ở service danh sách bạn bè), sau đó đăng một tin nhắn nói xấu dành riêng cho "những người còn là bạn" (xử lý ở service tin nhắn). Nếu worker gửi thông báo đọc phải sự kiện đăng tin *trước khi* sự kiện hủy kết bạn từ shard kia tới nơi, nó join với danh sách bạn bè cũ và vẫn gửi thông báo thẳng cho Bob.
+
+Có ba hướng xử lý phụ thuộc nhân quả mà không cần khóa toàn hệ thống, dù chưa có cách nào hoàn hảo tuyệt đối:
+
+1. **Đồng hồ logic (logical clocks)**: nhãn thời gian Lamport giúp lần ra quan hệ trước-sau mà không cần điều phối trung tâm, nhưng bên nhận phải biết giữ tạm sự kiện đến sớm và kẹp thêm metadata.
+2. **Đính kèm ID nhân quả tường minh**: ghi log lại trạng thái mà người dùng đã nhìn thấy trước khi bấm nút (gắn cho lần đọc đó một ID duy nhất), rồi đính ID đó vào sự kiện hành động để consumer biết đường chờ xử lý xong tiền đề mới chạy tiếp.
+3. **Giải thuật xử lý xung đột (CRDT)**: cực tốt để các bản sao dữ liệu tự hội tụ về một trạng thái chung, nhưng vô dụng một khi hệ thống đã lỡ bắn một tác dụng phụ ra ngoài (như gửi email hoặc thông báo đẩy rồi thì không rút lại được).
+
+<Callout type="warning" title="Eventual consistency không phải cái cớ để buông tay">
+Nói suông với team rằng "hệ phân tán thì chấp nhận nhất quán cuối cùng (eventual consistency) đi" chẳng giúp kỹ sư sửa được lỗi lộ thông báo. Đường ống bất đồng bộ vẫn cần mã nhân quả hoặc cam kết đọc-thấy-thứ-mình-vừa-ghi (read-your-writes) ở những chỗ đụng tới trải nghiệm nhạy cảm của người dùng.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Dual write (ghi kép trực tiếp)**: code ứng dụng tự gọi ghi vào hai kho dữ liệu tách rời; chỉ cần một bên lỗi hoặc hai request đan xen là hai kho lệch nhau mãi mãi.
+- **Change Data Capture (CDC)**: kỹ thuật đọc trực tiếp log giao dịch của database gốc để phát hiện từng dòng thêm, sửa, xóa và đẩy thành luồng sự kiện cho hệ thống khác.
+- **Total order broadcast**: cơ chế đảm bảo mọi node trong cụm đều nhận cùng một tập thông điệp theo đúng một thứ tự y hệt, tương đương đồng thuận (consensus).
+- **Causal dependency (phụ thuộc nhân quả)**: khi sự kiện B xảy ra *vì* sự kiện A đã xong (hủy kết bạn rồi mới nhắn tin), nên ai nhìn thấy B đều phải thấy A trước.
+- **Lamport timestamp**: bộ đếm logic đơn giản truyền kèm giữa các node để ghi nhận quan hệ "xảy ra trước" mà không phụ thuộc đồng hồ vật lý lệch giờ.
+
+</Concepts>
+
+---
+
+## 2. Tiến hoá dần bằng cách xử lý lại dữ liệu
+
+Hãy thử tưởng tượng cảnh nới rộng một tuyến cao tốc huyết mạch mà không được phép chặn xe ngày nào. Ở Anh thế kỷ 19, các hãng đường sắt xây đường ray theo nhiều **khổ ray (gauge)** khác nhau không chạy chung tàu được. Sau Đạo luật Khổ ray 1846, hãng Great Western Railway đứng trước một cuộc "migrate schema" khổng lồ: đổi toàn bộ tuyến khổ rộng 7 foot sang khổ chuẩn 4 foot 8,5 inch mà vẫn phải chạy tàu suốt nhiều năm.
+
+Các kỹ sư chọn cách đặt thêm **thanh ray thứ ba** trên cùng hàng tà vẹt gỗ, tạo ra tuyến **khổ kép (mixed-gauge)** y như đoạn đường sắt còn lưu giữ ở Didcot Railway Centre trong ảnh đầu bài. Cả tàu khổ rộng cũ lẫn tàu khổ chuẩn mới chạy chung trên một nền đường suốt hàng chục năm cho tới cuối tuần chuyển đổi dứt điểm năm 1892 (và chi phí đổi khổ đắt tới mức hệ thống tàu BART ở vùng vịnh San Francisco tới tận ngày nay vẫn giữ khổ riêng khác phần còn lại của nước Mỹ).
+
+### Chạy song song hai khung nhìn suy xuất
+
+Log bất biến kết hợp **xử lý lại dữ liệu (reprocessing)** mang đúng kỹ thuật đường ray ba thanh đó vào hệ thống phần mềm. Nếu không xử lý lại lịch sử được, việc nâng cấp schema bị bó hẹp ở vài chiêu chắp vá như thêm cột tùy chọn. Khi có log sự kiện, bạn cứ giữ nguyên khung nhìn cũ phục vụ khách, đồng thời bật một consumer mới tinh đọc lại toàn bộ log từ offset 0 để dựng ra một cấu trúc dữ liệu hoàn toàn mới.
+
+Khi khung nhìn mới đã bắt kịp hiện tại, bạn điều 1% người dùng sang đó đo độ trễ và dò lỗi, tăng dần lên 100%, rồi mới tắt khung nhìn cũ. Mỗi bước đều quay đầu lại trong vài giây — và chính sự an toàn khi rút lui ấy giúp đội kỹ sư dám cải tiến cấu trúc dữ liệu nhanh hơn hẳn.
+
+<UnbundledDualView />
+
+### Từ kiến trúc Lambda sang xử lý lại hợp nhất
+
+Những năm đầu thời dữ liệu lớn, kiến trúc **Lambda** do Nathan Marz đề xuất cố ghép lịch sử và thời gian thực bằng hai đường ống tách rời: một bộ máy batch chậm (như Hadoop) xử lý kho thô, chạy song song với một bộ máy stream nhanh (như Storm), rồi trộn kết quả khi đọc. Ngoài đời thực, việc phải viết và bảo trì cùng một logic nghiệp vụ trên hai framework khác hẳn nhau làm nhân đôi số lỗi và công vận hành.
+
+Các hệ thống hiện đại gom cả tính toán lại dữ liệu cũ lẫn xử lý luồng mới vào chung một bộ máy — đôi khi gọi là **kiến trúc Kappa** theo cách đặt tên của Jay Kreps:
+
+| Kiến trúc | Số bộ code xử lý | Cách chạy lại lịch sử (backfill) | Điểm yếu lớn nhất |
+|---|---|---|---|
+| **Lambda** | Hai bộ (batch engine + stream engine) | Job batch chạy lại toàn bộ kho thô đè lên view | Code batch và stream dễ lệch logic nhau |
+| **Hợp nhất / Kappa** | Một bộ stream operator duy nhất | Phát lại log hoặc kho object qua chính code đó | Đòi hỏi log đọc lại được và cửa sổ theo event time |
+
+Để gộp hai việc vào một hệ thống, bạn cần ba mảnh ghép: nguồn dữ liệu đầu vào phát lại được (log message broker hoặc object storage nối vào stream processor), cơ chế **xử lý đúng một lần (exactly-once)** biết hủy bỏ đầu ra dở dang của task bị sập, và tính cửa sổ theo **thời gian sự kiện (event time)** thay vì đồng hồ máy chủ (như cách Apache Beam, Apache Flink và Google Cloud Dataflow làm), nếu không dữ liệu năm ngoái phát lại hôm nay sẽ dồn hết vào khung giờ hiện tại.
+
+<Callout type="tip" title="Khả năng quay xe giúp team đi nhanh hơn">
+Khi mọi đợt migrate dữ liệu đều chạy theo kiểu đường ray kép — hai khung nhìn suy xuất cùng uống từ một log gốc — kỹ sư sẵn sàng tái cấu trúc model tốt hơn hẳn, vì lỡ có lỗi chỉ cần bật cờ định tuyến quay lại bản cũ.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Reprocessing (xử lý lại dữ liệu)**: đọc lại toàn bộ sự kiện lịch sử từ đầu log hoặc kho lưu trữ để dựng lại kho dữ liệu suy xuất theo code hoặc schema mới.
+- **Lambda architecture**: mô hình chạy song song hai luồng — một batch, một streaming — rồi ghép kết quả của cả hai khi có truy vấn đọc.
+- **Kappa architecture**: mô hình giữ đúng một bộ code stream processing duy nhất, và chạy lại dữ liệu quá khứ bằng cách tua log bất biến về offset 0.
+- **Event time vs. processing time**: *event time* là lúc hành động thực sự diễn ra (ghi trong sự kiện); *processing time* là lúc server vô tình đọc tới nó. Khi tua lại dữ liệu cũ bắt buộc phải chia cửa sổ theo event time.
+
+</Concepts>
+
+---
+
+## 3. Tháo rời các mảnh của database
+
+Hãy để ý kỹ chuyện gì diễn ra bên trong một database quan hệ khi bạn gõ `CREATE INDEX`. Đầu tiên, database quét một bản chụp nhất quán (consistent snapshot) của bảng, gom các giá trị cột cần đánh chỉ mục, sắp xếp rồi ghi cây index xuống đĩa. Tiếp theo, nó xử lý bù phần giao dịch đã commit trong lúc quét, và từ đó trở đi cứ mỗi lần bảng có ghi mới là cập nhật nối đuôi vào index.
+
+Hãy nhìn trình tự ba bước đó: **bản chụp ban đầu + đuổi kịp backlog + theo dõi luồng ghi tiếp theo.** Đó chính xác là quy trình dựng một follower replica mới, và cũng y hệt cách Debezium gắn Change Data Capture vào Kafka.
+
+### Ống dẫn Unix hay database nguyên khối
+
+Từ thập niên 1970, Unix và database quan hệ đã đi theo hai triết lý trái ngược. Unix cho lập trình viên những công cụ nhỏ làm đúng một việc, nối với nhau qua ống dẫn dòng byte (pipes); còn database quan hệ giấu toàn bộ cấu trúc đĩa, chỉ mục và khóa tương tranh sau ngôn ngữ SQL khai báo. Ý tưởng "tháo rời database" mang tinh thần ghép nối của Unix áp vào thế giới dữ liệu:
+
+- **Database liên kết (federated databases — hợp nhất đường đọc)**: công cụ như Postgres Foreign Data Wrapper (FDW) hay Trino đặt một lớp SQL chung trước nhiều kho lưu trữ khác nhau. Rất tiện cho truy vấn phân tích chỉ đọc, nhưng không giải được bài toán đồng bộ ghi giữa các kho.
+- **Database tháo rời (unbundled databases — hợp nhất đường ghi)**: một event log có thứ tự đóng vai ống dẫn pipe, còn các stream processor đóng vai bộ lọc Unix, liên tục đổ dữ liệu vào Redis, Elasticsearch hay kho phân tích qua các consumer chống lặp.
+
+</Vi>
+
+<YouTube id="fU9hR3kiOK0" title="Turning the database inside out with Apache Samza — Martin Kleppmann" start={1168} end={1494} caption="From 19:28 to 24:54, Martin Kleppmann explains turning the database inside out so application state lives in derived views fed continuously by an append-only log." captionVi="Từ 19:28 đến 24:54, Martin Kleppmann giải thích cách lộn ngược database để trạng thái ứng dụng nằm ở các khung nhìn suy xuất được nuôi liên tục từ log chỉ nối thêm." sourceTitle="Strange Loop Conference — Turning the database inside out" sourceUrl="https://www.youtube.com/watch?v=fU9hR3kiOK0&t=1168s" />
+
+<En>
+
+### Replacing microservice RPCs with stream joins
+
+Like VisiCalc spreadsheets updating a total cell whenever a price cell changes, unbundled dataflow flips how application logic talks to state. Most web backends keep stateless servers strictly apart from database state—a separation functional programmers jokingly call *"the separation of Church and state"*, nodding to Alonzo Church's stateless lambda calculus—which turns the database into a passive variable you have to poll or query over the network.
+
+In a typical microservice setup, if checkout needs to convert prices from euros to dollars, it fires a synchronous REST or RPC call to an exchange-rate service. If that exchange-rate service hiccups or slows down, checkout stalls.
+
+In a dataflow setup, checkout subscribes ahead of time to a stream of exchange-rate updates and stores the latest rates locally inside its own shard state. When a purchase arrives, the join happens against local memory or local disk with zero network hop. Remember one caveat: **this join is time-dependent**—if you reprocess last month's purchases today, you must match each purchase against the exchange rate from the time of purchase, not today's rate.
+
+| Design dimension | Synchronous microservice RPC | Unbundled dataflow stream join |
+|---|---|---|
+| **Cross-service call** | Blocking HTTP / gRPC request per purchase | Local lookup against subscribed stream state |
+| **If partner service is down** | Checkout stalls or fails immediately | Processes with local cached rate; catches up later |
+| **Replaying history** | Must query historical-rate API carefully | Joins purchase stream with timestamped rate stream |
+
+<UnbundledRpcVsJoin />
+
+<Callout type="note" title="Unbundling is about breadth, not raw single-workload speed">
+There is an honest trade-off: running Kafka, Flink, and three stores brings real operational overhead. If a single database like PostgreSQL already meets all your query and reliability needs, stick with it—unbundle only when no single engine covers all your access patterns well.
+</Callout>
+
+<Concepts>
+
+- **Federated database (polystore)**: a unified query engine (such as Trino) that lets you read across multiple underlying databases, without unifying writes across them.
+- **Unbundled database**: splitting indexing, caching, replication, and query serving into separate tools connected by an immutable log.
+- **Stream-table join**: enriching every incoming event on a stream with a local table maintained from another change stream, avoiding synchronous RPCs.
+- **Time-dependent join**: a join where the lookup value (such as a currency exchange rate or tax rate) changes over time, so replays must match the value valid at event time.
+
+</Concepts>
+
+---
+
+## 4. Shifting the write/read boundary
+
+Every derived dataset has two halves: the **write path** (eagerly precomputing results as data arrives, before anyone asks) and the **read path** (lazily computing answers when a user queries). In functional terms, writes are eager evaluation and reads are lazy evaluation.
+
+Take full-text search. Without an index, writes do zero extra work while reads run an expensive grep scan over every document. At the opposite extreme, precomputing answers for every possible multi-word search query is impossible because combinations explode exponentially. An inverted index plus a cache of the top common queries simply sets the boundary in between.
+
+</En>
+
+<Vi>
+
+### Thay lời gọi RPC giữa các microservice bằng stream join
+
+Giống bảng tính Excel tự tính lại ô tổng mỗi khi bạn sửa giá ở cột bên cạnh, tư duy luồng dữ liệu (dataflow) đảo ngược cách code ứng dụng làm việc với trạng thái. Đa số backend web tách rời hoàn toàn server không trạng thái khỏi database — điều giới lập trình hàm hay đùa là *"tách biệt Church và State"* (ám chỉ phép tính lambda phi trạng thái của Alonzo Church) — vô tình biến database thành một biến bị động mà app phải gọi hỏi liên tục qua mạng.
+
+Trong kiến trúc microservice quen thuộc, khi dịch vụ thanh toán cần đổi giá từ Euro sang Đô la, nó bắn một request REST hoặc gRPC đồng bộ sang dịch vụ tỷ giá. Chỉ cần dịch vụ tỷ giá chập chờn hoặc chậm vài giây là luồng thanh toán nghẽn theo.
+
+Với cách tiếp cận dataflow, dịch vụ thanh toán đăng ký sẵn (subscribe) vào luồng cập nhật tỷ giá và lưu tỷ giá mới nhất ngay trong bộ nhớ cục bộ của shard mình. Khi có đơn hàng mới, nó join trực tiếp với dữ liệu tại chỗ mà không tốn một nhịp mạng nào — đúng như câu nói kinh điển *"request mạng nhanh và đáng tin nhất là không gửi request mạng nào cả"*. Chỉ nhớ một bẫy nhỏ: **phép join này phụ thuộc thời gian (time-dependent)** — nếu tháng sau bạn chạy lại log đơn hàng cũ, bạn phải khớp với tỷ giá *tại thời điểm mua*, chứ không phải tỷ giá hôm nay.
+
+| Tiêu chí thiết kế | Gọi RPC microservice đồng bộ | Stream join trên luồng dữ liệu |
+|---|---|---|
+| **Giao tiếp liên service** | Chặn chờ HTTP / gRPC cho từng giao dịch | Tra cứu tại chỗ từ trạng thái đã đồng bộ sẵn |
+| **Khi dịch vụ đối tác sập** | Thanh toán lỗi hoặc nghẽn dây chuyền | Vẫn chạy từ bảng cục bộ; đồng bộ bù sau |
+| **Chạy lại dữ liệu cũ** | Phải hỏi lại API tỷ giá lịch sử rất cực | Join luồng đơn hàng với luồng tỷ giá theo event time |
+
+<UnbundledRpcVsJoin />
+
+<Callout type="note" title="Tháo rời để rộng đường, không phải để khoe kiến trúc">
+Cái giá khá thẳng: kéo thêm Kafka, Flink và vài kho lưu trữ là kéo thêm gánh nặng vận hành. Nếu một mình PostgreSQL đã gánh gọn toàn bộ nhu cầu đọc ghi của bạn, đừng tháo rời sớm — chỉ tách mảnh khi một công cụ đơn lẻ không còn phục vụ nổi mọi kiểu truy cập.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Federated database (database liên kết)**: lớp truy vấn chung (như Trino hay Postgres FDW) cho phép đọc xuyên qua nhiều kho dữ liệu khác nhau, nhưng không giải quyết đồng bộ khi ghi.
+- **Unbundled database (database tháo rời)**: tách việc đánh index, cache, sao chép dữ liệu và xử lý truy vấn ra các công cụ riêng nối bằng log bất biến.
+- **Stream-table join**: làm giàu mỗi sự kiện vừa tới trên stream bằng cách tra bảng cục bộ được nuôi từ một luồng sự kiện khác, bỏ được RPC đồng bộ.
+- **Time-dependent join (join phụ thuộc thời gian)**: phép ghép mà giá trị tra cứu (như tỷ giá hay thuế suất) đổi theo thời gian, nên khi xử lý lại lịch sử phải dùng đúng giá trị tại thời điểm sự kiện xảy ra.
+
+</Concepts>
+
+---
+
+## 4. Dịch ranh giới giữa đường ghi và đường đọc
+
+Mọi kho dữ liệu suy xuất đều có hai nửa: **đường ghi (write path)** làm sẵn việc tính toán ngay khi dữ liệu vừa tới dù chưa ai hỏi, và **đường đọc (read path)** chỉ tính khi có người gửi truy vấn. Nói theo ngôn ngữ lập trình hàm thì đường ghi là tính trước (eager evaluation), còn đường đọc là tính lười (lazy evaluation).
+
+Thử nhìn bài toán tìm kiếm văn bản. Không có index thì đường ghi nhẹ tênh, nhưng đường đọc phải quét kiểu grep toàn bộ tài liệu. Ở thái cực kia, tính sẵn kết quả cho mọi tổ hợp từ khoá có thể gõ là bất khả thi vì số lượng bùng nổ theo cấp số nhân. Inverted index cộng với cache vài câu tìm kiếm phổ biến chính là cách đặt ranh giới nằm lưng chừng giữa hai thái cực.
+
+</Vi>
+
+<UnbundledWriteReadBoundary />
+
+<En>
+
+### Extending the write path onto user devices
+
+Normally we stop the write path at a datacenter server, so a loaded web page goes stale the instant someone else saves a change—unless the user refreshes or polls. Moving to **WebSockets** or **Server-Sent Events (SSE)** pushes the write path past the datacenter boundary right into the user's device.
+
+In this model, the pixels on your screen are a materialized view of client model objects, and those client objects are a local replica of server state. When a laptop or phone loses cellular signal and reconnects later, it simply resumes from its last log offset—the same consumer-offset trick Kafka brokers use between servers—enabling **offline-first** and **local-first** apps where taps render with zero network spinner.
+
+<Figure src={worldPingTimes} alt="World map showing server-to-server round-trip network latencies between AWS regions ranging from 84 ms to 363 ms" caption="Cross-region network round trips take 84 ms to 363 ms before a server even touches disk. Pushing derived state onto the device lets the UI answer taps locally while syncing changes asynchronously in the background. Data: Bailis et al. (VLDB 2014)." sourceTitle="Ink & Switch — Local-first software" sourceUrl="https://www.inkandswitch.com/essay/local-first/" />
+
+### Reads are events too
+
+We can push the symmetry even further: instead of sending read queries as transient RPCs straight to a storage node, represent **read requests themselves as an event stream**. Route both the write stream and the read query stream by the same partition key to one stream processor, and serving a query becomes a stream-table join.
+
+A one-off HTTP GET passes through the join operator once and emits a single reply; a live subscription stays open as a persistent join against future writes. Logging read requests also captures **data provenance**—for instance, recording the exact delivery date and stock count an online shopper saw right before clicking Buy—and makes multi-shard fan-out joins (like computing fraud scores across sharded IP, email, and billing reputation tables) natural inside stream pipelines.
+
+<Concepts>
+
+- **Write path vs. read path**: the *write path* eagerly updates indexes and views when new data arrives; the *read path* lazily queries and merges results when a user asks.
+- **Local-first software**: keeping the user's primary working state right on their device for instant offline reads and writes, syncing with servers asynchronously over a stream or CRDT sync engine.
+- **Standing (persistent) query**: a subscription that behaves like a continuous join, emitting new results automatically whenever matching write events arrive.
+- **Data provenance**: tracking exactly what inputs and prior screen reads produced a decision or output record.
+
+</Concepts>
+
+---
+
+## 5. End-to-end correctness without 2PC
+
+Stateless read bugs disappear after a fix and a restart. Stateful writes stay corrupted forever. Many teams assume that wrapping money transfers in a serializable SQL transaction protects them—until a phone drops signal right after `COMMIT`:
+
+```sql
+BEGIN TRANSACTION;
+UPDATE accounts SET balance = balance + 11.00 WHERE account_id = 1234;
+UPDATE accounts SET balance = balance - 11.00 WHERE account_id = 4321;
+COMMIT;
+```
+
+Look closely at what fails here. TCP uses sequence numbers to suppress duplicate packets, **but only inside one TCP connection**. Once the cellular drop breaks that socket after `COMMIT` leaves the server and before the browser receives HTTP `200 OK`, the user or SDK sees a timeout and opens a brand-new connection to retry.
+
+To the database, that retry is a fresh TCP socket and a fresh transaction—so it runs the update a second time and charges **$22.00 instead of $11.00**. Even two-phase commit (2PC) between app servers and databases does not span the browser sitting across an unreliable cellular link.
+
+### Saltzer, Reed, and Clark's end-to-end argument
+
+In their 1984 paper *End-to-End Arguments in System Design*, Saltzer, Reed, and Clark stated a rule that still governs distributed data today: *"The function in question can completely and correctly be implemented only with the knowledge and help of the application standing at the endpoints of the communication system."* Lower layers (TCP deduplication, Ethernet checksums, Wi-Fi encryption) cut failure odds as useful optimizations, **but only the endpoints know enough to guarantee correctness**.
+
+That is why Stripe's API design (documented by Brandur Leach) requires clients to generate an immutable **`Idempotency-Key`** (a UUID per user action) before sending a `POST`, and to retry with exponential backoff plus jitter. Pass that same `request_id` all the way from the hidden form or client click through the server into a database `UNIQUE(request_id)` table:
+
+```sql
+ALTER TABLE requests ADD UNIQUE (request_id);
+BEGIN TRANSACTION;
+INSERT INTO requests
+  (request_id, from_account, to_account, amount)
+VALUES ('0286FDB8-D7E1-423F-B40B-792B3608036C', 4321, 1234, 11.00);
+UPDATE accounts SET balance = balance + 11.00 WHERE account_id = 1234;
+UPDATE accounts SET balance = balance - 11.00 WHERE account_id = 4321;
+COMMIT;
+```
+
+Because relational databases enforce `UNIQUE` constraints safely even below serializable isolation, a retry carrying the same `request_id` hits a constraint violation on `INSERT` and aborts cleanly—turning `$22.00` back into `$11.00`.
+
+### A real case: Stripe's idempotency keys
+
+A client sends a charge request to Stripe and the connection drops before the response arrives. The client cannot tell whether the charge went through, and Stripe's own write-up warns that calling it twice would double-charge the customer.
+
+The fix lives at the endpoints. The client generates a unique key per operation and sends it in the `Idempotency-Key` header of the `POST`. The server links that key to the request's state, so when the first attempt succeeded but the response was lost, a retry gets the cached result back and the customer is charged only once. Clients retry with exponential backoff plus random jitter so a struggling server is not hit by a thundering herd.
+
+<UnbundledIdempotentRetry />
+
+### Multishard atomicity using partitioned logs
+
+What if Account A (`4321`) and Account B (`1234`) live on **different database shards**? A traditional SQL transaction across both shards requires 2PC, locking both shards together and hurting throughput. Following the approach in Kleppmann, Beresford, and Svingen's *Online Event Processing*, unbundled stream processors achieve the exact same `$11.00` guarantee without cross-shard locks:
+
+</En>
+
+<Vi>
+
+### Đẩy đường ghi vươn tới tận thiết bị người dùng
+
+Thông thường đường ghi dừng lại ở server trong datacenter, nên một trang web vừa tải xong sẽ lập tức cũ đi ngay khi người khác sửa dữ liệu — trừ phi bạn bấm tải lại trang hoặc chạy polling. Khi dùng **WebSockets** hoặc **Server-Sent Events (SSE)**, đường ghi được nối dài vượt khỏi datacenter để chạm thẳng tới thiết bị của người dùng.
+
+Theo mô hình này, từng điểm ảnh trên màn hình chính là materialized view của các model object trong trình duyệt, còn các model object đó là một bản sao cục bộ (local replica) của trạng thái trên server. Khi điện thoại hay laptop mất sóng giữa chừng rồi kết nối lại, nó chỉ cần báo offset cuối cùng mình đã nhận — đúng cơ chế consumer offset của Kafka — mở đường cho ứng dụng **offline-first** và **local-first**, nơi mọi cú chạm phản hồi tức thì không cần vòng xoay chờ mạng.
+
+<Figure src={worldPingTimes} alt="Bản đồ thế giới minh họa độ trễ vòng lặp mạng giữa các vùng máy chủ AWS dao động từ 84 ms đến 363 ms" caption="Một vòng gọi mạng xuyên đại dương mất từ 84 ms tới 363 ms trước khi server kịp chạm vào ổ đĩa. Đẩy dữ liệu suy xuất xuống tận thiết bị giúp giao diện phản hồi cú bấm ngay tại chỗ và đồng bộ thay đổi ngầm ở phía sau. Số liệu: Bailis và cộng sự (VLDB 2014)." sourceTitle="Ink & Switch — Local-first software" sourceUrl="https://www.inkandswitch.com/essay/local-first/" />
+
+### Coi cả lệnh đọc như sự kiện trên stream
+
+Ta có thể đẩy tính đối xứng này đi xa thêm một bước nữa: thay vì gửi truy vấn đọc như một lời gọi RPC thoáng qua thẳng vào node lưu trữ, hãy biến **chính các yêu cầu đọc thành một luồng sự kiện**. Định tuyến cả luồng ghi lẫn luồng truy vấn đọc theo cùng một khoá phân mảnh (partition key) vào chung một stream processor, lúc ấy phục vụ lệnh đọc chính là chạy một phép stream-table join.
+
+Một lệnh HTTP GET một lần đi ngang qua toán tử join rồi phát ra đúng một kết quả; còn một lệnh subscribe mở sẵn thì trở thành phép join đứng giữ kết nối với mọi lệnh ghi tương lai. Ghi log lại cả thao tác đọc còn lưu vết được **nguồn gốc nhân quả của dữ liệu (data provenance)** — chẳng hạn biết chính xác ngày giao dự kiến và số tồn kho mà khách đã thấy trước khi bấm Mua — đồng thời giúp các phép join liên shard (như tính điểm gian lận từ bảng danh tiếng IP, email, địa chỉ thanh toán chia shard khác nhau) trở nên tự nhiên trong pipeline streaming.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Write path vs. read path (đường ghi / đường đọc)**: *đường ghi* chủ động cập nhật sẵn index và khung nhìn khi có dữ liệu mới; *đường đọc* chỉ tính toán và gộp kết quả khi có người hỏi.
+- **Local-first software**: kiến trúc giữ bản làm việc chính ngay trên thiết bị người dùng để chạy tức thì kể cả khi mất mạng, đồng bộ ngầm lên server qua stream hoặc CRDT.
+- **Standing query (truy vấn đứng / subscribe)**: kết nối theo dõi giống một phép join mở liên tục, tự đẩy kết quả mới xuống mỗi khi có sự kiện ghi khớp điều kiện.
+- **Data provenance (nguồn gốc dữ liệu)**: khả năng truy vết chính xác một quyết định hay bản ghi đầu ra được sinh ra từ những đầu vào và lần đọc nào trước đó.
+
+</Concepts>
+
+---
+
+## 5. Tính đúng đắn đầu-cuối không cần 2PC
+
+Lỗi ở service chỉ đọc thì sửa code rồi khởi động lại là xong. Lỗi ghi làm hỏng dữ liệu thì hậu quả có thể nằm lì mãi mãi trong database. Nhiều người tin rằng nhét lệnh chuyển khoản vào một transaction SQL mức serializable là yên tâm kê cao gối ngủ — cho tới khi điện thoại rớt mạng đúng khoảnh khắc sau `COMMIT`:
+
+```sql
+BEGIN TRANSACTION;
+UPDATE accounts SET balance = balance + 11.00 WHERE account_id = 1234;
+UPDATE accounts SET balance = balance - 11.00 WHERE account_id = 4321;
+COMMIT;
+```
+
+Chuyện gì gãy ở đây? Giao thức TCP có đánh số thứ tự gói tin để loại bỏ gói trùng, **nhưng phạm vi bảo vệ chỉ nằm gọn trong một kết nối TCP duy nhất**. Một khi rớt mạng làm đứt socket sau lúc server vừa `COMMIT` xong nhưng trình duyệt chưa kịp nhận HTTP `200 OK`, trình duyệt hoặc SDK báo timeout rồi mở một kết nối mới tinh để gửi lại.
+
+Đứng từ góc nhìn database, lần thử lại đó là một kết nối TCP mới và một transaction mới hoàn toàn — nên nó trừ tiền thêm lần nữa thành **$22,00 thay vì $11,00**. Ngay cả giao thức 2PC giữa server ứng dụng và database cũng không với tới được trình duyệt đang nằm bên kia đường truyền di động chập chờn.
+
+### Lập luận đầu-cuối (End-to-End Argument)
+
+Trong bài báo kinh điển năm 1984 *End-to-End Arguments in System Design*, Saltzer, Reed và Clark nêu một nguyên tắc vàng: một chức năng đảm bảo đúng đắn chỉ có thể thực thi trọn vẹn khi có thông tin từ chính hai đầu cuối của ứng dụng. Các tầng bên dưới (TCP chống lặp gói, checksum tầng Ethernet, mã hóa Wi-Fi) rất hữu ích để giảm xác suất lỗi, **nhưng bản thân chúng không bao giờ thay thế được bước kiểm tra ở hai đầu cuối**.
+
+Đó là lý do thiết kế API của Stripe (được Brandur Leach mô tả chi tiết) bắt buộc client tự tạo một mã **`Idempotency-Key`** bất biến (như UUID cho mỗi cú bấm của người dùng) trước khi gọi `POST`, và retry kèm thuật toán chờ tăng dần ngẫu nhiên (exponential backoff + jitter). Khi bạn truyền thẳng `request_id` đó từ nút bấm trình duyệt xuyên qua backend xuống một bảng có ràng buộc `UNIQUE(request_id)`:
+
+```sql
+ALTER TABLE requests ADD UNIQUE (request_id);
+BEGIN TRANSACTION;
+INSERT INTO requests
+  (request_id, from_account, to_account, amount)
+VALUES ('0286FDB8-D7E1-423F-B40B-792B3608036C', 4321, 1234, 11.00);
+UPDATE accounts SET balance = balance + 11.00 WHERE account_id = 1234;
+UPDATE accounts SET balance = balance - 11.00 WHERE account_id = 4321;
+COMMIT;
+```
+
+Nhờ database quan hệ giữ ràng buộc `UNIQUE` chính xác ngay cả ở các mức cô lập yếu hơn serializable, bản gửi lại mang cùng `request_id` sẽ đụng lỗi trùng khóa ngay ở lệnh `INSERT` và hủy sạch sẽ — kéo số tiền trừ từ `$22,00` về đúng `$11,00`.
+
+### Ca thực tế: idempotency key của Stripe
+
+Client gửi lệnh trừ tiền tới Stripe thì kết nối đứt trước khi phản hồi về tới nơi. Client không biết khoản trừ đã thành công hay chưa, và chính bài viết của Stripe cảnh báo rằng gọi hai lần sẽ khiến khách bị trừ tiền hai lần.
+
+Cách giải nằm ở hai đầu cuối. Client tạo một key duy nhất cho mỗi thao tác và gửi trong header `Idempotency-Key` của request `POST`. Server gắn key đó với trạng thái của request, nên nếu lần đầu đã thành công mà phản hồi bị mất, lần thử lại sẽ nhận về kết quả đã lưu và khách chỉ bị trừ một lần. Client thử lại với exponential backoff cộng thêm jitter ngẫu nhiên để server đang yếu không bị đổ dồn request cùng lúc (thundering herd).
+
+<UnbundledIdempotentRetry />
+
+### Giao dịch nguyên tử liên shard không cần khóa 2PC
+
+Thế nếu Tài khoản A (`4321`) và Tài khoản B (`1234`) nằm ở **hai shard database khác nhau** thì sao? Cách truyền thống phải kéo 2PC khóa cứng cả hai shard cùng lúc làm tụt thông lượng. Theo hướng của bài báo *Online Event Processing* (Kleppmann, Beresford và Svingen), kiến trúc stream tháo rời giữ nguyên tính đúng đắn `$11,00` mà chẳng cần khóa liên shard nào:
+
+</Vi>
+
+<UnbundledMultishardPayment />
+
+<En>
+
+Step through the three modes yourself below. Switch between a naive SQL transaction, an end-to-end `request_id` table, and an unbundled 3-stage partitioned stream—then switch to the `$6` short-funds scenario to see how an unbundled pipeline handles optimistic payments without corrupting balances.
+
+</En>
+
+<Vi>
+
+Bạn bấm thử cả ba chế độ ngay bên dưới. Hãy thử chuyển qua lại giữa transaction ACID thông thường, bảng `request_id` đầu-cuối, và luồng log phân vùng 3 chặng — rồi chuyển sang kịch bản thiếu tiền (còn `$6`) để xem đường ống bất đồng bộ xử lý bù trừ thế nào mà sổ sách không bao giờ bị âm hay lệch tiền.
+
+</Vi>
+
+<UnbundledPayment />
+
+<En>
+
+Notice where atomicity lives in the unbundled model: **appending the initial request to Shard A's log is the single atomic commit point**. Because Shard A's stream processor reads one partition sequentially on one thread and keeps `seen_ids`, even if it crashes right before emitting downstream events, deterministic replay re-emits the exact same `req-7f9a` events and Shard B ignores duplicates.
+
+<Concepts>
+
+- **End-to-end argument**: the principle (Saltzer, Reed & Clark, 1984) that lower layers like TCP cannot guarantee application-level correctness on their own; the client and server endpoints must share an explicit identifier.
+- **Idempotency key (`request_id`)**: a unique ID created by the client per user intent so retries can be recognized and ignored instead of repeating side effects.
+- **Exponential backoff with jitter**: waiting longer between each retry with added randomness so recovering servers are not crushed by synchronized retries (the thundering herd problem).
+- **Partitioned sequential log**: routing all events for one key (such as Payer Account A) to one single-threaded partition so conflict and balance checks run deterministically without distributed locks.
+
+</Concepts>
+
+---
+
+## 6. Timeliness, integrity, and audits
+
+People toss around the word "consistency" as if it meant one thing. It helps to split it into two distinct promises, because confusing them leads to over-engineering in the wrong places:
+
+- **Timeliness**: how fresh your read is (linearizability, read-your-writes). If timeliness slips, you see stale data for a few seconds—annoying, yet temporary, because waiting heals it.
+- **Integrity**: absence of data loss, double-billing, or contradictory balances. If integrity breaks, waiting does nothing; the ledger stays broken forever until someone writes a repair job.
+
+| Property | What fails if violated | Does waiting fix it? | Example |
+|---|---|---|---|
+| **Timeliness** | Stale read or delayed update | Yes, eventually | Yesterday's coffee missing from statement today |
+| **Integrity** | Lost funds, duplicates, broken sums | No — permanent corruption | Charged $22 instead of $11, or balance sums wrong |
+
+Traditional ACID transactions bundle both timeliness and integrity together. Event-driven dataflow systems **decouple them**: they give up synchronous timeliness across shards while guarding integrity fiercely with immutable logs, deterministic functions, and end-to-end `request_id` deduplication.
+
+### Memories, guesses, and apologies
+
+As Pat Helland famously explained in *Memories, Guesses, and Apologies* (and *Building on Quicksand*), strict uniqueness constraints—claiming a unique username or selling the last seat—unavoidably require synchronous coordination on that key. Yet most real businesses intentionally allow **loosely interpreted constraints** instead of stalling every user behind global locks.
+
+Airlines deliberately overbook seats expecting no-shows; hotels overbook rooms; warehouses occasionally lose stock to a clumsy forklift. In every case, you optimistically accept the order (a **guess** based on local **memories**), check the hard constraint asynchronously, and run a **compensating transaction** (an **apology**: refund, voucher, upgrade, or overdraft fee) when demand exceeds real supply. Because you already need apology workflows for physical accidents and cancelled flights anyway, coordination-avoiding pipelines let multi-region systems stay fast and available without corrupting financial integrity.
+
+### Trust, but verify
+
+All distributed proofs assume a tidy system model: disks keep bytes after `fsync`, CPUs multiply straight, and databases enforce `UNIQUE`. Reality is messier. Bit flips happen in RAM and on disk; MySQL once shipped a bug (`#73170`) that allowed duplicate rows in a unique secondary index, and PostgreSQL once fixed a subtle edge case in serializable isolation.
+
+That is why large storage services like Amazon S3 and HDFS never trust disks blindly—they run background scrubbers continually reading files back, comparing checksums across replicas, and migrating off failing drives. It is also why reliable engineering teams periodically test restoring backups before an actual outage proves the backup was empty.
+
+Event-sourced dataflows make **continuous self-auditing** practical. Because inputs sit in an immutable log and outputs come from deterministic functions, you can recompute derived views on a parallel pipeline to verify checksums, run **time-travel debugging** to see what caused an anomaly, or go further with cryptographic **Merkle trees**. **Certificate Transparency** (RFC 9162) proves this scales on the public internet: Certificate Authorities append every issued TLS certificate to cryptographically verifiable logs using Merkle trees with single log leaders—avoiding expensive blockchain consensus while allowing browsers and domain owners to catch forged certificates immediately.
+
+<Callout type="tip" title="How to start auditing without rebuilding everything">
+You do not need Merkle trees on day one to apply "trust, but verify." Start with a nightly reconciliation job that sums your immutable input events and compares the total against your derived ledger balances, and test restoring one backup into a scratch database every month.
+</Callout>
+
+<Concepts>
+
+- **Timeliness vs. integrity**: *timeliness* is seeing the latest data right away; *integrity* is ensuring data is never lost, duplicated, or contradictory.
+- **Compensating transaction (apology)**: a separate forward action (refund, credit, cancellation email) that repairs a constraint violation after an optimistic write, instead of holding a distributed lock beforehand.
+- **Coordination avoidance**: designing operations so shards or regions process writes locally without synchronous cross-region locking, reserving coordination only for irreversible external actions.
+- **Merkle tree**: a tree of cryptographic hashes where changing even one leaf record alters the root hash, allowing compact proofs that an entry belongs in an append-only log.
+- **Certificate Transparency (RFC 9162)**: an open auditing system where TLS certificates are recorded in public, Merkle-verified append-only logs so misissued certificates cannot stay hidden.
+
+</Concepts>
+
+---
+
+## Key takeaways
+
+- **Funnel writes through one log, never dual writes.** Writing straight to two stores lets concurrent updates interleave differently; feeding derived indexes and caches from a single ordered log isolates faults and prevents silent drift.
+- **Make schema migrations dual-gauge.** Keep old and new derived views running side by side off the same log, shift traffic gradually from 1% to 100%, and keep instant rollback so teams can evolve data models safely.
+- **Shift the write/read boundary toward the user.** Pushing derived state over SSE or WebSockets by log offset lets mobile and web UIs render instantly from local storage and catch up after offline gaps.
+- **Propagate client `request_id` tokens end to end.** TCP deduplication and single-shot SQL transactions cannot detect a retry after a dropped HTTP response; pass a client-generated ID all the way to a uniqueness check or partitioned log consumer.
+- **Guard integrity harder than timeliness, and audit both.** Decouple fresh reads from uncorrupted ledgers using compensating apologies where business rules allow, and run continuous end-to-end checks because disks, networks, and databases all have real bugs.
+
+---
+
+## Review questions
+
+1. Why can two concurrent updates leave PostgreSQL and Elasticsearch permanently out of sync under dual writes, and how does Change Data Capture (CDC) fix it without 2PC? *(Section 1)*
+2. In the unfriend-then-message race across microservices, why do CRDTs fail to prevent the leaked notification, and what causal metadata fixes it? *(Section 1)*
+3. Why did the Lambda architecture fall out of favor compared to unified reprocessing (Kappa), and why must replays window by event time instead of processing time? *(Section 2)*
+4. When a user clicks Pay on shaky cellular and the HTTP response drops after `COMMIT`, why do neither TCP sequence numbers nor serializable isolation stop a double-charge? *(Section 5)*
+5. How can a multishard payment reserve funds and credit a payee on another shard with zero distributed locks, and when should a business prefer compensating apologies over pre-write locks? *(Section 5, Section 6)*
+
+</En>
+
+<Vi>
+
+Nhận ra điểm mấu chốt nơi tính nguyên tử trú ngụ trong mô hình tháo rời chưa? **Ghi yêu cầu đầu vào vào log Shard A chính là điểm commit nguyên tử duy nhất.** Vì stream processor của Shard A đọc tuần tự một phân vùng trên đúng một luồng và giữ sổ `seen_ids`, ngay cả khi nó sập đúng lúc chuẩn bị phát event sang Shard B, cơ chế chạy lại tất định sẽ phát lại y hệt event `req-7f9a` và Shard B tự loại bỏ bản trùng.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **End-to-end argument (lập luận đầu-cuối)**: nguyên tắc (Saltzer, Reed & Clark, 1984) khẳng định các tầng bên dưới như TCP không thể tự bảo đảm tính đúng đắn ở tầng nghiệp vụ; chính client và server ở hai đầu cuối phải chia sẻ mã định danh tường minh.
+- **Idempotency key (`request_id`)**: mã duy nhất do client sinh ra cho mỗi lần người dùng bấm nút để server nhận ra bản thử lại và bỏ qua, tránh chạy lặp tác dụng phụ.
+- **Exponential backoff with jitter (chờ tăng dần có nhiễu)**: tăng thời gian nghỉ theo cấp số nhân giữa các lần gửi lại kèm một khoảng trễ ngẫu nhiên để không đánh sập server vừa hồi phục (lỗi bầy đàn thundering herd).
+- **Partitioned sequential log (log phân vùng tuần tự)**: gom mọi sự kiện cùng một khoá (như Tài khoản gửi A) vào một phân vùng đọc tuần tự trên một luồng để kiểm tra số dư và xung đột hoàn toàn tất định mà không cần khóa phân tán.
+
+</Concepts>
+
+---
+
+## 6. Tính kịp thời, toàn vẹn và tự kiểm toán
+
+Người ta hay dùng từ "consistency" (nhất quán) như thể nó chỉ có một nghĩa. Nên tách chữ đó ra thành hai cam kết rất rạch ròi, vì nhầm hai thứ này khiến ta tối ưu sai chỗ:
+
+- **Tính kịp thời (timeliness)**: dữ liệu bạn đọc tươi tới đâu (linearizability, đọc-thấy-thứ-mình-vừa-ghi). Kịp thời bị chậm thì thấy dữ liệu cũ vài giây — hơi khó chịu, nhưng chỉ tạm thời vì chờ một lát là tự đúng.
+- **Tính toàn vẹn (integrity)**: không mất dữ liệu, không trừ tiền hai lần, không lệch tổng số dư. Một khi toàn vẹn bị vỡ, chờ tới sang năm dữ liệu vẫn sai cho tới khi có người viết script đi sửa.
+
+| Thuộc tính | Hậu quả nếu vi phạm | Chờ thêm có tự khỏi không? | Ví dụ thực tế |
+|---|---|---|---|
+| **Tính kịp thời (Timeliness)** | Đọc phải bản cũ hoặc cập nhật trễ | Có, cuối cùng sẽ bắt kịp | Ly cà phê mới quẹt chưa hiện trên sao kê hôm nay |
+| **Tính toàn vẹn (Integrity)** | Mất tiền, trùng giao dịch, sai tổng | Không — hỏng vĩnh viễn | Bị trừ $22 thay vì $11, hoặc sổ cái không cân |
+
+Transaction ACID truyền thống gói cả tính kịp thời lẫn tính toàn vẹn vào chung một rổ. Kiến trúc luồng dữ liệu hướng sự kiện **tách riêng hai thứ này**: nó chấp nhận nới lỏng tính kịp thời đồng bộ giữa các shard, nhưng siết cực chặt tính toàn vẹn bằng log bất biến, hàm biến đổi tất định và lọc trùng `request_id` đầu-cuối.
+
+### Ký ức, phỏng đoán và lời xin lỗi
+
+Như Pat Helland viết trong bài *Memories, Guesses, and Apologies* (và *Building on Quicksand*), những ràng buộc duy nhất cứng — như giữ tên đăng nhập không trùng hay bán chiếc ghế cuối cùng — chắc chắn đòi hỏi điều phối đồng bộ trên khoá đó. Thế nhưng ngoài đời thực, phần lớn nghiệp vụ lại cố tình dùng **ràng buộc nới lỏng (loosely interpreted constraints)** thay vì đóng băng mọi người dùng chờ khóa toàn cục.
+
+Hãng hàng không cố tình bán quá số ghế vì tính trước sẽ có khách lỡ chuyến; khách sạn đặt dư phòng; xe nâng trong kho thi thoảng cán vỡ thùng hàng. Ở tất cả các tình huống đó, hệ thống cứ nhận đơn lạc quan trước (một **phỏng đoán / guess** dựa trên **ký ức / memories** cục bộ), kiểm tra ràng buộc thật sau, và kích hoạt một **giao dịch bù trừ (compensating transaction)** — tức là một **lời xin lỗi (apology)**: hoàn tiền, tặng voucher, nâng hạng phòng hay thu phí thấu chi — nếu cung thực tế không kịp cầu. Vì đằng nào bạn cũng phải viết quy trình xin lỗi cho sự cố vật lý hay hủy chuyến bay, việc né khóa toàn cục giúp hệ thống đa vùng địa lý vừa nhanh vừa sống dai mà vẫn giữ nguyên vẹn sổ sách tài chính.
+
+### Tin tưởng, nhưng phải kiểm chứng
+
+Mọi chứng minh phân tán đều dựa trên một mô hình giả định khá đẹp: ổ đĩa ghi xong `fsync` là còn nguyên, CPU nhân chia không sai, database giữ `UNIQUE` chuẩn chỉ. Thực tế phũ hơn nhiều. Bit trên RAM hay ổ đĩa vẫn lật ngầm; chính MySQL từng dính lỗi (`#73170`) cho phép lọt bản ghi trùng trong unique index phụ, còn PostgreSQL cũng từng phải vá lỗi biên ở mức cô lập serializable.
+
+Vì vậy những kho lưu trữ khổng lồ như Amazon S3 hay HDFS không bao giờ tin ổ đĩa tuyệt đối — chúng chạy tiến trình quét ngầm (scrubbing) liên tục đọc lại từng file, so checksum giữa các bản sao và chuyển dữ liệu khỏi ổ sắp hỏng. Đó cũng là lý do các team kỹ thuật kỷ luật luôn định kỳ diễn tập khôi phục bản sao lưu (restore backup) trước khi sự cố thật phơi bày ra rằng file backup bấy lâu nay trống rỗng.
+
+Luồng dữ liệu dựng từ sự kiện biến việc **tự kiểm toán liên tục (continuous self-auditing)** thành chuyện khả thi. Vì đầu vào nằm gọn trong log bất biến và đầu ra sinh bởi hàm tất định, bạn có thể cho chạy lại một đường ống đối chiếu song song để kiểm checksum, chạy **gỡ lỗi du hành thời gian (time-travel debugging)** xem nguyên nhân gốc của một sai lệch, hoặc tiến xa hơn với **Merkle tree** mật mã học. Hệ thống **Certificate Transparency** (RFC 9162) đã chứng minh cách làm này chạy mượt ở quy mô toàn internet: các tổ chức cấp chứng chỉ ghi mọi chứng chỉ TLS vào log chỉ nối thêm có kiểm chứng bằng Merkle tree với một leader mỗi log — tránh được gánh nặng đồng thuận kiểu blockchain mà vẫn giúp trình duyệt và chủ tên miền bắt tận tay chứng chỉ giả mạo ngay lập tức.
+
+<Callout type="tip" title="Bắt đầu tự kiểm toán mà không cần đập đi xây lại">
+Bạn chưa cần tới Merkle tree ngay ngày đầu để áp dụng tinh thần "tin tưởng, nhưng phải kiểm chứng". Hãy bắt đầu bằng một job đối soát hàng đêm cộng tổng toàn bộ sự kiện đầu vào bất biến rồi đối chiếu với số dư trên sổ suy xuất, và mỗi tháng thử khôi phục một bản backup vào database nháp.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Timeliness vs. integrity (kịp thời vs. toàn vẹn)**: *kịp thời* là nhìn thấy dữ liệu mới ngay tức khắc; *toàn vẹn* là dữ liệu không bao giờ bị mất, trùng lặp hay mâu thuẫn.
+- **Compensating transaction (giao dịch bù trừ / lời xin lỗi)**: một hành động sửa sai xuôi chiều sau đó (hoàn tiền, tặng mã giảm giá, gửi mail xin lỗi) để giải quyết vi phạm sau một lần ghi lạc quan, thay vì khóa chặn trước lúc ghi.
+- **Coordination avoidance (né điều phối đồng bộ)**: thiết kế thao tác sao cho từng shard hay vùng địa lý xử lý cục bộ mà không cần khóa chéo mạng, chỉ giữ khóa đồng bộ trước những hành động ngoài đời không thể hoàn tác.
+- **Merkle tree**: cây băm mật mã mà chỉ cần sửa một bản ghi lá là mã băm gốc thay đổi theo, giúp chứng minh gọn nhẹ một bản ghi thực sự nằm trong log bất biến.
+- **Certificate Transparency (RFC 9162)**: cơ chế kiểm toán mở ghi nhận mọi chứng chỉ TLS vào các log công khai có kiểm chứng bằng Merkle tree để không chứng chỉ giả nào lọt lưới âm thầm.
+
+</Concepts>
+
+---
+
+## Điểm rút ra
+
+- **Dồn mọi lệnh ghi qua một file log chung, đừng dùng dual write.** Tự ghi thẳng vào hai kho khác nhau làm các lệnh song song dễ lệch thứ tự; nuôi các index và cache từ một log có thứ tự giúp cô lập lỗi và tránh phân kỳ dữ liệu.
+- **Làm migration dữ liệu theo kiểu đường ray ba thanh.** Chạy song song khung nhìn cũ và mới từ cùng một log gốc, chuyển dần lưu lượng từ 1% lên 100%, và luôn giữ đường quay đầu tức thì để đội ngũ dám tiến hóa schema.
+- **Dịch ranh giới đường ghi/đọc sát về phía người dùng.** Đẩy thay đổi trạng thái qua SSE hoặc WebSocket theo log offset giúp ứng dụng web và mobile phản hồi tức thì từ bộ nhớ máy và tự bắt kịp sau khi rớt mạng.
+- **Truyền `request_id` từ đầu client xuyên tới tận điểm chốt cuối cùng.** Cơ chế chống lặp gói tin của TCP hay transaction SQL đơn lẻ không nhận ra cú retry sau khi đứt kết nối HTTP; phải đưa mã định danh từ client xuống tận khóa `UNIQUE` hoặc consumer log phân vùng.
+- **Bảo vệ tính toàn vẹn gắt hơn tính kịp thời, và tự kiểm toán liên tục.** Tách bài toán đọc tươi khỏi bài toán sổ sách không sai lệch bằng quy trình bù trừ khi nghiệp vụ cho phép, và luôn chạy kiểm tra đối soát đầu-cuối vì ổ đĩa, mạng và cả database đều có lúc lỗi.
+
+---
+
+## Câu hỏi ôn tập
+
+1. Vì sao hai lệnh cập nhật chạy song song có thể làm PostgreSQL và Elasticsearch lệch nhau vĩnh viễn dưới cơ chế dual write, và Change Data Capture (CDC) giải quyết chuyện đó thế nào mà không cần 2PC? *(Phần 1)*
+2. Trong lỗi race condition hủy kết bạn rồi mới gửi tin nhắn giữa các microservice, vì sao CRDT không chặn được thông báo bị lọt, và cần đính kèm metadata nhân quả nào để xử lý đúng? *(Phần 1)*
+3. Vì sao kiến trúc Lambda dần nhường chỗ cho mô hình xử lý lại hợp nhất (Kappa), và vì sao khi chạy lại lịch sử bắt buộc phải chia cửa sổ theo event time thay vì processing time? *(Phần 2)*
+4. Khi người dùng bấm thanh toán trên mạng di động chập chờn và phản hồi HTTP rớt ngay sau lúc `COMMIT`, vì sao cả số thứ tự TCP lẫn cô lập serializable đều không ngăn được việc trừ tiền hai lần? *(Phần 5)*
+5. Làm thế nào một giao dịch chuyển tiền liên shard vừa giữ được tiền ở người gửi vừa cộng cho người nhận bên shard kia mà không cần khóa phân tán, và khi nào doanh nghiệp nên chọn giao dịch bù trừ thay vì khóa trước lúc ghi? *(Phần 5, Phần 6)*
+
+</Vi>

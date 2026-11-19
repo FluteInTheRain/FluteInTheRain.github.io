@@ -1,0 +1,1069 @@
+---
+title: "Old code will read your new data: encoding and schema evolution through real failures"
+title_vi: "Code cũ sẽ đọc dữ liệu mới của bạn: encoding và tiến hoá schema qua những sự cố có thật"
+description: "Knight Capital's reused flag, Java deserialization exploits, Twitter's id_str, Stripe's API versions: how to change data formats without breaking readers."
+description_vi: "Một cờ cũ bị dùng lại làm Knight Capital mất 460 triệu đô trong 45 phút. Cách mã hoá dữ liệu và đổi schema để code cũ và code mới chạy cùng lúc mà không vỡ."
+date: 2026-11-18
+category: "system-design"
+tags: ["ddia", "encoding", "serialization", "protobuf", "avro", "schema-evolution", "api-versioning", "rolling-upgrade"]
+draft: true
+sources:
+  - { title: "Designing Data-Intensive Applications, 2nd Edition", author: "Martin Kleppmann & Chris Riccomini", chapters: "Ch. 5", url: "https://dataintensive.net/" }
+  - { title: "In the Matter of Knight Capital Americas LLC (Release No. 34-70694)", author: "U.S. Securities and Exchange Commission", url: "https://www.sec.gov/litigation/admin/2013/34-70694.pdf" }
+  - { title: "What Do WebLogic, WebSphere, JBoss, Jenkins, OpenNMS, and Your Application Have in Common? This Vulnerability.", author: "Steve Breen (FoxGlove Security)", url: "https://foxglovesecurity.com/2015/11/06/what-do-weblogic-websphere-jboss-jenkins-opennms-and-your-application-have-in-common-this-vulnerability/" }
+  - { title: "pickle: Python object serialization", author: "Python documentation", url: "https://docs.python.org/3/library/pickle.html" }
+  - { title: "X IDs", author: "X Developer Platform documentation", url: "https://docs.x.com/fundamentals/x-ids" }
+  - { title: "How Uber Engineering Evaluated JSON Encoding and Compression Algorithms to Put the Squeeze on Trip Data", author: "Kåre Kjelstrøm (Uber)", url: "https://www.uber.com/en-US/blog/trip-data-squeeze-json-encoding-compression/" }
+  - { title: "Proto Best Practices (dos and don'ts)", author: "Protocol Buffers documentation", url: "https://protobuf.dev/best-practices/dos-donts/" }
+  - { title: "Language Guide (proto 3): Updating a message type, Unknown fields", author: "Protocol Buffers documentation", url: "https://protobuf.dev/programming-guides/proto3/" }
+  - { title: "Protocol Buffers v3.5.0 release notes", author: "protocolbuffers/protobuf on GitHub", url: "https://github.com/protocolbuffers/protobuf/releases/tag/v3.5.0" }
+  - { title: "Apache Avro 1.12.0 Specification: Schema Resolution", author: "Apache Software Foundation", url: "https://avro.apache.org/docs/1.12.0/specification/" }
+  - { title: "Schema Evolution and Compatibility for Schema Registry", author: "Confluent documentation", url: "https://docs.confluent.io/platform/current/schema-registry/fundamentals/schema-evolution.html" }
+  - { title: "Avoiding downtime in migrations", author: "GitLab development documentation", url: "https://docs.gitlab.com/development/database/avoiding_downtime_in_migrations/" }
+  - { title: "PostgreSQL documentation: ALTER TABLE", url: "https://www.postgresql.org/docs/current/sql-altertable.html" }
+  - { title: "APIs as infrastructure: future-proofing Stripe with versioning", author: "Brandur Leach (Stripe)", url: "https://stripe.com/blog/api-versioning" }
+  - { title: "Temporal documentation: Workflow Definition (deterministic constraints, versioning)", url: "https://docs.temporal.io/workflow-definition" }
+  - { title: "Temporal documentation: Versioning in the Python SDK", url: "https://docs.temporal.io/develop/python/versioning" }
+  - { title: "Rosetta Stone (photo, CC BY-SA 4.0)", author: "Hans Hillewaert, Wikimedia Commons", url: "https://commons.wikimedia.org/wiki/File:Rosetta_Stone.JPG" }
+---
+
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import En from '../../components/mdx/En.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import RollingUpgrade from '../../components/mdx/RollingUpgrade.astro';
+import EncoderPlayground from '../../components/mdx/EncoderPlayground.astro';
+import SchemaEvolution from '../../components/mdx/SchemaEvolution.astro';
+import SchemaColumnReleases from '../../components/mdx/SchemaColumnReleases.astro';
+import StripeVersionChain from '../../components/mdx/StripeVersionChain.astro';
+import EncodingKnightFleet from '../../components/mdx/EncodingKnightFleet.astro';
+import EncodingDeserializeFlow from '../../components/mdx/EncodingDeserializeFlow.astro';
+import EncodingBrokerFlow from '../../components/mdx/EncodingBrokerFlow.astro';
+import figureUberSize from '../../assets/blog/encoding-and-schema-evolution/uber-encoding-size.png';
+import figureStripeDocs from '../../assets/blog/encoding-and-schema-evolution/stripe-docs-version-warning.png';
+import figureRosetta from '../../assets/blog/encoding-and-schema-evolution/rosetta-stone.jpg';
+
+<En>
+
+<Figure src={figureRosetta} alt="The Rosetta Stone in the British Museum: a dark granite slab carved with three bands of text, hieroglyphs at the top, Demotic in the middle and Greek at the bottom" caption="One decree from 196 BC, written in three scripts. Scholars could read the Greek, and that known version is what let them decode the other two. Every reader of encoded data needs the same thing: some way to know what the writer meant. Photo: Hans Hillewaert, CC BY-SA 4.0." sourceTitle="Wikimedia Commons: Rosetta Stone" sourceUrl="https://commons.wikimedia.org/wiki/File:Rosetta_Stone.JPG" />
+
+> "Everything changes and nothing stands still."
+> &mdash; *Heraclitus*, as quoted by Plato
+
+### What happened at Knight Capital
+
+On 1 August 2012 the New York Stock Exchange opened a new Retail Liquidity Program, and Knight Capital wanted its order router, SMARS, ready for it. The new code reused a flag. Years earlier, that same flag had switched on a feature called Power Peg, which Knight had stopped using in 2003 but never deleted.
+
+The deploy started on 27 July and went out a few servers at a time. According to the SEC's order, a technician did not copy the new code to one of the eight SMARS servers, and nobody checked. On 1 August, orders arrived with the flag set. Seven servers read it with its new meaning. The eighth read it with its old meaning and ran Power Peg.
+
+In about 45 minutes, the 212 orders that hit the old code turned into more than 4 million executions in 154 stocks. Knight lost $460 million. Trying to fix it, the team removed the new code from the seven good servers, and that made it worse: now they read the flag the old way too.
+
+<EncodingKnightFleet />
+
+Nothing was wrong with the network or the hardware. A message written by new code was read by old code, and the bytes meant something else to it. That is the subject of this post: how you turn data into bytes, and how you keep those bytes readable while the code on both ends keeps changing. The rest of the post goes through it with real cases:
+
+1. **Old and new code at the same time**: why compatibility runs in two directions, with Knight's deploy as a simulation.
+2. **Your language's built-in format**: Java deserialization exploits and Python's pickle.
+3. **JSON and its blind spots**: why X sends every post ID twice, and why Uber chose MessagePack.
+4. **Binary formats with a schema**: Protocol Buffers and Avro, byte by byte.
+5. **Changing a schema safely**: which changes break which readers, and why you never reuse a field.
+6. **Data outlives code**: databases, and how GitLab drops a column.
+7. **APIs you cannot take back**: Stripe's date-based API versions.
+8. **Workflows replay your code**: durable execution with Temporal.
+9. **Messages through a broker**: schema registries and the order you upgrade in.
+
+<Callout type="note" title="TL;DR">
+In any system that deploys without downtime, old and new versions of your code run at the same time and read each other's data. So every format change has to work in two directions: new code reading old data (backward compatibility) and old code reading new data (forward compatibility). Language-native formats such as Java serialization and pickle are dangerous and hard to evolve. JSON is everywhere but vague about numbers. Protocol Buffers and Avro give compact bytes and clear rules for adding and removing fields. The rules only protect you if you follow them: never reuse a field number or a flag, give new fields defaults, and upgrade readers before writers start sending something new.
+</Callout>
+
+<Concepts>
+
+- **Encoding (serialization)**: turning an in-memory object into a sequence of bytes you can store or send. **Decoding** turns bytes back into an object.
+- **Schema**: a description of the fields a record has and their types.
+- **Rolling upgrade**: deploying a new version to a few servers at a time instead of all at once, so the service never goes down.
+- **Flag**: a field whose value switches some behavior on or off.
+- **Order router**: trading software that splits a customer's order into smaller orders and sends them to exchanges.
+
+</Concepts>
+
+---
+
+## 1. Old and new code at the same time
+
+When you change what a record looks like, you change the code that reads and writes it. But in a real system the code cannot change everywhere at once:
+
+- On servers, a **rolling upgrade** deploys the new version a few machines at a time, watching for errors. For a while some machines run v1 and some run v2.
+- On phones and desktops, users update when they feel like it. Some run last year's app.
+
+So the same data meets different code. There are two directions to name:
+
+| Direction | Who reads what | How hard |
+|---|---|---|
+| **Backward compatible** | New code reads data written by old code | Usually easy: you wrote the new code knowing the old format |
+| **Forward compatible** | Old code reads data written by new code | Harder: the old code has to cope with things it has never seen |
+
+Forward compatibility is like a note to a colleague who has not read the new process doc: it should still make sense to them, or at least not mislead them.
+
+Knight Capital broke forward compatibility in the worst way. Old code did not reject the new flag; it understood it, just as something else. A loud failure ("unknown field") would have cost far less than a quiet wrong answer.
+
+There is one more detail from the SEC's order. Before the market opened, Knight's systems sent 97 automated emails mentioning "Power Peg disabled". They were not designed as alerts, and nobody read them. The one signal that v1 code was still running went to an inbox.
+
+</En>
+
+<Vi>
+
+<Figure src={figureRosetta} alt="Phiến đá Rosetta ở Bảo tàng Anh: một phiến đá granit sẫm màu khắc ba dải chữ, chữ tượng hình ở trên, chữ Demotic ở giữa và chữ Hy Lạp ở dưới" altVi="Phiến đá Rosetta ở Bảo tàng Anh: một phiến đá granit sẫm màu khắc ba dải chữ, chữ tượng hình ở trên, chữ Demotic ở giữa và chữ Hy Lạp ở dưới" caption="One decree from 196 BC, written in three scripts. Scholars could read the Greek, and that known version is what let them decode the other two. Every reader of encoded data needs the same thing: some way to know what the writer meant. Photo: Hans Hillewaert, CC BY-SA 4.0." captionVi="Một sắc lệnh năm 196 TCN, viết bằng ba loại chữ. Giới học giả đọc được bản Hy Lạp, và chính bản đã biết đó giúp họ giải mã hai bản còn lại. Ai đọc dữ liệu đã mã hoá cũng cần đúng thứ ấy: một cách để biết người viết muốn nói gì. Ảnh: Hans Hillewaert, CC BY-SA 4.0." sourceTitle="Wikimedia Commons: Rosetta Stone" sourceUrl="https://commons.wikimedia.org/wiki/File:Rosetta_Stone.JPG" />
+
+> "Mọi thứ đều thay đổi, không gì đứng yên."
+> &mdash; *Heraclitus*, qua lời Plato
+
+### Chuyện gì đã xảy ra ở Knight Capital
+
+Ngày 1/8/2012, sàn chứng khoán New York mở một chương trình mới tên Retail Liquidity Program, và Knight Capital muốn bộ định tuyến lệnh SMARS của mình sẵn sàng cho nó. Code mới dùng lại một cờ (flag). Nhiều năm trước, chính cái cờ ấy từng bật một tính năng tên Power Peg, thứ Knight đã ngừng dùng từ 2003 nhưng chưa bao giờ xoá.
+
+Đợt deploy bắt đầu ngày 27/7, mỗi lần vài server. Theo quyết định của SEC, một kỹ thuật viên đã không chép code mới lên một trong tám server SMARS, và không ai kiểm tra lại. Ngày 1/8, lệnh đổ về với cờ được bật. Bảy server hiểu cờ theo nghĩa mới. Server thứ tám hiểu theo nghĩa cũ và chạy Power Peg.
+
+Trong khoảng 45 phút, 212 lệnh rơi vào code cũ biến thành hơn 4 triệu lần khớp lệnh trên 154 mã cổ phiếu. Knight mất 460 triệu đô. Trong lúc chữa cháy, team gỡ code mới khỏi bảy server đang chạy đúng, và mọi thứ còn tệ hơn: giờ thì cả bảy cũng hiểu cờ theo kiểu cũ.
+
+<EncodingKnightFleet />
+
+Mạng không hỏng, phần cứng cũng không. Một message do code mới ghi được code cũ đọc, và với code cũ thì mấy byte đó mang nghĩa khác. Đó chính là chủ đề của bài này: biến dữ liệu thành byte ra sao, và giữ cho mấy byte đó đọc được thế nào khi code ở cả hai đầu cứ thay đổi. Bài này đi qua từng phần bằng các vụ việc có thật:
+
+1. **Code cũ và code mới chạy cùng lúc**: vì sao tương thích phải tính cả hai chiều, kèm mô phỏng đợt deploy của Knight.
+2. **Định dạng có sẵn của ngôn ngữ**: lỗ hổng deserialization của Java và pickle của Python.
+3. **JSON và những điểm mù**: vì sao X gửi ID mỗi bài đăng hai lần, và vì sao Uber chọn MessagePack.
+4. **Định dạng nhị phân có schema**: Protocol Buffers và Avro, soi từng byte.
+5. **Đổi schema mà không làm vỡ ai**: thay đổi nào làm hỏng bên đọc nào, và vì sao không bao giờ được dùng lại một trường.
+6. **Dữ liệu sống lâu hơn code**: database, và cách GitLab xoá một cột.
+7. **API đã phát hành thì không rút lại được**: phiên bản API theo ngày của Stripe.
+8. **Workflow chạy lại code của bạn**: durable execution với Temporal.
+9. **Message đi qua broker**: schema registry và thứ tự nâng cấp.
+
+<Callout type="note" title="Tóm tắt nhanh">
+Ở hệ thống nào deploy không downtime, code cũ và code mới sẽ chạy cùng lúc và đọc dữ liệu của nhau. Nên mọi thay đổi định dạng phải chạy được theo hai chiều: code mới đọc dữ liệu cũ (tương thích ngược, backward compatibility) và code cũ đọc dữ liệu mới (tương thích xuôi, forward compatibility). Định dạng riêng của ngôn ngữ như Java serialization hay pickle vừa nguy hiểm vừa khó tiến hoá. JSON có mặt khắp nơi nhưng mập mờ về số. Protocol Buffers và Avro cho byte gọn và luật rõ ràng khi thêm hay bớt trường. Luật chỉ bảo vệ bạn nếu bạn theo nó: không bao giờ dùng lại số trường hay một cờ cũ, cho trường mới giá trị mặc định, và nâng cấp bên đọc trước khi bên ghi bắt đầu gửi thứ mới.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Encoding / serialization (mã hoá, tuần tự hoá)**: biến một object trong bộ nhớ thành chuỗi byte để lưu hoặc gửi đi. **Decoding (giải mã)** là biến byte ngược lại thành object.
+- **Schema**: bản mô tả một bản ghi có những trường nào và mỗi trường kiểu gì.
+- **Rolling upgrade (nâng cấp cuốn chiếu)**: deploy phiên bản mới lên vài server một lần thay vì tất cả cùng lúc, để dịch vụ không phải dừng.
+- **Flag (cờ)**: một trường mà giá trị của nó bật hoặc tắt một hành vi nào đó.
+- **Order router (bộ định tuyến lệnh)**: phần mềm giao dịch chia lệnh của khách thành các lệnh nhỏ hơn rồi gửi tới các sàn.
+
+</Concepts>
+
+---
+
+## 1. Code cũ và code mới chạy cùng lúc
+
+Khi bạn đổi hình dạng của một bản ghi, bạn cũng đổi code đọc và ghi nó. Nhưng trong hệ thống thật, code không thể đổi ở mọi nơi cùng lúc:
+
+- Ở phía server, **rolling upgrade** deploy phiên bản mới lên vài máy một lần, vừa làm vừa theo dõi lỗi. Trong một khoảng thời gian, có máy chạy v1, có máy chạy v2.
+- Ở điện thoại và máy tính, người dùng cập nhật khi họ thích. Có người vẫn chạy bản app của năm ngoái.
+
+Vậy là cùng một dữ liệu sẽ gặp những đoạn code khác nhau. Cần gọi tên hai chiều:
+
+| Chiều | Ai đọc cái gì | Độ khó |
+|---|---|---|
+| **Tương thích ngược (backward)** | Code mới đọc dữ liệu do code cũ ghi | Thường dễ: bạn viết code mới khi đã biết định dạng cũ |
+| **Tương thích xuôi (forward)** | Code cũ đọc dữ liệu do code mới ghi | Khó hơn: code cũ phải đối phó với thứ nó chưa từng thấy |
+
+Tương thích xuôi giống như để lại lời nhắn cho một đồng nghiệp chưa đọc tài liệu quy trình mới: họ vẫn phải hiểu được, hoặc ít nhất là không bị hiểu sai.
+
+Knight Capital làm hỏng tương thích xuôi theo cách tệ nhất. Code cũ không từ chối cái cờ mới; nó hiểu cờ đó, chỉ là hiểu thành chuyện khác. Một lỗi ồn ào kiểu "trường lạ" còn rẻ hơn nhiều so với một câu trả lời sai mà im lặng.
+
+Còn một chi tiết nữa trong quyết định của SEC. Trước giờ mở cửa, hệ thống của Knight đã gửi 97 email tự động có dòng "Power Peg disabled". Chúng không được thiết kế làm cảnh báo, và không ai đọc. Tín hiệu duy nhất cho thấy code v1 vẫn đang chạy thì nằm im trong hộp thư.
+
+</Vi>
+
+<RollingUpgrade />
+
+<En>
+
+Play with it and three things show up. With an optional field, the mixed fleet is fine in every order. With a field v2 requires, the errors come from v2 servers meeting messages from clients that have not updated: a backward problem. With a reused flag, the trouble starts only when the new field is turned on while any v1 is still around, and rolling back servers adds more v1 readers, just as Knight found.
+
+There is one more case to watch for. Old code reads a record that has a new field, updates some other field, and writes the record back. If the old code decoded into an object that has no slot for the unknown field, the field is gone. Forward compatibility means old code reads new data *and* leaves alone what it does not understand.
+
+<Concepts>
+
+- **Backward compatibility**: newer code can read data that older code wrote.
+- **Forward compatibility**: older code can read data that newer code wrote, ignoring what it does not know.
+- **Rollback**: going back to the previous version after a bad deploy. It only helps if the old version can read whatever the new version already wrote.
+- **Unknown field**: a field in the data that the reading code's schema does not have.
+
+</Concepts>
+
+---
+
+## 2. Your language's built-in format
+
+Most languages can turn any object into bytes with one call: Java has `java.io.Serializable`, Python has `pickle`, Ruby has `Marshal`. It is convenient. It has four problems: the bytes tie you to one language, versioning is an afterthought, the encodings are often slow and large, and, worst, decoding can create objects of any class.
+
+That last one is a security hole, not a style issue. To rebuild an object, the decoder has to find its class and run code that belongs to it. If an attacker controls the bytes, they choose which class and which code.
+
+### The Java deserialization bug nobody patched for months
+
+In January 2015, Gabriel Lawrence and Chris Frohoff presented a talk called "Marshalling Pickles". They showed that the widely used Apache Commons Collections library contained classes that, when Java deserialized them in a crafted order, ran an operating-system command.
+
+More than nine months later, Steve Breen of FoxGlove Security wrote that "the world didn't seem to care". He published working pre-authentication remote-code-execution exploits for WebLogic, WebSphere, JBoss, Jenkins and OpenNMS, all on their newest versions. None of those products accepted serialized Java from users on purpose. They just had an endpoint somewhere that read a serialized object, and Commons Collections sitting on the classpath.
+
+<EncodingDeserializeFlow />
+
+### Python's pickle does the same, by design
+
+Python's documentation opens its pickle page with a warning box: "The pickle module is not secure. Only unpickle data you trust." Here is why, in a few lines you can run. An object tells pickle how to rebuild it, and that recipe can be any function:
+
+</En>
+
+<Vi>
+
+Bấm thử thì ba điều sẽ lộ ra. Với một trường tuỳ chọn, cả đội server lẫn lộn phiên bản vẫn ổn dù bạn làm theo thứ tự nào. Với một trường mà v2 bắt buộc phải có, lỗi đến từ server v2 gặp message của client chưa cập nhật: đó là lỗi tương thích ngược. Với một cờ bị dùng lại, rắc rối chỉ bắt đầu khi trường mới được bật trong lúc vẫn còn v1 ở đâu đó, và rollback server chỉ thêm bên đọc v1, đúng như Knight đã gặp.
+
+Còn một trường hợp nữa cần để ý. Code cũ đọc một bản ghi có trường mới, sửa một trường khác, rồi ghi bản ghi trở lại. Nếu code cũ giải mã vào một object không có chỗ cho trường lạ, trường đó mất luôn. Tương thích xuôi nghĩa là code cũ đọc được dữ liệu mới *và* để yên những gì nó không hiểu.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Backward compatibility (tương thích ngược)**: code mới đọc được dữ liệu do code cũ ghi.
+- **Forward compatibility (tương thích xuôi)**: code cũ đọc được dữ liệu do code mới ghi, bỏ qua những gì nó không biết.
+- **Rollback (quay lui)**: trở về phiên bản trước sau một lần deploy hỏng. Chỉ có ích nếu bản cũ đọc được những gì bản mới đã kịp ghi.
+- **Unknown field (trường lạ)**: một trường có trong dữ liệu nhưng schema của code đang đọc không có.
+
+</Concepts>
+
+---
+
+## 2. Định dạng có sẵn của ngôn ngữ
+
+Hầu hết ngôn ngữ đều biến được mọi object thành byte chỉ bằng một lệnh: Java có `java.io.Serializable`, Python có `pickle`, Ruby có `Marshal`. Tiện thật. Nó có bốn vấn đề: byte trói bạn vào một ngôn ngữ, chuyện phiên bản bị bỏ ngỏ, kết quả thường chậm và to, và tệ nhất là bước giải mã có thể tạo ra object thuộc bất kỳ class nào.
+
+Điểm cuối cùng là một lỗ hổng bảo mật, không phải chuyện phong cách. Để dựng lại một object, bộ giải mã phải tìm class của nó và chạy code thuộc class đó. Nếu kẻ tấn công kiểm soát được byte, họ được chọn class nào và code nào.
+
+### Lỗi deserialization của Java mà nhiều tháng không ai vá
+
+Tháng 1/2015, Gabriel Lawrence và Chris Frohoff trình bày một talk tên "Marshalling Pickles". Họ chỉ ra rằng thư viện Apache Commons Collections, thứ được dùng cực rộng rãi, có những class mà khi Java deserialize theo một thứ tự được sắp đặt thì sẽ chạy một lệnh của hệ điều hành.
+
+Hơn chín tháng sau, Steve Breen của FoxGlove Security viết rằng "thế giới có vẻ chẳng quan tâm". Anh công bố các exploit thực thi code từ xa, không cần đăng nhập, cho WebLogic, WebSphere, JBoss, Jenkins và OpenNMS, đều là phiên bản mới nhất. Không sản phẩm nào trong số đó cố ý nhận Java serialized từ người dùng. Chúng chỉ có một endpoint ở đâu đó đọc một object đã serialize, và Commons Collections nằm sẵn trên classpath.
+
+<EncodingDeserializeFlow />
+
+### pickle của Python cũng vậy, theo thiết kế
+
+Tài liệu Python mở đầu trang pickle bằng một khung cảnh báo: "Module pickle không an toàn. Chỉ unpickle dữ liệu bạn tin tưởng." Lý do nằm gọn trong vài dòng bạn chạy được. Một object tự nói cho pickle cách dựng lại nó, và công thức đó có thể là bất kỳ hàm nào:
+
+</Vi>
+
+```python
+import pickle
+
+class Innocent:
+    def __reduce__(self):
+        # Tells pickle: "to rebuild me, call print(...)". Any callable works, os.system included.
+        return (print, ("this ran inside pickle.loads(), before you saw any object",))
+
+payload = pickle.dumps(Innocent())
+print(len(payload), "bytes received from the network")
+obj = pickle.loads(payload)
+print("loads returned:", obj)
+```
+
+<En>
+
+<TerminalOutput command="python3 pickle_demo.py" label="pickle.loads runs code chosen by whoever wrote the bytes" caption="Run on an Apple M2 laptop, Python 3.15.2. The function ran during loads; the 'object' you get back is just print's return value.">
+```text
+97 bytes received from the network
+this ran inside pickle.loads(), before you saw any object
+loads returned: None
+```
+</TerminalOutput>
+
+Swap `print` for `os.system` and the bytes run a shell command on whoever unpickles them. There is no bug to fix here; it is how pickle works.
+
+Uber's 2016 encoding study, which comes back in the next section, found a second, duller reason to avoid pickle: on their trip data it was larger than plain JSON.
+
+<Callout type="warning" title="Keep language-native formats inside one process">
+Use pickle, Java serialization or Marshal only for short-lived data your own process wrote, such as a local cache. Anything that crosses a network, lives in a database, or might come from a user needs a format whose decoder only builds plain data: JSON, Protocol Buffers, Avro.
+</Callout>
+
+<Concepts>
+
+- **Deserialization**: decoding bytes back into objects. The same thing as decoding; Java and Python use this word.
+- **Remote code execution (RCE)**: an attacker makes your server run code of their choice. The worst class of vulnerability.
+- **Pre-authentication**: works without logging in.
+- **Classpath**: the list of libraries a Java program can load classes from. A library you never call can still be on it.
+- **Gadget chain**: existing classes that, decoded in a crafted order, end up running a command. Commons Collections supplied one.
+
+</Concepts>
+
+---
+
+## 3. JSON and its blind spots
+
+JSON is the default for anything that crosses an organisation's boundary, and it will probably stay that way: getting different teams to agree on any format is the hard part, and everyone already agrees on JSON. Its weak spots are specific, and worth knowing by name.
+
+### Numbers: why X sends every ID twice
+
+JSON has one number type and does not say how precise it is. JavaScript reads every JSON number into a 64-bit floating-point value, which holds integers exactly only up to 2<sup>53</sup>. Twitter, now X, gives every post a 64-bit ID from its Snowflake service. Those IDs are bigger than 2<sup>53</sup>.
+
+X's developer docs say it plainly: in JavaScript "integers are limited to 53 bits", which "causes precision loss with large IDs". Their fix was to send each ID twice, as a number in `id` and as a string in `id_str`, and to tell developers to "always use string IDs in your code". In their v2 API, IDs are strings by default. Here is the failure, with an ID the size of a post ID:
+
+</En>
+
+<Vi>
+
+<TerminalOutput command="python3 pickle_demo.py" label="pickle.loads chạy code do người tạo ra byte quyết định" caption="Chạy trên laptop Apple M2, Python 3.15.2. Hàm đã chạy ngay trong loads; cái 'object' bạn nhận về chỉ là giá trị trả về của print.">
+```text
+97 bytes received from the network
+this ran inside pickle.loads(), before you saw any object
+loads returned: None
+```
+</TerminalOutput>
+
+Thay `print` bằng `os.system` là mấy byte đó chạy một lệnh shell trên máy của bất kỳ ai unpickle nó. Không có bug nào để sửa ở đây cả; pickle vốn hoạt động như vậy.
+
+Nghiên cứu về encoding năm 2016 của Uber, sẽ quay lại ở phần sau, còn tìm ra một lý do nữa, kém kịch tính hơn, để tránh pickle: với dữ liệu chuyến đi của họ, nó còn to hơn cả JSON thường.
+
+<Callout type="warning" title="Định dạng riêng của ngôn ngữ thì chỉ dùng trong một process">
+Chỉ dùng pickle, Java serialization hay Marshal cho dữ liệu sống ngắn do chính process của bạn ghi, kiểu cache cục bộ. Thứ gì đi qua mạng, nằm trong database, hay có thể đến từ người dùng thì cần một định dạng mà bộ giải mã chỉ dựng ra dữ liệu thuần: JSON, Protocol Buffers, Avro.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Deserialization (giải tuần tự hoá)**: giải mã byte thành object. Chính là decoding; Java và Python hay dùng chữ này.
+- **Remote code execution, RCE (thực thi code từ xa)**: kẻ tấn công khiến server của bạn chạy code họ chọn. Loại lỗ hổng nặng nhất.
+- **Pre-authentication (trước khi xác thực)**: khai thác được mà không cần đăng nhập.
+- **Classpath**: danh sách thư viện mà một chương trình Java có thể nạp class từ đó. Thư viện bạn chưa từng gọi vẫn có thể nằm trong đó.
+- **Gadget chain (chuỗi gadget)**: những class có sẵn mà khi giải mã theo thứ tự được sắp đặt sẽ dẫn tới việc chạy một lệnh. Commons Collections cung cấp đúng một chuỗi như vậy.
+
+</Concepts>
+
+---
+
+## 3. JSON và những điểm mù
+
+JSON là lựa chọn mặc định cho mọi thứ đi ra ngoài ranh giới một tổ chức, và nhiều khả năng nó sẽ còn như vậy: khó nhất là khiến các team khác nhau đồng ý một định dạng, mà JSON thì ai cũng đã đồng ý rồi. Điểm yếu của nó khá cụ thể, và đáng để gọi đúng tên.
+
+### Số: vì sao X gửi mỗi ID hai lần
+
+JSON chỉ có một kiểu số và không nói độ chính xác là bao nhiêu. JavaScript đọc mọi số JSON vào một giá trị dấu phẩy động 64 bit, thứ chỉ giữ chính xác số nguyên tới 2<sup>53</sup>. Twitter, nay là X, cấp cho mỗi bài đăng một ID 64 bit từ dịch vụ Snowflake. Các ID đó lớn hơn 2<sup>53</sup>.
+
+Tài liệu cho developer của X nói thẳng: trong JavaScript "số nguyên bị giới hạn ở 53 bit", điều này "gây mất độ chính xác với các ID lớn". Cách họ xử lý là gửi mỗi ID hai lần, dạng số ở `id` và dạng chuỗi ở `id_str`, rồi dặn developer "luôn dùng ID dạng chuỗi trong code". Ở API v2, ID mặc định là chuỗi. Đây là lỗi đó, với một ID cỡ ID bài đăng:
+
+</Vi>
+
+```js
+const body = '{"id": 1050118621198921728, "id_str": "1050118621198921728"}';
+const tweet = JSON.parse(body);
+console.log("id     ", tweet.id);
+console.log("id_str ", tweet.id_str);
+console.log("same?  ", String(tweet.id) === tweet.id_str);
+console.log("MAX_SAFE_INTEGER", Number.MAX_SAFE_INTEGER);
+console.log("2**53 + 1 === 2**53 ?", 2**53 + 1 === 2**53);
+```
+
+<En>
+
+<TerminalOutput command="node json_ids.js" label="JSON.parse rounds a 64-bit ID without any error" caption="Node.js 26.10 on an Apple M2. The ID is a made-up value of the same size as an X post ID. The number lost its last digits; the string kept them.">
+```text
+id      1050118621198921700
+id_str  1050118621198921728
+same?   false
+MAX_SAFE_INTEGER 9007199254740991
+2**53 + 1 === 2**53 ? true
+```
+</TerminalOutput>
+
+No exception, no warning. The ID just points to a different post. Money has the same problem: send amounts as integer minor units (cents) or as strings, never as floats.
+
+### Other gaps in JSON
+
+- **Binary data.** JSON has no type for raw bytes, so people encode them as Base64 text, which makes them about a third larger (3,000 bytes become 4,000).
+- **Schemas are optional.** JSON Schema exists and is widely used, but its default is an *open* content model: `additionalProperties` is true, so any field not listed is allowed. A schema then says what is forbidden, not what exists.
+- **Field names in every record.** Each record spells out every key. Binary versions of JSON such as MessagePack keep that, so they shrink data less than you might hope.
+
+### Uber's encoding test: the schema decided it
+
+In 2016 Uber stored trips as JSON blobs of about 20 KB each in its Schemaless datastore, and the data was piling up. The team benchmarked encodings and compressors on 2,219 anonymized New York trips. A few results from their post:
+
+| Finding | Number |
+|---|---|
+| Smallest result | Protocol Buffers with zlib, "just above 8%" of the raw JSON size |
+| Fastest encoder | Thrift, 1,548 ms against 6,535 ms for JSON |
+| Slowest | Python's pure Avro library, 211,540 ms, more than 32 times slower than JSON |
+| Pickle | "worse than just persisting raw JSON" |
+| The pick | MessagePack with zlib: 18.3 MB for the test set, against 132.9 MB of raw JSON |
+
+<Figure src={figureUberSize} alt="Horizontal bar chart of the encoded and compressed size of all test trips in MiB, from Protocol Buffers with zlib at the top (smallest, about 10) down to Pickle at the bottom (largest, about 155), with plain JSON second from the bottom" caption="Uber's own chart of the same test: total size of all trips under each encoding and compressor. Plain JSON sits near the largest end; Protocol Buffers with zlib is the smallest, and MessagePack with zlib is far below raw JSON." sourceTitle="Uber Engineering: JSON encoding and compression test" sourceUrl="https://www.uber.com/en-US/blog/trip-data-squeeze-json-encoding-compression/" />
+
+Why not Protocol Buffers, the smallest? Until autumn 2014, the JSON passed between Uber's services was not under strict schema enforcement, and an IDL-based format would have meant writing and enforcing schemas first. MessagePack needs no schema, so it fit the data they had. The format choice was really a choice about schemas.
+
+<Concepts>
+
+- **Floating point (double)**: the 64-bit number type JavaScript uses for all numbers. It holds integers exactly only up to 2<sup>53</sup>, about 9 quadrillion.
+- **Snowflake ID**: the 64-bit IDs Twitter (now X) gives posts and users, generated by an internal service called Snowflake.
+- **Base64**: a way to write arbitrary bytes using 64 safe text characters. Every 3 bytes become 4 characters.
+- **Open content model**: a schema that allows fields it does not list.
+- **MessagePack**: a binary encoding of the JSON data model. Smaller and faster to parse, but field names are still in every record.
+- **IDL (interface definition language)**: a small language for writing schemas, such as the `.proto` files of Protocol Buffers.
+- **zlib / Snappy**: general-purpose compressors. zlib squeezes harder; Snappy is faster.
+
+</Concepts>
+
+---
+
+## 4. Binary formats with a schema
+
+Protocol Buffers (from Google) and Avro (from the Hadoop project) take the opposite bet from JSON: both sides agree on a schema in advance, so the bytes do not need to describe themselves.
+
+- **Protocol Buffers** gives each field a number, its **tag**. The bytes carry the tag and a small type code instead of the name. Integers use a **varint**: small numbers take one byte, bigger ones take more.
+- **Avro** carries no names and no tags at all, only the values, one after another in schema order. A string is its length and then its bytes. To read the data you need the exact schema it was written with.
+
+The playground below encodes one product record in all four formats. Change the price to 5 billion and watch the varints grow; type a Vietnamese name and watch UTF-8 spend two or three bytes per letter; set the price to 0 and Protocol Buffers drops the field entirely, because proto3 does not write default values.
+
+</En>
+
+<Vi>
+
+<TerminalOutput command="node json_ids.js" label="JSON.parse làm tròn ID 64 bit mà không báo lỗi gì" caption="Node.js 26.10 trên Apple M2. ID là giá trị tự đặt, cùng độ lớn với ID bài đăng của X. Số bị mất mấy chữ số cuối; chuỗi thì giữ nguyên.">
+```text
+id      1050118621198921700
+id_str  1050118621198921728
+same?   false
+MAX_SAFE_INTEGER 9007199254740991
+2**53 + 1 === 2**53 ? true
+```
+</TerminalOutput>
+
+Không exception, không cảnh báo. ID đơn giản là trỏ sang một bài đăng khác. Tiền cũng gặp đúng vấn đề này: hãy gửi số tiền dưới dạng số nguyên theo đơn vị nhỏ nhất (cent, đồng) hoặc dạng chuỗi, đừng bao giờ dùng số thực.
+
+### Những lỗ hổng khác của JSON
+
+- **Dữ liệu nhị phân.** JSON không có kiểu cho byte thô, nên người ta mã hoá chúng thành chữ bằng Base64, làm kích thước tăng khoảng một phần ba (3.000 byte thành 4.000).
+- **Schema là tuỳ chọn.** JSON Schema có tồn tại và được dùng nhiều, nhưng mặc định của nó là mô hình nội dung *mở* (open content model): `additionalProperties` là true, nên trường nào không liệt kê cũng được phép. Khi đó schema nói cái gì bị cấm, chứ không nói cái gì có.
+- **Tên trường trong mọi bản ghi.** Mỗi bản ghi đều viết ra đầy đủ mọi key. Các bản JSON nhị phân như MessagePack vẫn giữ nguyên chuyện đó, nên chúng thu nhỏ dữ liệu ít hơn bạn mong.
+
+### Bài test encoding của Uber: schema quyết định tất cả
+
+Năm 2016, Uber lưu mỗi chuyến đi dưới dạng một khối JSON khoảng 20 KB trong kho Schemaless, và dữ liệu cứ chất đống lên. Team đã benchmark các cách mã hoá và nén trên 2.219 chuyến đi ẩn danh ở New York. Vài kết quả trong bài viết của họ:
+
+| Phát hiện | Con số |
+|---|---|
+| Kết quả nhỏ nhất | Protocol Buffers nén zlib, "nhỉnh hơn 8% một chút" so với JSON gốc |
+| Mã hoá nhanh nhất | Thrift, 1.548 ms so với 6.535 ms của JSON |
+| Chậm nhất | Thư viện Avro thuần Python, 211.540 ms, chậm hơn JSON hơn 32 lần |
+| Pickle | "còn tệ hơn lưu thẳng JSON gốc" |
+| Lựa chọn cuối | MessagePack nén zlib: 18,3 MB cho bộ test, so với 132,9 MB JSON gốc |
+
+<Figure src={figureUberSize} alt="Biểu đồ thanh ngang về kích thước sau khi mã hoá và nén của toàn bộ chuyến đi trong bộ test, tính bằng MiB, từ Protocol Buffers nén zlib ở trên cùng (nhỏ nhất, khoảng 10) xuống Pickle ở dưới cùng (lớn nhất, khoảng 155), JSON thuần đứng thứ hai từ dưới lên" altVi="Biểu đồ thanh ngang về kích thước sau khi mã hoá và nén của toàn bộ chuyến đi trong bộ test, tính bằng MiB, từ Protocol Buffers nén zlib ở trên cùng (nhỏ nhất, khoảng 10) xuống Pickle ở dưới cùng (lớn nhất, khoảng 155), JSON thuần đứng thứ hai từ dưới lên" caption="Uber's own chart of the same test: total size of all trips under each encoding and compressor. Plain JSON sits near the largest end; Protocol Buffers with zlib is the smallest, and MessagePack with zlib is far below raw JSON." captionVi="Biểu đồ của chính Uber cho cùng bài test: tổng kích thước mọi chuyến đi với từng cách mã hoá và nén. JSON thuần nằm gần đầu lớn nhất; Protocol Buffers nén zlib nhỏ nhất, còn MessagePack nén zlib nhỏ hơn JSON gốc rất nhiều." sourceTitle="Uber Engineering: JSON encoding and compression test" sourceUrl="https://www.uber.com/en-US/blog/trip-data-squeeze-json-encoding-compression/" />
+
+Sao không chọn Protocol Buffers, cái nhỏ nhất? Cho tới mùa thu năm 2014, JSON truyền giữa các service của Uber không bị ràng buộc bởi schema chặt chẽ, và dùng một định dạng dựa trên IDL nghĩa là phải viết và áp schema trước đã. MessagePack không cần schema, nên hợp với dữ liệu họ đang có. Chọn định dạng thật ra là chọn có schema hay không.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Floating point, double (số dấu phẩy động)**: kiểu số 64 bit mà JavaScript dùng cho mọi con số. Nó chỉ giữ chính xác số nguyên tới 2<sup>53</sup>, khoảng 9 triệu tỷ.
+- **Snowflake ID**: ID 64 bit mà Twitter (nay là X) cấp cho bài đăng và người dùng, sinh ra bởi một dịch vụ nội bộ tên Snowflake.
+- **Base64**: cách viết byte bất kỳ bằng 64 ký tự chữ an toàn. Cứ 3 byte thành 4 ký tự.
+- **Open content model (mô hình nội dung mở)**: schema cho phép cả những trường nó không liệt kê.
+- **MessagePack**: bản mã hoá nhị phân của mô hình dữ liệu JSON. Nhỏ hơn và parse nhanh hơn, nhưng tên trường vẫn nằm trong mọi bản ghi.
+- **IDL, interface definition language (ngôn ngữ định nghĩa giao diện)**: một ngôn ngữ nhỏ để viết schema, như file `.proto` của Protocol Buffers.
+- **zlib / Snappy**: các bộ nén đa dụng. zlib nén mạnh hơn; Snappy nhanh hơn.
+
+</Concepts>
+
+---
+
+## 4. Định dạng nhị phân có schema
+
+Protocol Buffers (của Google) và Avro (từ dự án Hadoop) đặt cược ngược với JSON: hai bên thống nhất schema từ trước, nên byte không cần tự mô tả chính nó.
+
+- **Protocol Buffers** gán cho mỗi trường một con số, gọi là **tag**. Trong byte chỉ có tag và một mã kiểu nhỏ thay vì tên. Số nguyên dùng **varint**: số nhỏ chiếm một byte, số lớn hơn chiếm nhiều byte hơn.
+- **Avro** không mang tên cũng không mang tag, chỉ có các giá trị nối tiếp nhau theo thứ tự trong schema. Một chuỗi là độ dài của nó rồi tới các byte. Muốn đọc dữ liệu thì bạn cần đúng schema đã dùng để ghi nó.
+
+Playground bên dưới mã hoá một bản ghi sản phẩm theo cả bốn định dạng. Đổi giá thành 5 tỷ để xem varint dài ra; gõ một cái tên tiếng Việt để xem UTF-8 tốn hai, ba byte cho mỗi chữ; đặt giá bằng 0 thì Protocol Buffers bỏ hẳn trường đó, vì proto3 không ghi giá trị mặc định.
+
+</Vi>
+
+<EncoderPlayground />
+
+<En>
+
+The same record, encoded by the real libraries:
+
+<TerminalOutput command="uv run --with msgpack --with fastavro --with protobuf python encode_sizes.py" label="One record, four real encoders" caption="Apple M2, Python 3.15.2 with msgpack 1.2.4, protobuf 7.36.2 and fastavro 1.13.1 (schemaless writer, so no file header). JSON is written without spaces.">
+```text
+JSON              73 bytes  7b 22 70 72 6f 64 75 63 74 4e 61 6d 65 22 3a 22 52 61 69 6e 20 6a 61 63 6b 65 74 22 ...
+MessagePack       58 bytes  83 ab 70 72 6f 64 75 63 74 4e 61 6d 65 ab 52 61 69 6e 20 6a 61 63 6b 65 74 aa 70 72 ...
+Protocol Buffers  31 bytes  0a 0b 52 61 69 6e 20 6a 61 63 6b 65 74 10 87 27 1a 07 6f 75 74 64 6f 6f 72 1a 04 73 61 6c 65
+Avro              29 bytes  16 52 61 69 6e 20 6a 61 63 6b 65 74 8e 4e 04 0e 6f 75 74 64 6f 6f 72 08 73 61 6c 65 00
+```
+</TerminalOutput>
+
+Read the Protocol Buffers line from the left: `0a` is tag 1 with wire type 2 (length-delimited), `0b` says 11 bytes follow, then "Rain jacket". `10` is tag 2 with wire type 0 (varint), and `87 27` is 4,999 in two bytes. In Avro, `16` is the length 11 written in zigzag form, and nothing says "this is a string": only the schema knows.
+
+### How does an Avro reader know the writer's schema?
+
+Avro's bytes are useless without the schema they were written with, and attaching the whole schema to every record would cost more than the record. There are three answers, depending on where the data lives:
+
+| Where the data is | How the reader finds the writer's schema |
+|---|---|
+| A big file of records written together | The schema is stored once, in the file header (Avro object container files) |
+| A database, records written over years | Each record starts with a schema version number; the schemas live in a table or a registry. Confluent's Schema Registry for Kafka works this way |
+| A network connection | Both sides agree on the schema when the connection opens |
+
+Avro's lack of tag numbers has one more benefit: you can generate a schema from a database table automatically, one field per column, and regenerate it when the table changes. With Protocol Buffers, someone would have to assign tag numbers by hand and make sure an old number is never handed out again.
+
+<Concepts>
+
+- **Protocol Buffers (protobuf)**: Google's schema-based binary format. Fields are identified by tag numbers.
+- **Avro**: an Apache binary format that stores only values. The reader resolves the data with the writer's schema.
+- **Tag (field number)**: the number a protobuf schema assigns to a field. It is what goes on the wire, so it must never change.
+- **Varint**: a variable-length integer. Each byte holds 7 bits of the number, and the top bit says whether more bytes follow.
+- **Zigzag encoding**: maps signed numbers to unsigned ones (0, -1, 1, -2… become 0, 1, 2, 3…) so small negative numbers stay short.
+- **Wire type**: the small code next to a protobuf tag that says how to find the end of the value, so a reader can skip fields it does not know.
+- **Schema registry**: a service that stores every version of a schema under an ID and checks new versions for compatibility.
+
+</Concepts>
+
+---
+
+## 5. Changing a schema safely
+
+Schemas change. This is called **schema evolution**, and the two formats make different promises about it.
+
+**Protocol Buffers** never fails because a tag is missing or unknown. A tag it does not know is skipped (the wire type says how long the value is), and a tag that is absent gets the type's default: 0, an empty string, false. So adding and removing fields is safe, and the danger moves to meaning: a tag number must always mean the same thing.
+
+**Avro** resolves the writer's schema against the reader's schema, matching fields by name. Fields only the writer has are ignored. Fields only the reader has get the default *declared in the reader's schema*, and if there is no default, decoding fails. So in Avro you may add or remove only fields that have a default.
+
+Try each change in both formats:
+
+</En>
+
+<Vi>
+
+Cùng bản ghi đó, mã hoá bằng thư viện thật:
+
+<TerminalOutput command="uv run --with msgpack --with fastavro --with protobuf python encode_sizes.py" label="Một bản ghi, bốn bộ mã hoá thật" caption="Apple M2, Python 3.15.2 với msgpack 1.2.4, protobuf 7.36.2 và fastavro 1.13.1 (schemaless writer, nên không có header file). JSON được ghi không có khoảng trắng.">
+```text
+JSON              73 bytes  7b 22 70 72 6f 64 75 63 74 4e 61 6d 65 22 3a 22 52 61 69 6e 20 6a 61 63 6b 65 74 22 ...
+MessagePack       58 bytes  83 ab 70 72 6f 64 75 63 74 4e 61 6d 65 ab 52 61 69 6e 20 6a 61 63 6b 65 74 aa 70 72 ...
+Protocol Buffers  31 bytes  0a 0b 52 61 69 6e 20 6a 61 63 6b 65 74 10 87 27 1a 07 6f 75 74 64 6f 6f 72 1a 04 73 61 6c 65
+Avro              29 bytes  16 52 61 69 6e 20 6a 61 63 6b 65 74 8e 4e 04 0e 6f 75 74 64 6f 6f 72 08 73 61 6c 65 00
+```
+</TerminalOutput>
+
+Đọc dòng Protocol Buffers từ trái sang: `0a` là tag 1 với wire type 2 (có độ dài đi kèm), `0b` báo có 11 byte theo sau, rồi tới "Rain jacket". `10` là tag 2 với wire type 0 (varint), và `87 27` là 4.999 gói trong hai byte. Ở Avro, `16` là độ dài 11 viết theo dạng zigzag, và không có gì nói "đây là một chuỗi": chỉ schema mới biết.
+
+### Bên đọc Avro làm sao biết schema của bên ghi?
+
+Byte của Avro vô dụng nếu thiếu schema đã dùng để ghi nó, mà gắn nguyên schema vào mỗi bản ghi thì còn tốn hơn chính bản ghi. Có ba cách, tuỳ dữ liệu nằm ở đâu:
+
+| Dữ liệu nằm ở đâu | Bên đọc tìm schema của bên ghi thế nào |
+|---|---|
+| Một file lớn gồm nhiều bản ghi ghi cùng lúc | Schema được lưu một lần ở header của file (Avro object container file) |
+| Một database, bản ghi được ghi rải rác qua nhiều năm | Mỗi bản ghi bắt đầu bằng số phiên bản schema; các schema nằm trong một bảng hoặc một registry. Schema Registry của Confluent cho Kafka làm theo cách này |
+| Một kết nối mạng | Hai bên thống nhất schema lúc mở kết nối |
+
+Việc Avro không có số tag còn một lợi ích nữa: bạn có thể tự động sinh schema từ một bảng database, mỗi cột thành một trường, và sinh lại khi bảng đổi. Với Protocol Buffers, phải có người gán số tag bằng tay và bảo đảm một số cũ không bao giờ bị cấp lại.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Protocol Buffers (protobuf)**: định dạng nhị phân dựa trên schema của Google. Trường được nhận diện bằng số tag.
+- **Avro**: định dạng nhị phân của Apache chỉ lưu giá trị. Bên đọc giải mã dữ liệu dựa trên schema của bên ghi.
+- **Tag, field number (số hiệu trường)**: con số mà schema protobuf gán cho một trường. Đó là thứ thật sự nằm trong byte, nên không bao giờ được đổi.
+- **Varint (số nguyên độ dài thay đổi)**: mỗi byte chứa 7 bit của con số, bit cao nhất báo còn byte nữa hay không.
+- **Zigzag encoding**: ánh xạ số có dấu sang số không dấu (0, -1, 1, -2… thành 0, 1, 2, 3…) để số âm nhỏ vẫn ngắn.
+- **Wire type**: mã nhỏ đi cùng tag protobuf, cho biết cách tìm điểm kết thúc của giá trị, nhờ vậy bên đọc bỏ qua được trường nó không biết.
+- **Schema registry (kho schema)**: dịch vụ lưu mọi phiên bản của một schema kèm ID và kiểm tra phiên bản mới có tương thích không.
+
+</Concepts>
+
+---
+
+## 5. Đổi schema mà không làm vỡ ai
+
+Schema luôn thay đổi. Chuyện đó gọi là **schema evolution (tiến hoá schema)**, và hai định dạng hứa hẹn những điều khác nhau.
+
+**Protocol Buffers** không bao giờ lỗi vì thiếu tag hay gặp tag lạ. Tag nào nó không biết thì bỏ qua (wire type cho biết giá trị dài bao nhiêu), còn tag nào vắng mặt thì nhận giá trị mặc định của kiểu: 0, chuỗi rỗng, false. Vậy nên thêm và bớt trường đều an toàn, còn mối nguy chuyển sang ý nghĩa: một số tag phải luôn mang cùng một nghĩa.
+
+**Avro** đối chiếu schema của bên ghi với schema của bên đọc, khớp trường theo tên. Trường chỉ bên ghi có thì bị bỏ qua. Trường chỉ bên đọc có thì nhận giá trị mặc định *khai báo trong schema của bên đọc*, và nếu không có mặc định thì giải mã thất bại. Vậy nên với Avro, bạn chỉ được thêm hoặc bớt những trường có giá trị mặc định.
+
+Thử từng thay đổi trên cả hai định dạng:
+
+</Vi>
+
+<SchemaEvolution />
+
+<En>
+
+The same experiments, run against the real libraries (this is where the demo's answers come from):
+
+<TerminalOutput command="uv run --with fastavro --with protobuf python evolve.py" label="Schema changes, decoded by fastavro and protobuf" caption="Apple M2, Python 3.15.2, fastavro 1.13.1, protobuf 7.36.2. Error messages shortened.">
+```text
+avro add field WITH default, new reader on old data: {'productName': 'Rain jacket', 'priceCents': 4999, 'currency': 'USD'}
+avro add field NO default,   new reader on old data: ERROR SchemaResolutionError: No default value for field currency in Product
+avro old reader on new data (extra field): {'productName': 'Rain jacket', 'priceCents': 4999}
+avro remove field NO default, old reader on new data: ERROR SchemaResolutionError: No default value for field priceCents in Product
+avro rename+alias, new reader on old data: {'productName': 'Rain jacket', 'price': 4999}
+avro rename+alias, old reader on new data: ERROR SchemaResolutionError: No default value for field priceCents in Product
+avro int->long, new (long) reader on old (int) data: {'productName': 'x', 'priceCents': 4999}
+avro int->long, old (int) reader on new (long) data: ERROR SchemaResolutionError: Schema mismatch: long is not int
+proto old int32 reader on new int64 value 5000000000: 705032704
+proto old reader re-serializes, new field survives: True
+proto old reader round-trips through JSON, new field survives: False
+proto new reader on old data, missing currency: ''
+proto reused tag 2, new reader on old data, discount_percent = 4999
+```
+</TerminalOutput>
+
+Two lines deserve a closer look.
+
+**Silent truncation.** Widening `int32` to `int64` is "wire-compatible" in Protocol Buffers, and the docs warn it can be lossy: old code reading 5,000,000,000 gets 705,032,704. The docs' advice is to keep writing values that fit in 32 bits until every reader has the new schema. Avro refuses the same change in the forward direction with an error, which is the better failure.
+
+**Unknown fields and JSON.** Old protobuf code that parses a record and writes it back keeps the field it did not know, in binary. Send the same record through JSON and the field is gone, which is a quiet data loss. This was not always the default: proto3 dropped unknown fields until release 3.5.0, whose notes say "Unknown fields are now preserved in proto3 for most of the language implementations". The language guide still lists two ways to lose them: serializing to JSON, and copying a message field by field.
+
+<Callout type="warning" title="Never reuse a field number, or a flag">
+The protobuf best-practices page is blunt: "Never re-use a tag number. It messes up deserialization." Old data in a log or old code on another server will read the number with its old meaning. Delete the field and mark the number `reserved 2;` so the compiler stops anyone from reusing it. Knight Capital's Power Peg flag is the same mistake in a different format: a retired meaning that some server still knew.
+</Callout>
+
+The same page has a sentence worth pinning above every deploy script: "Clients and servers are never updated at exactly the same time - even when you try to update them at the same time."
+
+<Concepts>
+
+- **Schema evolution**: changing a schema over time while data written with older versions still exists.
+- **Default value**: the value a reader uses when the data has no value for a field.
+- **Writer's schema / reader's schema**: in Avro, the schema the data was written with, and the schema the reading code expects. Avro translates from one to the other.
+- **Alias**: an old name listed in an Avro reader's schema so it can still find a renamed field in old data.
+- **Truncation**: cutting off the high bits of a number that does not fit, which changes its value.
+- **`reserved`**: protobuf syntax that blocks a field number or name from being used again.
+
+</Concepts>
+
+---
+
+## 6. Data outlives code
+
+Data flows from one process to another in three ways: through databases, through services, and through messages. Databases come first, because they hold data the longest.
+
+Writing to a database is like sending a message to your future self. You redeploy the code in minutes, but a row written five years ago is still there in its old encoding, unless something rewrote it. In three words: "data outlives code". So the database is where backward compatibility matters most, and forward compatibility matters too, because during a rolling upgrade old code still reads rows that new code just wrote.
+
+Most databases avoid rewriting old data when the schema changes. PostgreSQL's docs, for example, say that adding a column with a non-volatile default, such as a constant, stores the default in the table's metadata and returns it "when any existing rows are accessed", which makes `ALTER TABLE` "very fast even on large tables". LSM-tree engines rewrite rows into the newest format when compaction runs anyway (more on compaction in [the storage engines post](/blog/storage-engines-logs-lsm-btree-columns/)). The table looks like it has one schema, while the files underneath hold many.
+
+### GitLab: three releases to drop one column
+
+Removing or renaming a column is where rolling upgrades bite. GitLab's database guide explains why: Rails' ActiveRecord caches each table's columns when a process boots, so a process that started before the migration still expects the column, even if no code mentions it. Drop the column while that process runs and its queries fail.
+
+So GitLab spreads one drop over three releases. In release M the code is told to ignore the column. In M+1 a post-deployment migration drops it. In M+2 the ignore rule is removed. The guide says the spread exists because dropping a column "can't be rolled back easily". Renames get the same care: a regular migration creates the new column and copies the data over, and a post-deployment migration finishes the switch once no old code uses the old name.
+
+</En>
+
+<Vi>
+
+Cũng những thí nghiệm đó, chạy với thư viện thật (đây là nguồn cho các câu trả lời trong demo):
+
+<TerminalOutput command="uv run --with fastavro --with protobuf python evolve.py" label="Các thay đổi schema, giải mã bằng fastavro và protobuf" caption="Apple M2, Python 3.15.2, fastavro 1.13.1, protobuf 7.36.2. Câu báo lỗi đã được rút gọn.">
+```text
+avro add field WITH default, new reader on old data: {'productName': 'Rain jacket', 'priceCents': 4999, 'currency': 'USD'}
+avro add field NO default,   new reader on old data: ERROR SchemaResolutionError: No default value for field currency in Product
+avro old reader on new data (extra field): {'productName': 'Rain jacket', 'priceCents': 4999}
+avro remove field NO default, old reader on new data: ERROR SchemaResolutionError: No default value for field priceCents in Product
+avro rename+alias, new reader on old data: {'productName': 'Rain jacket', 'price': 4999}
+avro rename+alias, old reader on new data: ERROR SchemaResolutionError: No default value for field priceCents in Product
+avro int->long, new (long) reader on old (int) data: {'productName': 'x', 'priceCents': 4999}
+avro int->long, old (int) reader on new (long) data: ERROR SchemaResolutionError: Schema mismatch: long is not int
+proto old int32 reader on new int64 value 5000000000: 705032704
+proto old reader re-serializes, new field survives: True
+proto old reader round-trips through JSON, new field survives: False
+proto new reader on old data, missing currency: ''
+proto reused tag 2, new reader on old data, discount_percent = 4999
+```
+</TerminalOutput>
+
+Có hai dòng đáng xem kỹ hơn.
+
+**Bị cắt mà không báo.** Nới `int32` thành `int64` trong Protocol Buffers được gọi là "tương thích ở mức byte" (wire-compatible), và tài liệu cảnh báo nó có thể làm mất dữ liệu: code cũ đọc 5.000.000.000 thì nhận 705.032.704. Lời khuyên của tài liệu là cứ ghi các giá trị vừa 32 bit cho tới khi mọi bên đọc đã có schema mới. Avro thì từ chối cùng thay đổi đó ở chiều xuôi bằng một lỗi, và đó là kiểu thất bại tốt hơn.
+
+**Trường lạ và JSON.** Code protobuf cũ parse một bản ghi rồi ghi lại vẫn giữ được trường nó không biết, nếu ghi ở dạng nhị phân. Cho cùng bản ghi đó đi qua JSON là trường ấy mất, một kiểu mất dữ liệu âm thầm. Mặc định này không phải lúc nào cũng vậy: proto3 từng bỏ trường lạ cho tới bản 3.5.0, với release note ghi "trường lạ giờ được giữ lại trong proto3 ở hầu hết các ngôn ngữ". Language guide hiện vẫn liệt kê hai cách làm mất chúng: serialize sang JSON, và chép một message từng trường một.
+
+<Callout type="warning" title="Đừng bao giờ dùng lại số trường, hay một cờ cũ">
+Trang best practices của protobuf nói thẳng: "Không bao giờ dùng lại số tag. Nó làm hỏng việc deserialize." Dữ liệu cũ trong một file log hay code cũ trên một server khác sẽ đọc con số đó theo nghĩa cũ. Hãy xoá trường và đánh dấu `reserved 2;` để compiler chặn không cho ai dùng lại. Cờ Power Peg của Knight Capital là đúng lỗi này ở một định dạng khác: một ý nghĩa đã nghỉ hưu nhưng vẫn còn một server nhớ.
+</Callout>
+
+Cũng trang đó có một câu đáng dán lên đầu mọi script deploy: "Client và server không bao giờ được cập nhật đúng cùng một lúc, kể cả khi bạn cố cập nhật chúng cùng lúc."
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Schema evolution (tiến hoá schema)**: thay đổi schema theo thời gian trong khi dữ liệu ghi bằng các phiên bản cũ vẫn còn đó.
+- **Default value (giá trị mặc định)**: giá trị bên đọc dùng khi dữ liệu không có giá trị cho một trường.
+- **Writer's schema / reader's schema (schema bên ghi / schema bên đọc)**: trong Avro, schema đã dùng để ghi dữ liệu, và schema mà code đang đọc mong đợi. Avro dịch từ cái này sang cái kia.
+- **Alias (bí danh)**: tên cũ được liệt kê trong schema bên đọc của Avro để vẫn tìm ra một trường đã đổi tên trong dữ liệu cũ.
+- **Truncation (cắt bớt)**: cắt mất các bit cao của một con số không vừa kiểu, làm giá trị của nó thay đổi.
+- **`reserved`**: cú pháp protobuf chặn không cho một số trường hay một tên được dùng lại.
+
+</Concepts>
+
+---
+
+## 6. Dữ liệu sống lâu hơn code
+
+Dữ liệu đi từ process này sang process khác theo ba đường: qua database, qua service, và qua message. Database đứng đầu, vì nó giữ dữ liệu lâu nhất.
+
+Ghi vào database giống như gửi một lời nhắn cho chính mình trong tương lai. Code thì bạn deploy lại trong vài phút, nhưng một dòng ghi từ năm năm trước vẫn nằm đó với cách mã hoá cũ, trừ khi có thứ gì đó ghi lại nó. Tóm lại trong một câu: "dữ liệu sống lâu hơn code". Vì vậy database là nơi tương thích ngược quan trọng nhất, và tương thích xuôi cũng quan trọng, vì trong lúc rolling upgrade, code cũ vẫn đọc những dòng mà code mới vừa ghi.
+
+Phần lớn database tránh ghi lại dữ liệu cũ khi schema đổi. Ví dụ tài liệu PostgreSQL nói rằng thêm một cột với giá trị mặc định không biến đổi (non-volatile), ví dụ một hằng số, thì giá trị đó được lưu trong metadata của bảng và trả về "khi đọc các dòng có sẵn", nhờ vậy `ALTER TABLE` "rất nhanh kể cả với bảng lớn". Engine LSM-tree thì ghi lại các dòng sang định dạng mới nhất khi compaction chạy, vốn dĩ nó cũng phải chạy (compaction có trong [bài về storage engine](/blog/storage-engines-logs-lsm-btree-columns/)). Bảng trông như chỉ có một schema, trong khi các file bên dưới chứa nhiều phiên bản.
+
+### GitLab: ba bản release để xoá một cột
+
+Xoá hay đổi tên cột là lúc rolling upgrade cắn người. Tài liệu database của GitLab giải thích vì sao: ActiveRecord của Rails cache danh sách cột của từng bảng khi process khởi động, nên process chạy từ trước migration vẫn tin cột còn đó, kể cả khi không dòng code nào nhắc tới nó. Xoá cột trong lúc process đó còn chạy là truy vấn của nó lỗi.
+
+Nên GitLab chia việc xoá một cột ra ba bản release. Ở bản M, code được dặn bỏ qua cột. Ở bản M+1, một migration chạy sau deploy (post-deployment migration) xoá cột. Ở bản M+2, luật bỏ qua được gỡ đi. Tài liệu nói việc chia nhỏ là vì xoá cột "không dễ rollback". Đổi tên cũng được cẩn thận y vậy: một migration thường tạo cột mới và chép dữ liệu sang, rồi một migration sau deploy hoàn tất việc chuyển khi không còn code cũ nào dùng tên cũ.
+
+</Vi>
+
+<SchemaColumnReleases />
+
+<En>
+
+This is the **expand and contract** pattern in practice: first make every running version able to live with both shapes, then change the data, then clean up. The bigger version of it, moving data between tables while the app keeps running, is Stripe's online migration from [the data models post](/blog/data-models-and-query-languages/).
+
+One more database case: backups and dumps for a data warehouse are written in one go, so it makes sense to encode the whole copy with the latest schema, in a format such as an Avro container file or Parquet.
+
+| Schema change | Rewrites old rows? | What running code must handle |
+|---|---|---|
+| Add a column with a constant default (Postgres) | No, default kept in metadata | Old code ignores the new column |
+| Drop a column | No, but old processes may still select it | Ignore it in code one release before dropping |
+| Rename a column | Usually done as add + copy + drop | Both names during the switch |
+| Change one value into a list, or split a table | Yes, often in application code | Both shapes until the backfill finishes |
+
+<Concepts>
+
+- **Migration**: a scripted change to a database schema, often with a step that rewrites data.
+- **Post-deployment migration**: a migration GitLab runs only after the new code is on every server.
+- **ActiveRecord**: the database layer of Ruby on Rails. It reads each table's columns once, at startup.
+- **Expand and contract**: change a schema in steps: add the new shape, move readers and writers over, then remove the old shape.
+- **Backfill**: rewriting existing rows so they fit a new schema.
+
+</Concepts>
+
+---
+
+## 7. APIs you cannot take back
+
+The second dataflow is through services: a client encodes a request, the server decodes it and encodes a response. A simplifying assumption helps here. You usually upgrade servers before clients, so you need backward compatibility on requests (the new server reads old requests) and forward compatibility on responses (old clients read new responses).
+
+But when the clients belong to other companies, you cannot make them upgrade at all. A public API has to stay compatible for years, maybe forever.
+
+### Stripe: every API version since 2011, still working
+
+Brandur Leach's 2017 post says Stripe has kept every version of its API working since the company started in 2011. The example in the post: a bank account once had a boolean `verified`; in 2014 Stripe replaced it with a `status` field. Integrations that checked `verified` would have broken.
+
+Stripe's answer has three parts:
+
+1. Versions are named by release date, like `2017-05-24`, and each one contains only a few changes.
+2. On an account's first API request, the account is pinned to the newest version. Every later call uses that pin unless a `Stripe-Version` header overrides it.
+3. Core code only knows the current API. Each breaking change lives in a **version change module** that can turn a current response into the previous shape. To answer an old account, Stripe walks back through the modules, newest first, until it reaches the pinned version.
+
+</En>
+
+<Vi>
+
+Đây chính là mẫu **expand and contract (mở rộng rồi thu lại)** khi làm thật: trước hết làm cho mọi phiên bản đang chạy sống được với cả hai hình dạng, rồi mới đổi dữ liệu, rồi mới dọn dẹp. Phiên bản lớn hơn của nó, chuyển dữ liệu giữa các bảng trong khi app vẫn chạy, là đợt online migration của Stripe trong [bài về data model](/blog/data-models-and-query-languages/).
+
+Còn một trường hợp database nữa: bản backup hay bản dump cho data warehouse được ghi một lèo, nên hợp lý nhất là mã hoá toàn bộ bản sao bằng schema mới nhất, theo định dạng như Avro container file hay Parquet.
+
+| Thay đổi schema | Có ghi lại dòng cũ không? | Code đang chạy phải xử lý gì |
+|---|---|---|
+| Thêm cột với mặc định cố định (Postgres) | Không, mặc định nằm trong metadata | Code cũ bỏ qua cột mới |
+| Xoá cột | Không, nhưng process cũ có thể vẫn select nó | Bỏ qua cột trong code một bản release trước khi xoá |
+| Đổi tên cột | Thường làm bằng thêm + chép + xoá | Cả hai tên trong lúc chuyển |
+| Đổi một giá trị thành danh sách, hay tách bảng | Có, thường trong code ứng dụng | Cả hai hình dạng cho tới khi backfill xong |
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Migration**: một thay đổi schema database được viết thành script, thường kèm một bước ghi lại dữ liệu.
+- **Post-deployment migration (migration sau deploy)**: migration mà GitLab chỉ chạy sau khi code mới đã có mặt trên mọi server.
+- **ActiveRecord**: tầng database của Ruby on Rails. Nó đọc danh sách cột của mỗi bảng một lần, lúc khởi động.
+- **Expand and contract (mở rộng rồi thu lại)**: đổi schema theo từng bước: thêm hình dạng mới, chuyển bên đọc và bên ghi sang, rồi mới bỏ hình dạng cũ.
+- **Backfill (điền bù)**: ghi lại các dòng có sẵn cho khớp schema mới.
+
+</Concepts>
+
+---
+
+## 7. API đã phát hành thì không rút lại được
+
+Đường thứ hai của dữ liệu là qua service: client mã hoá request, server giải mã rồi mã hoá response. Ta cứ giả định cho đơn giản. Bạn thường nâng cấp server trước client, nên cần tương thích ngược cho request (server mới đọc request cũ) và tương thích xuôi cho response (client cũ đọc response mới).
+
+Nhưng khi client thuộc về công ty khác, bạn không ép họ nâng cấp được. Một API công khai phải giữ tương thích trong nhiều năm, có khi là mãi mãi.
+
+### Stripe: mọi phiên bản API từ 2011 vẫn chạy
+
+Bài viết năm 2017 của Brandur Leach kể rằng Stripe giữ cho mọi phiên bản API của họ vẫn chạy được kể từ khi công ty ra đời năm 2011. Ví dụ trong bài: tài khoản ngân hàng từng có một trường boolean `verified`; năm 2014 Stripe thay nó bằng trường `status`. Tích hợp nào đang kiểm tra `verified` lẽ ra đã vỡ.
+
+Cách Stripe giải quyết gồm ba phần:
+
+1. Phiên bản được đặt tên theo ngày phát hành, kiểu `2017-05-24`, và mỗi phiên bản chỉ chứa vài thay đổi.
+2. Ở request API đầu tiên của một tài khoản, tài khoản đó được ghim vào phiên bản mới nhất. Mọi lần gọi sau đều dùng phiên bản đã ghim, trừ khi header `Stripe-Version` ghi đè.
+3. Code lõi chỉ biết API hiện tại. Mỗi thay đổi phá vỡ tương thích nằm trong một **version change module**, biết cách biến response hiện tại về hình dạng của phiên bản trước. Để trả lời một tài khoản cũ, Stripe đi lùi qua các module, mới nhất trước, cho tới khi chạm phiên bản đã ghim.
+
+</Vi>
+
+<StripeVersionChain />
+
+<En>
+
+<Figure src={figureStripeDocs} alt="A tooltip in Stripe's API documentation next to the request field: Changes since your API version (2017-04-06): Event objects and webhooks will now render a request subobject that contains a request ID and idempotency key instead of just a string request ID" caption="The same change, seen from the account's side. Stripe's docs detect the API version an account is pinned to and warn about every change since then." sourceTitle="Stripe: APIs as infrastructure, future-proofing Stripe with versioning" sourceUrl="https://stripe.com/blog/api-versioning" />
+
+The cost is real, and the post admits it: every version is more code to keep. Stripe tries hard to avoid needing a new version at all, with an API review before any change ships. And adding a field to a response, or a new endpoint, needs no version: that is a forward-compatible change old clients can ignore.
+
+The usual alternatives are a version number in the URL (`/v1/`), in the HTTP `Accept` header, or stored per API key on the server, which is what Stripe does.
+
+### Why a remote call is not a function call
+
+RPC frameworks that try to make a network call look like a local function call keep disappointing people, and the reasons are easy to list:
+
+| A local function call | A network request |
+|---|---|
+| Succeeds or fails because of its inputs | Can be lost, or the other machine can be slow or down |
+| Returns, throws, or never returns | Can also time out, and then you do not know if it ran |
+| Safe to call again | Retrying may run it twice unless it is idempotent |
+| Takes about the same time every call | Under a millisecond, or several seconds, for the same work |
+| Can take a pointer to an object | Must encode every argument into bytes |
+| Same language on both sides | Types must be translated, such as JavaScript's 2<sup>53</sup> limit |
+
+REST does not pretend otherwise, which is part of why it won. gRPC uses Protocol Buffers and so inherits its evolution rules; JSON APIs follow the usual rule that adding optional request parameters and new response fields is safe.
+
+<Concepts>
+
+- **Service / API**: a program that accepts requests over the network and answers them. Its API is the set of requests it accepts.
+- **REST**: a style of web API built on HTTP: URLs name resources, HTTP methods act on them, JSON is the usual body.
+- **RPC (remote procedure call)**: a framework that makes calling another machine look like calling a local function. gRPC is the common modern one.
+- **Pinned version**: the API version stored for a client, used for every call it makes until it chooses to upgrade.
+- **Breaking change**: a change that makes existing clients fail, such as removing or renaming a field.
+- **Idempotent**: running it twice has the same effect as running it once.
+
+</Concepts>
+
+---
+
+## 8. Workflows replay your code
+
+A newer kind of dataflow is **durable execution**. A payment workflow might call a fraud check, then charge a card, then pay a bank. If the machine dies after the charge, you must not charge again. Engines such as Temporal and Restate record every step's result in a durable log. After a crash they run your workflow code again from the start, and instead of repeating finished calls they hand back the logged results.
+
+That trick only works if the code, run again, makes the same calls in the same order. Temporal's documentation says a workflow definition "must be deterministic to support replay", and gives an example. A workflow starts a timer, then calls an activity. While a run is waiting on the timer, you deploy code that calls the activity first. When the timer fires, the worker replays the new code, sees a `ScheduleActivityTask` command where the history says `TimerStarted`, and the run fails with a non-determinism error.
+
+This is schema evolution again, with your code as the schema and the event history as the old data. Temporal's answer is versioning. Either keep old workers running for old executions (Worker Versioning, which the docs recommend), or branch inside the code with a patch marker:
+
+</En>
+
+<Vi>
+
+<Figure src={figureStripeDocs} alt="Tooltip trong tài liệu API của Stripe cạnh trường request: Changes since your API version (2017-04-06): Event objects và webhooks giờ render một subobject request chứa request ID và idempotency key thay vì chỉ một chuỗi request ID" altVi="Tooltip trong tài liệu API của Stripe cạnh trường request: Changes since your API version (2017-04-06): Event objects và webhooks giờ render một subobject request chứa request ID và idempotency key thay vì chỉ một chuỗi request ID" caption="The same change, seen from the account's side. Stripe's docs detect the API version an account is pinned to and warn about every change since then." captionVi="Cùng thay đổi đó, nhìn từ phía tài khoản. Tài liệu của Stripe nhận ra phiên bản API mà tài khoản đang ghim và cảnh báo mọi thay đổi kể từ đó." sourceTitle="Stripe: APIs as infrastructure, future-proofing Stripe with versioning" sourceUrl="https://stripe.com/blog/api-versioning" />
+
+Cái giá là có thật, và bài viết thừa nhận: mỗi phiên bản là thêm code phải duy trì. Stripe cố hết sức để khỏi phải tạo phiên bản mới, bằng một bước review API trước khi bất kỳ thay đổi nào được phát hành. Còn thêm một trường vào response, hay thêm endpoint mới, thì không cần phiên bản: đó là thay đổi tương thích xuôi mà client cũ cứ việc bỏ qua.
+
+Các cách thường gặp khác là số phiên bản trong URL (`/v1/`), trong header HTTP `Accept`, hoặc lưu theo từng API key ở phía server, đúng như Stripe làm.
+
+### Vì sao gọi qua mạng không phải là gọi hàm
+
+Các framework RPC cố làm cho lời gọi qua mạng trông giống gọi hàm cục bộ cứ làm người ta thất vọng, và lý do thì dễ liệt kê:
+
+| Gọi một hàm cục bộ | Gửi một request qua mạng |
+|---|---|
+| Thành công hay thất bại là do tham số đầu vào | Có thể bị mất, hoặc máy bên kia chậm hay sập |
+| Trả về, ném exception, hoặc không bao giờ trả về | Còn có thể timeout, và khi đó bạn không biết nó đã chạy chưa |
+| Gọi lại thoải mái | Thử lại có thể làm nó chạy hai lần, trừ khi nó idempotent |
+| Lần nào cũng tốn chừng ấy thời gian | Dưới một mili giây, hoặc vài giây, cho cùng một việc |
+| Truyền được con trỏ tới object | Phải mã hoá mọi tham số thành byte |
+| Hai bên cùng một ngôn ngữ | Kiểu dữ liệu phải được dịch, như giới hạn 2<sup>53</sup> của JavaScript |
+
+REST không giả vờ ngược lại, và đó là một phần lý do nó thắng. gRPC dùng Protocol Buffers nên thừa hưởng luật tiến hoá của nó; API JSON theo quy tắc quen thuộc là thêm tham số tuỳ chọn cho request và thêm trường mới cho response thì an toàn.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Service / API (dịch vụ / giao diện lập trình)**: một chương trình nhận request qua mạng và trả lời. API của nó là tập các request nó chấp nhận.
+- **REST**: một kiểu web API dựa trên HTTP: URL đặt tên tài nguyên, phương thức HTTP thao tác trên chúng, body thường là JSON.
+- **RPC, remote procedure call (gọi thủ tục từ xa)**: framework làm cho việc gọi sang máy khác trông như gọi hàm cục bộ. gRPC là cái phổ biến hiện nay.
+- **Pinned version (phiên bản được ghim)**: phiên bản API lưu sẵn cho một client, dùng cho mọi lần gọi của nó cho tới khi nó chủ động nâng cấp.
+- **Breaking change (thay đổi phá vỡ tương thích)**: thay đổi khiến client hiện có bị lỗi, như xoá hay đổi tên một trường.
+- **Idempotent**: chạy hai lần cho cùng kết quả như chạy một lần.
+
+</Concepts>
+
+---
+
+## 8. Workflow chạy lại code của bạn
+
+Còn một đường đi của dữ liệu khá mới: **durable execution (thực thi bền vững)**. Một workflow thanh toán có thể gọi kiểm tra gian lận, rồi trừ tiền thẻ, rồi chuyển tiền vào ngân hàng. Nếu máy chết sau khi đã trừ tiền, bạn không được trừ lần nữa. Các engine như Temporal và Restate ghi kết quả của từng bước vào một log bền vững. Sau khi sập, chúng chạy lại code workflow của bạn từ đầu, và thay vì gọi lại những bước đã xong, chúng trả về kết quả đã ghi trong log.
+
+Mẹo này chỉ chạy nếu code, khi chạy lại, gọi đúng những lời gọi đó theo đúng thứ tự đó. Tài liệu Temporal nói định nghĩa workflow "phải mang tính tất định (deterministic) để hỗ trợ replay", và đưa một ví dụ. Một workflow bắt đầu một timer, rồi gọi một activity. Trong lúc một lần chạy đang chờ timer, bạn deploy code gọi activity trước. Khi timer kêu, worker replay code mới, thấy lệnh `ScheduleActivityTask` ở chỗ lịch sử ghi `TimerStarted`, và lần chạy đó thất bại với lỗi non-determinism.
+
+Đây lại là chuyện tiến hoá schema, chỉ có điều schema là code của bạn còn dữ liệu cũ là lịch sử sự kiện. Cách Temporal xử lý là quản lý phiên bản. Hoặc giữ worker cũ chạy cho các lần thực thi cũ (Worker Versioning, cách mà tài liệu khuyên dùng), hoặc rẽ nhánh ngay trong code bằng một dấu patch:
+
+</Vi>
+
+```python
+@workflow.run
+async def run(self) -> None:
+    if workflow.patched("my-patch"):
+        # Runs for executions that start after this deploy.
+        self._result = await workflow.execute_activity(
+            post_patch_activity, schedule_to_close_timeout=timedelta(minutes=5))
+    else:
+        # Old executions replay their recorded history through the old path.
+        self._result = await workflow.execute_activity(
+            pre_patch_activity, schedule_to_close_timeout=timedelta(minutes=5))
+```
+
+<En>
+
+The pattern is from Temporal's Python versioning guide. Once no running execution uses the old path, you replace the branch with `workflow.deprecate_patch("my-patch")`, and later remove that too: expand and contract again.
+
+<Callout type="tip" title="Determinism rules out more than you think">
+Replay also breaks on code that gives different answers each run: `random()`, reading the clock, iterating a set in hash order. Durable-execution SDKs ship replay-safe versions of these; use them inside workflow code, and put anything that talks to the outside world in activities.
+</Callout>
+
+<Concepts>
+
+- **Workflow**: a sequence of steps across services, such as check fraud, charge card, pay out.
+- **Durable execution**: running a workflow so that after a crash it resumes where it was, without repeating finished steps.
+- **Activity**: Temporal's name for one step that talks to the outside world. Its result is recorded.
+- **Replay**: re-running workflow code against the recorded history to rebuild where it was.
+- **Deterministic**: gives the same result every time for the same input.
+- **Patch / Worker Versioning**: Temporal's two ways to change workflow code while old executions are still running.
+
+</Concepts>
+
+---
+
+## 9. Messages through a broker
+
+The last dataflow is asynchronous messages. A sender puts a message on a **message broker** (Kafka, RabbitMQ, a cloud queue) and moves on; one or more consumers read it later. The broker buffers when consumers are slow, redelivers after a crash, and lets one message reach many readers. It does not care what the bytes mean, so the encoding and its evolution are your problem.
+
+Kafka topics can keep messages for a long time, so a topic behaves like a database: a consumer may read messages written months ago by an older producer. Confluent's Schema Registry checks each new schema version against the old ones before producers may use it. Its compatibility setting decides who can read what, and the docs spell out the upgrade order each one implies:
+
+| Mode | What it guarantees | Upgrade first |
+|---|---|---|
+| `BACKWARD` (the default) | Consumers on the new schema can read data from the previous one | Consumers, then producers |
+| `FORWARD` | Data from the new schema can be read by consumers on the previous one | Producers, then consumers |
+| `FULL` | Both | Either, independently |
+| `*_TRANSITIVE` | The same, against every earlier version, not only the last | As above |
+| `NONE` | No checks | Everything at once, or a new topic |
+
+Why BACKWARD by default? Confluent's docs give the reason: it lets you "rewind consumers to the beginning of the topic", which means reading old data with new code. It is the database argument again: data outlives code.
+
+<EncodingBrokerFlow />
+
+The upgrade-order column is Knight Capital's lesson written as a rule. Under BACKWARD, the old consumers cannot be trusted with new data, so every consumer must be on the new code before any producer sends it. Knight turned the flag on while one consumer was still old.
+
+Two more points. If a consumer reads a message and republishes it to another topic, it must keep fields it does not understand, or the next consumer loses them. And distributed actor frameworks (Akka, Orleans, Erlang/OTP) send messages between nodes that, during a rolling upgrade, run different versions, so they need the same compatible encodings.
+
+<Concepts>
+
+- **Message broker**: a server that stores messages from senders until receivers read them.
+- **Producer / consumer**: the program that writes messages to a topic, and the one that reads them.
+- **Topic**: a named stream of messages in a broker such as Kafka.
+- **Asynchronous**: the sender does not wait for the receiver to process the message.
+- **Transitive compatibility**: compatible with every earlier schema version, not only the one just before.
+- **Actor**: a unit of code with private state that talks to others only by messages. Actor frameworks spread actors across machines.
+
+</Concepts>
+
+---
+
+## Key takeaways
+
+- **Assume old and new code read each other's data.** During any rolling deploy, rollback, or slow client update, both directions happen, so test forward compatibility (old code, new data), not only backward.
+- **Never give an old field, number or flag a new meaning.** Reserve retired protobuf tags, add a new field for a new meaning, and delete dead code that still reacts to retired values; Knight Capital's $460 million loss came from a reused flag.
+- **Upgrade readers before writers send something new.** Deploy code that understands the new field everywhere first, verify every server really runs it, and only then turn the field on.
+- **Keep untrusted bytes away from language-native decoders.** pickle and Java serialization can run code during decoding; use JSON, Protocol Buffers or Avro across any trust boundary.
+- **Choose the failure you want.** Avro rejects many unsafe changes loudly, protobuf skips and fills defaults quietly; whichever you use, put a schema registry or a compatibility test in CI so the check happens before deploy.
+
+---
+
+## Review questions
+
+1. Knight Capital rolled the new code back from seven servers and things got worse. Explain why, using the words "forward compatibility". *(Section 1)*
+2. Why can decoding a Java serialized object or a pickle run code, while decoding JSON cannot? *(Section 2)*
+3. Uber found Protocol Buffers with zlib gave the smallest data, yet picked MessagePack. What did their data lack that Protocol Buffers needs? *(Section 3, Section 4)*
+4. In Avro, adding a field without a default breaks one direction of compatibility, and removing a field without a default breaks the other. Which is which, and why? *(Section 5)*
+5. Why does GitLab ignore a column in code one release before it drops the column from the database? *(Section 6)*
+
+</En>
+
+<Vi>
+
+Mẫu code này lấy từ hướng dẫn versioning cho Python của Temporal. Khi không còn lần thực thi nào đang chạy dùng nhánh cũ, bạn thay nhánh đó bằng `workflow.deprecate_patch("my-patch")`, rồi sau đó gỡ luôn cả dòng này: lại là expand and contract.
+
+<Callout type="tip" title="Tính tất định loại bỏ nhiều thứ hơn bạn tưởng">
+Replay còn vỡ với code cho kết quả khác nhau mỗi lần chạy: `random()`, đọc đồng hồ, duyệt một set theo thứ tự băm. Các SDK durable execution có sẵn phiên bản an toàn khi replay cho mấy thứ này; hãy dùng chúng trong code workflow, và đẩy mọi thứ giao tiếp với bên ngoài vào activity.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Workflow (luồng công việc)**: một chuỗi bước trải qua nhiều service, như kiểm tra gian lận, trừ tiền thẻ, chuyển tiền.
+- **Durable execution (thực thi bền vững)**: chạy workflow sao cho sau khi sập nó tiếp tục từ chỗ đang dở, không lặp lại các bước đã xong.
+- **Activity**: tên Temporal đặt cho một bước giao tiếp với bên ngoài. Kết quả của nó được ghi lại.
+- **Replay (chạy lại)**: chạy lại code workflow dựa trên lịch sử đã ghi để dựng lại trạng thái đang dở.
+- **Deterministic (tất định)**: cùng đầu vào thì lần nào cũng cho cùng kết quả.
+- **Patch / Worker Versioning**: hai cách của Temporal để đổi code workflow trong khi các lần thực thi cũ vẫn đang chạy.
+
+</Concepts>
+
+---
+
+## 9. Message đi qua broker
+
+Đường cuối cùng là message bất đồng bộ. Bên gửi đặt message lên một **message broker** (Kafka, RabbitMQ, một hàng đợi trên cloud) rồi đi làm việc khác; một hoặc nhiều consumer đọc nó sau. Broker làm vùng đệm khi consumer chậm, gửi lại sau khi có sự cố, và cho một message tới được nhiều bên đọc. Nó không quan tâm byte mang nghĩa gì, nên chuyện mã hoá và tiến hoá là việc của bạn.
+
+Topic Kafka có thể giữ message rất lâu, nên một topic hành xử như một database: consumer có thể đọc message do một producer phiên bản cũ ghi từ nhiều tháng trước. Schema Registry của Confluent kiểm tra mỗi phiên bản schema mới với các phiên bản cũ trước khi producer được phép dùng. Thiết lập tương thích của nó quyết định ai đọc được gì, và tài liệu nói rõ thứ tự nâng cấp tương ứng:
+
+| Chế độ | Nó bảo đảm gì | Nâng cấp trước |
+|---|---|---|
+| `BACKWARD` (mặc định) | Consumer dùng schema mới đọc được dữ liệu từ schema trước đó | Consumer, rồi tới producer |
+| `FORWARD` | Dữ liệu từ schema mới đọc được bởi consumer dùng schema trước đó | Producer, rồi tới consumer |
+| `FULL` | Cả hai | Bên nào trước cũng được, độc lập |
+| `*_TRANSITIVE` | Như trên, nhưng với mọi phiên bản trước, không chỉ cái gần nhất | Như trên |
+| `NONE` | Không kiểm tra | Tất cả cùng lúc, hoặc một topic mới |
+
+Vì sao mặc định là BACKWARD? Tài liệu Confluent nêu lý do: nó cho phép "tua consumer về đầu topic", tức là đọc dữ liệu cũ bằng code mới. Lại là lập luận của database: dữ liệu sống lâu hơn code.
+
+<EncodingBrokerFlow />
+
+Cột thứ tự nâng cấp chính là bài học của Knight Capital được viết thành luật. Với BACKWARD, consumer cũ không đáng tin với dữ liệu mới, nên mọi consumer phải chạy code mới trước khi bất kỳ producer nào gửi nó. Knight bật cờ khi vẫn còn một consumer cũ.
+
+Thêm hai ý. Nếu một consumer đọc message rồi đăng lại sang topic khác, nó phải giữ nguyên những trường nó không hiểu, nếu không consumer kế tiếp sẽ mất chúng. Và các framework actor phân tán (Akka, Orleans, Erlang/OTP) gửi message giữa các node mà trong lúc rolling upgrade lại chạy những phiên bản khác nhau, nên chúng cũng cần các cách mã hoá tương thích như trên.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Message broker (môi giới message)**: server giữ message từ bên gửi cho tới khi bên nhận đọc.
+- **Producer / consumer (bên sản xuất / bên tiêu thụ)**: chương trình ghi message vào topic, và chương trình đọc chúng.
+- **Topic**: một luồng message có tên trong broker như Kafka.
+- **Asynchronous (bất đồng bộ)**: bên gửi không chờ bên nhận xử lý xong message.
+- **Transitive compatibility (tương thích bắc cầu)**: tương thích với mọi phiên bản schema trước đó, không chỉ phiên bản ngay trước.
+- **Actor**: một đơn vị code có trạng thái riêng, chỉ nói chuyện với bên khác bằng message. Framework actor rải các actor ra nhiều máy.
+
+</Concepts>
+
+---
+
+## Điểm rút ra
+
+- **Mặc định rằng code cũ và code mới đọc dữ liệu của nhau.** Trong mọi đợt rolling deploy, rollback, hay khi client cập nhật chậm, cả hai chiều đều xảy ra, nên hãy test cả tương thích xuôi (code cũ, dữ liệu mới), không chỉ tương thích ngược.
+- **Đừng bao giờ gán nghĩa mới cho một trường, một số hay một cờ cũ.** Đánh dấu reserved các tag protobuf đã bỏ, thêm trường mới cho nghĩa mới, và xoá code chết vẫn còn phản ứng với giá trị đã nghỉ hưu; khoản lỗ 460 triệu đô của Knight Capital đến từ một cờ bị dùng lại.
+- **Nâng cấp bên đọc trước khi bên ghi gửi thứ mới.** Deploy code hiểu trường mới lên mọi nơi trước, kiểm chứng mọi server thật sự đang chạy nó, rồi mới bật trường đó.
+- **Giữ byte không đáng tin tránh xa bộ giải mã riêng của ngôn ngữ.** pickle và Java serialization có thể chạy code ngay lúc giải mã; qua bất kỳ ranh giới tin cậy nào, hãy dùng JSON, Protocol Buffers hoặc Avro.
+- **Chọn kiểu thất bại bạn muốn.** Avro từ chối ồn ào nhiều thay đổi không an toàn, protobuf thì lặng lẽ bỏ qua và điền mặc định; dùng cái nào thì cũng hãy đặt schema registry hoặc một bài test tương thích trong CI để việc kiểm tra xảy ra trước khi deploy.
+
+---
+
+## Câu hỏi ôn tập
+
+1. Knight Capital rollback code mới khỏi bảy server và mọi thứ còn tệ hơn. Giải thích vì sao, dùng khái niệm "tương thích xuôi". *(Phần 1)*
+2. Vì sao giải mã một object Java đã serialize hay một pickle có thể chạy code, còn giải mã JSON thì không? *(Phần 2)*
+3. Uber thấy Protocol Buffers nén zlib cho dữ liệu nhỏ nhất, nhưng vẫn chọn MessagePack. Dữ liệu của họ thiếu thứ gì mà Protocol Buffers cần? *(Phần 3, Phần 4)*
+4. Trong Avro, thêm một trường không có mặc định làm vỡ một chiều tương thích, còn xoá một trường không có mặc định làm vỡ chiều kia. Chiều nào là chiều nào, và vì sao? *(Phần 5)*
+5. Vì sao GitLab cho code bỏ qua một cột trước một bản release rồi mới xoá cột đó khỏi database? *(Phần 6)*
+
+</Vi>

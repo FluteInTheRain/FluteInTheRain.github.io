@@ -1,0 +1,748 @@
+---
+title: "From queues to event logs: CDC, watermarks, and stream joins"
+title_vi: "Từ hàng đợi tới event log: CDC, watermark và join luồng dữ liệu"
+description: "Dual-write races, Shopify's polling misses, fake deploy spikes, and idempotent sinks: Kafka logs, CDC, incremental SQL views, watermarks, and stream joins."
+description_vi: "Vì sao dual write làm lệch Elasticsearch, polling mất bản ghi đã xoá ở Shopify, và restart tạo đỉnh giả: log Kafka, CDC, IVM, watermark và chịu lỗi stream."
+date: 2026-11-19
+category: "system-design"
+tags: ["distributed-systems", "stream-processing", "kafka", "cdc", "debezium", "flink", "ddia"]
+draft: true
+sources:
+  - { title: "Designing Data-Intensive Applications, 2nd Edition", author: "Martin Kleppmann & Chris Riccomini", chapters: "Ch. 12", url: "https://dataintensive.net/" }
+  - { title: "Using logs to build a solid data infrastructure (or: why dual writes are a bad idea)", author: "Martin Kleppmann", url: "https://www.confluent.io/blog/using-logs-to-build-a-solid-data-infrastructure-or-why-dual-writes-are-a-bad-idea/" }
+  - { title: "Apache Kafka Documentation: Design (Log, Offsets, Compaction)", url: "https://kafka.apache.org/documentation/#design" }
+  - { title: "Capturing Every Change From Shopify's Sharded Monolith", author: "John Martin & Adam Bellemare (Shopify)", url: "https://shopify.engineering/capturing-every-change-shopify-sharded-monolith" }
+  - { title: "Revisiting the Outbox Pattern", author: "Gunnar Morling", url: "https://www.morling.dev/blog/revisiting-the-outbox-pattern/" }
+  - { title: "Debezium Reference Documentation: Architecture", url: "https://debezium.io/documentation/reference/stable/architecture.html" }
+  - { title: "DBLog: A Watermark Based Change-Data-Capture Framework", author: "Andreas Andreakis & Ioannis Papapanagiotou (Netflix)", url: "https://arxiv.org/abs/2010.12597" }
+  - { title: "DBSP: Automatic Incremental View Maintenance for Rich Query Languages", author: "Mihai Budiu, Tej Chajed, Frank McSherry, Leonid Ryzhyk & Val Tannen", url: "https://arxiv.org/abs/2203.16684" }
+  - { title: "Deep Dive into the RisingWave Stream Processing Engine — Part 2: Computational Model", author: "RisingWave Labs", url: "https://risingwave.com/blog/deep-dive-into-the-risingwave-stream-processing-engine-part-2-computational-model/" }
+  - { title: "Searching over Streams at FOSDEM (Luwak and Apache Samza)", author: "Martin Kleppmann", url: "https://martin.kleppmann.com/2015/01/31/searching-over-streams-at-fosdem.html" }
+  - { title: "The Dataflow Model: A Practical Approach to Balancing Correctness, Latency, and Cost", author: "Tyler Akidau et al.", url: "https://vldb.org/pvldb/vol8/p1792-Akidau.pdf" }
+  - { title: "Improving Snowplow's understanding of time", author: "Alex Dean (Snowplow)", url: "https://snowplow.io/blog/improving-snowplows-understanding-of-time" }
+  - { title: "Apache Flink Documentation: Timely Stream Processing", url: "https://nightlies.apache.org/flink/flink-docs-stable/docs/concepts/time/" }
+  - { title: "Apache Flink Documentation: Stateful Stream Processing", url: "https://nightlies.apache.org/flink/flink-docs-stable/docs/concepts/stateful-stream-processing/" }
+  - { title: "Lightweight Asynchronous Snapshots for Distributed Dataflows", author: "Paris Carbone, Gyula Fóra, Stephan Ewen, Seif Haridi & Kostas Tzoumas", url: "https://arxiv.org/abs/1506.08603" }
+  - { title: "KIP-98: Exactly Once Delivery and Transactional Messaging", author: "Jason Gustafson et al. (Apache Kafka)", url: "https://cwiki.apache.org/confluence/display/KAFKA/KIP-98+-+Exactly+Once+Delivery+and+Transactional+Messaging" }
+  - { title: "Edison Gold & Stock Telegraph Ticker (photo, CC BY 3.0)", author: "H. Zimmer, Wikimedia Commons", url: "https://commons.wikimedia.org/wiki/File:Edison_Stock_Telegraph_Ticker.jpg" }
+---
+
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import En from '../../components/mdx/En.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import StreamDualWriteVsCdc from '../../components/mdx/StreamDualWriteVsCdc.astro';
+import StreamEventVsProcessingTime from '../../components/mdx/StreamEventVsProcessingTime.astro';
+import StreamWindow from '../../components/mdx/StreamWindow.astro';
+import StreamQueueRedelivery from '../../components/mdx/StreamQueueRedelivery.astro';
+import StreamLogPartitions from '../../components/mdx/StreamLogPartitions.astro';
+import StreamShopifyCdcCase from '../../components/mdx/StreamShopifyCdcCase.astro';
+import StreamIvmDelta from '../../components/mdx/StreamIvmDelta.astro';
+import edisonTicker from '../../assets/blog/stream-processing-event-logs-cdc-windows-joins/edison-stock-ticker.jpg';
+import flinkWatermarks from '../../assets/blog/stream-processing-event-logs-cdc-windows-joins/flink-out-of-order-watermarks.png';
+import flinkCheckpoints from '../../assets/blog/stream-processing-event-logs-cdc-windows-joins/flink-checkpoint-barriers.png';
+
+<En>
+
+<Figure src={edisonTicker} alt="Thomas Edison's Gold and Stock Telegraph ticker machine with a continuous roll of paper tape feeding across brass printing gears" caption="A stock ticker never rewrites old prices: it appends each new market tick onto a continuous paper tape. Modern event logs work the same way. Photo: H. Zimmer, CC BY 3.0." sourceTitle="Wikimedia Commons: Edison Stock Telegraph Ticker" sourceUrl="https://commons.wikimedia.org/wiki/File:Edison_Stock_Telegraph_Ticker.jpg" />
+
+> "A complex system that works is invariably found to have evolved from a simple system that works. The inverse proposition also appears to be true: A complex system designed from scratch never works and cannot be made to work."
+> &mdash; *John Gall*, *Systemantics* (1975)
+
+### Why systems quietly drift apart
+
+Most teams start with one relational database and soon add a cache, a search index and an analytics warehouse. Keeping those copies aligned sounds straightforward until production traffic exposes the cracks:
+
+- **Silent dual-write drift.** Your API writes to PostgreSQL and then updates Elasticsearch. Two concurrent updates arrive in opposite orders at the two stores, both return 200 OK, and search shows stale data until someone runs a manual reindex.
+- **Polling blind spots at Shopify (2021).** Shopify's `Longboat` extractor polled 100+ MySQL shards once an hour using `WHERE updated_at > last_run`. Polling harder would overload the replicas, so data was at least an hour stale, hard `DELETE`s vanished without a trace, and rapid edits between polls were lost.
+- **Reordered retries in message queues.** An AMQP broker shares work across consumers; one worker crashes mid-message and the broker redelivers that message to another worker, scrambling the original order.
+- **The 2 a.m. false traffic spike.** A stream consumer restarts for a 60-second deploy. When it comes back and drains its backlog, a dashboard grouped by wall-clock time records double the real request rate and wakes up the on-call engineer.
+
+All four failures trace back to one idea: treat unbounded data as a durable, ordered event log. Here is how that works in six steps:
+
+1. **Why message queues scramble your order**: backpressure, load balancing vs. fan-out, redelivery reordering, and dead-letter queues.
+2. **Log-based brokers and non-destructive reads**: Kafka partitions, integer offsets, object-store tiered logs, and safe replay.
+3. **Keeping databases and indexes in sync**: dual writes vs. Change Data Capture (CDC), the Outbox pattern, DBLog snapshots, and log compaction.
+4. **Processing streams and live SQL views**: Complex Event Processing, probabilistic sketches, and Incremental View Maintenance (IVM).
+5. **Reasoning about time and windows**: event time vs. processing time, watermarks, Snowplow's three-timestamp clock fix, and four window types.
+6. **Stream joins and fault tolerance**: window, enrichment, and materialized-view joins, Chandy-Lamport barriers, and idempotent sinks.
+
+<Callout type="note" title="TL;DR">
+Batch jobs assume a bounded input with a clean finish line; real applications emit unbounded events forever. Traditional queues delete messages on acknowledgment and scramble causal order when workers crash and retry. Log-based brokers (Kafka, Redpanda, WarpStream) keep an append-only partitioned log on disk or object storage, turning database replication logs (CDC) into replayable streams. Once you read from ordered logs instead of dual-writing, you still have to separate event time from processing time with watermarks, handle stragglers, and make state checkpoints or sink writes idempotent so restarts never double-count.
+</Callout>
+
+<Concepts>
+
+- **Unbounded stream**: data that keeps arriving continuously with no finish line (user clicks, sensor readings, database writes), unlike a finite batch file.
+- **Event**: a small, immutable record describing one thing that happened at a point in time, usually carrying a timestamp.
+- **Dual write**: application code writing the same change separately to two or more stores (such as PostgreSQL and Elasticsearch) without a distributed transaction.
+- **Change Data Capture (CDC)**: reading a database's own commit log (such as PostgreSQL WAL or MySQL binlog) to stream committed changes to other systems in order.
+- **Watermark**: a marker in a stream saying "no more events with an older timestamp are expected", used to decide when an event-time window can close.
+
+</Concepts>
+
+---
+
+## 1. Why message queues scramble your order
+
+In batch processing, you wait until midnight, sort a day's worth of files, and write the output. Waiting a day is too slow when fraud detection, live inventory, or merchant dashboards need updates in seconds. You could shrink the batch interval to every minute, or abandon fixed batches and process each **event** as it arrives.
+
+Connecting producers to consumers by polling a regular database table gets wasteful fast: the shorter your poll interval, the more empty queries hit your database. And as Shopify saw across its 100+ MySQL shards, `WHERE updated_at > ...` polling misses hard deletes completely because deleted rows are no longer in the table to match the query.
+
+Instead, producers push notifications through a **messaging system**. Two engineering questions separate every messaging design:
+
+1. **What if producers outrun consumers?** You can **drop** messages, **buffer** them in a queue (risking memory exhaustion or disk overflow), or apply **backpressure** (flow control that slows the producer down, the way TCP and Unix pipes work).
+2. **What if a node crashes?** Keeping messages only in RAM trades durability for lower latency; writing to disk or replicating keeps them safe at higher cost.
+
+### Direct messaging vs. AMQP/JMS brokers vs. logs
+
+Direct network channels skip the broker entirely. Financial market feeds use **UDP multicast** for minimal latency (relying on application-level retransmission if packets drop), **StatsD** sends counter metrics over unreliable UDP, and **webhooks** fire direct HTTP callbacks to a consumer URL. Direct channels break down whenever a consumer goes offline or a producer crashes while holding retry buffers.
+
+Traditional message brokers—standardized in **AMQP** and **JMS** and implemented by RabbitMQ, ActiveMQ, and Google Cloud Pub/Sub—centralize buffering on a server. They support two consumer patterns:
+
+- **Load balancing (shared queue)**: each message goes to one consumer in a pool so workers share expensive work.
+- **Fan-out (topic broadcast)**: each message goes to every subscribed consumer independently, like multiple batch jobs reading the same input file.
+
+The trouble appears when **load balancing meets acknowledgments**. Workers crash, so brokers hold a message until the worker sends an acknowledgment (`ACK`). If Consumer 2 crashes while handling `m3` while Consumer 1 is already handling `m4`, the broker redelivers `m3` to Consumer 1—turning `[m3, m4]` into `[m4, m3]`. Even brokers that promise strict queue ordering scramble causal order whenever load balancing and retries combine.
+
+<StreamQueueRedelivery lang="en" />
+
+A related trap is the **poison pill**: a malformed JSON event missing a required field crashes every worker that touches it. Without a **dead-letter queue (DLQ)** to shunt failing messages aside after a few retries, an ordered queue stalls permanently or burns CPU in an infinite crash loop.
+
+| Dimension | Direct (UDP, webhooks) | AMQP / JMS broker (RabbitMQ) | Log-based broker (Kafka) |
+|---|---|---|---|
+| Offline consumers | Miss messages or rely on sender RAM buffer | Queued centrally on broker | Retained in log up to retention limit |
+| Backpressure / slow reader | Drop packets or block sender | Unbounded queue grows until disk/RAM fills | Circular buffer; consumer lags by offset |
+| Order on retry | Caller-dependent | Scrambled under load balancing + redelivery | Preserved within each partition |
+| Re-reading old events | Not possible | Gone once ACKed and deleted | Non-destructive read from any offset |
+
+<Concepts>
+
+- **Backpressure (flow control)**: pushing back on a fast sender so it slows down when the receiver's buffer fills up, instead of dropping data or crashing.
+- **Load balancing vs. fan-out**: load balancing hands each message to one worker to split the CPU cost; fan-out delivers every message to all subscribers independently.
+- **Redelivery reordering**: when one worker stalls or crashes on message `m3` while a peer finishes `m4`, retrying `m3` flips their order.
+- **Dead-letter queue (DLQ)**: a side queue where unprocessable "poison" messages are moved after repeated failures so the main stream keeps moving and operators can inspect them.
+
+</Concepts>
+
+---
+
+</En>
+
+<Vi>
+
+<Figure src={edisonTicker} alt="Máy điện báo chứng khoán Edison với cuộn băng giấy liên tục chạy qua các bánh răng đồng" caption="Máy đánh băng chứng khoán không bao giờ tẩy giá cũ: nó chỉ nối thêm từng nhịp giá mới lên cuộn băng giấy liên tục. Event log hiện đại vận hành y hệt như vậy. Ảnh: H. Zimmer, CC BY 3.0." sourceTitle="Wikimedia Commons: Edison Stock Telegraph Ticker" sourceUrl="https://commons.wikimedia.org/wiki/File:Edison_Stock_Telegraph_Ticker.jpg" />
+
+> "Một hệ thống phức tạp chạy được bao giờ cũng tiến hoá từ một hệ thống đơn giản chạy được. Điều ngược lại cũng đúng: một hệ thống phức tạp thiết kế từ đầu không bao giờ chạy và không thể sửa cho chạy được."
+> &mdash; *John Gall*, *Systemantics* (1975)
+
+### Vì sao các hệ thống âm thầm lệch pha nhau
+
+Phần lớn các team khởi đầu với một database quan hệ, rồi chẳng mấy chốc gắn thêm cache, search index và kho phân tích. Nghe có vẻ đơn giản cho tới khi tải production phơi bày bốn cái bẫy kinh điển:
+
+- **Lệch ngầm vì dual write.** API ghi vào PostgreSQL rồi cập nhật Elasticsearch. Hai lệnh ghi đồng thời tới hai nơi theo thứ tự ngược nhau, cả hai đều trả về 200 OK, và search index hiển thị dữ liệu cũ vĩnh viễn cho tới khi có người reindex lại bằng tay.
+- **Điểm mù polling ở Shopify (2021).** Công cụ `Longboat` của Shopify quét hơn 100 shard MySQL mỗi giờ một lần bằng `WHERE updated_at > last_run`. Quét dày hơn sẽ làm quá tải replica, nên dữ liệu luôn trễ tối thiểu 1 giờ, lệnh `DELETE` cứng biến mất không dấu vết, và các lần sửa dồn dập giữa hai nhịp quét bị mất sạch.
+- **Đảo thứ tự khi queue gửi lại.** Broker kiểu AMQP chia việc cho nhiều worker; một worker sập giữa chừng khi đang xử lý tin nhắn, broker gửi lại tin đó cho worker khác, vô tình đảo ngược thứ tự ban đầu.
+- **Đỉnh tăng giả lúc 2 giờ sáng.** Một consumer khởi động lại mất 60 giây để deploy. Khi chạy lại và xả đống tin tồn đọng, dashboard gom theo giờ đồng hồ máy tính báo lưu lượng tăng gấp đôi và gọi trực đêm vì một sự cố không hề có thật.
+
+Cả bốn sự cố này có chung một gốc rễ, và cách chữa cũng chung: coi dữ liệu chảy liên tục (unbounded stream) là một nhật ký sự kiện bền vững, có thứ tự. Bài này đi qua 6 bước:
+
+1. **Vì sao hàng đợi tin nhắn làm đảo thứ tự**: backpressure, load balancing vs. fan-out, gửi lại đảo chiều và dead-letter queue.
+2. **Broker dạng log và cách đọc không phá huỷ**: partition trong Kafka, offset số nguyên, lưu trữ phân tầng trên object storage và replay an toàn.
+3. **Giữ database và index đồng bộ với nhau**: dual write so với Change Data Capture (CDC), Outbox pattern, snapshot kiểu DBLog và log compaction.
+4. **Xử lý stream và materialized view chạy liên tục**: Complex Event Processing, cấu trúc xấp xỉ và Incremental View Maintenance (IVM).
+5. **Bài toán thời gian và các loại cửa sổ**: event time vs. processing time, watermark, mẹo 3 mốc giờ của Snowplow và 4 kiểu cửa sổ.
+6. **Join luồng sự kiện và chịu lỗi không trùng lặp**: join stream-stream, stream-table, table-table, Chandy-Lamport barrier và sink bất biến (idempotent).
+
+<Callout type="note" title="Tóm tắt nhanh">
+Batch job mặc định dữ liệu có kích thước hữu hạn và điểm kết thúc rõ ràng; hệ thống thật lại đẻ ra sự kiện liên tục không bao giờ ngừng. Hàng đợi truyền thống xoá tin nhắn ngay khi consumer xác nhận (ACK) và làm đảo lộn thứ tự nhân quả mỗi khi worker sập rồi gửi lại. Broker dạng log (Kafka, Redpanda, WarpStream) giữ một file log chỉ nối thêm được phân mảnh trên đĩa hoặc object storage, biến nhật ký commit của database (CDC) thành luồng sự kiện có thể phát lại bất cứ lúc nào. Nhưng đọc từ log có thứ tự mới chỉ là nửa đường: bạn vẫn phải tách thời gian sự kiện khỏi thời gian xử lý bằng watermark, xử lý sự kiện đến muộn, và làm cho checkpoint hay thao tác ghi đích có tính idempotent để restart không bao giờ đếm trùng.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Unbounded stream (luồng dữ liệu không giới hạn)**: dữ liệu đổ về liên tục không có điểm dừng (click người dùng, cảm biến, lệnh ghi DB), trái ngược với một file batch hữu hạn.
+- **Event (sự kiện)**: một bản ghi nhỏ, bất biến (immutable) mô tả một chuyện vừa xảy ra tại một thời điểm, thường mang theo mốc giờ (timestamp).
+- **Dual write (ghi hai nơi)**: code ứng dụng tự ghi cùng một thay đổi lần lượt vào hai hệ thống trở lên (như PostgreSQL và Elasticsearch) mà không có transaction phân tán bọc ngoài.
+- **Change Data Capture (CDC — bắt thay đổi dữ liệu)**: đọc thẳng nhật ký commit nội bộ của database (như WAL của PostgreSQL hay binlog của MySQL) để phát các thay đổi sang hệ thống khác theo đúng thứ tự.
+- **Watermark (dấu mực nước)**: một mốc đánh dấu trong luồng sự kiện báo rằng "từ giờ không còn sự kiện nào có giờ cũ hơn mốc này nữa", dùng để quyết định lúc nào được đóng một cửa sổ thời gian.
+
+</Concepts>
+
+---
+
+## 1. Vì sao hàng đợi tin nhắn làm đảo thứ tự
+
+Ở xử lý theo lô (batch processing), bạn đợi hết ngày, sắp xếp cả đống file rồi xuất kết quả. Đợi một ngày thì quá chậm khi hệ thống chống gian lận, tồn kho hay dashboard bán hàng cần cập nhật tính bằng giây. Bạn có thể rút chu kỳ batch xuống từng phút, hoặc bỏ hẳn khung giờ cứng để xử lý từng **sự kiện (event)** ngay khi nó tới.
+
+Nối producer với consumer bằng cách quét định kỳ (polling) một bảng database thông thường sẽ nhanh chóng trở nên đắt đỏ: quét càng dày, số truy vấn trả về rỗng càng nhiều. Và như Shopify gặp phải trên hơn 100 shard MySQL của họ, quét kiểu `WHERE updated_at > ...` bỏ sót sạch các lệnh `DELETE` cứng vì dòng đã bị xoá thì còn đâu nằm trong bảng mà quét.
+
+Thay vào đó, producer đẩy thông báo qua một **hệ thống nhắn tin (messaging system)**. Có hai câu hỏi kỹ thuật phân loại mọi thiết kế hàng đợi:
+
+1. **Nếu producer gửi nhanh hơn consumer xử lý thì sao?** Bạn có ba lựa chọn: **bỏ bớt** tin nhắn, **đệm vào hàng đợi** (rủi ro tràn RAM hoặc đầy đĩa), hoặc tạo **áp lực ngược (backpressure / flow control)** để ghìm tốc độ của bên gửi lại — đúng cách mà TCP và Unix pipe làm.
+2. **Nếu một máy bị sập thì sao?** Giữ tin nhắn thuần trên RAM cho độ trễ thấp hơn nhưng mất dữ liệu khi mất điện; ghi xuống đĩa hoặc nhân bản (replication) thì bền vững nhưng tốn chi phí I/O.
+
+### Gửi trực tiếp vs. Broker AMQP/JMS vs. Log
+
+Kênh mạng trực tiếp bỏ qua hoàn toàn máy chủ trung gian. Bảng giá chứng khoán dùng **UDP multicast** để ép độ trễ xuống cực thấp (và tự xử lý gửi bù ở tầng ứng dụng nếu rơi gói), **StatsD** bắn số đếm metric qua UDP chấp nhận sai số nhẹ, còn **webhook** gọi thẳng HTTP callback tới URL của bên nhận. Điểm yếu chung là chỉ cần bên nhận tắt máy lâu hoặc bên gửi sập khi đang giữ bộ đệm thử lại là mất tin.
+
+Broker truyền thống — chuẩn hoá qua **AMQP** và **JMS**, tiêu biểu là RabbitMQ, ActiveMQ và Google Cloud Pub/Sub — gom việc đệm tin về một server trung tâm. Chúng hỗ trợ hai kiểu đọc:
+
+- **Load balancing (chia tải trên cùng hàng đợi)**: mỗi tin nhắn chỉ giao cho một consumer trong nhóm để chia sẻ chi phí CPU.
+- **Fan-out (phát tán theo chủ đề)**: mỗi tin nhắn được giao cho tất cả các consumer đăng ký, giống nhiều batch job độc lập cùng đọc một file đầu vào.
+
+Rắc rối nảy sinh khi **chia tải đi kèm với xác nhận (acknowledgment)**. Worker có thể sập bất cứ lúc nào, nên broker giữ lại tin nhắn cho tới khi nhận được `ACK`. Nếu Consumer 2 sập khi đang xử lý `m3` cùng lúc Consumer 1 đang xử lý `m4`, broker gửi lại `m3` cho Consumer 1 — biến `[m3, m4]` thành `[m4, m3]`. Kể cả khi broker cam kết giữ thứ tự, việc kết hợp chia tải và gửi lại tất yếu làm xáo trộn thứ tự nhân quả.
+
+<StreamQueueRedelivery lang="vi" />
+
+Một cái bẫy khác là **poison pill (tin nhắn độc)**: một sự kiện JSON bị thiếu trường bắt buộc làm sập bất kỳ worker nào chạm vào. Nếu không có **hàng đợi thư chết (dead-letter queue — DLQ)** để đẩy tin nhắn lỗi sang một bên sau vài lần thử, hàng đợi giữ thứ tự sẽ đứng hình vĩnh viễn hoặc đốt sạch CPU trong vòng lặp sập-khởi động lại.
+
+| Tiêu chí | Gửi trực tiếp (UDP, webhook) | Broker AMQP / JMS (RabbitMQ) | Broker dạng log (Kafka) |
+|---|---|---|---|
+| Consumer ngoại tuyến | Mất tin hoặc phụ thuộc RAM bên gửi | Đệm tập trung trên broker | Giữ trong log tới khi hết hạn retention |
+| Áp lực ngược / đọc chậm | Rơi gói hoặc chặn bên gửi | Hàng đợi phình to tới khi đầy RAM/đĩa | Bộ đệm vòng (ring buffer); consumer trễ theo offset |
+| Thứ tự khi thử lại | Tự xử lý ở tầng ứng dụng | Dễ bị đảo khi chia tải + gửi lại | Giữ nguyên tuyệt đối trong từng partition |
+| Đọc lại tin cũ | Không thể | Xoá mất sau khi ACK | Đọc không phá huỷ từ bất kỳ offset nào |
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Backpressure (áp lực ngược / điều tiết luồng)**: cơ chế hãm bên gửi chậm lại khi bộ đệm bên nhận đầy, thay vì vứt dữ liệu hoặc làm sập tiến trình.
+- **Load balancing vs. fan-out (chia tải vs. phát tán)**: chia tải giao mỗi tin cho đúng một worker để gánh bớt việc; phát tán giao bản sao của mọi tin cho tất cả các nhóm đăng ký độc lập.
+- **Redelivery reordering (đảo thứ tự do gửi lại)**: hiện tượng tin `m3` được gửi lại muộn hơn sau khi worker giữ nó bị sập, khiến nó bị xử lý sau `m4`.
+- **Dead-letter queue (DLQ — hàng đợi thư chết)**: hàng đợi phụ để tách các tin nhắn lỗi xử lý mãi không xong ra khỏi luồng chính, vừa tránh nghẽn luồng vừa để kỹ sư kiểm tra sau.
+
+</Concepts>
+
+---
+
+</Vi>
+
+<En>
+
+## 2. Log-based brokers and non-destructive reads
+
+Traditional message queues treat messages like network packets: once delivered and acknowledged, delete them. Databases do the opposite: keep everything until explicitly removed. **Log-based message brokers**—Apache Kafka, Amazon Kinesis, Redpanda, and newer tiered engines—combine database durability with low-latency pub/sub notification.
+
+Think of `tail -f` on a file. Producers append records sequentially to the end of an on-disk log, while consumers read sequentially from left to right and wait when they hit the tail. To scale beyond one disk, a topic splits into shards called **partitions**, each an independent append-only log hosted across brokers.
+
+Inside each partition, the broker stamps every message with a monotonically increasing integer called an **offset**. Because a single partition is totally ordered, putting `user_id` as the **partition key** ensures every event for one user lands in the same partition in strict order. There is no ordering guarantee *across* different partitions.
+
+<StreamLogPartitions lang="en" />
+
+### Consumer groups, offsets, and retention math
+
+Log-based brokers combine fan-out and load balancing using **consumer groups**:
+
+- **Across groups (fan-out):** two separate groups (say, billing and search indexing) read the same topic at completely different speeds without interfering.
+- **Within a group (load balancing):** the broker assigns whole partitions to consumers rather than individual messages.
+
+Coarse-grained partition assignment gives huge throughput because the broker does not track millions of per-message ACKs—each consumer just checkpoints one integer offset per partition, much like a database replica's log sequence number. The trade-off is parallelism and **head-of-line blocking**: you can run at most as many active workers in a group as there are partitions (unless you opt into newer queue-style consumer share groups like Kafka's KIP-932), and one slow record stalls everything behind it in that partition.
+
+What stops the log from filling the disk? Old segments are deleted once they pass a retention window, turning the log into a huge disk-backed **circular buffer**. A back-of-the-envelope check: a single 20 TB drive writing sequentially at 250 MB/s takes about **22 hours** just to overwrite itself once. Real clusters write well below max disk bandwidth, so they routinely retain days or weeks of events—giving operators plenty of runway to fix a stalled consumer before old segments expire.
+
+Modern brokers push retention even further with **tiered storage** and object-store logs. Kafka and Redpanda offload older log segments to S3-compatible object storage, while architectures like WarpStream, Bufstream, and Confluent Freight store all segments in object storage directly (often exposing them as Apache Iceberg tables so batch and warehouse engines can query streams with zero ETL copy).
+
+Best of all, reading a log is **non-destructive**. If you deploy buggy stream code on Monday and catch it on Tuesday, you spin up a new consumer group starting from Monday's offset, test the fix against real production traffic into a staging table, and never touch the original stream.
+
+<Callout type="tip" title="At-least-once by default on restart">
+If a consumer processes offsets 100 through 105 and crashes before saving offset 105, its replacement resumes from the last committed offset (say, 100) and processes 101–105 a second time. We look at how to neutralize those duplicates in Section 6.
+</Callout>
+
+<Concepts>
+
+- **Partition**: one independent, append-only shard of a topic. Ordering holds strictly inside a partition, never across partitions.
+- **Offset**: the monotonically increasing integer sequence number of a record within one partition.
+- **Consumer group**: a named pool of workers sharing a topic. Each partition goes to one worker in the group (load balancing), while separate groups each get their own full copy (fan-out).
+- **Head-of-line blocking**: one slow or stuck record in a partition holding up every record queued behind it in the same partition.
+- **Tiered storage**: keeping recent hot log segments on fast local NVMe/SSD while transparently serving older segments from cheap object storage (like S3).
+
+</Concepts>
+
+---
+
+</En>
+
+<Vi>
+
+## 2. Broker dạng log và cách đọc không phá huỷ
+
+Hàng đợi truyền thống coi tin nhắn như gói tin mạng: giao xong và nhận ACK là xoá. Database thì làm ngược lại: giữ mọi thứ cho tới khi có người chủ động xoá. **Broker dạng log (log-based message broker)** — như Apache Kafka, Amazon Kinesis, Redpanda và các hệ thống lưu trữ phân tầng mới — ghép sự bền vững của database với khả năng thông báo độ trễ thấp của hàng đợi.
+
+Hãy hình dung lệnh `tail -f` trên một file. Producer chỉ nối thêm bản ghi vào cuối file log trên đĩa, còn consumer đọc tuần tự từ trái sang phải và đứng đợi khi chạm tới cuối file. Để vượt qua giới hạn của một ổ đĩa, một topic được chia thành nhiều mảnh gọi là **partition**, mỗi partition là một log nối thêm độc lập đặt rải trên các broker.
+
+Trong mỗi partition, broker đóng dấu từng tin nhắn bằng một số nguyên tăng đơn điệu gọi là **offset**. Vì bên trong một partition có thứ tự toàn phần, đặt `user_id` làm **partition key (khoá phân mảnh)** sẽ gom mọi sự kiện của cùng một người dùng vào chung một partition theo đúng thứ tự. Ngược lại, *giữa các partition khác nhau* không hề có bảo đảm về thứ tự.
+
+<StreamLogPartitions lang="vi" />
+
+### Consumer group, offset và bài toán dung lượng lưu trữ
+
+Broker dạng log kết hợp cả fan-out lẫn load balancing bằng **consumer group (nhóm consumer)**:
+
+- **Giữa các nhóm (fan-out):** hai nhóm khác nhau (ví dụ tính cước và đánh search index) cùng đọc một topic ở tốc độ hoàn toàn khác nhau mà không đụng chạm gì nhau.
+- **Bên trong một nhóm (load balancing):** broker chia nguyên cả từng partition cho các consumer chứ không phát lẻ từng tin nhắn.
+
+Giao nguyên partition giúp thông lượng vọt lên rất cao vì broker không phải theo dõi hàng triệu ACK lẻ tẻ — mỗi consumer chỉ cần lưu đúng một con số nguyên offset cho mỗi partition, giống hệt số thứ tự log (LSN) của một replica database. Đổi lại, bạn gặp giới hạn song song và **nghẽn đầu hàng (head-of-line blocking)**: số worker chạy song song tối đa trong nhóm chỉ bằng số partition (trừ khi bật chế độ chia sẻ kiểu hàng đợi mới như KIP-932 của Kafka), và một tin nhắn xử lý chậm sẽ làm kẹt mọi tin xếp sau nó trong cùng partition.
+
+Vậy làm sao log không làm đầy cứng ổ đĩa? Các đoạn log (segment) cũ quá hạn lưu giữ sẽ bị xoá, biến log thành một **bộ đệm vòng (circular buffer)** khổng lồ trên đĩa. Thử tính nhẩm: một ổ cứng 20 TB ghi tuần tự tối đa 250 MB/s mất tới khoảng **22 tiếng** mới ghi đầy một vòng. Thực tế băng thông ghi hiếm khi chạm trần đĩa, nên hệ thống thường giữ được dữ liệu vài ngày tới vài tuần — đủ thời gian cho kỹ sư sửa một consumer bị kẹt trước khi dữ liệu cũ bị cuộn mất.
+
+Các broker đời mới còn đẩy giới hạn này xa hơn bằng **lưu trữ phân tầng (tiered storage)** trên object storage. Kafka và Redpanda đẩy các segment cũ lên S3, trong khi WarpStream, Bufstream hay Confluent Freight lưu toàn bộ dữ liệu trực tiếp trên object storage (thường đóng gói luôn thành bảng Apache Iceberg để job phân tích chạy thẳng không cần ETL copy sang kho khác).
+
+Điểm đắt giá nhất là thao tác đọc log **không hề phá huỷ dữ liệu**. Nếu thứ Hai bạn deploy nhầm code xử lý sai và thứ Ba mới phát hiện, bạn chỉ cần bật một consumer group mới đọc lại từ offset ngày thứ Hai, xuất ra bảng thử nghiệm để kiểm chứng mà không đụng chạm gì tới luồng chạy thật.
+
+<Callout type="tip" title="Mặc định lặp lại ít nhất một lần khi khởi động lại">
+Nếu một consumer xử lý xong các offset 100 đến 105 nhưng sập trước khi lưu offset 105, worker thay thế sẽ đọc tiếp từ mốc đã lưu gần nhất (ví dụ 100) và xử lý lại đoạn 101–105 thêm một lần nữa. Phần 6 sẽ giải quyết chuyện xử lý trùng này.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Partition (phân mảnh)**: một mảnh log độc lập chỉ nối thêm của một topic. Thứ tự được giữ tuyệt đối bên trong một partition, không giữ giữa các partition khác nhau.
+- **Offset (vị trí bản ghi)**: số thứ tự nguyên tăng dần mà broker gán cho từng tin nhắn trong một partition.
+- **Consumer group (nhóm tiêu thụ)**: tập hợp các worker chia nhau đọc một topic. Mỗi partition giao cho một worker trong nhóm (chia tải), còn nhiều nhóm riêng biệt nhận bản sao đầy đủ độc lập (phát tán).
+- **Head-of-line blocking (nghẽn đầu hàng)**: một bản ghi xử lý chậm nằm đầu hàng làm ách tắc toàn bộ các bản ghi phía sau nó trong cùng partition.
+- **Tiered storage (lưu trữ phân tầng)**: giữ các đoạn log mới nóng hổi trên ổ SSD/NVMe cục bộ cho nhanh, còn các đoạn cũ tự động đẩy ra object storage giá rẻ (như S3).
+
+</Concepts>
+
+---
+
+</Vi>
+
+<En>
+
+## 3. Keeping databases and indexes in sync
+
+Non-trivial systems rarely fit in one engine: an OLTP store handles transactions, Redis caches hot reads, Elasticsearch powers full-text search, and an OLAP warehouse runs analytics. Whenever one row changes, every derived copy must catch up.
+
+The naive fix is **dual writes** inside application code: write to PostgreSQL, then update Elasticsearch, then bust Redis. Two subtle bugs break this pattern even without crashes:
+
+1. **Concurrent race conditions.** Client 1 sets `X = A` and Client 2 sets `X = B`. PostgreSQL sees `1 → 2` (ending at `B`), while network jitter delivers them to Elasticsearch as `2 → 1` (ending at `A`). Both stores think they succeeded, yet they permanently disagree.
+2. **Partial failures.** One write succeeds and the next times out. Making both atomic across different engines requires Two-Phase Commit (2PC), which hurts latency and availability.
+
+The clean alternative is **Change Data Capture (CDC)**: write *only* to the system of record, let its commit log establish one total order, and stream those committed changes through a log-based broker to every derived store.
+
+</En>
+
+<Vi>
+
+## 3. Giữ database và index đồng bộ với nhau
+
+Hệ thống lớn hiếm khi chỉ dùng một loại database: kho OLTP xử lý giao dịch, Redis làm cache đọc nhanh, Elasticsearch gánh tìm kiếm toàn văn, còn kho OLAP chạy phân tích. Cứ mỗi lần một dòng dữ liệu thay đổi, mọi bản sao phái sinh đều phải chạy theo.
+
+Cách làm bản năng là **dual write (ghi thẳng hai nơi)** ngay trong code ứng dụng: ghi vào PostgreSQL, rồi gọi cập nhật Elasticsearch, rồi xoá cache Redis. Có hai lỗi ngầm phá hỏng cách này kể cả khi server không hề sập:
+
+1. **Điều kiện tranh chấp (race condition) khi ghi đồng thời.** Client 1 đặt `X = A` và Client 2 đặt `X = B`. PostgreSQL nhận theo thứ tự `1 → 2` (chốt là `B`), nhưng trễ mạng làm Elasticsearch nhận ngược thành `2 → 1` (chốt là `A`). Cả hai bên đều báo thành công nhưng dữ liệu vĩnh viễn vênh nhau.
+2. **Lỗi nửa vời.** Lần ghi thứ nhất xong, lần thứ hai bị timeout. Muốn cả hai cùng thành công hoặc cùng huỷ trên hai engine khác nhau thì phải dùng Two-Phase Commit (2PC), làm nặng độ trễ và giảm độ sẵn sàng.
+
+Giải pháp sạch sẽ là **Change Data Capture (CDC)**: app chỉ ghi vào *duy nhất* hệ thống gốc (system of record), để nhật ký commit của nó chốt một thứ tự duy nhất, rồi phát dòng thay đổi đã commit qua Kafka tới mọi hệ thống phái sinh.
+
+</Vi>
+
+<StreamDualWriteVsCdc />
+
+<En>
+
+### Debezium, the Outbox pattern, snapshots, and log compaction
+
+Tools like **Debezium** (running on Kafka Connect) attach directly to PostgreSQL's logical replication stream (WAL) or MySQL's binary log (`binlog`). That turns your primary database into the single leader and makes Elasticsearch, Redis, and your warehouse behave like asynchronous followers—solving the exact blind spots that forced **Shopify** off its hourly `Longboat` polling scripts onto Debezium across 100+ MySQL shards (capturing hard deletes, intermediate edits, and consistent join state).
+
+Because CDC exposes raw database tables, it introduces a trap Chris Riccomini and Gunnar Morling have both warned about: **your internal database schema becomes a public API**. Dropping or renaming an internal column can break downstream production services.
+
+The **transactional Outbox pattern** avoids that coupling:
+
+1. Inside the **same local ACID transaction**, your service updates its private domain tables *and* inserts a clean domain event row into an `outbox` table.
+2. Debezium tails *only* the `outbox` table, so internal schema migrations stay private while downstream consumers see stable contracts (Morling notes PostgreSQL even supports `pg_logical_emit_message()` to emit directly into the WAL without bloating an outbox table).
+
+Two operational mechanics make CDC practical long-term:
+
+- **Initial snapshots without table locks.** If old logs were trimmed, a brand-new search index needs a baseline snapshot tied to a known log offset. Netflix's **DBLog** algorithm (adopted inside Debezium's incremental snapshots) brackets primary-key chunk queries with low and high watermark markers in the change log so any row updated mid-snapshot is superseded by the live stream without locking the table.
+- **Log compaction.** If you retain a CDC topic forever, disk grows with every update. Enabling **log compaction** in Kafka periodically collapses older events with the same key, keeping only the latest value—and dropping keys once a special **`null` payload (tombstone)** has propagated. Rebuilding a brand-new cache or search index simply reads offset 0 to the end.
+
+### A real case: Shopify stops polling and reads the binlog
+
+**Setup.** Shopify's data warehouse was fed by Longboat, an in-house extractor that ran a query like `updated_at > last run` against read replicas of its 100+ MySQL shards. Each table could be queried at most once an hour, because the long-running queries hurt the sources, so the data was always at least an hour old.
+
+**What broke.** A polling query only sees rows that still exist and whose `updated_at` moved. A hard `DELETE` leaves nothing to find. A big data migration, or a bug that forgets to touch `updated_at`, changes rows silently. A row edited three times between two runs arrives as one final state. And two tables extracted at different times (a sales snapshot at 2:15, a products snapshot at 2:30) cannot honestly be joined at one freshness. Running Longboat more often only hammers the databases harder.
+
+**The idea that fixes it.** The binlog already records every committed change in order, so read that instead of asking the table. Shopify runs one Debezium connector per shard that writes into Kafka, then a Kafka Streams app splits the records into one topic per table, keyed by primary key and compacted, so a consumer can rebuild a table's current state from it. Shopify reports a p99 under 10 seconds from a MySQL insert to the record reaching Kafka.
+
+<StreamShopifyCdcCase lang="en" />
+
+### State is the integral; the stream is the derivative
+
+CDC reads mutable rows and extracts a changelog; **Event Sourcing** reverses the starting point by making immutable application-intent events (`OrderCancelled`, `ItemRemovedFromCart`) the system of record from the start. You still get the same architectural insight: mutable state and an append-only event log are not opposites. Current application state is what you get when you **integrate** a stream of events over time (`state(now) = ∫ stream(t) dt`), and a change stream is what you get when you **differentiate** state by time (`stream(t) = d(state)/dt`).
+
+Immutability gives you free audit trails and painless side-by-side migrations, until privacy rules like **GDPR** ask you to erase a user completely. Because you cannot just append "forget this user" while old backups and log segments still hold their name, teams reach for excision tools or **crypto-shredding**—encrypting each user's records with a dedicated key and deleting that key when erasure is requested.
+
+<Concepts>
+
+- **Debezium**: an open-source CDC platform (commonly run on Kafka Connect) that tails database replication logs (WAL/binlog) and emits row-level change events.
+- **Transactional Outbox**: writing business rows and an outgoing event record in the same local database transaction so CDC publishes domain contracts without leaking internal schemas.
+- **Log compaction**: background cleanup in a log broker that discards older overwritten values for the same key and keeps only the latest value (plus tombstones for deletes).
+- **Tombstone**: a log record with a `null` value signaling that a key was deleted so downstream indexes delete it before compaction sweeps the marker away.
+- **Crypto-shredding**: encrypting immutable records per user or entity so throwing away the encryption key renders past log entries unreadable.
+
+</Concepts>
+
+---
+
+</En>
+
+<Vi>
+
+### Debezium, Outbox pattern, snapshot và log compaction
+
+Các công cụ như **Debezium** (chạy trên Kafka Connect) bám thẳng vào luồng nhân bản logic (WAL của PostgreSQL hoặc `binlog` của MySQL). Nhờ vậy, database chính trở thành leader duy nhất, còn Elasticsearch, Redis và kho phân tích chỉ việc bám theo như các follower bất đồng bộ — xử lý triệt để các điểm mù từng buộc **Shopify** bỏ công cụ polling hàng giờ `Longboat` để chuyển sang Debezium trên hơn 100 shard MySQL (bắt trọn xoá cứng, cập nhật trung gian và đồng bộ thời điểm join).
+
+Tuy nhiên, vì CDC đọc thẳng cấu trúc bảng nội bộ nên nó đẻ ra một cái bẫy mà cả Chris Riccomini lẫn Gunnar Morling đều cảnh báo: **schema database nội bộ vô tình biến thành API công khai**. Bạn chỉ cần đổi tên hoặc xoá một cột trong service là đủ làm sập consumer ở hệ thống khác.
+
+**Transactional Outbox pattern** cắt đứt sự phụ thuộc này:
+
+1. Bên trong **cùng một ACID transaction cục bộ**, service vừa cập nhật bảng nghiệp vụ riêng tư *vừa* chèn một dòng sự kiện sạch sẽ vào bảng `outbox`.
+2. Debezium chỉ đọc *duy nhất* bảng `outbox`, nên nhóm phát triển thoải mái sửa schema nội bộ mà bên ngoài vẫn nhận đúng hợp đồng sự kiện ổn định (Morling còn chỉ ra PostgreSQL hỗ trợ `pg_logical_emit_message()` ghi thẳng sự kiện vào WAL mà không làm phình bảng `outbox`).
+
+Hai cơ chế vận hành giúp CDC chạy bền dài hạn:
+
+- **Snapshot khởi đầu không cần khoá bảng.** Nếu log cũ đã bị cắt bớt, một search index mới tinh cần một bản chụp (snapshot) ban đầu khớp chính xác với một offset trên log. Thuật toán **DBLog** của Netflix (được tích hợp làm incremental snapshot trong Debezium) kẹp các truy vấn đọc từng khúc khoá chính giữa hai mốc watermark thấp–cao trong log thay đổi, để bất kỳ dòng nào bị sửa ngay lúc đang đọc chunk đều tự bị bản ghi stream mới hơn ghi đè, hoàn toàn không phải lock bảng.
+- **Log compaction (nén gọn log theo khoá).** Nếu giữ nguyên mọi bản cập nhật mãi mãi, đĩa sẽ phình theo tổng số lần ghi từ trước tới nay. Bật **log compaction** trong Kafka giúp broker chạy ngầm loại bỏ các bản ghi cũ trùng khoá và chỉ giữ giá trị mới nhất — đồng thời xoá hẳn khoá đó sau khi một bản ghi **`null` (tombstone)** đã đi qua các consumer. Khi cần dựng lại cache hay index mới, bạn chỉ việc đọc từ offset 0 tới cuối log.
+
+### Ca thực tế: Shopify bỏ polling, chuyển sang đọc binlog
+
+**Bối cảnh.** Kho dữ liệu của Shopify được nuôi bằng Longboat, một công cụ tự viết chạy truy vấn kiểu `updated_at > lần chạy trước` trên replica chỉ đọc của hơn 100 shard MySQL. Mỗi bảng chỉ được quét tối đa mỗi giờ một lần vì các truy vấn dài làm nặng nguồn, nên dữ liệu luôn trễ ít nhất một giờ.
+
+**Cái gì hỏng.** Truy vấn polling chỉ thấy những dòng còn tồn tại và có `updated_at` đã nhích lên. Lệnh `DELETE` cứng không để lại gì để tìm. Một đợt migrate dữ liệu lớn, hoặc một bug quên cập nhật `updated_at`, làm dòng đổi mà không ai hay. Một dòng bị sửa ba lần giữa hai lần chạy chỉ tới nơi với trạng thái cuối. Và hai bảng được lấy ở hai thời điểm khác nhau (snapshot sales lúc 2:15, snapshot products lúc 2:30) không thể join rồi nói "dữ liệu mới tới lúc nào" cho trung thực. Chạy Longboat dày hơn chỉ làm database quá tải thêm.
+
+**Ý tưởng giải quyết.** Binlog vốn đã ghi mọi thay đổi đã commit theo đúng thứ tự, nên cứ đọc nó thay vì hỏi bảng. Shopify chạy một connector Debezium cho mỗi shard để ghi vào Kafka, rồi một ứng dụng Kafka Streams tách bản ghi thành mỗi bảng một topic, khoá là primary key và bật compaction, để consumer dựng lại trạng thái hiện tại của bảng từ đó. Shopify báo p99 dưới 10 giây từ lúc MySQL ghi tới lúc bản ghi vào Kafka.
+
+<StreamShopifyCdcCase lang="vi" />
+
+### Trạng thái là tích phân; luồng sự kiện là đạo hàm
+
+CDC đọc từ bảng có thể sửa rồi trích ra lịch sử thay đổi; còn **Event Sourcing** đảo ngược điểm xuất phát, lấy chuỗi sự kiện bất biến mô tả ý định nghiệp vụ (`OrderCancelled`, `ItemRemovedFromCart`) làm nguồn sự thật ngay từ đầu. Cả hai gặp nhau ở một tính chất toán học rất đẹp: trạng thái hiện tại chính là **tích phân** của dòng sự kiện theo thời gian (`state(now) = ∫ stream(t) dt`), còn dòng thay đổi chính là **đạo hàm** của trạng thái theo thời gian (`stream(t) = d(state)/dt`).
+
+Tính bất biến cho bạn nhật ký kiểm toán miễn phí và dễ dựng song song phiên bản mới, cho tới khi quy định quyền riêng tư như **GDPR** yêu cầu xoá sạch dữ liệu của một người dùng. Vì bạn không thể chỉ nối thêm sự kiện "hãy quên người này" trong khi dữ liệu cũ vẫn nằm trong các đoạn log và backup trước đó, các hệ thống phải dùng công cụ cắt bỏ lịch sử hoặc **crypto-shredding** — mã hoá dữ liệu từng người dùng bằng khoá riêng rồi huỷ khoá đó khi có yêu cầu xoá.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Debezium**: nền tảng CDC mã nguồn mở (thường chạy trên Kafka Connect) đọc thẳng nhật ký replication (WAL/binlog) của database để phát sự kiện thay đổi từng dòng.
+- **Transactional Outbox (hộp thư đi trong transaction)**: ghi thay đổi nghiệp vụ và sự kiện cần phát vào bảng `outbox` trong cùng một transaction cục bộ để CDC phát ra hợp đồng sự kiện chuẩn mà không lộ schema nội bộ.
+- **Log compaction (nén gọn log)**: tiến trình dọn dẹp chạy ngầm trong broker, bỏ bớt các giá trị cũ bị ghi đè của cùng một khoá để chỉ giữ bản mới nhất (cộng thêm tombstone cho lệnh xoá).
+- **Tombstone (bia mộ)**: bản ghi mang giá trị `null` báo rằng khoá đó đã bị xoá để các index phía sau xoá theo trước khi compaction dọn mất dấu vết.
+- **Crypto-shredding (xoá bằng huỷ khoá mã hoá)**: mã hoá bản ghi bất biến theo từng người dùng hoặc thực thể, để khi cần xoá chỉ việc vứt khoá giải mã đi là dữ liệu cũ hết đọc được.
+
+</Concepts>
+
+---
+
+</Vi>
+
+<En>
+
+## 4. Processing streams and live SQL views
+
+Once events sit in durable, ordered streams, you can sink them into a database or search index (as in Section 3), push live alerts to humans, or run **stream processors** (operators) that transform input streams into derived output streams. Four distinct workloads have emerged around stream processors:
+
+1. **Complex Event Processing (CEP):** searches an event stream the way regular expressions search text—storing standing rules ("flag any card swiped in two countries within 10 minutes") and maintaining a state machine as events flow past (Esper, Flink CEP).
+2. **Stream analytics:** computes rolling counts, averages, or percentiles over millions of events. To keep memory bounded, engines often plug in **probabilistic sketches**—Bloom filters for membership, **HyperLogLog** for distinct counts, or quantile digests for `p99`. Approximation is an optional memory optimization, not an inherent flaw of streaming.
+3. **Search on streams (reverse indexing):** media monitors and real-estate alerts store thousands of saved full-text queries and match each incoming document against all of them at once using inverted query indexes like Elasticsearch **Percolator** or Lucene's **Luwak**.
+4. **Incremental View Maintenance (IVM):** keeps live SQL materialized views current in milliseconds instead of waiting for periodic batch refreshes.
+
+### Why Incremental View Maintenance matters now
+
+Traditional databases let you define a `MATERIALIZED VIEW`, but updating it with PostgreSQL's `REFRESH MATERIALIZED VIEW` re-executes the entire SQL query from scratch on every refresh—too slow for big tables and stale between runs. Hand-written database triggers break down quickly once SQL involves multi-way joins, `GROUP BY`, or nested subqueries.
+
+Modern streaming SQL engines—**Materialize** (built on Differential Dataflow), **RisingWave**, and **Feldera** (built on the **DBSP** model by Budiu, McSherry, Chajed, Ryzhyk, and Tannen)—compile arbitrary SQL queries into incremental dataflow graphs. Using signed weights (**Z-sets**, where `+1` inserts a row and `-1` deletes it), every operator computes work proportional only to the *delta* (what changed) rather than rescanning the full table, giving you real-time SQL views directly over CDC streams.
+
+<StreamIvmDelta lang="en" />
+
+| Pattern | What is stored | What streams past | Typical tools |
+|---|---|---|---|
+| CEP | Standing pattern rules & state machines | Raw events | Flink CEP, Esper |
+| Stream analytics | Window counters / HyperLogLog sketches | High-volume metrics | Flink, Kafka Streams, Beam |
+| Stream search | Indexed saved full-text queries | Documents / articles | Elasticsearch Percolator, Luwak |
+| Incremental View Maintenance | Materialized SQL tables + Z-set state | CDC / Kafka row deltas | Materialize, RisingWave, Feldera (DBSP) |
+
+<Concepts>
+
+- **Complex Event Processing (CEP)**: evaluating standing pattern-matching rules over a stream of events to emit an alert whenever a target sequence occurs.
+- **HyperLogLog**: a compact probabilistic sketch that estimates unique item counts (cardinality) in kilobytes instead of holding a full hash set in memory.
+- **Incremental View Maintenance (IVM)**: updating a materialized SQL query result by computing only the delta from newly arrived changes rather than re-running the whole query from scratch.
+- **Z-set**: a table representation in DBSP where every row carries an integer weight (`+1` for insert, `-1` for delete), allowing joins and aggregations to handle deletions cleanly.
+
+</Concepts>
+
+---
+
+</En>
+
+<Vi>
+
+## 4. Xử lý stream và materialized view chạy liên tục
+
+Khi sự kiện đã nằm gọn trong các log bền vững và có thứ tự, bạn có thể đổ chúng vào database hoặc search index (như Phần 3), đẩy cảnh báo trực tiếp tới con người, hoặc chạy các **stream processor** (bộ xử lý luồng) biến đổi luồng đầu vào thành các luồng phái sinh mới. Có bốn nhóm bài toán phổ biến nhất:
+
+1. **Complex Event Processing (CEP — xử lý sự kiện phức hợp):** quét luồng sự kiện giống cách biểu thức chính quy (regex) quét chuỗi ký tự — lưu sẵn các quy tắc ("báo động nếu thẻ quẹt ở hai quốc gia trong vòng 10 phút") và giữ máy trạng thái khi sự kiện trôi qua (Esper, Flink CEP).
+2. **Phân tích luồng (Stream analytics):** tính số đếm, trung bình trượt hay bách phân vị trên hàng triệu sự kiện. Để khỏi tràn RAM, các engine hay dùng **cấu trúc xác suất (probabilistic sketches)** — Bloom filter để kiểm tra tồn tại, **HyperLogLog** để ước lượng số phần tử duy nhất, hay các thuật toán ước lượng `p99`. Cần nhớ đây chỉ là mẹo tối ưu bộ nhớ tuỳ chọn, không phải bản chất của stream processing là thiếu chính xác.
+3. **Tìm kiếm trên luồng (đảo ngược vị trí query và dữ liệu):** các dịch vụ săn tin tức hay thông báo nhà đất lưu sẵn hàng nghìn câu truy vấn tìm kiếm rồi đánh giá từng bài đăng mới bay qua bằng các chỉ mục câu truy vấn như Elasticsearch **Percolator** hay **Luwak** của Lucene.
+4. **Incremental View Maintenance (IVM — duy trì khung nhìn tăng dần):** giữ cho các bảng materialized view SQL luôn tươi mới ở mức mili-giây thay vì đợi batch chạy lại theo lịch.
+
+### Vì sao Incremental View Maintenance đáng chú ý lúc này
+
+Database truyền thống cho phép tạo `MATERIALIZED VIEW`, nhưng cập nhật bằng lệnh kiểu `REFRESH MATERIALIZED VIEW` của PostgreSQL sẽ chạy lại toàn bộ truy vấn từ đầu — vừa quá chậm trên bảng lớn vừa bị cũ giữa các lần chạy. Tự viết trigger thì nhanh chóng vỡ trận khi câu SQL có nhiều phép `JOIN`, `GROUP BY` hay truy vấn lồng nhau.
+
+Các engine streaming SQL hiện đại — như **Materialize** (dựa trên Differential Dataflow), **RisingWave**, và **Feldera** (dựa trên mô hình toán học **DBSP** của Budiu, McSherry, Chajed, Ryzhyk và Tannen) — biên dịch thẳng mọi câu SQL thành một đồ thị luồng dữ liệu tăng dần. Bằng cách gán trọng số có dấu cho từng dòng (**Z-set**, trong đó `+1` là thêm dòng và `-1` là xoá dòng), mỗi bước xử lý chỉ tốn công tỉ lệ với *phần chênh lệch (delta)* vừa thay đổi chứ không quét lại cả bảng, giúp bạn có ngay các bảng SQL real-time chạy trực tiếp trên luồng CDC.
+
+<StreamIvmDelta lang="vi" />
+
+| Hướng xử lý | Thứ được lưu dài hạn | Thứ chảy ngang qua | Công cụ tiêu biểu |
+|---|---|---|---|
+| CEP | Luật khớp mẫu & máy trạng thái | Sự kiện thô | Flink CEP, Esper |
+| Stream analytics | Bộ đếm cửa sổ / sketch HyperLogLog | Metric tải cao | Flink, Kafka Streams, Beam |
+| Tìm kiếm trên luồng | Chỉ mục các câu truy vấn lưu sẵn | Tài liệu / bài báo mới | Elasticsearch Percolator, Luwak |
+| Incremental View Maintenance | Bảng SQL hiện thực hoá + trạng thái Z-set | Thay đổi dòng từ CDC / Kafka | Materialize, RisingWave, Feldera (DBSP) |
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Complex Event Processing (CEP — xử lý sự kiện phức hợp)**: áp các quy tắc tìm chuỗi mẫu được lưu sẵn lên dòng sự kiện để phát cảnh báo ngay khi chuỗi hành vi mục tiêu xuất hiện.
+- **HyperLogLog**: cấu trúc dữ liệu xác suất siêu gọn giúp ước lượng số lượng phần tử không trùng lặp (cardinality) chỉ bằng vài kilobyte RAM thay vì giữ cả một tập hợp khổng lồ.
+- **Incremental View Maintenance (IVM — cập nhật view tăng dần)**: giữ cho kết quả một truy vấn SQL luôn mới bằng cách chỉ tính phần chênh lệch từ dữ liệu mới thay đổi thay vì chạy lại toàn bộ câu lệnh từ đầu.
+- **Z-set**: cách biểu diễn bảng trong DBSP trong đó mỗi dòng mang một trọng số nguyên (`+1` khi thêm, `-1` khi xoá), giúp cả phép join lẫn thống kê đều xử lý gọn lệnh xoá và sửa.
+
+</Concepts>
+
+---
+
+</Vi>
+
+<En>
+
+## 5. Reasoning about time and windows
+
+"What was the request rate over the last five minutes?" sounds simple until you ask **whose clock defines those five minutes**.
+
+Batch jobs always read the timestamp embedded inside each event—otherwise re-running last year's logs in ten minutes of CPU time would collapse a whole year into ten minutes. Many stream processors, however, default to **processing time**: the wall clock on the machine currently reading the message.
+
+A memorable analogy: the *Star Wars* films. Episodes IV, V, and VI came out in 1977–1983; Episodes I, II, and III came out in 1999–2005. Watch them in release order and your **processing order** disagrees with the story's **event order**. Whenever a consumer pauses for a deploy, hits network jitter, or replays a backlog, processing time creates phantom gaps and fake traffic spikes.
+
+</En>
+
+<Vi>
+
+## 5. Bài toán thời gian và các loại cửa sổ
+
+Câu hỏi "tốc độ request năm phút vừa qua là bao nhiêu?" nghe rất đơn giản cho tới khi bạn hỏi lại: **dùng đồng hồ của ai để đo năm phút đó?**
+
+Batch job luôn nhìn vào mốc giờ gắn bên trong từng sự kiện — nếu không, chạy lại dữ liệu cả năm trước trong vòng 10 phút CPU sẽ ép cả năm lịch sử dồn vào 10 phút. Thế nhưng nhiều hệ thống stream lại mặc định dùng **thời gian xử lý (processing time)**: đồng hồ trên chính chiếc máy đang đọc tin nhắn lúc đó.
+
+Có một phép so sánh dễ nhớ: loạt phim *Star Wars*. Các tập IV, V, VI công chiếu năm 1977–1983, còn các tập tiền truyện I, II, III lại ra mắt tận năm 1999–2005. Nếu bạn xem theo năm phát hành, **thứ tự xử lý** của bạn vênh hẳn với **thứ tự sự kiện** trong cốt truyện. Cứ mỗi lần consumer tạm dừng để deploy, bị nghẽn mạng hay chạy bù backlog, việc tính theo thời gian xử lý sẽ tạo ra các khoảng tụt giả và đỉnh tăng giả trên đồ thị.
+
+</Vi>
+
+<StreamEventVsProcessingTime />
+
+<En>
+
+### Watermarks, stragglers, and three mobile timestamps
+
+Switching to **event time** raises a harder question: since late events can still be sitting in a queue or offline phone buffer, how do you ever know a 1-minute window is "complete"?
+
+Engines like Apache Flink and Google Cloud Dataflow solve this using **watermarks** (introduced in MillWheel and formalized in Akidau's *Dataflow Model*). A watermark `W(t)` flowing inline through the stream is an assertion: *"From here on, no more events with an event timestamp earlier than `t` are expected."* Once `W(t)` crosses the end of a window, the engine closes and emits that window.
+
+<Figure src={flinkWatermarks} alt="An out-of-order stream of numbered event timestamps passing through watermarks W(11) and W(17)" caption="In Apache Flink, watermarks travel inside the stream alongside out-of-order records. Notice event 12 arriving behind W(11) and event 17 behind W(17): late stragglers force an explicit trade-off between completeness and latency." sourceTitle="Apache Flink Documentation — Timely Stream Processing" sourceUrl="https://nightlies.apache.org/flink/flink-docs-stable/docs/concepts/time/" />
+
+Whenever an event arrives *after* its window's watermark has already passed—a **straggler**—you choose one of two options:
+
+1. **Ignore it** (and increment a dropped-late-events metric so alerts fire if drops spike).
+2. **Emit an update** (often paired with an explicit **retraction** of the previously emitted value so downstream consumers replace it cleanly).
+
+Even with watermarks, mobile apps introduce a second clock bug: the user's phone might sit offline on a subway for hours, and the phone's local clock itself might be set hours wrong. Snowplow popularized a **three-timestamp adjustment** to recover the true event time:
+
+| Step | Timestamp recorded | Example clock value | Why you need it |
+|---|---|---|---|
+| 1. `device_event` | Device clock when user tapped | `10:00:40` (phone 5 min slow) | Captures gap while offline |
+| 2. `device_send` | Device clock when app synced online | `10:05:25` | Measures time spent buffered on phone (`4m 45s`) |
+| 3. `server_receive` | Server clock when collector received batch | `10:10:25` | Estimates clock offset (`server - device_send = +5m`) |
+| **Derived true time** | `device_event + (server_receive - device_send)` | **`10:05:40`** | Removes phone clock skew (assuming minimal send lag) |
+
+### Choosing a window shape—try it live
+
+Once you trust each event's timestamp, you group events into one of four window shapes: **Tumbling** (fixed, non-overlapping buckets), **Hopping** (fixed size stepping by a smaller hop for rolling smoothing), **Sliding** (grouping events within an interval `Δ` of each other, regardless of fixed minute boundaries), and **Session** (grouping bursts of user activity separated by an inactivity gap).
+
+Play with the simulator below. Notice how turning on the 60-second consumer restart pause breaks **Processing time** into a fake zero and a red 2× spike, while **Event time** restores the flat truth—and watch how changing watermark slack decides whether the offline mobile straggler gets dropped, triggers a retraction, or arrives in time.
+
+</En>
+
+<Vi>
+
+### Watermark, sự kiện lạc và mẹo ba mốc giờ trên di động
+
+Chuyển sang **thời gian sự kiện (event time)** lại mở ra một câu hỏi hóc búa hơn: vì tin nhắn có thể đang kẹt đâu đó trên mạng hoặc nằm trong máy điện thoại mất sóng, làm sao biết chắc một cửa sổ 1 phút đã gom *đủ hết* sự kiện để chốt sổ?
+
+Các engine như Apache Flink và Google Cloud Dataflow giải quyết bằng **watermark** (từ hệ thống MillWheel và được chuẩn hoá trong bài báo *The Dataflow Model* của Akidau). Một watermark `W(t)` trôi lẫn trong dòng dữ liệu mang thông điệp: *"Kể từ điểm này trở đi, dự kiến sẽ không còn sự kiện nào có mốc giờ nhỏ hơn `t` nữa."* Ngay khi `W(t)` vượt qua mốc đóng cửa sổ, engine chốt và xuất kết quả cửa sổ đó.
+
+<Figure src={flinkWatermarks} alt="Luồng sự kiện mang các mốc thời gian lộn xộn đi xen kẽ cùng hai dấu watermark W(11) và W(17)" caption="Trong Apache Flink, watermark chạy trực tiếp trong luồng cùng các bản ghi đến lộn xộn. Để ý sự kiện 12 tới sau W(11) và sự kiện 17 tới sau W(17): những kẻ đến muộn này buộc bạn phải chọn giữa độ trễ xuất số và độ đầy đủ dữ liệu." sourceTitle="Apache Flink Documentation — Timely Stream Processing" sourceUrl="https://nightlies.apache.org/flink/flink-docs-stable/docs/concepts/time/" />
+
+Mỗi khi có sự kiện tới *sau* lúc watermark của cửa sổ đó đã đi qua — gọi là **straggler (sự kiện lạc đến muộn)** — bạn chỉ có hai cách xử lý:
+
+1. **Bỏ qua nó** (và tăng một bộ đếm metric để báo động nếu tỉ lệ tin bị bỏ tăng bất thường).
+2. **Phát bản cập nhật bù** (thường đi kèm một thông báo **thu hồi (retraction)** kết quả cũ để hệ thống phía sau thay thế cho đúng).
+
+Chưa hết, ứng dụng di động còn dính thêm một cái bẫy đồng hồ nữa: người dùng mở app dưới hầm tàu điện ngầm không có sóng, lưu tạm sự kiện vài tiếng, và bản thân đồng hồ máy người dùng có thể bị chỉnh sai giờ. Snowplow phổ biến cách **ghi ba mốc thời gian** để khôi phục giờ thật:
+
+| Bước | Mốc giờ được ghi | Ví dụ thực tế | Vai trò trong phép tính |
+|---|---|---|---|
+| 1. `device_event` | Giờ máy lúc người dùng bấm | `10:00:40` (máy chậm 5 phút) | Lưu khoảng trễ lúc máy mất mạng |
+| 2. `device_send` | Giờ máy lúc app kết nối lại và gửi | `10:05:25` | Đo thời gian nằm chờ trên máy (`4p 45s`) |
+| 3. `server_receive` | Giờ server lúc nhận được gói tin | `10:10:25` | Ước lượng độ lệch đồng hồ (`server - device_send = +5p`) |
+| **Giờ thật suy ra** | `device_event + (server_receive - device_send)` | **`10:05:40`** | Khử sai số đồng hồ máy khách (giả sử trễ truyền mạng nhỏ) |
+
+### Chọn hình dạng cửa sổ — thử trực tiếp bên dưới
+
+Khi đã tin cậy được mốc giờ của sự kiện, bạn chọn một trong bốn kiểu cửa sổ: **Tumbling** (khung cố định không chồng lấn), **Hopping** (khung cố định trượt từng bước nhỏ để làm mượt), **Sliding** (gom mọi sự kiện xảy ra cách nhau trong khoảng `Δ`, không phụ thuộc ranh giới phút tròn), và **Session** (gom theo phiên hoạt động liên tục cho tới khi người dùng im lặng quá một ngưỡng nghỉ).
+
+Bạn thử bấm ngay ở trình mô phỏng dưới đây. Bật sự cố tạm dừng restart lúc 10:02 ở chế độ **Thời gian xử lý** để thấy cột 10:02 tụt về 0 rồi cột 10:03 dựng đứng gấp đôi màu đỏ; chuyển sang **Thời gian sự kiện** để trả mọi thứ về đúng tốc độ thật, rồi thử đổi độ trễ watermark và chính sách xử lý tin trễ với sự kiện di động `m1`.
+
+</Vi>
+
+<StreamWindow />
+
+<En>
+
+<Concepts>
+
+- **Event time vs. processing time**: event time is when an action actually happened at the source; processing time is the wall clock of the worker machine handling the record later.
+- **Straggler event**: a delayed record arriving after the watermark has already closed its target window.
+- **Retraction**: an output message canceling a previously emitted window result before publishing the updated total with late stragglers included.
+- **Tumbling / Hopping / Sliding / Session windows**: tumbling slices time into disjoint fixed buckets; hopping overlaps fixed buckets; sliding groups events within `Δ` of each other; session groups bursts ended by an inactivity timeout.
+
+</Concepts>
+
+---
+
+</En>
+
+<Vi>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Event time vs. processing time (thời gian sự kiện vs. thời gian xử lý)**: event time là lúc sự kiện thật sự xảy ra ở nguồn; processing time là đồng hồ máy chạy consumer xử lý tin đó về sau.
+- **Straggler event (sự kiện lạc / đến muộn)**: bản ghi bị trễ, tới tay bộ xử lý sau khi watermark đã đóng mất cửa sổ của nó.
+- **Retraction (thu hồi kết quả)**: bản ghi phát ra để huỷ giá trị cửa sổ đã công bố trước đó trước khi phát bản cập nhật mới đã tính thêm sự kiện đến muộn.
+- **Cửa sổ Tumbling / Hopping / Sliding / Session**: tumbling chia thời gian thành các ô cố định tách rời; hopping là ô cố định chồng lên nhau; sliding gom các sự kiện cách nhau không quá `Δ`; session gom chuỗi thao tác liên tiếp cho tới khi im lặng quá một khoảng nghỉ.
+
+</Concepts>
+
+---
+
+</Vi>
+
+<En>
+
+## 6. Stream joins and fault tolerance
+
+Just like batch jobs, stream pipelines need joins—except new events keep arriving forever, so you cannot wait for "the end of the file" before sorting and merging. Stream joins fall into three patterns, all built around **maintaining local state**:
+
+1. **Stream–stream join (window join):** match ad impressions or search queries with clicks sharing a `session_id` within a bounded window (say, 1 hour). The operator indexes both streams inside the window; when a click arrives it looks up the matching query, and when a search expires without a click it emits a non-click event so click-through rates stay honest.
+2. **Stream–table join (stream enrichment):** enrich every user activity event with profile details without hammering a remote database on every event. Keep a local hash or RocksDB copy inside the stream processor, fed continuously by a log-compacted CDC stream from the user table (a conceptually infinite window back to the start of time).
+3. **Table–table join (materialized view):** join two changelogs—such as `posts` and `follows` to maintain home timelines. Remember Section 3's calculus analogy: if stream `u'` is the derivative of table `u`, then joining `u · v` follows the product rule `(u · v)′ = u′v + uv′`. Every new post joins the current followers table; every new follow joins the current posts table.
+
+### Time dependence and nondeterministic replays
+
+Joins across multiple streams carry a subtle trap: because Kafka only orders records *within* one partition, two streams (`sales` and `tax_rates`) have no guaranteed cross-stream interleaving. If a tax rate changes mid-day and you replay last month's logs, joining against "current" state can apply today's tax rate to last month's invoice. Data warehouses call this a **slowly changing dimension (SCD)**; to keep replays deterministic, either tag every rate update with an immutable version ID referenced by the sale event, or denormalize the tax rate directly into the sale event at the moment of purchase.
+
+### Fault tolerance: checkpoints, barriers, and idempotent sinks
+
+A batch task that fails after 10 minutes simply deletes its partial output file and retries. An infinite stream job cannot replay three years of events from scratch, nor can it hide output until "finished". Stream engines achieve **exactly-once semantics**—more accurately termed **effectively-once** by Viktor Klang—through three mechanisms:
+
+- **Microbatching (Spark Streaming):** chops the stream into ~1-second mini-batches and runs each like a miniature deterministic batch job. Simple, but couples latency directly to batch duration.
+- **Asynchronous Barrier Snapshotting (Apache Flink):** injects lightweight **checkpoint barriers** inline into input streams (a streaming adaptation of the Chandy-Lamport distributed snapshot algorithm). Operators align incoming barriers across input channels, snapshot their local state asynchronously to durable storage without halting the whole pipeline, and roll back to the latest barrier on crash.
+
+<Figure src={flinkCheckpoints} alt="Three stages of Flink checkpoint barrier alignment across two input channels feeding an operator and asynchronously persisting state" caption="Apache Flink injects Chandy-Lamport checkpoint barriers inline with data records. Once an operator aligns barriers from all input streams, it snapshots local state asynchronously while resuming normal processing." sourceTitle="Apache Flink Documentation — Stateful Stream Processing" sourceUrl="https://nightlies.apache.org/flink/flink-docs-stable/docs/concepts/stateful-stream-processing/" />
+
+- **Atomic commits vs. idempotent sinks:** internal checkpoints and Kafka Transactions (KIP-98) keep *stream-to-stream* state atomic. The moment output **leaves** the stream processor—updating PostgreSQL, invalidating Redis, or sending an email—the engine can no longer roll back a failed retry's side effect. Making an external write idempotent often needs only one extra column: store the monotonic Kafka partition offset alongside the row (`WHERE last_offset < $incoming_offset`) and pair failover with a **fencing token** so a stalled zombie worker cannot overwrite newer offsets.
+
+<Concepts>
+
+- **Stream–stream / stream–table / table–table joins**: window joins correlate two event streams over bounded time; enrichment joins look up a local CDC table copy; table–table joins continuously maintain a SQL join view via `(u · v)′ = u′v + uv′`.
+- **Slowly changing dimension (SCD)**: reference data (like tax rates or addresses) that shifts over time, requiring immutable version IDs or event-time snapshots so historical replays stay deterministic.
+- **Checkpoint barrier (Chandy-Lamport)**: a marker flowing inline with stream records telling operators when to snapshot local state to durable storage cleanly without pausing the whole cluster.
+- **Effectively-once (idempotent sink)**: achieving the visible effect of processing every message once by pairing at-least-once replay with deterministic code and idempotent writes (e.g., guarding updates with a monotonic Kafka offset).
+
+</Concepts>
+
+---
+
+## Key takeaways
+
+- **Never dual-write across independent databases from application code.** Concurrent network jitter reorders updates silently; write once to your system of record (or a local `outbox` table) and stream ordered changes out via CDC.
+- **Pick log-based brokers when order and replay matter.** Traditional AMQP/JMS queues are great for parallelizing unordered task work, while Kafka-style partitioned logs preserve per-key order and let you replay days of traffic without disturbing production.
+- **Never compute rate alerts or rolling windows on processing time.** Always group by event time with explicit watermarks so consumer restarts and network stalls do not invent fake drops and 2× spikes.
+- **Choose your straggler policy up front.** Tune watermark slack for latency vs. completeness, decide whether late stragglers are dropped or emit retractions, and apply Snowplow's three-timestamp offset when mobile clocks drift.
+- **Treat "exactly-once" as an end-to-end discipline.** Checkpointing and Kafka transactions protect state inside the pipeline; once you write to an external store, store the monotonic offset (or version key) to make sink writes idempotent.
+
+---
+
+## Review questions
+
+1. Why can an AMQP message broker guarantee strict queue ordering yet still deliver `[m4, m3]` when producers sent `[m3, m4]`? *(Section 1)*
+2. In Shopify's migration from `Longboat` to Debezium + Kafka, what three data correctness bugs disappeared when moving from `updated_at` polling to reading the database replication log? *(Section 1, Section 3)*
+3. How does the transactional Outbox pattern avoid both dual-write race conditions and leaking internal database schema changes to other services? *(Section 3)*
+4. During a 60-second consumer deploy, why does a processing-time metric dip to zero and then spike to 2×, whereas an event-time metric stays flat? *(Section 5)*
+5. Why are Flink checkpoint barriers or Spark microbatches not enough to prevent duplicate side effects when writing from a stream processor into PostgreSQL, and how does storing the Kafka offset fix it? *(Section 6)*
+
+</En>
+
+<Vi>
+
+## 6. Join luồng sự kiện và chịu lỗi không trùng lặp
+
+Cũng giống như batch job, hệ thống stream thường xuyên cần phép join — chỉ khác là dữ liệu cứ chảy về mãi không dứt, nên bạn không thể chờ "đọc hết file" rồi mới sắp xếp để ghép. Join trên luồng chia thành ba kiểu, tất cả đều xoay quanh **việc giữ trạng thái cục bộ (local state)**:
+
+1. **Join stream–stream (join theo cửa sổ):** ghép sự kiện tìm kiếm hoặc hiển thị quảng cáo với sự kiện click chuột có cùng `session_id` trong một khoảng thời gian giới hạn (ví dụ 1 tiếng). Bộ xử lý đánh chỉ mục cả hai luồng trong cửa sổ đó; hễ có click tới là tra tìm lượt tìm kiếm tương ứng, còn khi một lượt tìm kiếm hết hạn mà không ai bấm thì phát ra sự kiện "không click" để tính đúng tỉ lệ click (CTR).
+2. **Join stream–table (làm giàu dữ liệu luồng):** gắn thêm thông tin hồ sơ người dùng vào từng sự kiện hành vi mà không phải truy vấn DB từ xa cho từng tin nhắn. Giải pháp là giữ một bản sao bảng băm hoặc RocksDB ngay tại chỗ bên trong stream processor, được cập nhật liên tục bởi một luồng CDC đã bật log compaction từ bảng người dùng (tức một cửa sổ dài vô hạn kéo về tận lúc khởi tạo).
+3. **Join table–table (duy trì materialized view):** join hai nhật ký thay đổi — như `posts` và `follows` để nuôi bảng tin trang chủ. Nhớ lại phép giải tích ở Phần 3: nếu luồng `u′` là đạo hàm của bảng `u`, thì phép join `u · v` tuân theo quy tắc đạo hàm tích `(u · v)′ = u′v + uv′`. Mỗi bài viết mới được join với danh sách người theo dõi hiện tại; mỗi lượt follow mới được join với danh sách bài viết hiện tại.
+
+### Phụ thuộc thời gian và bài toán chạy lại bất định
+
+Join xuyên nhiều luồng ẩn chứa một cái bẫy tinh vi: vì Kafka chỉ bảo đảm thứ tự *bên trong* từng partition, hai luồng riêng biệt (`sales` và `tax_rates`) không có thứ tự xen kẽ cố định. Nếu thuế suất thay đổi giữa ngày rồi hôm sau bạn replay lại dữ liệu tháng trước, việc join với trạng thái "hiện tại" sẽ áp nhầm thuế mới vào hoá đơn cũ. Trong kho dữ liệu, đây gọi là **chiều biến đổi chậm (slowly changing dimension — SCD)**; để replay luôn cho ra cùng một kết quả, bạn hoặc phải gắn mã phiên bản bất biến cho mỗi mức thuế rồi lưu mã đó trong sự kiện bán hàng, hoặc nhúng thẳng mức thuế lúc mua vào bản ghi giao dịch.
+
+### Chịu lỗi: checkpoint, barrier và sink bất biến
+
+Một batch task sập sau 10 phút chỉ việc xoá file tạm dở dang rồi chạy lại từ đầu. Một stream job chạy liên tục hàng năm trời không thể chạy lại từ đầu, cũng không thể giấu kết quả chờ tới "lúc xong". Các hệ thống stream đạt được **ngữ nghĩa đúng-một-lần (exactly-once semantics)** — hay như Viktor Klang đặt tên chuẩn xác hơn là **effectively-once (hiệu quả như một lần)** — nhờ ba kỹ thuật:
+
+- **Microbatching (Spark Streaming):** cắt dòng chảy thành từng lô nhỏ cỡ ~1 giây rồi chạy mỗi lô như một batch job tí hon có tính tất định. Đơn giản, nhưng độ trễ bị buộc chặt vào kích thước lô.
+- **Asynchronous Barrier Snapshotting (Apache Flink):** chèn thẳng các **checkpoint barrier** nhẹ vào trong luồng dữ liệu (biến thể cho stream của thuật toán chụp trạng thái phân tán Chandy-Lamport). Khi các barrier từ mọi luồng vào đã xếp thẳng hàng tại một toán tử, nó sao lưu trạng thái cục bộ bất đồng bộ ra kho bền vững mà không phải dừng cả cụm xử lý, và quay về mốc checkpoint gần nhất nếu gặp sự cố.
+
+<Figure src={flinkCheckpoints} alt="Ba bước căn chỉnh checkpoint barrier trên hai luồng vào của một toán tử trong Apache Flink để chụp trạng thái bất đồng bộ" caption="Apache Flink chèn checkpoint barrier theo thuật toán Chandy-Lamport chạy xen kẽ cùng bản ghi dữ liệu. Khi barrier từ mọi luồng vào gặp nhau tại toán tử, trạng thái cục bộ được chụp bất đồng bộ trong khi luồng xử lý chính vẫn tiếp tục chạy." sourceTitle="Apache Flink Documentation — Stateful Stream Processing" sourceUrl="https://nightlies.apache.org/flink/flink-docs-stable/docs/concepts/stateful-stream-processing/" />
+
+- **Atomic commit nội bộ vs. sink idempotent:** checkpoint nội bộ và giao dịch Kafka (KIP-98) giữ cho các bước *stream-sang-stream* mang tính nguyên tử. Nhưng ngay khi kết quả **bước ra ngoài** bộ xử lý — cập nhật PostgreSQL, xoá cache Redis hay gửi email — engine không thể hoàn tác tác dụng phụ của một lần chạy lại bị sập giữa chừng. Cách giữ thao tác ghi ra ngoài có tính bất biến (idempotent) thường chỉ cần thêm một cột: lưu thẳng con số offset tăng đơn điệu của Kafka kèm với dòng dữ liệu (`WHERE last_offset < $incoming_offset`), và kết hợp với **fencing token** khi chuyển quyền xử lý để một worker cũ chưa chết hẳn không thể ghi đè lên offset mới hơn.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Join stream–stream / stream–table / table–table**: join theo cửa sổ ghép hai luồng sự kiện trong khoảng thời gian giới hạn; join làm giàu tra cứu bản sao bảng CDC cục bộ; join hai bảng duy trì liên tục một materialized view qua công thức `(u · v)′ = u′v + uv′`.
+- **Slowly changing dimension (SCD — chiều biến đổi chậm)**: dữ liệu tham chiếu (như thuế suất, địa chỉ) thay đổi theo thời gian, đòi hỏi mã phiên bản hoặc nhúng thẳng bản chụp lúc phát sinh sự kiện để replay không sai lệch.
+- **Checkpoint barrier (Chandy-Lamport)**: thẻ đánh dấu chạy lẫn trong luồng dữ liệu báo cho từng bước biết thời điểm chụp trạng thái cục bộ xuống kho bền vững mà không phải khoá đứng toàn bộ hệ thống.
+- **Effectively-once / Idempotent sink**: đạt được kết quả bề ngoài như thể mỗi tin nhắn chỉ chạy đúng một lần bằng cách ghép cơ chế chạy lại ít-nhất-một-lần với code tất định và thao tác ghi đích có tính idempotent (như chặn bằng offset tăng dần của Kafka).
+
+</Concepts>
+
+---
+
+## Điểm rút ra
+
+- **Đừng bao giờ tự dual write sang hai database độc lập từ code ứng dụng.** Trễ mạng khi chạy song song làm đảo thứ tự cập nhật một cách âm thầm; hãy ghi một lần vào hệ thống gốc (hoặc bảng `outbox` cục bộ) rồi dùng CDC đẩy thay đổi đúng thứ tự đi các nơi.
+- **Chọn broker dạng log khi thứ tự và khả năng replay là bắt buộc.** Hàng đợi kiểu AMQP/JMS hợp cho việc chia tải các tác vụ không cần thứ tự, còn log phân mảnh kiểu Kafka giữ chặt thứ tự theo khoá và cho phép chạy lại dữ liệu nhiều ngày trước mà không đụng tới luồng chạy thật.
+- **Không tính cảnh báo lưu lượng hay cửa sổ trượt theo processing time.** Hãy luôn gom theo thời gian sự kiện kết hợp watermark để việc restart consumer hay nghẽn mạng không biến thành đỉnh tăng giả 2×.
+- **Chốt trước quy tắc xử lý sự kiện đến muộn.** Cân chỉnh độ trễ watermark giữa tốc độ và độ đầy đủ, chọn rõ việc bỏ qua hay phát thông báo thu hồi (retraction), và dùng công thức 3 mốc giờ kiểu Snowplow khi đồng hồ điện thoại bị lệch.
+- **Coi "exactly-once" là kỷ luật đầu-cuối (end-to-end).** Checkpoint và Kafka transaction bảo vệ trạng thái bên trong pipeline; một khi đã ghi ra database bên ngoài, hãy lưu kèm offset đơn điệu (hoặc mã phiên bản) để thao tác ghi đích mang tính idempotent.
+
+---
+
+## Câu hỏi ôn tập
+
+1. Vì sao một message broker chuẩn AMQP cam kết giữ thứ tự hàng đợi nhưng vẫn có thể giao `[m4, m3]` dù producer đã gửi `[m3, m4]`? *(Phần 1)*
+2. Trong quá trình Shopify chuyển từ `Longboat` sang Debezium + Kafka, ba lỗi lệch dữ liệu nào đã biến mất khi chuyển từ quét cột `updated_at` sang đọc replication log của MySQL? *(Phần 1, Phần 3)*
+3. Transactional Outbox pattern giải quyết đồng thời cả điều kiện tranh chấp của dual write lẫn rủi ro làm lộ thay đổi schema nội bộ ra ngoài bằng cách nào? *(Phần 3)*
+4. Trong sự cố deploy consumer mất 60 giây, vì sao biểu đồ theo thời gian xử lý tụt về 0 rồi vọt gấp đôi, trong khi biểu đồ theo thời gian sự kiện vẫn giữ nguyên đường thẳng? *(Phần 5)*
+5. Vì sao checkpoint barrier của Flink hay microbatch của Spark vẫn chưa đủ để ngăn ghi trùng tác dụng phụ khi xuất dữ liệu ra PostgreSQL, và lưu kèm Kafka offset giải quyết việc đó ra sao? *(Phần 6)*
+
+</Vi>

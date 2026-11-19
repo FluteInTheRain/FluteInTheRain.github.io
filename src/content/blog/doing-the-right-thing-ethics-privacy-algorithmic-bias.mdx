@@ -1,0 +1,663 @@
+---
+title: "Algorithms, surveillance, and toxic data: engineering ethics in data systems"
+title_vi: "Thuật toán, giám sát và dữ liệu độc hại: trách nhiệm đạo đức của kỹ sư dữ liệu"
+description: "Why dropping sensitive columns fails, how feedback loops trap innocent people, and why user data is a toxic asset, told through real cases."
+description_vi: "Xóa cột nhạy cảm vẫn gây thiên kiến, vòng lặp phản hồi đẩy người vô tội vào ngõ cụt, và vì sao dữ liệu người dùng là tài sản độc hại, kể qua các sự cố có thật."
+date: 2026-11-19
+category: "system-design"
+tags: ["system-design", "ethics", "privacy", "algorithmic-bias", "gdpr", "feedback-loops", "ddia"]
+draft: true
+sources:
+  - { title: "Designing Data-Intensive Applications, 2nd Edition", author: "Martin Kleppmann & Chris Riccomini", chapters: "Ch. 14", url: "https://dataintensive.net/" }
+  - { title: "Xenophobic machines: Discrimination through unregulated use of algorithms in the Dutch childcare benefits scandal", author: "Amnesty International", url: "https://www.amnesty.org/en/documents/eur35/4686/2021/en/" }
+  - { title: "FTC Takes Action Against General Motors for Sharing Drivers' Precise Location and Driving Behavior Data Without Consent", author: "U.S. Federal Trade Commission", url: "https://www.ftc.gov/news-events/news/press-releases/2025/01/ftc-takes-action-against-general-motors-sharing-drivers-precise-location-driving-behavior-data" }
+  - { title: "Amazon scraps secret AI recruiting tool that showed bias against women", author: "Jeffrey Dastin (Reuters)", url: "https://www.reuters.com/article/us-amazon-com-jobs-automation-insight/amazon-scraps-secret-ai-recruiting-tool-that-showed-bias-against-women-idUSKCN1MK08G" }
+  - { title: "Machine Bias: There's software used across the country to predict future criminals. And it's biased against blacks.", author: "Julia Angwin, Jeff Larson, Surya Mattu & Lauren Kirchner (ProPublica)", url: "https://www.propublica.org/article/machine-bias-risk-assessments-in-criminal-sentencing" }
+  - { title: "Algorithmic Pricing and Competition: Empirical Evidence from the German Retail Gasoline Market", author: "Stephanie Assad, Robert Clark, Daniel Ershov & Lei Xu", url: "https://www.econstor.eu/handle/10419/223593" }
+  - { title: "European Union Regulations on Algorithmic Decision-Making and a 'Right to Explanation'", author: "Bryce Goodman & Seth Flaxman", url: "https://arxiv.org/abs/1606.08813" }
+  - { title: "Regulation (EU) 2016/679 (General Data Protection Regulation)", author: "European Parliament and Council", url: "https://eur-lex.europa.eu/eli/reg/2016/679/oj" }
+  - { title: "Regulation (EU) 2024/1689 (Artificial Intelligence Act)", author: "European Parliament and Council", url: "https://eur-lex.europa.eu/eli/reg/2024/1689/oj" }
+  - { title: "Data Is a Toxic Asset", author: "Bruce Schneier", url: "https://www.schneier.com/blog/archives/2016/03/data_is_a_toxic.html" }
+  - { title: "Remarks at the SASE Panel On The Moral Economy of Tech", author: "Maciej Cegłowski", url: "https://idlewords.com/talks/sase_panel.htm" }
+  - { title: "Haunted By Data", author: "Maciej Cegłowski", url: "https://idlewords.com/talks/haunted_by_data.htm" }
+  - { title: "Discord customer service data breach leaks user info and scanned photo IDs (HN comment on data retention)", author: "Fnoord (Hacker News)", url: "https://news.ycombinator.com/item?id=45469917" }
+  - { title: "Penitentiary Panopticon Plan (1791, Public Domain)", author: "Jeremy Bentham", url: "https://commons.wikimedia.org/wiki/File:Penetentiary_Panopticon_Plan.jpg" }
+  - { title: "Manchester from Kersal Moor (1857, Public Domain)", author: "William Wyld", url: "https://commons.wikimedia.org/wiki/File:Manchester_from_Kersal_Moor_William_Wylde_(1857).jpg" }
+---
+
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import En from '../../components/mdx/En.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import LinkCard from '../../components/mdx/LinkCard.astro';
+import QuoteCard from '../../components/mdx/QuoteCard.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import EthicsThreshold from '../../components/mdx/EthicsThreshold.astro';
+import EthicsProxyCorrelation from '../../components/mdx/EthicsProxyCorrelation.astro';
+import EthicsFeedbackLoop from '../../components/mdx/EthicsFeedbackLoop.astro';
+import EthicsDataJourney from '../../components/mdx/EthicsDataJourney.astro';
+import EthicsGmDataFlow from '../../components/mdx/EthicsGmDataFlow.astro';
+import EthicsRetentionBeforeAfter from '../../components/mdx/EthicsRetentionBeforeAfter.astro';
+import compasScores from '../../assets/blog/doing-the-right-thing-ethics-privacy-algorithmic-bias/propublica-compas-risk-scores.png';
+import heroPanopticon from '../../assets/blog/doing-the-right-thing-ethics-privacy-algorithmic-bias/bentham-panopticon-plan.jpg';
+import manchesterSmokestacks from '../../assets/blog/doing-the-right-thing-ethics-privacy-algorithmic-bias/manchester-1857-cottonopolis.jpg';
+
+<En>
+
+<Figure src={heroPanopticon} alt="Jeremy Bentham's 1791 architectural plan and elevation of the Penitentiary Panopticon showing a ring of cells facing a central inspector lodge" caption="Bentham's 1791 Panopticon put every inmate inside a sunlit outer ring facing a darkened central tower. Modern data pipelines recreate that geometry in software: one-way visibility where tracking sees every click, while scoring models inside the tower stay hidden. Public domain." sourceTitle="Wikimedia Commons: Penitentiary Panopticon Plan" sourceUrl="https://commons.wikimedia.org/wiki/File:Penetentiary_Panopticon_Plan.jpg" />
+
+> "Feeding AI systems on the world's beauty, ugliness, and cruelty, but expecting it to reflect only the beauty is a fantasy."
+> &mdash; *Vinay Uday Prabhu and Abeba Birhane* (2020)
+
+### What happened when systems started deciding
+
+Most writing on distributed systems stops once queries run fast and replicas stay in sync. Engineers usually skip one question in design docs: what happens to the humans whose lives sit inside those rows?
+
+Three real deployments show how fast schema and modeling decisions turn into human harm:
+
+- **Dutch Tax Administration, 2005–2019.** An automated fraud-scoring system flagged dual nationality and minor clerical slips in childcare allowance claims. Roughly 26,000+ parents were branded fraudsters and ordered to repay tens of thousands of euros, plunging families into debt and toppling the Dutch cabinet in 2021.
+- **General Motors and OnStar, 2024–2025.** Cars quietly streamed hard braking, speed, and exact location history through OnStar's Smart Driver enrollment to consumer reporting agencies, and insurers used the resulting reports to set rates, until the U.S. Federal Trade Commission proposed a five-year ban on that sharing in January 2025.
+- **Amazon recruiting model, 2014–2017.** Trained on ten years of predominantly male tech resumes, an automated screening model penalized resumes containing `"women's"` and downgraded graduates of two women's colleges. Engineers scrapped it after finding that deleting explicit words could not stop the model from picking up new proxies.
+
+Software is not neutral once it decides who gets hired, bailed, insured, or surveilled. This post walks through six lessons and the real cases behind them:
+
+1. **Predictive analytics and the algorithmic prison**: why minimizing false negatives traps innocent people with no appeal.
+2. **Proxy features and laundering bias**: why deleting sensitive columns leaves discrimination intact.
+3. **Accountability and runaway feedback loops**: how outputs poison tomorrow's training sets and raise prices on their own.
+4. **Surveillance and the consent illusion**: what changes when you swap the word "data" for "surveillance".
+5. **Privacy as control and toxic data**: why hoarded records turn into breach targets, subpoenas, and future political weapons.
+6. **Lessons from the Industrial Revolution**: how environmental safeguards and an engineer's checklist help clean up digital pollution.
+
+</En>
+
+<Vi>
+
+<Figure src={heroPanopticon} alt="Bản thiết kế kiến trúc nhà tù Panopticon năm 1791 của Jeremy Bentham gồm vòng xà lim bao quanh tháp canh trung tâm" caption="Thiết kế Panopticon năm 1791 của Jeremy Bentham đặt mọi phòng giam trên vòng ngoài sáng đèn, hướng về tháp canh tối ở giữa. Kiến trúc dữ liệu hiện đại lặp lại đúng hình học đó: hệ thống thấy mọi cú nhấp chuột, còn mô hình chấm điểm bên trong tháp lại kín như bưng. Phạm vi công cộng." sourceTitle="Wikimedia Commons: Penitentiary Panopticon Plan" sourceUrl="https://commons.wikimedia.org/wiki/File:Penetentiary_Panopticon_Plan.jpg" />
+
+> "Cho hệ thống AI ăn cả cái đẹp, cái xấu và sự tàn nhẫn của thế giới, rồi mong nó chỉ phản chiếu mỗi cái đẹp là một ảo tưởng."
+> &mdash; *Vinay Uday Prabhu và Abeba Birhane* (2020)
+
+### Chuyện gì xảy ra khi thuật toán bắt đầu phán xét
+
+Hầu hết tài liệu về hệ thống phân tán dừng lại ngay khi truy vấn chạy nhanh và các replica đồng bộ xong. Kỹ sư thường bỏ qua một câu hỏi trong design doc: chuyện gì xảy ra với những con người có cuộc đời nằm trong các dòng dữ liệu đó?
+
+Ba sự cố thật cho thấy lựa chọn schema và mô hình biến thành thiệt hại cho con người nhanh tới mức nào:
+
+- **Cơ quan Thuế Hà Lan, 2005–2019.** Hệ thống chấm điểm gian lận tự động đánh dấu tình trạng song tịch và cả những lỗi giấy tờ nhỏ trong hồ sơ trợ cấp trẻ em. Khoảng hơn 26.000 phụ huynh bị quy kết gian lận, buộc hoàn trả hàng chục nghìn euro, đẩy nhiều gia đình vào nợ nần và khiến nội các Hà Lan từ chức năm 2021.
+- **General Motors và OnStar, 2024–2025.** Xe kết nối âm thầm gửi dữ liệu phanh gấp, tốc độ và tọa độ chi tiết qua tính năng Smart Driver tới các công ty báo cáo người tiêu dùng, và hãng bảo hiểm dùng báo cáo đó để định phí, cho tới khi Ủy ban Thương mại Mỹ (FTC) đề xuất lệnh cấm 5 năm với việc chia sẻ này vào tháng 1/2025.
+- **Công cụ lọc CV của Amazon, 2014–2017.** Học từ 10 năm hồ sơ ngành kỹ thuật vốn đa số là nam giới, mô hình tự động trừ điểm các CV chứa chữ `"women's"` và hạ bậc ứng viên tốt nghiệp từ hai trường đại học nữ sinh. Đội kỹ sư phải bỏ dự án vì xóa từ khóa rõ ràng vẫn không ngăn được máy tìm đường vòng khác.
+
+Phần mềm không còn trung lập về đạo đức khi nó quyết định ai được tuyển, ai được tại ngoại, ai bị tăng phí bảo hiểm hay ai bị theo dõi. Bài này đi qua sáu bài học cốt lõi cùng các sự cố thực tế đứng sau chúng:
+
+1. **Phân tích dự đoán và "nhà tù thuật toán"**: vì sao cố giảm sót lọt lại đẩy người vô tội vào cảnh không lối thoát.
+2. **Biến đại diện và "rửa tiền" cho thiên kiến**: vì sao xóa cột nhạy cảm khỏi bảng vẫn không hết phân biệt đối xử.
+3. **Trách nhiệm giải trình và vòng lặp phản hồi**: cách kết quả hôm nay đầu độc tập dữ liệu ngày mai và tự đẩy giá bán lên.
+4. **Giám sát ngầm và ảo giác đồng thuận**: điều gì hiện ra khi bạn thay chữ "dữ liệu" bằng chữ "giám sát".
+5. **Quyền riêng tư là quyền quyết định và dữ liệu độc hại**: vì sao kho dữ liệu tích trữ trở thành mồi ngon cho tin tặc, trát tòa và công cụ kiểm soát tương lai.
+6. **Bài học từ Cách mạng Công nghiệp**: luật môi trường và checklist kỹ thuật để dọn "ô nhiễm số".
+
+</Vi>
+
+<EthicsDataJourney />
+
+<En>
+
+<Callout type="note" title="TL;DR">
+Data systems do not just reflect the world; they judge people, reshape incentives, and hoard secrets longer than the companies that collected them survive. Dropping protected columns fails because correlated proxies rebuild them, feedback loops magnify small gaps across retraining cycles, and "accept or leave" consent breaks under platform lock-in. Treat personal data like hazardous material: collect only what the feature needs, audit subgroup error rates, build an appeal path, and purge raw records on a schedule.
+</Callout>
+
+<Concepts>
+
+- **Algorithmic prison**: systematically locking someone out of loans, jobs, flights, or housing through automated risk scores without a trial or appeal.
+- **Proxy variable**: an ordinary column (like postal code or browser language) that tracks closely with a protected trait (like race or nationality).
+- **Feedback loop**: a cycle where a model's output alters real-world behavior, which then feeds back into the model's next training dataset.
+- **Decision right**: the freedom to choose what personal facts you disclose, to whom, and for what purpose.
+- **Toxic asset**: Bruce Schneier's term for stored user data that creates escalating liability from breaches, theft, or forced disclosure.
+- **Data minimization**: collecting and keeping only the narrowest slice of personal data needed for an explicit, stated task.
+
+</Concepts>
+
+---
+
+## 1. Predictive analytics and the algorithmic prison
+
+Using statistics to forecast rain or track a flu wave is one thing. Using statistics to decide whether someone gets bail, a mortgage, a boarding pass, or a job interview is another.
+
+In plain words, a **risk classifier** scores a person between 0 and 100 and compares that score against a cutoff. Organizations face lopsided incentives here: missing one bad loan or fraudulent claim (**false negative**) costs real money or safety, whereas rejecting a trustworthy customer (**false positive**) only forfeits a small sale. When in doubt, the math pushes institutions to say no.
+
+Think of a nightclub bouncer told they get fired if one troublemaker sneaks in, but never penalized for turning away polite guests. Before long, half the quiet line stays stranded outside on the sidewalk.
+
+When banks, airlines, landlords, and HR teams all buy automated filters, the same person starts hitting `"no"` at every counter. Bill Davidow named that trap **algorithmic prison** in 2014: unlike a court that presumes innocence until proven guilty, automated systems strip away daily participation in society with no evidence shown and no human to hear an appeal.
+
+Look at **ProPublica's 2016 investigation** of COMPAS, a proprietary tool used in U.S. bail and sentencing decisions across more than 10,000 defendants in Broward County, Florida. Overall predictive accuracy sat near 60–70% for both Black and white defendants—yet Black defendants who did *not* reoffend were labeled high-risk at nearly twice the rate of white non-reoffenders, while white reoffenders were far more likely to be labeled low-risk. Equal overall accuracy hid wildly unequal harm.
+
+<Figure src={compasScores} alt="Two bar charts of COMPAS risk scores from 1 to 10: Black defendants' scores are spread almost evenly, white defendants' scores pile up at the lowest scores" caption="ProPublica's score counts for Broward County defendants: scores for Black defendants spread across the whole range, while scores for white defendants skew toward the low-risk end." sourceTitle="ProPublica: Machine Bias" sourceUrl="https://www.propublica.org/article/machine-bias-risk-assessments-in-criminal-sentencing" />
+
+| | Traditional credit record | ML predictive scoring |
+|---|---|---|
+| Core question asked | "How did *you* repay past debts?" | "How did *people like you* behave?" |
+| Typical inputs | Borrowing and repayment ledger | Location, device, social links, clicks, browsing |
+| Error correction | Dispute process (slow, yet legally defined) | Often opaque; model weights cannot point to one bad row |
+| Individual fairness | Ties directly to your actions | Stereotypes you by statistical bucket |
+
+Test the threshold trade-off below. Both Group A and Group B start with the exact same ground truth (40 genuinely safe applicants and 10 risky applicants per group), except Group B carries a +8-point initial proxy penalty. Drag the rejection threshold down to cut missed risks, then step through eight retraining cycles to watch the gap widen.
+
+</En>
+
+<Vi>
+
+<Callout type="note" title="Tóm tắt nhanh">
+Hệ thống dữ liệu không đứng ngoài quan sát thế giới; nó phán xét con người, bẻ lái động lực xã hội và tích trữ bí mật lâu hơn tuổi thọ của chính công ty thu thập chúng. Xóa cột nhạy cảm thất bại vì biến đại diện dựng lại chúng, vòng lặp phản hồi khuếch đại sai lệch qua từng chu kỳ, còn sự đồng thuận kiểu "nhấn Đồng ý hoặc nghỉ dùng" sụp đổ khi nền tảng giữ vị thế độc quyền. Hãy đối xử với dữ liệu cá nhân như chất thải nguy hại: chỉ thu thứ tính năng thật sự cần, kiểm toán tỉ lệ sai lệch theo từng nhóm, mở cửa khiếu nại và xóa dữ liệu thô đúng hạn.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Algorithmic prison (nhà tù thuật toán)**: tình trạng một người bị gạt khỏi cơ hội việc làm, vay vốn, bay hay thuê nhà bởi các hệ thống chấm điểm tự động mà không có phiên xét xử hay cửa khiếu nại.
+- **Proxy variable (biến đại diện)**: cột dữ liệu trông vô hại (như mã bưu chính hay ngôn ngữ trình duyệt) nhưng bám rất sát đặc điểm nhạy cảm (như chủng tộc hay quốc tịch).
+- **Feedback loop (vòng lặp phản hồi)**: chu trình nơi quyết định của mô hình làm thay đổi hành vi ngoài đời, rồi kết quả mới lại chảy ngược vào dữ liệu huấn luyện kỳ sau.
+- **Decision right (quyền tự quyết)**: quyền chọn tiết lộ điều gì về bản thân, cho ai và vì mục đích gì.
+- **Toxic asset (tài sản độc hại)**: cách gọi của Bruce Schneier cho dữ liệu người dùng lưu trữ lâu ngày, làm phình to rủi ro rò rỉ, trộm cắp hoặc bị cưỡng chế nộp.
+- **Data minimization (tối thiểu hóa dữ liệu)**: chỉ thu thập và giữ phần dữ liệu ít nhất cần thiết cho một mục đích đã nêu rõ.
+
+</Concepts>
+
+---
+
+## 1. Phân tích dự đoán và "nhà tù thuật toán"
+
+Dùng thống kê để dự báo mưa bão hay dịch cúm là một chuyện. Dùng thống kê để quyết định một người có được tại ngoại, vay mua nhà, lên máy bay hay vào vòng phỏng vấn lại là chuyện hoàn toàn khác.
+
+Nói nôm na, một **bộ phân loại rủi ro (risk classifier)** chấm cho mỗi hồ sơ một điểm từ 0 tới 100 rồi so với ngưỡng cắt. Ở đây động lực hai phía lệch nhau rất rõ: bỏ lọt một ca gian lận hay nợ xấu (**false negative — âm tính giả**) khiến tổ chức mất tiền thật hoặc gặp rủi ro an ninh, còn từ chối nhầm một khách tốt (**false positive — dương tính giả**) chỉ mất chút doanh thu cơ hội. Khi lưỡng lự, bài toán chi phí đẩy tổ chức về phía nói "không".
+
+Cứ hình dung anh bảo vệ quán bar được dặn rằng để lọt một kẻ gây rối sẽ bị đuổi việc ngay, còn từ chối nhầm khách hiền thì chẳng ai phạt. Rất nhanh thôi, nửa hàng khách tử tế sẽ bị chặn lại ngoài vỉa hè.
+
+Khi ngân hàng, hãng bay, chủ nhà và phòng nhân sự đều mua phần mềm lọc tự động, cùng một con người sẽ liên tục đụng chữ `"từ chối"` ở mọi quầy. Bill Davidow gọi bẫy đó là **nhà tù thuật toán (algorithmic prison)** vào năm 2014: khác với tòa án suy đoán vô tội cho tới khi chứng minh được lỗi, hệ thống tự động tước bỏ quyền tham gia đời sống xã hội mà không đưa bằng chứng và chẳng có người nghe giải trình.
+
+Nhìn vào **nghiên cứu năm 2016 của ProPublica** về COMPAS, công cụ chấm điểm tái phạm được dùng tại tòa án Mỹ trên hơn 10.000 bị cáo ở hạt Broward, Florida. Độ chính xác tổng thể ngang nhau ở mức khoảng 60–70% cho cả bị cáo da đen và da trắng — nhưng người da đen *không* tái phạm bị gắn nhãn rủi ro cao nhiều gấp gần hai lần người da trắng không tái phạm, còn người da trắng tái phạm lại hay bị gắn nhãn rủi ro thấp hơn. Độ chính xác gộp bằng nhau che khuất sự bất công về chiều sai sót.
+
+<Figure src={compasScores} alt="Hai biểu đồ cột điểm rủi ro COMPAS từ 1 đến 10: điểm của bị cáo da đen trải gần đều, điểm của bị cáo da trắng dồn về mức thấp nhất" caption="Số lượng điểm rủi ro của ProPublica với các bị cáo hạt Broward: điểm của người da đen trải khắp thang điểm, còn điểm của người da trắng nghiêng về phía rủi ro thấp." sourceTitle="ProPublica: Machine Bias" sourceUrl="https://www.propublica.org/article/machine-bias-risk-assessments-in-criminal-sentencing" />
+
+| | Lịch sử tín dụng truyền thống | Chấm điểm dự đoán bằng ML |
+|---|---|---|
+| Câu hỏi cốt lõi | "*Chính bạn* đã trả nợ cũ ra sao?" | "*Những người giống bạn* từng cư xử thế nào?" |
+| Dữ liệu đầu vào | Sổ cái vay và trả nợ | Vị trí, thiết bị, quan hệ xã hội, lịch sử nhấp chuột |
+| Sửa dữ liệu sai | Có quy trình khiếu nại (chậm nhưng rõ luật) | Thường mù mờ; trọng số model không trỏ về một dòng lỗi cụ thể |
+| Công bằng cá nhân | Gắn với hành vi của riêng bạn | Dán nhãn theo nhóm thống kê |
+
+Bạn có thể thử sự đánh đổi của ngưỡng cắt ngay bên dưới. Cả Nhóm A và Nhóm B có thực chất y hệt nhau (mỗi nhóm gồm 40 người an toàn thật sự và 10 người rủi ro thật), chỉ khác là Nhóm B chịu cộng +8 điểm ban đầu từ biến đại diện. Hãy kéo ngưỡng từ chối xuống để chặn hết ca lọt lưới, rồi bấm qua 8 vòng huấn luyện lại để xem khoảng cách phình to ra sao.
+
+</Vi>
+
+<EthicsThreshold />
+
+<En>
+
+Look at what happens at a threshold of 55. At cycle 0, Group B's safe applicants are already wrongly rejected three times as often as Group A's (30% versus 10%), while zero risky Group B cases slip through. After eight retraining cycles—even though nobody altered the real trustworthiness of either group—Group B's wrongful exclusion rate climbs to 75% while Group A stays flat at 10%.
+
+<Concepts>
+
+- **Risk classifier**: a model that turns input features into a numeric score and rejects anything past a chosen threshold.
+- **False positive / False negative**: rejecting a safe person by mistake versus failing to catch a genuinely risky case.
+- **Aggregate accuracy vs. error parity**: two groups can share the same overall accuracy score while one group suffers double the wrongful rejections.
+
+</Concepts>
+
+---
+
+## 2. Proxy features and laundering bias
+
+Engineers often assume an algorithm is fairer than a prejudiced manager because Python code does not hold personal grudges. That assumption misunderstands how **machine learning** learns its rules.
+
+In classic software, a human writes every `if` condition. In predictive analytics, engineers feed the model historical outcomes and let optimization infer the splits on its own. If past decisions were skewed, the model absorbs that skew and applies it faster and at scale.
+
+Deleting sensitive columns from the training table—known as **fairness through unawareness**—hardly ever fixes this. Because real-world traits correlate tightly, innocent columns act as **proxy variables** that rebuild the missing column behind your back.
+
+Think of deleting the `"country"` column from a customer table while keeping `"phone prefix"` and `"postal code"`. You did not hide nationality; you just renamed the lookup key.
+
+</En>
+
+<Vi>
+
+Nhìn kỹ điều xảy ra ở ngưỡng 55. Ngay tại vòng 0, người vô tội ở Nhóm B đã bị chặn nhầm nhiều gấp ba lần Nhóm A (30% so với 10%). Chỉ sau tám vòng huấn luyện lại — dù chất lượng thật của hai nhóm không hề đổi — tỉ lệ người vô tội ở Nhóm B bị kẹt ngoài ngưỡng leo thẳng lên 75%, trong khi Nhóm A vẫn đứng yên ở 10%.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Risk classifier (bộ phân loại rủi ro)**: mô hình đổi dữ liệu đầu vào thành một con số điểm và từ chối ai vượt quá ngưỡng chọn trước.
+- **False positive / False negative (dương tính giả / âm tính giả)**: chặn nhầm người vô tội so với bỏ lọt trường hợp thật sự có rủi ro.
+- **Aggregate accuracy vs. error parity**: hai nhóm có thể đạt cùng độ chính xác tổng thể nhưng một nhóm lại gánh tỉ lệ bị chặn oan cao gấp đôi nhóm kia.
+
+</Concepts>
+
+---
+
+## 2. Biến đại diện và "rửa tiền" cho thiên kiến
+
+Nhiều người mặc định thuật toán công bằng hơn một sếp khó tính vì code Python không biết ghét ai. Cách nghĩ đó hiểu nhầm cách **machine learning** tạo ra luật chơi.
+
+Ở phần mềm truyền thống, kỹ sư tự gõ từng dòng `if/else`. Ở phân tích dự đoán, bạn đưa dữ liệu quá khứ vào rồi để thuật toán tối ưu tự rút luật. Nếu lịch sử vốn đã méo mó, mô hình hấp thụ nguyên si sự méo mó đó và nhân nó lên ở quy mô hàng triệu lượt.
+
+Xóa các cột nhạy cảm khỏi bảng huấn luyện — cách làm hay gọi là **công bằng bằng cách nhắm mắt làm ngơ (fairness through unawareness)** — hầu như không giải quyết được gì. Vì dữ liệu xã hội gắn chặt với nhau, các cột bình thường lập tức biến thành **biến đại diện (proxy variable)** để dựng lại đúng cột bạn vừa xóa.
+
+Giống như bạn xóa cột `"quốc gia"` khỏi bảng khách hàng nhưng giữ nguyên `"mã vùng điện thoại"` và `"mã bưu chính"`. Bạn chẳng giấu được thông tin nào cả; bạn chỉ đổi tên khóa tra cứu thôi.
+
+</Vi>
+
+<EthicsProxyCorrelation />
+
+<En>
+
+Both Amazon and the Dutch government ran headfirst into this failure mode:
+
+- **Amazon's resume screener (2014–2017):** Reuters reported that engineers tried neutralizing explicit gender terms after catching the model downgrading women applicants. They still scrapped the tool because they could not guarantee the model would not latch onto subtler linguistic proxies.
+- **Dutch *Toeslagenaffaire* (2005–2019):** Investigations by the Dutch Data Protection Authority (*Autoriteit Persoonsgegevens*) and Amnesty International's *Xenophobic Machines* report showed how automated risk models fed on dual nationality and socio-demographic indicators systematically singled out immigrant families, treating routine paperwork slips as fraud.
+
+Maciej Cegłowski summed up the trap in one line: *"machine learning is like money laundering for bias."* Clean linear algebra washes messy human discrimination until a loan officer or caseworker sees only an unassailable score: `risk_score = 84`.
+
+Cathy O'Neil pushes the point further in *Weapons of Math Destruction*: predictive models only extrapolate from the past. Making the future fairer than history takes human **moral imagination** to constrain which features, objectives, and errors you accept.
+
+<Concepts>
+
+- **Fairness through unawareness**: dropping explicit protected columns like race or gender while leaving correlated features that leak them anyway.
+- **Bias laundering**: wrapping historical human prejudice inside statistical weights so the output looks objective and indisputable.
+- **Historical bias**: skew baked directly into training labels because past human decisions or enforcement favored one group.
+- **Moral imagination**: consciously designing constraints for a fairer world instead of automating whatever inequality sits in historical logs.
+
+</Concepts>
+
+---
+
+## 3. Accountability and runaway feedback loops
+
+When a human loan officer denies your mortgage or a judge sets bail, someone owns that call and an appeal path exists. When a neural network rejects you, who walks into court?
+
+Teams sometimes shrug and blame the math: *"our deep-learning model is unexplainable."* **Engineers cannot evade responsibility by hiding behind an algorithm.** Statistical models also confuse group averages with individual justice: if national life expectancy is 80 years, nobody expects you to die on your 80th birthday. A bucket built from people "similar to you" will inevitably mistreat individuals who break the mold.
+
+Lawmakers have started turning that accountability demand into enforceable system design constraints:
+
+- **GDPR Article 22 and "Right to Explanation":** As Bryce Goodman and Seth Flaxman examined in 2016, EU rules grant safeguards around purely automated decisions with legal or life-altering effects—pushing teams toward human review and clear decision logic.
+- **EU AI Act (Regulation 2024/1689):** Classifies systems used in credit scoring, hiring, law enforcement, and essential public benefits as **high-risk**, requiring audit logs, data governance, and human oversight rather than opaque black boxes.
+
+### Self-reinforcing feedback loops
+
+Even worse than a one-off wrong score is a prediction that alters reality to confirm itself. To catch those traps before production, Donella Meadows' **systems thinking** urges you to draw the boundary around both the pipeline *and* the humans reacting to its decisions.
+
+Picture a thermostat mounted right beside an open freezer door: the sensor reads cold, blasts the heater harder, melts more ice, and creates a runaway swing because the loop feeds itself.
+
+</En>
+
+<Vi>
+
+Cả Amazon lẫn chính phủ Hà Lan đều đâm thẳng vào đúng cái bẫy này:
+
+- **Hệ thống lọc CV của Amazon (2014–2017):** Reuters ghi nhận nhóm kỹ sư đã thử sửa code để trung hòa từ ngữ chỉ giới tính sau khi thấy mô hình đánh rớt ứng viên nữ. Cuối cùng họ vẫn phải bỏ hoàn toàn hệ thống vì không thể chắc chắn mô hình sẽ không bám vào các tín hiệu văn phong tinh vi khác để nhận diện nam giới.
+- **Vụ *Toeslagenaffaire* ở Hà Lan (2005–2019):** Điều tra của Cơ quan Bảo vệ Dữ liệu Hà Lan (*Autoriteit Persoonsgegevens*) và báo cáo *Xenophobic Machines* của Amnesty International chỉ ra cách mô hình chấm rủi ro dựa vào song tịch và chỉ báo nhân khẩu học để nhắm vào các gia đình nhập cư, biến sai sót điền đơn thông thường thành chứng cứ gian lận.
+
+Maciej Cegłowski tóm gọn cái bẫy này bằng câu nói: *"machine learning giống như rửa tiền cho thiên kiến."* Đại số tuyến tính sạch sẽ "giặt" định kiến thô ráp của con người cho tới khi nhân viên ngân hàng hay công chức chỉ còn thấy một con số khó cãi: `risk_score = 84`.
+
+Cathy O'Neil trong *Weapons of Math Destruction* nhấn thêm: mô hình dự đoán chỉ biết ngoại suy từ quá khứ. Muốn tương lai công bằng hơn lịch sử thì dữ liệu tự nó không làm được — cần tới **trí tưởng tượng đạo đức (moral imagination)** của con người để đặt giới hạn cho đặc trưng, hàm mục tiêu và ngưỡng sai số được phép tồn tại.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Fairness through unawareness (công bằng bằng cách giấu cột)**: xóa các cột nhạy cảm rõ ràng như giới tính hay chủng tộc nhưng bỏ mặc những cột liên đới làm lộ lại chúng.
+- **Bias laundering (rửa tiền cho thiên kiến)**: gói định kiến lịch sử vào trọng số thống kê để con số đầu ra trông như chân lý khách quan.
+- **Historical bias (thiên kiến lịch sử)**: độ lệch có sẵn trong nhãn dữ liệu quá khứ vì các quyết định hoặc mức độ thanh tra trước đây không đều.
+- **Moral imagination (trí tưởng tượng đạo đức)**: chủ động đặt quy tắc cho một tương lai công bằng hơn, thay vì tự động hóa y nguyên quá khứ méo mó trong log.
+
+</Concepts>
+
+---
+
+## 3. Trách nhiệm giải trình và vòng lặp phản hồi
+
+Khi một chuyên viên tín dụng từ chối khoản vay hay một thẩm phán quyết định tạm giam, luôn có một cá nhân chịu trách nhiệm và một cửa khiếu nại rõ ràng. Khi một mạng nơ-ron đánh rớt bạn, ai đứng trước tòa?
+
+Đôi khi đội ngũ kỹ thuật nhún vai đổ cho thuật toán: *"mạng deep learning không giải thích được."* **Kỹ sư không thể trốn tránh trách nhiệm bằng cách đổ lỗi cho mô hình.** Mô hình thống kê cũng hay đánh đồng trung bình nhóm với công lý cá nhân: tuổi thọ trung bình một nước là 80 không có nghĩa đúng sinh nhật 80 bạn sẽ qua đời. Việc xếp một người vào rổ xác suất của những người "giống họ" chắc chắn sẽ làm oan rất nhiều cá nhân.
+
+Các nhà làm luật đang biến yêu cầu giải trình thành quy chuẩn kiến trúc bắt buộc:
+
+- **GDPR Điều 22 và "Quyền được giải thích" (Right to Explanation):** Như phân tích của Bryce Goodman và Seth Flaxman năm 2016, luật EU bảo vệ người dân trước các quyết định hoàn toàn tự động có hệ quả pháp lý hoặc ảnh hưởng lớn — buộc hệ thống phải có người rà soát và giải thích được logic cốt lõi.
+- **Đạo luật AI châu Âu (EU AI Act 2024/1689):** Xếp mô hình chấm điểm tín dụng, tuyển dụng, thực thi pháp luật và phúc lợi vào nhóm **rủi ro cao (high-risk)**, bắt buộc lưu log kiểm toán, quản trị dữ liệu và giữ quyền giám sát của con người.
+
+### Vòng lặp phản hồi tự củng cố
+
+Nguy hiểm hơn cả một lần chấm điểm sai là một dự đoán làm thay đổi chính tương lai để tự chứng minh nó đúng. Để nhìn thấy bẫy này trước khi đưa lên production, **tư duy hệ thống (systems thinking)** của Donella Meadows khuyên bạn vẽ đường biên hệ thống bao trùm cả pipeline *lẫn* con người đang phản ứng với đầu ra của nó.
+
+Hãy hình dung cảm biến điều hòa đặt ngay cạnh cánh cửa tủ đông đang hé mở: máy đo thấy lạnh buốt liền sưởi hết công suất, làm đá tan nhanh hơn và đẩy cả hệ thống vào vòng xoáy mất kiểm soát.
+
+</Vi>
+
+<EthicsFeedbackLoop />
+
+<En>
+
+Three feedback loops are already distorting people's lives and markets:
+
+1. **Credit-to-unemployment spiral:** An unexpected medical bill lowers your credit score. Employers screen hires by credit score, so you cannot land work, miss more bills, and fall deeper into the exact risk bucket the model flagged.
+2. **Echo chambers and polarization:** Recommendation engines learn which outraged headlines keep you scrolling, narrowing what you see until misinformation crowds out shared facts.
+3. **Algorithmic price collusion:** A 2024 *Journal of Political Economy* study by Stephanie Assad, Robert Clark, Daniel Ershov, and Lei Xu tracked German retail gas stations after algorithmic pricing spread around 2017. In local duopolies where *both* competing stations adopted pricing software, profit margins climbed roughly **28%** (and about 9% across non-monopoly markets overall)—not because owners phoned each other, but because bots learned to punish discounts and lock in higher prices.
+
+<Concepts>
+
+- **Accountability**: ensuring named humans and organizations stand behind automated decisions, backed by audit logs and appeal channels.
+- **Right to Explanation**: the principle (debated around GDPR Article 22) that people affected by automated decisions deserve clear reasons and human review.
+- **Systems thinking**: studying software, data pipelines, user incentives, and feedback loops together as one connected system.
+- **Tacit algorithmic collusion**: competing pricing bots independently converging on elevated prices without explicit human coordination.
+
+</Concepts>
+
+---
+
+## 4. Surveillance and the consent illusion
+
+Ethics issues do not start in the ML training script; they start the moment an ingestion service logs someone's life.
+
+When a notes app stores text you typed so it can sync across your laptop and phone, the app serves you—you are the customer. When a "free" service records every scroll, pause, physical route, and purchase in the background to sell behavioral profiles to advertisers, **you are no longer the customer; you are the raw material**.
+
+Daniel J. Bernstein offered a blunt test in 2015 that makes a useful thought experiment: **mentally replace the word "data" with "surveillance"** in your architecture docs.
+
+> *"In our surveillance-driven organization, we collect real-time surveillance streams and store them in our surveillance warehouse. Our surveillance scientists use advanced surveillance processing to derive new insights."*
+
+Suddenly, `"surveillance lakes"` sound less harmless. Yet connected gadgets have quietly built the widest surveillance network ever seen: smartphones, smart TVs, voice assistants, baby monitors, and connected cars. Tony Beltramelli's 2015 thesis even showed smartwatch motion sensors can infer typed passwords and PINs.
+
+In January 2025, the **U.S. Federal Trade Commission (FTC)** showed where silent telemetry ends up when it took action against **General Motors and OnStar**. The worked case at the end of this section follows that data hop by hop.
+
+### Why "Accept or leave" fails real consent
+
+Product teams often lean on one defense: *"Users clicked Accept on our privacy policy."* Under the **GDPR**, valid consent must be **freely given, specific, informed, and unambiguous**, and users must be able to withdraw it without harm. Four realities break that excuse:
+
+- **Opacity:** Dense legal text hides derived datasets and third-party joins that even engineers struggle to map, and one user's upload often exposes non-users in their contacts or photos.
+- **Zero negotiation:** There is no dial for *"pay $3/month and skip tracking"*; the relationship is take-it-or-leave-it.
+- **Network-effect lock-in:** Once a chat app, search engine, or social network becomes required for jobs and social life (as Shoshana Zuboff warns), opting out carries a steep social cost.
+- **Behavioral hooks:** Feeds use variable-reward mechanics borrowed from gambling (highlighted by Tristan Harris) to keep users generating behavioral exhaust.
+
+<Callout type="warning" title="Necessary product telemetry vs. surveillance">
+Not every log is surveillance. Logging which search link a user clicked improves search ranking, and fraud systems rely on GDPR's **legitimate interest** basis (since fraudsters obviously will not click "I consent to fraud detection"). The ethical line sits where logging stops serving the user's explicit task and starts building permanent profiles to monetize or judge them elsewhere.
+</Callout>
+
+### One car, five hops: the GM and OnStar case
+
+**Setup.** GM sold cars with OnStar and encouraged buyers to enroll in Smart Driver, a feature often pitched as a way to assess their own driving habits.
+
+**What broke.** The FTC alleges the enrollment flow was confusing and misleading, and some drivers did not know they had been enrolled. Cars reported precise location (sometimes as often as every three seconds) plus every instance of hard braking, late-night driving, and speeding. GM then sold that data to third parties, including consumer reporting agencies, and insurers used the resulting reports to set rates or deny coverage. Drivers complained to GM when they found out; one said they had signed up so OnStar could track them, not so their insurer could.
+
+**Which idea fixes it.** Data collected to coach one driver should not silently flow to another party for another purpose. That is purpose limitation and freely given consent, written as system design. The proposed order does exactly that: a five-year ban on disclosing geolocation and driver behavior data to consumer reporting agencies, affirmative express consent before collecting connected-vehicle data, and drivers who can ask for a copy, request deletion and switch off precise geolocation collection.
+
+</En>
+
+<Vi>
+
+Ba vòng lặp phản hồi đang bóp méo đời sống lẫn thị trường ngoài thực tế:
+
+1. **Vòng xoáy tín dụng — việc làm:** Một hóa đơn viện phí bất ngờ làm điểm tín dụng của bạn tụt xuống. Nhà tuyển dụng lại lọc ứng viên qua điểm tín dụng, khiến bạn khó tìm việc, tiếp tục trễ hạn hóa đơn và lún sâu đúng vào nhóm rủi ro mà mô hình đã "tiên tri".
+2. **Buồng vang và phân cực:** Hệ thống gợi ý học rất nhanh xem tiêu đề gây phẫn nộ nào giữ bạn cuộn màn hình lâu nhất, rồi thu hẹp dần góc nhìn cho tới khi tin giả lấn át sự thật chung.
+3. **Thông đồng giá bằng thuật toán:** Một nghiên cứu năm 2024 trên *Journal of Political Economy* của Stephanie Assad, Robert Clark, Daniel Ershov và Lei Xu khảo sát các trạm xăng Đức sau khi phần mềm định giá tự động phổ biến quanh năm 2017. Tại các cặp trạm cạnh tranh trực tiếp nơi *cả hai* đối thủ đều bật bot định giá, biên lợi nhuận vọt lên khoảng **28%** (và tăng trung bình ~9% ở các thị trường không độc quyền) — không phải vì chủ trạm gọi điện bàn bạc, mà vì các bot tự học cách trừng phạt giảm giá và cùng neo ở mức giá cao.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Accountability (trách nhiệm giải trình)**: bảo đảm luôn có con người và tổ chức đứng tên chịu trách nhiệm về kết quả tự động, kèm log kiểm toán và cửa khiếu nại.
+- **Right to Explanation (quyền được giải thích)**: nguyên tắc pháp lý (xoay quanh Điều 22 GDPR) cho rằng người chịu tác động từ quyết định tự động xứng đáng được biết lý do dễ hiểu và được người thật xem lại.
+- **Systems thinking (tư duy hệ thống)**: phân tích phần mềm, pipeline dữ liệu, động cơ người dùng và vòng lặp phản hồi như một hệ thống thống nhất.
+- **Tacit algorithmic collusion (thông đồng giá ngầm bằng thuật toán)**: hiện tượng các bot định giá cạnh tranh tự hội tụ về mức giá cao hơn mà không cần con người thỏa thuận.
+
+</Concepts>
+
+---
+
+## 4. Giám sát ngầm và ảo giác đồng thuận
+
+Vấn đề đạo đức không bắt đầu trong file code huấn luyện AI; nó bắt đầu ngay khoảnh khắc pipeline thu thập ghi lại đời sống của một con người.
+
+Khi app ghi chú lưu đoạn chữ bạn gõ để đồng bộ giữa laptop và điện thoại, phần mềm phục vụ bạn — bạn là khách hàng. Khi một dịch vụ "miễn phí" âm thầm ghi lại từng cú cuộn trang, quãng dừng, tọa độ di chuyển và hóa đơn mua sắm để bán hồ sơ hành vi cho bên quảng cáo, **bạn không còn là khách hàng nữa; bạn là nguyên liệu đầu vào**.
+
+Daniel J. Bernstein đề xuất một phép thử thẳng thắn vào năm 2015 rất hợp làm bài tập tư duy: **hãy thử thay mọi chữ "dữ liệu (data)" bằng chữ "giám sát (surveillance)"** trong tài liệu của team bạn.
+
+> *"Trong tổ chức vận hành bằng giám sát của chúng tôi, chúng tôi thu các luồng giám sát thời gian thực (real-time surveillance streams) và đổ vào kho giám sát (surveillance warehouse). Đội ngũ khoa học giám sát xử lý dữ liệu để rút ra insight mới."*
+
+Đột nhiên cụm `"hồ giám sát"` nghe bớt dễ thương đi hẳn. Thế nhưng thiết bị tiêu dùng đã âm thầm dựng nên mạng lưới giám sát lớn chưa từng có: điện thoại thông minh, TV thông minh, loa trợ lý ảo, máy trông trẻ và xe hơi kết nối mạng. Luận văn thạc sĩ năm 2015 của Tony Beltramelli thậm chí chứng minh cảm biến chuyển động trên smartwatch có thể suy ra mật khẩu và mã PIN bạn đang gõ.
+
+Tháng 1/2025, **Ủy ban Thương mại Liên bang Mỹ (FTC)** cho thấy dữ liệu cảm biến âm thầm đi về đâu khi ra tay với **General Motors và OnStar**. Ca thực tế ở cuối phần này lần theo dữ liệu đó từng chặng một.
+
+### Vì sao "Đồng ý hoặc nghỉ dùng" không phải đồng thuận thật
+
+Đội sản phẩm hay dựa vào một lá chắn quen thuộc: *"Người dùng đã bấm Đồng ý vào chính sách quyền riêng tư rồi."* Theo **GDPR**, sự đồng thuận hợp lệ phải **tự nguyện, cụ thể, đủ thông tin, rõ ràng**, và người dùng có thể rút lại mà không bị phạt. Bốn thực tế sau phá vỡ lá chắn đó:
+
+- **Mù mờ:** Điều khoản dài hàng nghìn chữ che giấu các tập dữ liệu suy diễn và phép join với bên thứ ba mà ngay cả kỹ sư cũng khó lần ra, và dữ liệu một người tải lên thường kéo theo thông tin của những người chưa từng dùng dịch vụ (trong danh bạ hay ảnh chụp).
+- **Không có quyền thương lượng:** Không có nút chọn *"trả 3 USD/tháng để tắt theo dõi"*; quan hệ giữa hai bên là chấp nhận toàn bộ hoặc ra đi.
+- **Khóa chặt bởi hiệu ứng mạng:** Khi app nhắn tin, công cụ tìm kiếm hay mạng xã hội trở thành hạ tầng thiết yếu cho công việc và giao tiếp (như Shoshana Zuboff cảnh báo), từ chối sử dụng mang lại cái giá xã hội quá đắt.
+- **Móc câu hành vi:** Bảng tin dùng cơ chế thưởng ngẫu nhiên mượn từ cờ bạc (được Tristan Harris phân tích) để giữ người dùng tiếp tục tạo thêm dấu vết hành vi.
+
+<Callout type="warning" title="Telemetry cần cho sản phẩm khác gì giám sát ngầm">
+Không phải log nào cũng là giám sát. Ghi nhận người dùng nhấp vào kết quả tìm kiếm nào giúp xếp hạng chính xác hơn, và hệ thống chống gian lận dựa trên cơ sở **lợi ích hợp pháp (legitimate interest)** của GDPR (vì kẻ gian dĩ nhiên sẽ không bấm "Tôi đồng ý bị phát hiện gian lận"). Ranh giới đạo đức nằm ở chỗ việc ghi log dừng phục vụ tính năng người dùng yêu cầu và chuyển sang dựng hồ sơ lâu dài để khai thác quảng cáo hoặc chấm điểm ở nơi khác.
+</Callout>
+
+### Một chiếc xe, năm chặng: ca GM và OnStar
+
+**Bối cảnh.** GM bán xe kèm OnStar và khuyến khích người mua đăng ký Smart Driver, tính năng thường được giới thiệu là giúp tài xế tự đánh giá thói quen lái xe của mình.
+
+**Chỗ hỏng.** FTC cáo buộc quy trình đăng ký khó hiểu và gây hiểu nhầm, có tài xế không biết mình đã bị đăng ký. Xe gửi về vị trí chính xác (có lúc cứ ba giây một lần) cùng từng lần phanh gấp, lái xe ban đêm và chạy quá tốc độ. GM sau đó bán dữ liệu này cho bên thứ ba, gồm cả các công ty báo cáo người tiêu dùng, và hãng bảo hiểm dùng các báo cáo đó để định phí hoặc từ chối bảo hiểm. Khi phát hiện, tài xế phàn nàn với GM; có người nói họ đăng ký để OnStar theo dõi xe mình, chứ không phải để hãng bảo hiểm theo dõi.
+
+**Ý tưởng giải quyết.** Dữ liệu thu để hướng dẫn một tài xế không được âm thầm chảy sang bên khác cho mục đích khác. Đó là giới hạn mục đích và đồng thuận tự nguyện, viết thành thiết kế hệ thống. Lệnh đề xuất của FTC làm đúng việc ấy: cấm 5 năm việc chia sẻ dữ liệu vị trí và hành vi lái xe cho các công ty báo cáo người tiêu dùng, bắt buộc có sự đồng ý rõ ràng trước khi thu dữ liệu xe kết nối, và tài xế được quyền xin bản sao, yêu cầu xóa và tắt việc thu vị trí chính xác.
+
+</Vi>
+
+<EthicsGmDataFlow />
+
+<En>
+
+<Concepts>
+
+- **Surveillance capitalism**: a business model (named by Shoshana Zuboff) that captures behavioral data for free and sells predictions of future human behavior.
+- **Freely given consent**: GDPR's rule that permission is invalid if users face dark patterns, pre-ticked boxes, or punishment for opting out.
+- **Legitimate interest**: a lawful GDPR basis (such as payment fraud detection) that still requires balancing necessity against user rights.
+- **Telemetry**: automated measurement streams sent back by apps, servers, cars, or connected devices.
+
+</Concepts>
+
+---
+
+## 5. Privacy as control, and data as toxic waste
+
+Whenever a breach or tracking scandal hits the news, someone replies that *"privacy is dead—people post their whole lives online!"* That claim confuses **secrecy** with **control**.
+
+Having privacy does not mean hiding in a cellar with no windows. It means holding a **decision right**: choosing what you disclose, to whom, and for what purpose. A patient with a rare disease may gladly donate medical scans to university researchers while demanding that insurers and employers never see one byte.
+
+When tracking pipelines pull behavioral records into corporate warehouses, privacy does not vanish—**it gets transferred from the user to the company**. Companies then hide their own inferences as corporate secrets because showing users *"we flagged your pregnancy or divorce anxiety"* feels creepy (as Carina Zona noted in her talk on `"insightful algorithms"`, even factually accurate inferences can trigger painful memories). Users lose control over sensitive facts while still seeing ads targeted off them.
+
+### From "data exhaust" to "the new uranium"
+
+Calling behavioral logs `"data exhaust"` makes them sound like harmless steam. In reality, user interaction is unpaid **data labor** (Ibarra, Lanier, and Weyl, 2018), bought and merged by secretive **data brokers**.
+
+Security researchers **Bruce Schneier** (2016) and **Maciej Cegłowski** (2015) flip Silicon Valley's slogan *"data is the new oil"* upside down: personal data is a **toxic asset**—or as Mark Pesce put it in 2024, **the new uranium**. Every retained row gains liability over time:
+
+- **Breaches and insider leaks:** Attackers steal poorly guarded tables, or insiders leak records.
+- **M&A and bankruptcy sales:** When a startup shuts down, user tables get auctioned off to buyers who never signed your original promise.
+- **Subpoenas and future regimes:** Data gathered under a benign government sits on disk if less scrupulous leaders take power later. As Schneier warns, *"It is poor civic hygiene to install technologies that could someday facilitate a police state."*
+
+<LinkCard url="https://www.schneier.com/blog/archives/2016/03/data_is_a_toxic.html" title="Data Is a Toxic Asset — Bruce Schneier" description="Why storing personal data creates mounting security, legal, and reputational liabilities—and why throwing unneeded records out is the safest defense." tag="Essay" />
+
+<QuoteCard author="Fnoord" sourceTitle="Hacker News — Discord CS data breach leaks scanned photo IDs" sourceUrl="https://news.ycombinator.com/item?id=45469917">
+Because companies CS never delete such data after verification. They sit on a goldmine of data, while data is a toxic asset (as per Schneier's essay).
+</QuoteCard>
+
+</En>
+
+<Vi>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Surveillance capitalism (chủ nghĩa tư bản giám sát)**: mô hình kinh tế (do Shoshana Zuboff đặt tên) thu dữ liệu hành vi miễn phí rồi bán các dự đoán về hành vi tương lai của con người.
+- **Freely given consent (đồng thuận tự nguyện)**: quy định của GDPR rằng sự cho phép vô hiệu nếu người dùng bị dẫn dụ bằng dark pattern, ô tick sẵn hoặc bị thiệt thòi khi từ chối.
+- **Legitimate interest (lợi ích hợp pháp)**: một căn cứ xử lý dữ liệu hợp pháp trong GDPR (như chặn gian lận thẻ) nhưng vẫn phải cân đối giữa nhu cầu kỹ thuật và quyền người dùng.
+- **Telemetry**: các dòng số đo tự động được app, server, xe hơi hoặc thiết bị IoT gửi về hệ thống trung tâm.
+
+</Concepts>
+
+---
+
+## 5. Quyền riêng tư là quyền quyết định, và dữ liệu là chất thải độc hại
+
+Mỗi lần nổ ra bê bối rò rỉ dữ liệu, luôn có người buông câu *"quyền riêng tư chết rồi — người ta tự đăng cả đời tư lên mạng đấy thôi!"* Câu nói đó đánh đồng **sự giấu giếm (secrecy)** với **quyền kiểm soát (control)**.
+
+Có quyền riêng tư không phải là trốn trong hầm kín không cửa sổ. Đó là **quyền tự quyết (decision right)**: tự chọn mình chia sẻ điều gì, cho ai, và cho mục đích nào. Một bệnh nhân mắc bệnh hiếm có thể rất sẵn lòng gửi hồ sơ bệnh án cho nhóm nghiên cứu đại học tìm thuốc chữa, nhưng dứt khoát yêu cầu hãng bảo hiểm và nhà tuyển dụng không bao giờ chạm tới một byte nào.
+
+Khi hệ thống theo dõi hút dữ liệu hành vi về kho doanh nghiệp, quyền riêng tư không biến mất — **nó bị chuyển giao từ cá nhân sang công ty**. Các công ty sau đó giấu kết quả phân tích làm bí mật thương mại, vì trưng ra trước mặt người dùng kiểu *"chúng tôi đoán bạn đang ly hôn hoặc lo âu bệnh lý"* sẽ gây phản cảm (như Carina Zona nói trong bài thuyết trình về *"thuật toán quá tinh tường"*, dữ liệu dù đúng sự thật vẫn có thể khơi lại ký ức đau buồn). Người dùng mất quyền định đoạt thông tin nhạy cảm trong khi vẫn thấy quảng cáo nhắm đúng vào nỗi đau đó.
+
+### Từ "khí thải dữ liệu" tới "uranium mới"
+
+Gọi log hành vi là `"khí thải dữ liệu (data exhaust)"` khiến nó nghe như làn hơi vô hại. Thực tế, tương tác của người dùng là **lao động dữ liệu không công (data labor)** (Ibarra, Lanier và Weyl, 2018), được các **nhà môi giới dữ liệu (data brokers)** gom mua và bán lại âm thầm.
+
+Hai chuyên gia bảo mật **Bruce Schneier** (2016) và **Maciej Cegłowski** (2015) lật ngược khẩu hiệu *"dữ liệu là dầu mỏ mới"* của Thung lũng Silicon: dữ liệu cá nhân là **tài sản độc hại (toxic asset)** — hay như Mark Pesce ví năm 2024, **uranium mới**. Mỗi dòng dữ liệu giữ lại càng lâu càng tích thêm rủi ro:
+
+- **Lộ lọt từ bên ngoài và nội gián:** Tin tặc đánh cắp kho dữ liệu bảo vệ lỏng lẻo, hoặc người trong công ty tuồn ra ngoài.
+- **Mua bán sáp nhập và phá sản:** Khi một startup đóng cửa, bảng dữ liệu người dùng trở thành tài sản đem bán đấu giá cho chủ mới chưa từng hứa hẹn gì với bạn.
+- **Trát tòa và biến động chính trị:** Dữ liệu gom thời bình vẫn nằm nguyên trên ổ cứng khi những người cầm quyền ít tôn trọng tự do dân sự hơn xuất hiện. Như Schneier cảnh báo: *"Thật thiếu vệ sinh công dân khi lắp đặt sẵn những công nghệ mà một ngày nào đó có thể tiếp tay cho nhà nước cảnh sát."*
+
+<LinkCard url="https://www.schneier.com/blog/archives/2016/03/data_is_a_toxic.html" title="Data Is a Toxic Asset — Bruce Schneier" description="Vì sao tích trữ dữ liệu cá nhân làm phình to trách nhiệm pháp lý, an ninh và uy tín — và vì sao vứt bỏ dữ liệu không còn cần là lớp phòng thủ an toàn nhất." tag="Tiểu luận" />
+
+<QuoteCard author="Fnoord" sourceTitle="Hacker News — Vụ rò rỉ bộ phận CSKH Discord làm lộ ảnh giấy tờ tùy thân" sourceUrl="https://news.ycombinator.com/item?id=45469917">
+Bởi vì bộ phận chăm sóc khách hàng của các công ty chẳng bao giờ xóa loại dữ liệu đó sau khi xác minh xong. Họ ngồi trên cả một mỏ dữ liệu, trong khi dữ liệu là một tài sản độc hại (đúng như bài viết của Schneier).
+</QuoteCard>
+
+</Vi>
+
+<EthicsRetentionBeforeAfter />
+
+<En>
+
+<Concepts>
+
+- **Privacy as a decision right**: owning where you stand between secrecy and transparency in each situation.
+- **Data broker**: a behind-the-scenes firm that buys, merges, scores, and resells personal dossiers for ads, insurance, or background checks.
+- **Data exhaust vs. data labor**: viewing clickstreams as worthless leftovers versus recognizing user activity as unpaid value creation.
+- **Mission creep**: reusing data gathered for one narrow task (like billing or ID verification) for sweeping surveillance later.
+
+</Concepts>
+
+---
+
+## 6. From smoky rivers to an engineer's checklist
+
+Humanity has already navigated one technological revolution that dumped unmeasured waste onto the public: the **Industrial Revolution**.
+
+<Figure src={manchesterSmokestacks} alt="William Wyld's 1857 painting Manchester from Kersal Moor showing green hills overlooking a valley of smoking factory chimneys" caption="William Wyld's 1857 view of Manchester ('Cottonopolis') captures the early industrial bargain: surging output alongside black soot and poisoned rivers. Cleanup came only when workplace safety laws, food inspections, and environmental standards forced factories to contain their waste. Public domain." sourceTitle="Wikimedia Commons: Manchester from Kersal Moor (1857)" sourceUrl="https://commons.wikimedia.org/wiki/File:Manchester_from_Kersal_Moor_William_Wylde_(1857).jpg" />
+
+Early factories delivered huge economic gains alongside blackened skies, poisoned rivers, tainted food, and child labor in mines. Factory owners protested that safety rules would wreck innovation, yet nobody today wants to bring back burning rivers or adulterated bread.
+
+Bruce Schneier makes the parallel explicit: **data is the pollution problem of the information age, and protecting privacy is the environmental challenge.** Our grandchildren will look back on early software engineers and judge how we handled this digital waste, just as we look back on early industrialists ignoring smoke-choked cities.
+
+Regulation sets an essential floor, though laws alone have gaps. GDPR's **purpose limitation** rule—requiring data to be gathered only for *"specified, explicit and legitimate purposes"*—clashes head-on with big data's habit of hoarding everything for unforeseen queries later. Weak enforcement still lets giant fines look like an operating fee, while clumsy rules can slow beneficial medical analytics.
+
+That is why the decisive shift has to be **cultural and architectural**. Treat individual privacy like a shared national park—protect it on purpose before it suffers a tragedy of the commons.
+
+### What you can ship tomorrow
+
+| Engineering habit | Concrete design choice | Why it cuts harm |
+|---|---|---|
+| Enforce strict schemas and TTLs | Drop raw PII at ingestion; attach short expiry timers to behavioral logs | Data you never store cannot leak in a breach or get subpoenaed |
+| Design deletion into immutable logs | Encrypt each user's records with dedicated keys and delete keys on request (**crypto-shredding**) | Lets append-only logs and event streams honor erasure without rewriting history |
+| Measure subgroup error rates | Track false positives and false negatives per demographic or proxy slice alongside aggregate accuracy | Catches skewed exclusion before shipping and across retraining cycles |
+| Build human override and appeal paths | Surface plain-language rejection reasons and a manual review queue | Prevents automated scores from locking innocent people in an algorithmic prison |
+| Separate product telemetry from profiles | Aggregate click metrics without persistent cross-app user identifiers | Improves search ranking and UI without feeding a surveillance warehouse |
+
+As Jez Humble reminds technologists: if people enter tech to change the world, refusing to weigh its societal impact means *"you're not doing your job."*
+
+<Concepts>
+
+- **Purpose limitation**: GDPR's requirement that data collected for one clear job cannot silently be repurposed for unrelated profiling later.
+- **Tragedy of the commons**: when individual actors degrade a shared good (like clean rivers or ambient privacy) because nobody pays the full cost alone.
+- **Crypto-shredding**: encrypting each user's records with per-user keys so deleting the keys makes every immutable copy unreadable at once.
+- **TTL (Time-to-Live)**: an automatic expiry timer attached to logs or database rows so raw records disappear on schedule.
+
+</Concepts>
+
+---
+
+## Key takeaways
+
+- **Measure false positives per group, not just overall accuracy.** Equal total accuracy can still trap one group in an algorithmic prison at twice or three times the rate of another.
+- **Deleting protected columns is never enough.** Postal codes, device traits, and text patterns act as proxy variables that rebuild race, gender, or class; audit subgroup outcomes directly.
+- **Trace the system loop beyond your model.** When rejected applicants lose jobs or pricing bots learn to match rivals, predictions alter the world and poison the next retraining cycle.
+- **Run the "surveillance" swap on your schema.** If replacing `"data"` with `"surveillance"` in your design doc sounds unsettling, check whether the user truly benefits from that log.
+- **Purge raw records you no longer need.** Stored user logs are a toxic asset whose risk grows every year; ship strict TTLs, data minimization, and crypto-shredding from day one.
+
+---
+
+## Review questions
+
+1. Why do fraud, hiring, and bail models naturally favor low false negatives over low false positives, and how does that create an "algorithmic prison" when multiple institutions rely on automated scores? *(Section 1)*
+2. In Amazon's scrapped recruiting model and the Dutch childcare benefits scandal, why did removing explicit sensitive columns fail to stop discriminatory classifications? *(Section 2)*
+3. Walk through how a credit-based hiring filter or German gas-station pricing software can trigger a runaway outcome without a buggy line of code or explicit human conspiracy. *(Section 3)*
+4. Why does clicking `"Accept"` on a long privacy policy fail GDPR's standard of `"freely given"` consent when a platform holds strong network effects? *(Section 4)*
+5. How does treating personal data as a `"toxic asset"` instead of `"the new oil"` change the way an engineering team designs event retention, backups, and user deletion? *(Section 5, Section 6)*
+
+</En>
+
+<Vi>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Privacy as a decision right (quyền riêng tư là quyền quyết định)**: tự nắm quyền chọn đứng ở đâu giữa kín đáo và công khai trong từng hoàn cảnh.
+- **Data broker (nhà môi giới dữ liệu)**: công ty hoạt động phía sau, chuyên mua, ghép, chấm điểm và bán lại hồ sơ cá nhân cho quảng cáo, bảo hiểm hay kiểm tra lý lịch.
+- **Data exhaust vs. data labor**: sự đối lập giữa việc coi lịch sử click là phế phẩm vô giá trị và việc nhìn nhận hoạt động người dùng là lao động tạo giá trị.
+- **Mission creep (trượt mục đích)**: mang dữ liệu thu cho một việc hẹp ban đầu (như xuất hóa đơn hay xác minh danh tính) sang phục vụ giám sát diện rộng về sau.
+
+</Concepts>
+
+---
+
+## 6. Từ những dòng sông ô nhiễm tới checklist cho kỹ sư
+
+Nhân loại từng đi qua một cuộc cách mạng công nghệ xả thải không kiểm soát ra cộng đồng trước đây: **Cách mạng Công nghiệp**.
+
+<Figure src={manchesterSmokestacks} alt="Bức tranh Manchester from Kersal Moor năm 1857 của William Wyld vẽ triền đồi xanh nhìn xuống thung lũng dày đặc ống khói nhà máy" caption="Góc nhìn Manchester ('Cottonopolis') năm 1857 của William Wyld lột tả cái giá công nghiệp buổi đầu: sản lượng tăng vọt đi kèm bầu trời đặc khói than và sông ngòi nhiễm độc. Môi trường chỉ sạch lại khi luật an toàn lao động, kiểm định thực phẩm và tiêu chuẩn môi trường ép nhà máy phải xử lý chất thải. Phạm vi công cộng." sourceTitle="Wikimedia Commons: Manchester from Kersal Moor (1857)" sourceUrl="https://commons.wikimedia.org/wiki/File:Manchester_from_Kersal_Moor_William_Wylde_(1857).jpg" />
+
+Các nhà máy buổi đầu mang lại tăng trưởng khổng lồ đi cùng bầu trời đen kịt, dòng sông nhiễm độc, thực phẩm bẩn và lao động trẻ em trong hầm mỏ. Chủ xưởng từng phản đối rằng luật an toàn sẽ bóp nghẹt phát triển, nhưng ngày nay chẳng ai muốn quay lại thời sông bốc cháy hay thực phẩm không kiểm định.
+
+Bruce Schneier đặt phép so sánh trực tiếp: **dữ liệu là bài toán ô nhiễm của kỷ nguyên thông tin, và bảo vệ quyền riêng tư chính là thách thức môi trường.** Con cháu chúng ta sẽ nhìn lại thế hệ kỹ sư phần mềm đầu tiên để đánh giá cách ta xử lý thứ rác thải số này, hệt như cách ta tự hỏi sao các chủ xưởng xưa có thể làm ngơ trước những thành phố nghẹt khói than.
+
+Luật pháp giúp đặt ra mức sàn tối thiểu, dù riêng luật vẫn có điểm mù. Nguyên tắc **giới hạn mục đích (purpose limitation)** của GDPR — chỉ được thu thập dữ liệu cho *"những mục đích cụ thể, rõ ràng và hợp pháp"* — đụng độ trực diện với thói quen Big Data gom hết mọi thứ phòng khi sau này nghĩ ra câu truy vấn mới. Việc thực thi còn lỏng khiến tiền phạt nhiều khi chỉ như một khoản chi phí kinh doanh, trong khi luật quá cứng nhắc lại có thể cản trở nghiên cứu y học cứu người.
+
+Đó là lý do chuyển biến quyết định phải đến từ **văn hóa kỹ thuật và kiến trúc hệ thống**. Hãy coi quyền riêng tư cá nhân như một công viên quốc gia chung — chủ động bảo vệ nó trước khi rơi vào bi kịch tài sản công (tragedy of the commons).
+
+### Những việc bạn có thể làm ngay từ ngày mai
+
+| Thói quen kỹ thuật | Lựa chọn kiến trúc cụ thể | Vì sao giảm được rủi ro |
+|---|---|---|
+| Siết chặt schema và gắn TTL | Bỏ các trường định danh thô ngay ở tầng ingest; gắn hạn tự hủy (TTL) ngắn cho log hành vi | Dữ liệu bạn không lưu thì không thể bị rò rỉ hay đòi nộp qua trát tòa |
+| Thiết kế sẵn quyền xóa trong log bất biến | Mã hóa bản ghi từng user bằng khóa riêng và xóa khóa khi được yêu cầu (**crypto-shredding**) | Giúp append-only log hay event stream xóa được dữ liệu mà không cần viết lại lịch sử |
+| Đo sai số theo từng nhóm nhỏ | Theo dõi false positive và false negative trên từng phân khúc thay vì chỉ nhìn độ chính xác gộp | Phát hiện sớm tình trạng chặn oan lệch nhóm trước khi deploy và qua các lần train lại |
+| Mở đường cho con người rà soát và khiếu nại | Trả về lý do từ chối dễ hiểu kèm hàng đợi kiểm tra thủ công | Ngăn điểm tự động nhốt người vô tội vào nhà tù thuật toán |
+| Tách telemetry sản phẩm khỏi hồ sơ cá nhân | Tổng hợp số liệu click mà không gắn ID người dùng xuyên suốt giữa các app | Cải thiện xếp hạng tìm kiếm và UX mà không nuôi lớn kho giám sát |
+
+Như Jez Humble nhắc giới công nghệ nếu người ta bước vào ngành phần mềm để thay đổi thế giới, mà lại từ chối cân nhắc tác động xã hội của thứ mình viết, thì *"bạn đang không làm tròn công việc của mình."*
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Purpose limitation (giới hạn mục đích)**: quy tắc của GDPR cấm lấy dữ liệu thu cho một tác vụ rõ ràng sang phục vụ chấm điểm hay nhắm mục tiêu khác mà không báo trước.
+- **Tragedy of the commons (bi kịch tài sản công)**: khi từng bên khai thác hoặc xả thải làm hỏng tài nguyên chung (như sông sạch hay sự riêng tư mặc định) vì không ai tự gánh hết chi phí xã hội.
+- **Crypto-shredding (băm khóa mã hóa)**: mã hóa dữ liệu của mỗi user bằng bộ khóa riêng; khi cần xóa chỉ việc hủy khóa là mọi bản sao bất biến đều hết đọc được ngay lập tức.
+- **TTL (Time-to-Live)**: bộ đếm hết hạn tự động gắn vào log hoặc bản ghi để dữ liệu thô tự biến mất đúng lịch thay vì nằm vĩnh viễn trên đĩa.
+
+</Concepts>
+
+---
+
+## Điểm rút ra
+
+- **Đo dương tính giả theo từng nhóm, đừng chỉ nhìn độ chính xác gộp.** Hai nhóm có thể đạt cùng tổng tỉ lệ đoán đúng nhưng một nhóm vẫn bị chặn oan nhiều gấp hai đến ba lần nhóm kia.
+- **Xóa cột nhạy cảm khỏi bảng không bao giờ là đủ.** Mã bưu chính, thiết bị và từ khóa trên CV đóng vai trò biến đại diện tái tạo lại đặc điểm nhạy cảm; hãy kiểm toán kết quả đầu ra theo từng phân khúc.
+- **Vẽ vòng lặp hệ thống vượt ra ngoài ranh giới model.** Khi ứng viên bị từ chối mất cơ hội việc làm hay bot giá xăng học theo đối thủ, dự đoán đang làm thay đổi chính thế giới của vòng huấn luyện kế tiếp.
+- **Áp phép thử đổi chữ "dữ liệu" thành "giám sát" lên schema của mình.** Nếu đọc lại design doc với chữ `"giám sát"` mà thấy chột dạ, hãy hỏi xem log đó đang phục vụ người dùng hay chỉ phục vụ nhà quảng cáo.
+- **Xóa dữ liệu thô ngay khi hết việc.** Log người dùng là tài sản độc hại tích thêm rủi ro pháp lý và an ninh theo từng năm; hãy thiết kế TTL, tối thiểu hóa dữ liệu và crypto-shredding ngay từ ngày đầu.
+
+---
+
+## Câu hỏi ôn tập
+
+1. Vì sao các mô hình chống gian lận, tuyển dụng hay xét tại ngoại thường ưu tiên giảm âm tính giả (false negative) hơn dương tính giả (false positive), và cơ chế đó tạo ra "nhà tù thuật toán" thế nào khi nhiều tổ chức cùng dùng điểm tự động? *(Phần 1)*
+2. Trong công cụ lọc CV bị hủy của Amazon và vụ bê bối trợ cấp trẻ em ở Hà Lan, vì sao việc bỏ các cột nhạy cảm trực tiếp vẫn không ngăn được phân loại thiên lệch? *(Phần 2)*
+3. Hãy lần theo từng bước để thấy một bộ lọc tuyển dụng dùng điểm tín dụng hoặc phần mềm định giá xăng ở Đức có thể tạo ra hệ quả leo thang mà không cần một dòng code lỗi hay sự thông đồng nào giữa người với người. *(Phần 3)*
+4. Vì sao việc bấm `"Đồng ý"` vào một chính sách quyền riêng tư dài hàng nghìn chữ vẫn không đạt chuẩn `"đồng thuận tự nguyện"` của GDPR khi nền tảng nắm hiệu ứng mạng mạnh? *(Phần 4)*
+5. Việc coi dữ liệu cá nhân là `"tài sản độc hại"` thay vì `"dầu mỏ mới"` làm thay đổi cách một team kỹ thuật thiết kế thời gian lưu event, bản sao lưu (backup) và cơ chế xóa người dùng ra sao? *(Phần 5, Phần 6)*
+
+</Vi>
