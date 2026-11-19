@@ -332,7 +332,7 @@ const ddia: Series = {
   kicker: { en: 'A 14-part series', vi: 'Series 14 bài' },
   tagline: {
     en: 'From one disk to many machines: what each design choice costs, shown with real incidents and demos you can break.',
-    vi: 'Từ một ổ đĩa tới nhiều máy: mỗi lựa chọn thiết kế phải trả giá gì, minh hoạ bằng sự cố thật và demo để bạn tự làm hỏng.',
+    vi: 'Từ một ổ đĩa tới nhiều máy: mỗi lựa chọn thiết kế phải trả giá gì, minh họa bằng sự cố thật và demo để bạn tự làm hỏng.',
   },
   pitch: [
     {
@@ -358,7 +358,7 @@ const ddia: Series = {
     alt: 'An IBM 305 RAMAC installation at the U.S. Army Red River Arsenal: tall cabinets, the 350 disk unit visible behind glass, and an operator at the console.',
     position: '50% 45%',
     imprint: 'SYSTEM DESIGN',
-    credit: { title: 'IBM 305 RAMAC', author: 'U.S. Army Red River Arsenal', url: 'https://commons.wikimedia.org/wiki/File:BRL61-IBM_305_RAMAC.jpeg', license: 'public domain' },
+    credit: { title: 'IBM 305 RAMAC', author: 'U.S. Army Red River Arsenal', url: 'https://commons.wikimedia.org/wiki/File:BRL61-IBM_305_RAMAC.jpeg', license: 'Public domain' },
   },
   outcomes: [
     {
@@ -478,7 +478,7 @@ const ddia: Series = {
     },
     {
       slug: D.trouble,
-      topic: { en: 'What breaks', vi: 'Thứ hay hỏng' },
+      topic: { en: 'What breaks', vi: 'Chỗ dễ hỏng' },
       hook: {
         en: 'Lost packets, jumping clocks and paused processes, and why locks need fencing tokens.',
         vi: 'Mất gói tin, đồng hồ nhảy giờ, tiến trình khựng, và vì sao khoá cần fencing token.',
