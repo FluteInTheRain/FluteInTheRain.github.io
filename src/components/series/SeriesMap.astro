@@ -1,0 +1,235 @@
+---
+// Reading map: the parts laid out in four act columns, with "builds on" arrows.
+// A path picker numbers the parts in a suggested reading order; hovering or tabbing to a part
+// lights up what it builds on and what builds on it. Without JS it is a plain linked diagram.
+import T from '../T.astro';
+import type { ActId } from '../../data/series';
+import type { SeriesView } from '../../utils/series';
+
+interface Props { view: SeriesView }
+const { view } = Astro.props;
+const { series, parts } = view;
+
+const ACTS: ActId[] = ['start', 'structure', 'surface', 'craft'];
+const W = 900;
+const colW = 180;
+const gapX = (W - 24 - ACTS.length * colW) / (ACTS.length - 1);
+const nodeH = 64;
+const gapY = 18;
+const top = 74;
+const colX = (c: number) => 12 + c * (colW + gapX);
+
+const rowInAct = new Map<ActId, number>();
+const pos = new Map<string, { x: number; y: number; col: number }>();
+const nodes = parts.map((p) => {
+  const col = ACTS.indexOf(p.part.act);
+  const row = rowInAct.get(p.part.act) ?? 0;
+  rowInAct.set(p.part.act, row + 1);
+  const at = { x: colX(col), y: top + row * (nodeH + gapY), col };
+  pos.set(p.part.slug, at);
+  return { ...p, ...at };
+});
+const maxRows = Math.max(...rowInAct.values());
+const H = top + maxRows * (nodeH + gapY) + 4;
+
+const links = parts.flatMap((p) =>
+  p.part.builds.filter((from) => pos.has(from)).map((from) => ({ from, to: p.part.slug, a: pos.get(from)!, b: pos.get(p.part.slug)! })),
+);
+// Spread the ends of several arrows along a node's edge so they do not meet in one point.
+// Ports are grouped by side: arrows leave from the right (or left, for same-column loops)
+// and arrive on the left; each group is sorted by the other end's height.
+const portY = (key: string, list: { id: number; other: number }[]) => {
+  const sorted = [...list].sort((m, n) => m.other - n.other);
+  return new Map(sorted.map((e, i) => [`${key}:${e.id}`, (i + 1) / (sorted.length + 1)]));
+};
+const groups = new Map<string, { id: number; other: number }[]>();
+const add = (key: string, id: number, other: number) => groups.set(key, [...(groups.get(key) ?? []), { id, other }]);
+links.forEach((l, id) => {
+  add(`${l.from}:${l.a.col === l.b.col ? 'L' : 'R'}`, id, l.b.y);
+  add(`${l.to}:L`, id, l.a.y);
+});
+const frac = new Map<string, number>();
+for (const [key, list] of groups) for (const [k, v] of portY(key, list)) frac.set(k, v);
+const at = (key: string, id: number) => 10 + (nodeH - 20) * (frac.get(`${key}:${id}`) ?? 0.5);
+
+const edges = links.map((l, id) => {
+  const { a, b } = l;
+  const y2 = b.y + at(`${l.to}:L`, id);
+  let d: string;
+  if (a.col === b.col) {
+    // same column: loop out on the left side, wider for longer jumps
+    const y1 = a.y + at(`${l.from}:L`, id);
+    const bulge = 14 + Math.abs(y2 - y1) / 8;
+    d = `M ${a.x} ${y1} C ${a.x - bulge} ${y1}, ${b.x - bulge} ${y2}, ${b.x - 3} ${y2}`;
+  } else {
+    const x1 = a.x + colW;
+    const y1 = a.y + at(`${l.from}:R`, id);
+    const x2 = b.x - 3;
+    const mid = (x1 + x2) / 2;
+    d = `M ${x1} ${y1} C ${mid} ${y1}, ${mid} ${y2}, ${x2} ${y2}`;
+  }
+  return { from: l.from, to: l.to, d };
+});
+
+const pathOrders = Object.fromEntries(series.paths.map((p) => [p.id, p.order]));
+const uid = `smap-${series.id}`;
+const pad = (n: number) => String(n).padStart(2, '0');
+---
+<figure class="smap" data-js="off" data-paths={JSON.stringify(pathOrders)} data-default={series.paths[0]?.id}>
+  <div class="smap-paths" role="group" aria-label="Reading paths">
+    {series.paths.map((p) => (
+      <button type="button" class="smap-btn" data-path={p.id} aria-pressed="false"><T en={p.label.en} vi={p.label.vi} /></button>
+    ))}
+  </div>
+  {series.paths.map((p) => (
+    <p class="smap-who" data-who={p.id} hidden><T en={p.who.en} vi={p.who.vi} /></p>
+  ))}
+
+  <div class="smap-scroll">
+    <svg viewBox={`0 0 ${W} ${H}`} role="group" aria-label="Series reading map" aria-describedby={`${uid}-desc`}>
+      <desc id={`${uid}-desc`}>
+        Map of the {parts.length} parts in four groups: {ACTS.map((a) => `${series.acts[a].label.en} (${parts.filter((p) => p.part.act === a).map((p) => p.n).join(', ')})`).join('; ')}. Arrows point from a part to the parts that build on it.
+      </desc>
+      <defs>
+        <marker id={`${uid}-arrow`} viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" class="smap-head" />
+        </marker>
+        <marker id={`${uid}-arrow-hi`} viewBox="0 0 10 10" refX="9" refY="5" markerUnits="userSpaceOnUse" markerWidth="10" markerHeight="10" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" class="smap-head-hi" />
+        </marker>
+      </defs>
+
+      {ACTS.map((a, c) => (
+        <g class="smap-act">
+          <text x={colX(c)} y="24" class="smap-act-t"><tspan data-lang-en>{series.acts[a].label.en}</tspan><tspan data-lang-vi>{series.acts[a].label.vi}</tspan></text>
+          <text x={colX(c)} y="44" class="smap-act-b"><tspan data-lang-en>{series.acts[a].blurb.en}</tspan><tspan data-lang-vi>{series.acts[a].blurb.vi}</tspan></text>
+        </g>
+      ))}
+
+      {edges.map((e) => (
+        <path d={e.d} class="smap-edge" data-from={e.from} data-to={e.to} style={`--m: url(#${uid}-arrow); --m-hi: url(#${uid}-arrow-hi)`} />
+      ))}
+
+      {nodes.map((n) => {
+        const body = (
+          <>
+            <rect x={n.x} y={n.y} width={colW} height={nodeH} rx="10" class="smap-box" />
+            <text x={n.x + 14} y={n.y + 24} class="smap-n">{pad(n.n)}{!n.published && <tspan dx="8" class="smap-soon"><tspan data-lang-en>soon</tspan><tspan data-lang-vi>sắp có</tspan></tspan>}</text>
+            <text x={n.x + 14} y={n.y + 47} class="smap-topic"><tspan data-lang-en>{n.part.topic.en}</tspan><tspan data-lang-vi>{n.part.topic.vi}</tspan></text>
+            <g class="smap-step">
+              <circle cx={n.x + colW - 4} cy={n.y + 4} r="13" />
+              <text x={n.x + colW - 4} y={n.y + 9} text-anchor="middle" class="smap-step-t"></text>
+            </g>
+          </>
+        );
+        return n.published
+          ? <a href={n.url} class="smap-node" data-slug={n.part.slug}>{body}</a>
+          : <g class="smap-node is-soon" data-slug={n.part.slug} role="img" aria-label={`Part ${n.n}: ${n.part.topic.en} (coming soon)`}>{body}</g>;
+      })}
+    </svg>
+  </div>
+
+  <div class="smap-detail" aria-live="polite">
+    <p class="smap-hint" data-hook=""><T en="Hover or tab to a part to see what it builds on and what it unlocks." vi="Rê chuột hoặc Tab tới một bài để xem nó dựa trên bài nào và mở đường cho bài nào." /></p>
+    {parts.map((p) => (
+      <p data-hook={p.part.slug} hidden><strong>{pad(p.n)} · <T en={p.part.topic.en} vi={p.part.topic.vi} /></strong> — <T en={p.part.hook.en} vi={p.part.hook.vi} /></p>
+    ))}
+  </div>
+</figure>
+
+<script>
+  for (const fig of document.querySelectorAll<HTMLElement>('figure.smap')) {
+    fig.dataset.js = 'on';
+    const paths: Record<string, string[]> = JSON.parse(fig.dataset.paths || '{}');
+    const nodes = [...fig.querySelectorAll<SVGElement>('.smap-node')];
+    const edges = [...fig.querySelectorAll<SVGElement>('.smap-edge')];
+    const buttons = [...fig.querySelectorAll<HTMLButtonElement>('[data-path]')];
+    const whos = [...fig.querySelectorAll<HTMLElement>('[data-who]')];
+    const hooks = [...fig.querySelectorAll<HTMLElement>('[data-hook]')];
+
+    const showPath = (id: string) => {
+      const order = paths[id] ?? [];
+      for (const n of nodes) {
+        const i = order.indexOf(n.dataset.slug!);
+        n.classList.toggle('is-on', i >= 0);
+        n.classList.toggle('is-dim', i < 0);
+        const t = n.querySelector('.smap-step-t');
+        if (t) t.textContent = i >= 0 ? String(i + 1) : '';
+      }
+      for (const e of edges) e.classList.toggle('is-dim', !(order.includes(e.dataset.from!) && order.includes(e.dataset.to!)));
+      for (const b of buttons) b.setAttribute('aria-pressed', String(b.dataset.path === id));
+      for (const w of whos) w.hidden = w.dataset.who !== id;
+    };
+
+    const focusNode = (slug: string) => {
+      const related = new Set([slug]);
+      for (const e of edges) {
+        const hit = e.dataset.to === slug || e.dataset.from === slug;
+        e.classList.toggle('is-hi', hit);
+        if (hit) related.add(e.dataset.to === slug ? e.dataset.from! : e.dataset.to!);
+      }
+      fig.classList.add('is-focus');
+      for (const n of nodes) n.classList.toggle('is-hi', related.has(n.dataset.slug!));
+      for (const h of hooks) h.hidden = h.dataset.hook !== slug;
+    };
+
+    const clear = () => {
+      fig.classList.remove('is-focus');
+      for (const el of [...nodes, ...edges]) el.classList.remove('is-hi');
+      for (const h of hooks) h.hidden = h.dataset.hook !== '';
+    };
+
+    for (const n of nodes) {
+      n.addEventListener('mouseenter', () => focusNode(n.dataset.slug!));
+      n.addEventListener('mouseleave', clear);
+      n.addEventListener('focusin', () => focusNode(n.dataset.slug!));
+      n.addEventListener('focusout', clear);
+    }
+    for (const b of buttons) b.addEventListener('click', () => showPath(b.dataset.path!));
+    showPath(fig.dataset.default || buttons[0]?.dataset.path || '');
+  }
+</script>
+
+<style>
+  .smap { margin: 0; }
+  .smap[data-js='off'] .smap-paths, .smap[data-js='off'] .smap-who, .smap[data-js='off'] .smap-detail { display: none; }
+  .smap-paths { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 10px; }
+  .smap-btn { font: inherit; font-size: 14px; font-weight: 600; padding: 7px 14px; border-radius: 999px; border: 1px solid var(--border); background: var(--bg); color: var(--text-body); cursor: pointer; }
+  .smap-btn:hover { border-color: var(--red); color: var(--text); }
+  .smap-btn[aria-pressed='true'] { background: var(--btn-primary-bg); border-color: var(--btn-primary-bg); color: #fff; }
+  .smap-who { margin: 0 0 14px; font-size: 15px; color: var(--text-muted); min-height: 1.5em; }
+
+  .smap-scroll { overflow-x: auto; border: 1px solid var(--border); border-radius: 12px; background: var(--bg-alt); padding: 12px 8px 8px; }
+  .smap svg { display: block; width: 100%; min-width: 680px; height: auto; overflow: visible; }
+
+  .smap-act-t { font-size: 13px; font-weight: 800; letter-spacing: 0.1em; text-transform: uppercase; fill: var(--red); }
+  .smap-act-b { font-size: 13px; fill: var(--text-muted); }
+
+  .smap-edge { fill: none; stroke: var(--text-faint); stroke-width: 1.6; marker-end: var(--m); transition: opacity 0.15s, stroke 0.15s; }
+  .smap-head { fill: var(--text-faint); }
+  .smap-head-hi { fill: var(--red); }
+
+  .smap-node { cursor: pointer; outline: none; transition: opacity 0.15s; }
+  .smap-node.is-soon { cursor: default; }
+  .smap-box { fill: var(--bg); stroke: var(--border); stroke-width: 1.5; transition: stroke 0.15s; }
+  .smap-node.is-soon .smap-box { stroke-dasharray: 5 4; fill: transparent; }
+  .smap-n { font-size: 12px; font-weight: 700; fill: var(--text-muted); font-variant-numeric: tabular-nums; }
+  .smap-soon { font-size: 10px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; fill: var(--text-faint); }
+  .smap-topic { font-size: 16px; font-weight: 700; fill: var(--text); }
+  .smap-node.is-soon .smap-topic { fill: var(--text-muted); }
+  .smap-node:hover .smap-box, .smap-node:focus-visible .smap-box { stroke: var(--red); stroke-width: 2.5; }
+
+  .smap-step { display: none; }
+  .smap-node.is-on .smap-step { display: inline; }
+  .smap-step circle { fill: var(--btn-primary-bg); stroke: var(--bg-alt); stroke-width: 2; }
+  .smap-step-t { font-size: 13px; font-weight: 800; fill: #fff; }
+
+  .smap-node.is-dim, .smap-edge.is-dim { opacity: 0.28; }
+  .smap.is-focus .smap-node:not(.is-hi), .smap.is-focus .smap-edge:not(.is-hi) { opacity: 0.18; }
+  .smap.is-focus .smap-node.is-hi { opacity: 1; }
+  .smap-edge.is-hi { opacity: 1; stroke: var(--red); stroke-width: 2.2; marker-end: var(--m-hi); }
+
+  .smap-detail { margin-top: 12px; min-height: 3em; font-size: 15px; line-height: 1.55; color: var(--text-body); }
+  .smap-detail p { margin: 0; }
+  .smap-hint { color: var(--text-muted); }
+</style>
