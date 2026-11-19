@@ -3,7 +3,23 @@
 // src/content/blog/). Unpublished (draft) posts show as "soon" on the cover page and
 // are skipped by the prev/next links in production.
 
+import type { ImageMetadata } from 'astro';
+import draftingSet from '../assets/series/drafting-set.jpg';
+import ramac305 from '../assets/series/ibm-305-ramac.jpg';
+
 export interface L10n { en: string; vi: string }
+
+/** what the book cover shows (BookCover.astro) and how its photo is credited */
+export interface SeriesCoverArt {
+  subtitle: L10n;
+  image: ImageMetadata;
+  alt: string;
+  /** CSS object-position for the photo plate */
+  position: string;
+  /** small label at the cover's foot */
+  imprint: string;
+  credit: { title: string; author: string; url: string; license: string };
+}
 
 /** one column of the reading map; `id` is what `SeriesPart.act` refers to */
 export interface SeriesAct { id: string; label: L10n; blurb: L10n }
@@ -36,6 +52,7 @@ export interface Series {
   tagline: L10n;
   pitch: L10n[];
   credit: L10n;
+  cover: SeriesCoverArt;
   outcomes: L10n[];
   /** map columns, left to right */
   acts: SeriesAct[];
@@ -67,6 +84,18 @@ const refactoringUi: Series = {
   credit: {
     en: 'Built on Refactoring UI by Adam Wathan and Steve Schoger, then extended with live demos, real-product screenshots and audits of this very site.',
     vi: 'Dựa trên Refactoring UI của Adam Wathan và Steve Schoger, bổ sung demo tương tác, ảnh chụp sản phẩm thật và các lần soát lỗi ngay trên chính blog này.',
+  },
+  // A drafting set keeps every instrument in its own slot on a grid: the series' idea of fixed scales over eyeballing.
+  cover: {
+    subtitle: {
+      en: 'Hierarchy · Spacing · Type · Colour · Depth',
+      vi: 'Phân cấp · Khoảng cách · Chữ · Màu · Chiều sâu',
+    },
+    image: draftingSet,
+    alt: 'A vintage drafting set open on graph paper: compasses, dividers and ruling pens, each resting in its own slot of a blue velvet case.',
+    position: '55% 60%',
+    imprint: 'UI / UX',
+    credit: { title: 'Anker compass set in case', author: 'Slashme', url: 'https://commons.wikimedia.org/wiki/File:Anker_compass_set_in_case.jpg', license: 'CC0' },
   },
   outcomes: [
     {
@@ -319,6 +348,18 @@ const ddia: Series = {
     en: 'Built on Designing Data-Intensive Applications (2nd edition) by Martin Kleppmann and Chris Riccomini, extended with postmortems, architecture diagrams and live demos.',
     vi: 'Dựa trên Designing Data-Intensive Applications (bản 2) của Martin Kleppmann và Chris Riccomini, bổ sung postmortem thật, sơ đồ kiến trúc và demo tương tác.',
   },
+  // An IBM 305 RAMAC, the first computer sold with a hard disk (1956): the series starts at one disk and ends at many machines.
+  cover: {
+    subtitle: {
+      en: 'Storage · Replication · Consensus · Streams',
+      vi: 'Lưu trữ · Replication · Đồng thuận · Luồng',
+    },
+    image: ramac305,
+    alt: 'An IBM 305 RAMAC installation at the U.S. Army Red River Arsenal: tall cabinets, the 350 disk unit visible behind glass, and an operator at the console.',
+    position: '50% 45%',
+    imprint: 'SYSTEM DESIGN',
+    credit: { title: 'IBM 305 RAMAC', author: 'U.S. Army Red River Arsenal', url: 'https://commons.wikimedia.org/wiki/File:BRL61-IBM_305_RAMAC.jpeg', license: 'public domain' },
+  },
   outcomes: [
     {
       en: 'Pick a data model and storage engine from the access pattern, not from habit.',
@@ -367,7 +408,7 @@ const ddia: Series = {
     },
     {
       slug: D.nfr,
-      topic: { en: 'Reliable and scalable', vi: 'Tin cậy và mở rộng' },
+      topic: { en: 'Reliability', vi: 'Độ tin cậy' },
       hook: {
         en: 'Why average latency lies, how one celebrity post fans out, and what "maintainable" means in practice.',
         vi: 'Vì sao độ trễ trung bình đánh lừa, một bài của người nổi tiếng lan ra thế nào, và "dễ bảo trì" thực ra là gì.',
@@ -477,7 +518,7 @@ const ddia: Series = {
     },
     {
       slug: D.unbundling,
-      topic: { en: 'Unbundling', vi: 'Tháo rời database' },
+      topic: { en: 'Unbundling', vi: 'Tháo rời DB' },
       hook: {
         en: 'Build one system from logs and derived views, and keep it correct end to end.',
         vi: 'Dựng một hệ thống từ log và view dẫn xuất, và giữ nó đúng từ đầu tới cuối.',
