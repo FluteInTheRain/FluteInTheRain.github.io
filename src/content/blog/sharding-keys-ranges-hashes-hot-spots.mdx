@@ -1,0 +1,679 @@
+---
+title: "Sharding at scale: keys, rebalancing, hot spots, and secondary indexes"
+title_vi: "Chia shard ở quy mô lớn: chọn khoá, rebalancing, hot spot và secondary index"
+description: "Notion's 480 Postgres shards, Discord's hot channels, and Slack's Vitess move: DDIA chapter 7 on splitting data across nodes without melting one shard or losing your indexes."
+description_vi: "Notion chia 480 shard Postgres, Discord vật lộn vì kênh chat làm nghẽn cả cụm, Slack chuyển qua Vitess: chương 7 DDIA giải thích cách chia dữ liệu qua nhiều máy mà vẫn giữ hiệu năng và index."
+date: 2026-11-19
+category: "database"
+tags: ["database", "sharding", "partitioning", "consistent-hashing", "secondary-indexes", "ddia"]
+draft: true
+sources:
+  - { title: "Designing Data-Intensive Applications, 2nd Edition", author: "Martin Kleppmann & Chris Riccomini", chapters: "Ch. 7", url: "https://dataintensive.net/" }
+  - { title: "Herding elephants: Lessons learned from sharding Postgres at Notion", author: "Garrett Fidalgo (Notion)", url: "https://www.notion.com/blog/sharding-postgres-at-notion" }
+  - { title: "The Great Re-shard: adding Postgres capacity (again) with zero downtime", author: "Notion Engineering", url: "https://www.notion.com/blog/the-great-re-shard" }
+  - { title: "Scaling Datastores at Slack with Vitess", author: "Arka Ganguli, Guido Iaquinti, Maggie Zhou, and Rafael Chacón (Slack)", url: "https://slack.engineering/scaling-datastores-at-slack-with-vitess/" }
+  - { title: "How Discord Stores Trillions of Messages", author: "Bo Ingram (Discord)", url: "https://discord.com/blog/how-discord-stores-trillions-of-messages" }
+  - { title: "Reducing the Scope of Impact with Cell-Based Architecture", author: "Robisson Oliveira (AWS Well-Architected)", url: "https://docs.aws.amazon.com/wellarchitected/latest/reducing-scope-of-impact-with-cell-based-architecture/welcome.html" }
+  - { title: "Amazon DynamoDB: A Scalable, Predictably Performant, and Fully Managed NoSQL Database Service", author: "Mostafa Elhemali et al. (AWS / USENIX ATC '22)", url: "https://www.usenix.org/conference/atc22/presentation/elhemali" }
+  - { title: "Distribution Layer — CockroachDB Architecture Docs", author: "Cockroach Labs", url: "https://docs.cockroachlabs.com/docs/stable/architecture/distribution-layer" }
+  - { title: "Intermodal yard, CSX Bedford Park (photo, CC BY 2.0)", author: "Sam LaRussa", url: "https://commons.wikimedia.org/wiki/File:Intermodal_(48250806881).jpg" }
+---
+
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import En from '../../components/mdx/En.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import ShardingKeyRangeVsHash from '../../components/mdx/ShardingKeyRangeVsHash.astro';
+import ShardingLocalVsGlobalIndex from '../../components/mdx/ShardingLocalVsGlobalIndex.astro';
+import ShardingRebalance from '../../components/mdx/ShardingRebalance.astro';
+import heroImg from '../../assets/blog/sharding-keys-ranges-hashes-hot-spots/hero.jpg';
+import notionCpu from '../../assets/blog/sharding-keys-ranges-hashes-hot-spots/notion-cpu-saturation.png';
+import notionSchemas from '../../assets/blog/sharding-keys-ranges-hashes-hot-spots/notion-reshard-schemas.png';
+
+<En>
+
+<Figure src={heroImg} alt="Aerial view of rows of shipping containers lined up alongside freight rail tracks in an intermodal yard" caption="An intermodal yard packs cargo into fixed-size containers so cranes can shift whole units onto new trains without unpacking them. Sharding works best on the same principle. Photo: Sam LaRussa, CC BY 2.0." sourceTitle="Wikimedia Commons: Intermodal (CSX Bedford Park)" sourceUrl="https://commons.wikimedia.org/wiki/File:Intermodal_(48250806881).jpg" />
+
+> "Clearly, we must break away from the sequential and not limit the computers. We must state definitions and provide for priorities and descriptions of data."
+> &mdash; *Grace Murray Hopper*, *Management and the Computer of the Future* (1962), quoted at the start of DDIA chapter 7
+
+### When one database node stops being enough
+
+A single server can hold far more data than most teams expect. When it finally runs out of disk, IOPS, or write capacity, copying the whole dataset onto replicas (replication) stops helping—every replica still absorbs every write. You have to split the data into **shards** (also called **partitions**, ranges, regions, or tablets) across different machines.
+
+Three real production stories show where teams get burned once they split:
+
+- **Notion, 2021 & 2023.** Their single giant Postgres database stalled on `VACUUM`, raising the threat of transaction ID wraparound—a safety stop where Postgres refuses all writes. They split into 480 logical shards across 32 physical databases, and two years later, when peak CPU crossed 90%, shifted those same 480 shards onto 96 hosts with zero downtime.
+- **Discord, 2022–2023.** Even across 177 Cassandra nodes holding trillions of messages, one `@everyone` ping in a huge server slammed a single chat partition. Quorum latency jumped across the cluster until Discord added request coalescing in Rust and moved to 72 ScyllaDB nodes.
+- **Slack, 2017–2020.** Giant enterprise workspaces ran individual MySQL hosts red-hot while smaller hosts sat nearly idle. Moving 99% of query traffic onto Vitess let Slack split busy keyspaces dynamically and absorb a 50% one-week traffic surge in March 2020.
+
+Chapter 7 of *Designing Data-Intensive Applications* (2nd edition) lays out the mechanics behind every choice those teams made:
+
+1. **When to shard—and sharding for multitenancy**: keeping data isolated per tenant without over-engineering early.
+2. **Key-range vs. hash sharding**: choosing between fast range scans and even write spread.
+3. **Skewed workloads and celebrity hot spots**: why hashing alone never saves you from one viral key.
+4. **Rebalancing shards**: why `hash(key) % N` breaks when you add a machine, and what works instead.
+5. **Request routing**: finding the right node without split-brain routing tables.
+6. **Secondary indexes across shards**: trading fast writes for scatter/gather reads, or fast reads for cross-shard writes.
+
+<Callout type="note" title="TL;DR">
+Sharding scales storage and write throughput by putting each record in one shard across many machines. Every design choice is a tug-of-war: key ranges keep scans fast but pile sequential writes onto one shard; hashing evens out writes but breaks cross-key scans and still chokes on celebrity hot keys; `hash(key) % N` forces massive data movement when you resize, while fixed logical shards, dynamic range splits, or consistent hashing move only a fraction; and secondary indexes force you to pay either on reads (local indexes) or on writes (global indexes).
+</Callout>
+
+<Concepts>
+
+- **Shard / Partition**: one slice of a larger dataset that behaves like a small database of its own. Each record typically belongs to one shard, which may still be replicated on several nodes for fault tolerance.
+- **Partition key**: the field or key prefix used to decide which shard holds a record. All rows sharing a partition key land in the same shard.
+- **Skew / Hot spot (hot shard)**: an uneven workload where one shard gets far more data or requests than the rest, turning that one node into the cluster's bottleneck.
+- **Network partition (netsplit)**: a network fault that cuts nodes off from each other. Unrelated to database partitioning, though the word is the same.
+
+</Concepts>
+
+---
+
+## 1. When to shard—and sharding for multitenancy
+
+Replication copies the same dataset onto several nodes; sharding splits one dataset across them. Wait as long as you reasonably can before sharding. If one machine handles your writes and storage, stick with it—add read replicas if only reads are slow.
+
+Once you split data across nodes, simple things get hard. Changing your partition key later hurts, joins across shards require pulling rows over the network, and transactions spanning multiple shards become far slower than single-node transactions.
+
+Even on a single machine, engines sometimes shard across CPU cores to avoid lock contention or cross-socket memory traffic (NUMA). Redis, VoltDB, and FoundationDB run one single-threaded process per core, giving each core its own slice of keys.
+
+### Notion's wall, and why multitenant SaaS shards by tenant
+
+By 2021, Notion's single Amazon RDS Postgres database could no longer finish background `VACUUM` runs smoothly, leaving dead tuples behind and threatening transaction ID (TXID) wraparound—where Postgres halts all writes to protect older transactions. Simply clicking "resize instance" had run out of headroom.
+
+Because Notion workspaces rarely query across different customers, the team chose `workspace_id` as the partition key. Every block, page, and comment for a workspace lives on the same shard, keeping workspace queries single-shard and free of distributed joins.
+
+</En>
+
+<Vi>
+
+<Figure src={heroImg} alt="Toàn cảnh từ trên cao một bãi trung chuyển container xếp thành từng hàng dọc đường ray tàu hoả" caption="Bãi trung chuyển đóng hàng vào các container chuẩn kích thước để cần cẩu nhấc trọn vẹn từng thùng sang đoàn tàu mới mà không cần bóc dỡ bên trong. Chia shard hiệu quả cũng dựa trên đúng nguyên tắc đó. Ảnh: Sam LaRussa, CC BY 2.0." sourceTitle="Wikimedia Commons: Intermodal (CSX Bedford Park)" sourceUrl="https://commons.wikimedia.org/wiki/File:Intermodal_(48250806881).jpg" />
+
+> "Rõ ràng là chúng ta phải thoát khỏi lối xử lý tuần tự và đừng tự trói chân máy tính. Phải định nghĩa rõ các tập dữ liệu, thứ tự ưu tiên và mô tả dữ liệu."
+> &mdash; *Grace Murray Hopper*, *Management and the Computer of the Future* (1962), trích dẫn mở đầu chương 7 của DDIA
+
+### Khi một máy chủ không còn gánh nổi
+
+Một máy chủ đơn lẻ chịu được tải lớn hơn nhiều so với suy nghĩ của đa số đội ngũ. Chỉ khi dung lượng đĩa, IOPS hay tốc độ ghi chạm trần, việc nhân bản toàn bộ dữ liệu ra nhiều replica (replication) mới hết tác dụng—vì replica nào cũng vẫn phải nhận đủ mọi lệnh ghi. Lúc đó bạn mới phải xé nhỏ dữ liệu thành các **shard** (còn gọi là **partition**, range, region hay tablet) đặt rải trên nhiều máy khác nhau.
+
+Ba câu chuyện thực tế cho thấy những cái bẫy chờ sẵn ngay khi bạn bắt đầu chia shard:
+
+- **Notion, 2021 & 2023.** Database Postgres khổng lồ duy nhất của họ bị kẹt tiến trình `VACUUM`, dẫn tới nguy cơ tràn mã giao dịch (TXID wraparound)—cơ chế tự vệ khiến Postgres ngừng nhận mọi lệnh ghi. Họ phải chia thành 480 shard logic trên 32 máy Postgres vật lý, rồi hai năm sau khi CPU chạm 90%, họ dời nguyên 480 shard đó lên 96 máy mà không hề downtime.
+- **Discord, 2022–2023.** Dù đã chạy 177 node Cassandra chứa hàng nghìn tỉ tin nhắn, chỉ một cú tag `@everyone` trong server lớn cũng đủ dồn bão truy vấn vào đúng một partition kênh chat. Độ trễ quorum kéo chậm cả cụm cho tới khi Discord thêm tầng gộp request viết bằng Rust và chuyển sang 72 node ScyllaDB.
+- **Slack, 2017–2020.** Các công ty khách hàng lớn khiến vài máy MySQL nóng rực trong khi hàng nghìn máy khác nhàn rỗi. Đưa 99% lưu lượng truy vấn sang Vitess giúp Slack tách linh hoạt các keyspace quá tải và chịu được cú nhảy vọt 50% lưu lượng chỉ trong một tuần hồi tháng 3/2020.
+
+Chương 7 cuốn *Designing Data-Intensive Applications* (bản 2) hệ thống hoá toàn bộ cơ chế phía sau từng quyết định đó:
+
+1. **Khi nào nên chia shard—và chia theo khách hàng (multitenancy)**: cô lập từng tenant mà không tự làm khổ mình quá sớm.
+2. **Chia theo dải khoá hay hàm băm**: đánh đổi giữa quét theo khoảng nhanh và rải lệnh ghi đều tay.
+3. **Dữ liệu lệch và điểm nóng "người nổi tiếng"**: vì sao chỉ băm thôi không bao giờ cứu được một hot key.
+4. **Cân bằng lại shard (rebalancing)**: vì sao `hash(key) % N` là cái bẫy khi thêm máy, và cách làm đúng là gì.
+5. **Định tuyến request**: tìm đúng máy mà không dính lỗi chia tách bảng định tuyến (split-brain).
+6. **Secondary index xuyên shard**: trả giá ở lúc đọc (local index) hay trả giá ở lúc ghi (global index).
+
+<Callout type="note" title="Tóm tắt nhanh">
+Chia shard giúp mở rộng dung lượng lưu trữ và thông lượng ghi bằng cách đặt mỗi bản ghi vào đúng một shard trên cụm nhiều máy. Mọi lựa chọn thiết kế đều là sự đánh đổi: chia theo dải khoá giữ nguyên thứ tự để quét nhanh nhưng dồn lệnh ghi mới vào một shard; chia bằng hàm băm rải đều ghi nhưng đánh mất quét theo khoảng và vẫn bó tay trước hot key kiểu người nổi tiếng; công thức `hash(key) % N` làm dời gần hết dữ liệu khi đổi số máy, trong khi số shard cố định, tách dải động hay consistent hashing chỉ dời một phần nhỏ; và secondary index bắt bạn chọn trả giá khi đọc (local index) hoặc khi ghi (global index).
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Shard / Partition (mảnh dữ liệu)**: một phần dữ liệu tách ra từ tập lớn, hoạt động như một database thu nhỏ độc lập. Mỗi bản ghi thuộc đúng một shard, và bản thân shard đó vẫn thường được sao chép sang nhiều node để chịu lỗi.
+- **Partition key (khoá phân mảnh)**: trường dữ liệu hoặc phần đầu của khoá dùng để quyết định bản ghi nằm ở shard nào. Mọi dòng có cùng partition key sẽ nằm chung một shard.
+- **Skew / Hot spot (lệch tải / điểm nóng)**: tình trạng một shard phải gánh lượng dữ liệu hoặc lượt truy vấn lớn hơn hẳn các shard còn lại, biến đúng máy đó thành nút cổ chai của cả cụm.
+- **Network partition (netsplit / chia cắt mạng)**: sự cố mạng làm các node mất liên lạc với nhau. Khái niệm này không liên quan gì tới database partitioning, dù trùng tên tiếng Anh.
+
+</Concepts>
+
+---
+
+## 1. Khi nào mới chia shard—và chia theo khách hàng
+
+Replication chép nguyên bộ dữ liệu sang nhiều máy; sharding xé bộ dữ liệu đó ra. Lời khuyên thực tế là hãy trì hoãn sharding lâu nhất có thể. Nếu một máy chủ khoẻ vẫn gánh nổi lưu lượng ghi và ổ đĩa, cứ giữ nguyên một máy—nếu chỉ nghẽn đọc thì gắn thêm read replica là đủ.
+
+Ngay khi tách dữ liệu qua nhiều máy, những thao tác bình thường bỗng trở nên đắt đỏ. Đổi partition key về sau cực kỳ vất vả, phép `JOIN` xuyên shard phải kéo dữ liệu qua mạng, và giao dịch chạm nhiều shard chậm hơn hẳn giao dịch trên một máy.
+
+Ngay cả trên một máy đơn lẻ, một số hệ thống vẫn chia shard theo từng nhân CPU để tránh tranh chấp khoá (lock contention) hoặc truy cập bộ nhớ chéo socket (NUMA). Redis, VoltDB và FoundationDB đều chạy một tiến trình đơn luồng trên mỗi nhân CPU, giao cho mỗi nhân giữ một phần khoá riêng.
+
+### Bức tường của Notion, và lý do SaaS hay chia theo tenant
+
+Tới năm 2021, database Postgres duy nhất trên Amazon RDS của Notion không thể chạy `VACUUM` dọn rác kịp nữa, khiến nguy cơ tràn TXID đe doạ buộc Postgres khoá toàn bộ lệnh ghi. Bấm nút nâng cấp cấu hình máy mạnh hơn không còn giải quyết được tận gốc.
+
+Vì người dùng Notion hiếm khi truy vấn xuyên từ workspace này sang workspace khác, đội ngũ chọn `workspace_id` làm partition key. Mọi block, trang và bình luận của cùng một workspace nằm gọn trên một shard, giữ cho truy vấn chỉ chạm một máy và tránh hoàn toàn `JOIN` xuyên shard.
+
+</Vi>
+
+<En>
+
+<Figure src={notionCpu} alt="Two time-series charts of Notion's 32 space shard Postgres instances showing CPU utilization repeatedly spiking past the 75 percent saturation line up to 95 percent and IOPS climbing past 75 percent during daily peaks" caption="Even after Notion sharded its monolith across 32 Postgres hosts in 2021, growth pushed peak CPU utilization over 90% by late 2022, triggering a zero-downtime move to 96 hosts." sourceTitle="Notion Engineering — The Great Re-shard" sourceUrl="https://www.notion.com/blog/the-great-re-shard" />
+
+</En>
+
+<Vi>
+
+<Figure src={notionCpu} alt="Hai biểu đồ chuỗi thời gian của 32 máy Postgres space shard tại Notion cho thấy CPU liên tục vọt qua ngưỡng bão hoà 75% lên tới 95% và IOPS vượt 75% vào giờ cao điểm mỗi ngày" caption="Ngay cả sau khi chia monolith thành 32 máy Postgres hồi 2021, tăng trưởng tiếp tục đẩy CPU đỉnh vượt quá 90% vào cuối 2022, buộc Notion phải mở rộng lên 96 máy mà không downtime." sourceTitle="Notion Engineering — The Great Re-shard" sourceUrl="https://www.notion.com/blog/the-great-re-shard" />
+
+</Vi>
+
+<En>
+
+For software-as-a-service (SaaS) products, sharding by tenant solves more than raw throughput:
+
+- **Resource and permission isolation**: one tenant running an expensive export slows only its own shard, and a missing `WHERE tenant_id = ?` check is less likely to leak another customer's rows across separate physical databases.
+- **Cell-based architecture**: AWS applies the same idea across compute and storage together, grouping subsets of customers into self-contained **cells** like watertight bulkheads on a ship so one bad deploy or poison request breaks only one cell.
+- **Compliance and safe rollouts**: backing up, restoring, GDPR-deleting, pinning a tenant to an EU region, or rolling out schema migrations one shard at a time all map cleanly onto per-tenant shards.
+
+The catch hits at both ends of the size curve. Tiny tenants waste overhead if every one gets its own database, so teams pack many small tenants into shared shards and must migrate whales later—or, if one enterprise tenant outgrows a single machine on its own (as Slack saw), shard *inside* that tenant too.
+
+<Concepts>
+
+- **TXID wraparound**: in PostgreSQL, a safety freeze triggered when transaction counters near overflow because background cleanup (`VACUUM`) has fallen behind.
+- **Multitenancy**: serving multiple isolated customers (tenants) from one shared software platform.
+- **Cell-based architecture**: packaging both application services and storage for a slice of tenants into an independent unit (cell) so failures stay contained inside that cell.
+
+</Concepts>
+
+---
+
+## 2. Key-range vs. hash sharding
+
+Once you commit to sharding, you need a deterministic rule that takes a partition key and returns a shard. Think of sorting a library versus shuffling mail into numbered bins: each choice makes one query pattern fast and another painful.
+
+### Key-range sharding: fast scans, dangerous timestamps
+
+Key-range sharding gives each shard a continuous slice of sorted keys, from a minimum to a maximum—like volumes of a printed encyclopedia (`A–B`, `C–D`, …, `T–Z`). Keys inside each shard stay sorted on disk (in a B-tree or SSTables), so fetching a range such as `order_date BETWEEN '2026-11-01' AND '2026-11-15'` reads sequentially from one or two shards.
+
+Notice that ranges do not share equal alphabet widths: `T–Z` needs its own volume even though it spans seven letters. Boundaries must adapt to real data skew, whether set manually (Vitess) or split automatically (HBase, CockroachDB, FoundationDB, YugabyteDB).
+
+The classic trap is using a timestamp—or any monotonically increasing ID—as the partition key. Every incoming sensor reading or new order carries *today's* timestamp, so 100% of writes hammer the single newest shard while every older shard sits idle.
+
+### Hash sharding and compound keys
+
+To break up sequential clusters, hash the partition key with a deterministic function such as MD5 (MongoDB) or Murmur3 (Cassandra, ScyllaDB). Similar inputs scatter uniformly across the hash space, spreading write traffic evenly.
+
+Avoid built-in language hashes such as Java's `Object.hashCode()` or Ruby's `Object#hash`: they can return different integers across separate JVM or Ruby processes, scrambling shard routing between servers.
+
+Hashing sacrifices cross-key range scans, because neighboring keys now land on different shards. The practical fix is a **compound key** made of `(partition_key, sort_key)`:
+
+- Hash only the first part (`sensor_id` or `channel_id`) to spread writes across machines.
+- Sort rows within that shard by the second part (`timestamp` or `message_id`).
+
+Discord used this exact pattern—`PRIMARY KEY ((channel_id, bucket), message_id)`—bucketing messages by channel and static 10-day windows so recent chat history stays sorted on disk without jamming the whole cluster into one chronological shard. Data warehouses like BigQuery, Snowflake, and Delta Lake offer a sibling split between partition keys (which group files) and cluster columns (which sort inside them).
+
+</En>
+
+<Vi>
+
+Với các sản phẩm SaaS đa người dùng, chia shard theo tenant giải quyết được nhiều bài toán hơn là chỉ thông lượng thô:
+
+- **Cô lập tài nguyên và phân quyền**: một khách hàng chạy báo cáo nặng chỉ làm chậm shard của họ; còn nếu code lỡ thiếu điều kiện `WHERE tenant_id = ?`, dữ liệu khách hàng khác nằm ở database vật lý riêng cũng khó bị lộ chéo sang.
+- **Kiến trúc theo cell (cell-based architecture)**: AWS áp dụng tư duy này cho cả tầng tính toán lẫn lưu trữ, gom từng nhóm khách hàng vào một **cell** khép kín như các khoang kín nước trên tàu thuỷ—một bản deploy lỗi hay một request độc hại chỉ đánh sập đúng một cell đó.
+- **Tuân thủ luật và nâng cấp an toàn**: sao lưu, khôi phục riêng cho một khách hàng, xoá sạch dữ liệu theo GDPR, giữ dữ liệu tại châu Âu (data residency) hay chạy schema migration cuốn chiếu từng shard đều gọn gàng hơn hẳn.
+
+Điểm khó nằm ở hai đầu dải kích thước. Khách hàng tí hon sẽ tốn tài nguyên thừa thãi nếu ai cũng có database riêng, nên bạn phải ghép nhiều khách nhỏ vào chung shard rồi tách riêng khi họ lớn lên—còn nếu một khách hàng doanh nghiệp phình to vượt sức một máy (như Slack từng gặp), bạn lại phải tiếp tục chia shard *bên trong* chính khách hàng đó.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **TXID wraparound (tràn bộ đếm giao dịch)**: cơ chế dừng khẩn cấp của PostgreSQL khi tiến trình dọn dẹp (`VACUUM`) chạy không kịp và bộ đếm giao dịch tiến sát ngưỡng quay vòng, buộc DB ngừng nhận ghi để bảo vệ dữ liệu cũ.
+- **Multitenancy (đa khách hàng)**: mô hình nhiều tổ chức/khách hàng (tenant) dùng chung một hệ thống phần mềm nhưng dữ liệu vẫn tách biệt.
+- **Cell-based architecture (kiến trúc theo ô)**: đóng gói cả tầng ứng dụng lẫn lưu trữ cho một nhóm tenant thành từng đơn vị khép kín (cell) nhằm khoanh vùng bán kính ảnh hưởng khi có sự cố.
+
+</Concepts>
+
+---
+
+## 2. Chia theo dải khoá hay hàm băm
+
+Một khi quyết định chia shard, bạn cần một quy tắc nhất quán biến partition key thành vị trí shard. Hãy hình dung việc xếp sách theo vần bảng chữ cái so với việc phát bài ngẫu nhiên vào các hòm: mỗi cách làm mượt một kiểu truy vấn và trả giá ở kiểu còn lại.
+
+### Chia theo dải khoá: quét khoảng rất nhanh, ghi theo giờ dễ nghẽn
+
+Chia theo dải khoá (**key-range sharding**) giao cho mỗi shard một dải khoá liên tục đã sắp xếp, giống các tập từ điển bách khoa (`A–B`, `C–D`, …, `T–Z`). Dữ liệu bên trong mỗi shard luôn nằm có thứ tự trên đĩa (B-tree hoặc SSTable), nên câu truy vấn khoảng như `order_date BETWEEN '2026-11-01' AND '2026-11-15'` chỉ cần đọc tuần tự trên một hoặc hai shard.
+
+Các dải chữ cái không cần rộng bằng nhau: tập `T–Z` gộp bảy chữ cái vẫn dày ngang tập `A–B`. Ranh giới giữa các shard phải co giãn theo mật độ dữ liệu thực tế, có thể chỉnh tay (Vitess) hoặc tự động tách dải (HBase, CockroachDB, FoundationDB, YugabyteDB).
+
+Cái bẫy kinh điển ở đây là lấy mốc thời gian—hoặc ID tăng dần theo thời gian—làm partition key. Mọi dữ liệu cảm biến hay đơn hàng mới phát sinh lúc này đều mang thời gian *hôm nay*, thế là 100% lệnh ghi dội thẳng vào đúng một shard cuối cùng trong khi các shard tháng trước nằm chơi.
+
+### Chia theo hàm băm và khoá ghép (compound key)
+
+Để phá vỡ sự dồn cục theo thời gian, ta đưa partition key qua một hàm băm ổn định như MD5 (MongoDB) hay Murmur3 (Cassandra, ScyllaDB). Các khoá gần nhau sẽ bị ném rải rác đều khắp dải giá trị băm, san đều tải ghi qua mọi máy.
+
+Tuyệt đối tránh dùng hàm băm nội bộ của ngôn ngữ như `Object.hashCode()` trong Java hay `Object#hash` trong Ruby: giữa hai process hay hai lần khởi động khác nhau, cùng một khoá có thể ra hai số khác hẳn nhau.
+
+Đánh đổi của hàm băm là mất khả năng quét theo khoảng trên partition key, vì các khoá liền kề đã bị xé lẻ sang nhiều shard. Cách khắc phục thực dụng nhất là dùng **khoá ghép (compound key)** gồm `(partition_key, sort_key)`:
+
+- Chỉ băm phần đầu (`sensor_id` hoặc `channel_id`) để rải đều dữ liệu ra nhiều máy.
+- Giữ phần sau (`timestamp` hoặc `message_id`) sắp xếp theo thứ tự bên trong mỗi shard.
+
+Discord dùng đúng công thức này—`PRIMARY KEY ((channel_id, bucket), message_id)`—gom tin nhắn theo từng kênh và từng khung cửa sổ 10 ngày để lịch sử chat luôn xếp theo thứ tự trên đĩa mà không dồn toàn bộ lưu lượng chat toàn cầu vào một shard duy nhất. Các hệ thống phân tích như BigQuery, Snowflake hay Delta Lake cũng tách đôi tương tự giữa partition key (gom nhóm file) và cluster column (sắp xếp bên trong file).
+
+</Vi>
+
+<ShardingKeyRangeVsHash />
+
+<En>
+
+| Scheme | Write spread | Range query on partition key | Example systems |
+|---|---|---|---|
+| Key-range | Poor if keys arrive in time order | Fast sequential scan on 1 shard | HBase, CockroachDB, YugabyteDB, Vitess |
+| Hash-only | Uniform for distinct keys | Scatter/gather across all shards | Riak, Couchbase, DynamoDB (hash key only) |
+| Compound `(partition, sort)` | Even across entities | Fast scan *within* one partition key | Cassandra, ScyllaDB, DynamoDB, BigQuery |
+
+<Concepts>
+
+- **Key-range sharding**: assigning each shard a continuous interval of sorted keys, like volumes of an encyclopedia.
+- **Hash sharding**: running the partition key through a deterministic hash function to scatter neighboring keys evenly across shards.
+- **Compound key**: a two-part key where the first part picks the shard and the second part sorts records inside that shard.
+
+</Concepts>
+
+---
+
+## 3. Skewed workloads and celebrity hot spots
+
+A good hash function spreads distinct keys evenly, yet it cannot prevent traffic skew when one key dominates the workload. Imagine a ten-lane highway toll plaza where every lane moves at the same speed—except 90% of drivers carry the same VIP pass that only lane 3 validates.
+
+On social networks, sports streams, or flash sales, a single celebrity account or viral item draws millions of reads and writes per minute to *one* partition key. Early Twitter famously spent roughly 3% of its server fleet serving traffic generated by Justin Bieber alone; Discord hit the same wall whenever a mega-server sent an `@everyone` ping, jamming a single `(channel_id, bucket)` partition and dragging down quorum latency across every node holding that partition's replicas.
+
+### Four tools for cooling a hot key
+
+1. **Dedicated shard or host.** In range- or directory-based policies (like Meta's Shard Manager), the control plane isolates a single hot key on its own shard and dedicates a machine to it so normal neighbors do not starve.
+2. **Application-level key salting.** Append a random two-digit suffix (`key#00` through `key#99`) before hashing. Writes to one celebrity key now spread 100 ways across the cluster.
+3. **Request coalescing and hot caching.** For read-heavy hot keys, a thin service layer collapses simultaneous identical queries into one database fetch. Discord's Rust data services use consistent hashing so all requests for the same channel hit the same Rust worker, turning thousands of `@everyone` database hits into a single ScyllaDB query and helping slash historical read p99 from 40–125 ms on 177 Cassandra nodes down to ~15 ms on 72 ScyllaDB nodes.
+4. **Cloud heat management.** DynamoDB's adaptive capacity and S3's heat management automatically split hot key ranges or borrow burst capacity without manual intervention.
+
+<Callout type="warning" title="Salting helps writes, not reads">
+Splitting `celebrity_key` into `#00` through `#99` divides **write** load by 100, but every **read** now has to query all 100 salted keys and merge them. Keep a small directory of currently hot keys so normal traffic skips that 100× read overhead—and un-salt them once the viral spike fades.
+</Callout>
+
+| Hot-key pattern | Best fix | Hidden cost |
+|---|---|---|
+| Write burst (viral comments, counters) | Salt key (`#00..#99`) or isolate dedicated shard | Reads must merge all salted buckets; tracking hot keys adds metadata |
+| Read burst (`@everyone` channel load, flash sale item) | Coalesce in-flight queries + cache in front of DB | Stale window on cache; requires consistent routing to the coalescer |
+
+<Concepts>
+
+- **Hot key**: a single partition key receiving an outsized share of traffic (for example, a celebrity user or viral post).
+- **Key salting**: appending a short random suffix (`#00..#99`) to a hot key so its writes split across multiple shards.
+- **Request coalescing**: combining many concurrent identical reads into one downstream database query and sharing the answer.
+
+</Concepts>
+
+---
+
+## 4. Rebalancing shards
+
+Clusters never stay the same size: disks fill up, traffic jumps, nodes die. **Rebalancing** moves data and query load fairly when nodes join or leave—ideally while keeping reads and writes online and moving as little data as possible.
+
+### Why `hash(key) % N` fails fatally
+
+Using `hash(key) % N` (where `N` is the number of nodes) looks clean until you add a node. Changing `N` from 3 to 4 changes the remainder for almost every integer, forcing roughly 75% of all keys across the network at once. Worse, the ratio scales against you as the cluster grows: going from 31 to 32 nodes relocates roughly 97% of the entire database.
+
+</En>
+
+<Vi>
+
+| Cách chia | Phân bổ lệnh ghi | Quét theo khoảng trên partition key | Hệ thống tiêu biểu |
+|---|---|---|---|
+| Key-range (dải khoá) | Dễ nghẽn nếu khoá tăng theo thời gian | Quét tuần tự rất nhanh trên 1 shard | HBase, CockroachDB, YugabyteDB, Vitess |
+| Chỉ dùng Hash | Rải đều cho các khoá khác nhau | Phải quét chéo mọi shard (scatter/gather) | Riak, Couchbase, DynamoDB (chỉ hash key) |
+| Khoá ghép `(partition, sort)` | Rải đều giữa các thực thể | Quét nhanh *bên trong* một partition key | Cassandra, ScyllaDB, DynamoDB, BigQuery |
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Key-range sharding (chia theo dải khoá)**: giao mỗi shard một khoảng khoá liên tục đã sắp xếp, giống các tập từ điển.
+- **Hash sharding (chia theo hàm băm)**: đưa partition key qua hàm băm ổn định để rải các khoá gần nhau ra nhiều shard.
+- **Compound key (khoá ghép)**: khoá gồm hai phần: phần đầu quyết định shard, phần sau sắp thứ tự bản ghi bên trong shard đó.
+
+</Concepts>
+
+---
+
+## 3. Dữ liệu lệch và điểm nóng "người nổi tiếng"
+
+Một hàm băm tốt rải đều các khoá khác nhau, nhưng hoàn toàn bất lực khi một khoá duy nhất hứng trọn cơn bão traffic. Tưởng tượng một trạm thu phí 10 làn xe thông thoáng đều như nhau—trừ việc 90% tài xế dùng chung một loại thẻ ưu tiên mà chỉ làn số 3 xử lý được.
+
+Trên mạng xã hội, livestream hay sàn thương mại dịp flash sale, chỉ một tài khoản người nổi tiếng hoặc một bài đăng viral có thể dội hàng triệu lượt đọc ghi mỗi phút vào đúng *một* partition key. Thời kỳ đầu, Twitter từng tốn tới khoảng 3% tổng số máy chủ chỉ để phục vụ lưu lượng liên quan tới Justin Bieber; Discord cũng vướng y hệt mỗi lần một server khổng lồ gửi thông báo `@everyone`, khiến một cặp `(channel_id, bucket)` làm nghẽn toàn bộ các node giữ bản sao của nó.
+
+### Bốn cách hạ nhiệt một hot key
+
+1. **Tách shard hoặc dành riêng một máy.** Ở các hệ thống chia theo dải hoặc bảng danh mục (như Shard Manager của Meta), tầng điều phối nhấc riêng hot key đó ra một shard độc lập để không vạ lây tới người dùng bình thường.
+2. **Thêm muối ở tầng ứng dụng (key salting).** Gắn thêm hai chữ số ngẫu nhiên (`key#00` tới `key#99`) vào khoá trước khi băm. Lệnh ghi cho khoá nổi tiếng đó lập tức được chia đều ra 100 shard khác nhau.
+3. **Gộp request và cache phía trước (request coalescing).** Với hot key nặng về đọc, lớp dịch vụ trung gian gộp hàng nghìn truy vấn giống hệt nhau thành một truy vấn xuống DB. Lớp data service bằng Rust của Discord dùng consistent hashing để mọi request vào cùng một kênh chat đổ về đúng một worker Rust, biến cơn bão `@everyone` thành đúng một lệnh đọc ScyllaDB—góp phần hạ độ trễ p99 đọc tin cũ từ 40–125 ms trên 177 node Cassandra xuống còn ~15 ms trên 72 node ScyllaDB.
+4. **Cơ chế tự điều tiết của cloud.** Adaptive capacity của DynamoDB hay heat management của S3 tự động tách nhỏ dải khoá nóng hoặc cấp thêm băng thông bùng nổ mà không cần người trực can thiệp.
+
+<Callout type="warning" title="Thêm muối chỉ cứu ghi, không cứu đọc">
+Tách `celebrity_key` thành `#00` tới `#99` giúp tải **ghi** giảm 100 lần, nhưng mọi lần **đọc** giờ phải hỏi cả 100 khoá phụ rồi ghép lại. Chỉ bật thêm muối cho một danh sách nhỏ các hot key đã xác định để 99,9% khoá bình thường không bị gánh chi phí đọc gấp trăm lần—và gỡ muối khi cơn sốt qua đi.
+</Callout>
+
+| Kiểu hot key | Cách xử lý hiệu quả nhất | Chi phí ẩn phải trả |
+|---|---|---|
+| Bùng nổ ghi (bình luận viral, bộ đếm) | Thêm muối (`#00..#99`) hoặc tách máy riêng | Đọc phải gom đủ các khoá phụ; cần danh sách theo dõi hot key |
+| Bùng nổ đọc (ping `@everyone`, món hàng flash sale) | Gộp truy vấn đồng thời (coalescing) + cache trước DB | Chấp nhận độ trễ dữ liệu trong cache; cần định tuyến ổn định về cùng worker gộp |
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Hot key (khoá nóng)**: một partition key gánh tỉ lệ traffic quá lớn so với phần còn lại (ví dụ tài khoản ngôi sao hay bài viết viral).
+- **Key salting (thêm muối vào khoá)**: gắn thêm hậu tố ngẫu nhiên ngắn (`#00..#99`) vào hot key để rải lệnh ghi qua nhiều shard.
+- **Request coalescing (gộp yêu cầu)**: gộp nhiều lệnh đọc giống hệt nhau diễn ra cùng lúc thành một truy vấn duy nhất xuống database rồi trả chung kết quả.
+
+</Concepts>
+
+---
+
+## 4. Cân bằng lại shard khi cụm máy đổi cỡ
+
+Cụm máy chủ không bao giờ đứng yên: ổ đĩa đầy lên, lượng truy cập tăng vọt, hay một máy bỗng lăn ra chết. **Rebalancing** là quá trình dời dữ liệu và tải truy vấn cho đều lại mỗi khi thêm hoặc bớt node—trong khi hệ thống vẫn phục vụ đọc ghi bình thường và dời ít dữ liệu nhất có thể.
+
+### Vì sao `hash(key) % N` là cái bẫy chết người
+
+Công thức `hash(key) % N` (với `N` là số máy) nhìn qua rất gọn cho tới ngày bạn cắm thêm máy mới. Đổi `N` từ 3 lên 4 làm phần dư của gần như mọi số nguyên thay đổi, ép khoảng 75% toàn bộ khoá phải chuyển nhà qua mạng cùng lúc. Cụm càng to thì tỉ lệ dời càng tệ: từ 31 lên 32 máy kéo theo khoảng 97% database phải di chuyển.
+
+</Vi>
+
+<En>
+
+<TerminalOutput command="python3 hash_relocation_bench.py" label="Keys relocated across 10,000 keys (MD5 prefix vs Jump Consistent Hash)" caption="Measured locally on Apple M2 (macOS 26.4.1, Python 3.15.2). Modulo N relocates N/(N+1) of the database as clusters grow, whereas consistent hashing relocates roughly 1/N.">
+```text
+resize  3 ->  4 nodes  mod N moved 7462/10000 ( 74.6%)  jump hash moved 2432/10000 ( 24.3%)
+resize  9 -> 10 nodes  mod N moved 8989/10000 ( 89.9%)  jump hash moved  983/10000 (  9.8%)
+resize 31 -> 32 nodes  mod N moved 9710/10000 ( 97.1%)  jump hash moved  332/10000 (  3.3%)
+```
+</TerminalOutput>
+
+### Three rebalancing strategies that actually work
+
+1. **Fixed number of shards.** Pre-create far more logical shards than physical nodes (`hash(key) % 480`), then map whole logical shards onto machines in a table. Riak, Elasticsearch, Couchbase, and Citus work this way. Notion chose **480** logical shards across 32 Postgres hosts (15 schemas per host) specifically because 480 divides cleanly by 32, 40, 48, 60, 80, and 96—unlike 512, which forces a 2× hardware jump. In 2023, they tripled capacity from 32 to 96 physical hosts with zero downtime by moving whole schemas (15 down to 5 per host) without ever touching `hash(workspace_id) % 480`. The catch: if data grows 100× beyond your original estimate, shards grow huge and slow to recover, and changing that fixed count later requires a full rewrite.
+2. **Dynamic range splitting and merging.** Key-range and hash-range systems (HBase at a 10 GB default, CockroachDB at 512 MiB `range_max_bytes`, TiDB, MongoDB) split an overgrown or over-busy shard in two and hand one half to a quieter node—and merge tiny adjacent ranges back together after heavy deletes. Pre-splitting empty tables avoids starting life on one hot shard, though splitting is expensive (like LSM compaction) right when a shard is already under heavy load.
+3. **Consistent hashing.** Place both keys and nodes (via multiple **virtual nodes**—16 per node by default in Cassandra, 256 in ScyllaDB) onto a hash ring, or use algorithmic variants like Rendezvous hashing or Jump Consistent Hash. Adding a 4th node moves only ~25% of keys—straight from existing nodes to the newcomer, never bouncing keys between older hosts.
+
+Try switching strategies, adding nodes, and flipping on a celebrity burst below:
+
+</En>
+
+<Vi>
+
+<TerminalOutput command="python3 hash_relocation_bench.py" label="Số khoá phải dời trên 10.000 khoá (chia dư mod N so với Jump Consistent Hash)" caption="Đo trực tiếp trên Apple M2 (macOS 26.4.1, Python 3.15.2). Chia lấy dư mod N bắt dời tới xấp xỉ N/(N+1) dữ liệu khi cụm lớn lên, còn consistent hashing chỉ dời khoảng 1/N.">
+```text
+resize  3 ->  4 nodes  mod N moved 7462/10000 ( 74.6%)  jump hash moved 2432/10000 ( 24.3%)
+resize  9 -> 10 nodes  mod N moved 8989/10000 ( 89.9%)  jump hash moved  983/10000 (  9.8%)
+resize 31 -> 32 nodes  mod N moved 9710/10000 ( 97.1%)  jump hash moved  332/10000 (  3.3%)
+```
+</TerminalOutput>
+
+### Ba chiến lược rebalance thật sự chạy được ngoài thực tế
+
+1. **Số shard cố định (fixed number of shards).** Chia sẵn số shard logic nhiều gấp bội số máy vật lý (`hash(key) % 480`), rồi dùng một bảng ánh xạ để gán nguyên từng shard lên các máy. Riak, Elasticsearch, Couchbase và Citus dùng cách này. Notion chọn **480** shard logic trên 32 máy Postgres (mỗi máy 15 schema) chính vì 480 chia hết cho 32, 40, 48, 60, 80 lẫn 96—không bị ép nhân đôi phần cứng đột ngột như con số 512. Tới năm 2023, họ tăng cụm từ 32 lên 96 máy mà không hề downtime chỉ bằng cách chuyển nguyên các cụm 5 schema sang máy mới mà không đụng gì tới công thức `hash(workspace_id) % 480`. Điểm yếu: nếu dữ liệu phình gấp trăm lần dự kiến ban đầu, từng shard trở nên khổng lồ và khôi phục rất chậm, còn muốn đổi tổng số shard cố định thì gần như phải viết lại toàn bộ bảng.
+2. **Tách và gộp dải động (dynamic splitting & merging).** Các hệ thống chia theo dải khoá hoặc dải băm (HBase mặc định 10 GB, CockroachDB mặc định `range_max_bytes` 512 MiB, TiDB, MongoDB) tự tách đôi một shard khi nó phình quá ngưỡng hoặc nhận quá nhiều ghi, chuyển một nửa sang máy rảnh—và gộp lại hai dải liền kề nếu dữ liệu bị xoá đi nhiều. Chia trước (pre-splitting) giúp bảng mới tạo không bị dồn vào một shard đầu, nhưng bản thân thao tác tách lại rất tốn I/O (như compaction) ngay đúng lúc shard đó đang chịu tải cao nhất.
+3. **Consistent hashing.** Đặt cả khoá lẫn máy (thông qua nhiều **virtual node**—Cassandra mặc định 16 vnode mỗi máy, ScyllaDB dùng 256) lên cùng một vòng tròn băm, hoặc dùng biến thể toán học như Rendezvous hay Jump Consistent Hash. Khi thêm máy thứ 4, chỉ khoảng 25% khoá chuyển thẳng sang máy mới, tuyệt đối không làm các máy cũ đá dữ liệu qua lại với nhau.
+
+Bạn thử chuyển qua lại các chiến lược, thêm bớt node và bật thử hot key ngay dưới đây:
+
+</Vi>
+
+<ShardingRebalance />
+
+<En>
+
+<Figure src={notionSchemas} alt="Diagram from Notion showing 15 logical Postgres schemas split into three groups of five and replicated onto three new physical database shards without changing the shard mapping" caption="Fixed logical shards in action: Notion moved whole groups of 5 schemas from one saturated Postgres host onto three new hosts without changing its hash function." sourceTitle="Notion Engineering — The Great Re-shard" sourceUrl="https://www.notion.com/blog/the-great-re-shard" />
+
+### Automatic vs. manual rebalancing: watch out for cascades
+
+Cloud services such as DynamoDB automatically split and migrate shards within minutes to absorb traffic surges. That automation is convenient, yet pairing fully automatic rebalancing with automatic failure detection hides a dangerous loop:
+
+1. One node gets overloaded and becomes slow to answer heartbeats.
+2. Peers falsely assume the slow node is dead and start rebalancing its shards onto other nodes.
+3. Copying gigabytes across the network pushes the remaining nodes over their limit too, triggering a **cascading failure**.
+
+That is why engines like Couchbase and Riak compute a rebalance plan automatically but wait for a human operator to commit it—and why teams still pre-split or pre-scale ahead of predictable surges like Cyber Monday or World Cup ticket drops.
+
+<Concepts>
+
+- **Rebalancing**: moving shards between nodes so storage and query load stay balanced after adding, removing, or replacing machines.
+- **Pre-splitting**: defining initial shard boundaries on an empty database so day-one writes do not all land on a single shard.
+- **Virtual node (vnode)**: giving each physical machine multiple positions on a consistent hashing ring so key ownership evens out.
+- **Cascading failure**: a chain reaction where one overloaded or failed node shifts load onto neighbors and knocks them down too.
+
+</Concepts>
+
+---
+
+## 5. Request routing and service discovery
+
+Once data is spread across dozens of shards, a client trying to read `user_42` faces a basic question: which IP address and port should it talk to? Unlike stateless web servers behind a round-robin load balancer, only a node holding a replica of `user_42`'s shard can answer.
+
+There are three ways systems solve request routing:
+
+| Routing pattern | How a request reaches the owner | Extra network hop? | Trade-off |
+|---|---|---|---|
+| **Any node forwards** (e.g., Cassandra coordinator) | Client hits any node via LB; node forwards if needed | Yes, if wrong node | Simple clients; extra hop + tail latency on miss |
+| **Dedicated routing tier** (`mongos`, Vitess `VTGate`, DynamoDB routers) | Partition-aware stateless proxy routes straight to shard | Yes, 1 proxy hop | Centralizes topology cache; keeps app code clean |
+| **Smart client** (partition-aware driver) | Client caches shard map and connects directly | No (direct) | Lowest latency; hard to keep drivers updated across languages |
+
+### Keeping the shard map consistent without split-brain
+
+Every node, proxy, or smart client needs to know when a shard changes owners—and if two controllers disagree about who owns shard 17, you get **split-brain** corruption.
+
+- **Consensus-backed coordination services:** HBase and SolrCloud rely on **ZooKeeper**; Kubernetes uses **etcd**; Kafka, CockroachDB (via meta ranges), YugabyteDB, TiDB, and ScyllaDB embed **Raft** directly. Routers watch the consensus store for topology updates so there is always one authoritative owner.
+- **Gossip protocols:** Riak skips central coordinators and gossips cluster state peer-to-peer between nodes. That tolerates temporary conflicting shard views—acceptable only in leaderless systems built for weak consistency.
+
+Even with Raft or ZooKeeper, watch the **cutover window** while a shard migrates from node A to node B: in-flight requests sent to A seconds before the switch need clean redirects or brief retry handling. And DNS? Use DNS to locate the stable IPs of routers or nodes, never for rapidly changing key-to-shard maps.
+
+<Callout type="tip" title="Watch the proxy connection math during resharding">
+When Notion tripled from 32 to 96 physical Postgres shards, dual-writing and failing over temporarily multiplied downstream connections from their PgBouncer proxy tier. They had to shard the PgBouncer tier itself into four independent pools first, capping any proxy failure to 25% of the fleet.
+</Callout>
+
+<Concepts>
+
+- **Request routing**: figuring out which node IP and port currently owns the shard for a requested key.
+- **Routing tier**: a stateless, partition-aware proxy layer (such as Vitess `VTGate` or `mongos`) sitting between app servers and database shards.
+- **Coordination service**: a consensus-backed metadata store (such as ZooKeeper or etcd) holding the single source of truth for shard-to-node ownership.
+- **Split-brain**: a fault where two parts of a cluster independently act as the owner or leader for the same shard at the same time.
+
+</Concepts>
+
+---
+
+## 6. Secondary indexes across shards
+
+Everything above assumed you look up rows by their partition key. The moment a product needs `WHERE customer_id = 42` or `WHERE status = 'pending'` on a table sharded by `order_id`, you need a **secondary index**—and secondary indexes do not align cleanly with primary-key shards.
+
+Databases pick between two designs, and each flips the read-vs.-write cost:
+
+</En>
+
+<Vi>
+
+<Figure src={notionSchemas} alt="Sơ đồ của Notion minh hoạ 15 schema Postgres logic được chia thành 3 nhóm mỗi nhóm 5 schema và sao chép sang 3 máy chủ database vật lý mới mà không đổi cách ánh xạ khoá" caption="Số shard cố định ngoài thực tế: Notion dời nguyên các cụm 5 schema từ một máy Postgres quá tải sang 3 máy mới mà không phải sửa lại hàm băm." sourceTitle="Notion Engineering — The Great Re-shard" sourceUrl="https://www.notion.com/blog/the-great-re-shard" />
+
+### Tự động rebalance hay để người duyệt: cẩn thận hiệu ứng domino
+
+Các dịch vụ cloud như DynamoDB có thể tự động tách và dời shard chỉ trong vài phút khi tải tăng vọt. Tự động hoàn toàn nghe rất nhàn, nhưng nếu ghép chung nó với cơ chế tự phát hiện node chết, bạn rất dễ dính một vòng lặp nguy hiểm:
+
+1. Một node bị quá tải nên trả lời heartbeat chậm chạp.
+2. Các node khác tưởng nhầm node đó đã chết, lập tức tự động dời shard của nó sang các máy còn lại.
+3. Việc sao chép hàng chục gigabyte qua mạng đẩy luôn các máy còn lại vượt ngưỡng chịu tải, kích hoạt một vụ **sập dây chuyền (cascading failure)**.
+
+Đó là lý do Couchbase hay Riak chỉ *tính sẵn* phương án rebalance rồi đợi kỹ sư vận hành bấm duyệt—và các team vẫn chủ động tách shard từ trước trước những ngày cao điểm đoán trước được như Black Friday hay mở bán vé World Cup.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Rebalancing (cân bằng lại tải)**: dời các shard qua lại giữa các máy để giữ dung lượng và tải truy vấn đồng đều khi thêm, bớt hoặc thay máy.
+- **Pre-splitting (chia dải trước)**: khai báo sẵn ranh giới các shard ngay khi database còn trống để lệnh ghi ngày đầu không dồn hết vào một máy.
+- **Virtual node (vnode / node ảo)**: gán cho mỗi máy vật lý nhiều vị trí trên vòng consistent hashing để phân bổ khoá đều tay hơn.
+- **Cascading failure (sập dây chuyền)**: phản ứng dây chuyền khi một node chết hoặc quá tải đẩy việc sang các node bên cạnh và kéo sập nốt chúng.
+
+</Concepts>
+
+---
+
+## 5. Định tuyến request tới đúng shard
+
+Khi dữ liệu đã nằm rải trên hàng chục shard, một client muốn đọc `user_42` đối mặt ngay câu hỏi thực tế: gửi gói tin tới địa chỉ IP và cổng nào? Khác với web server không trạng thái đứng sau load balancer vòng tròn, một lệnh đọc `user_42` chỉ có thể được xử lý bởi đúng máy đang giữ bản sao shard chứa `user_42`.
+
+Hệ thống phân tán giải bài toán định tuyến này theo ba mô hình chính:
+
+| Mô hình định tuyến | Request tìm tới đúng shard ra sao | Tốn thêm hop mạng? | Điểm đánh đổi |
+|---|---|---|---|
+| **Hỏi node bất kỳ** (vd: coordinator của Cassandra) | Client gọi đại một node qua LB; node tự chuyển tiếp nếu không giữ shard | Có, nếu gọi nhầm node | Client cực gọn; tốn thêm hop và tăng tail latency nếu trượt |
+| **Tầng proxy định tuyến** (`mongos`, `VTGate` của Vitess, router DynamoDB) | Proxy không lưu trạng thái nhưng nắm bản đồ shard đứng ra điều hướng | Có, 1 hop qua proxy | Tập trung cache bản đồ định tuyến; giữ code app sạch sẽ |
+| **Smart client** (driver tự biết chia shard) | Client cache thẳng bản đồ shard và nối trực tiếp tới đúng node | Không (nối thẳng) | Độ trễ thấp nhất; rất cực khi phải cập nhật driver nhiều ngôn ngữ |
+
+### Giữ bản đồ shard thống nhất mà không bị split-brain
+
+Dù là node, proxy hay smart client, tất cả đều phải biết ngay khi một shard vừa đổi chủ—và nếu hai bộ điều khiển cùng tưởng mình đang giữ bản đồ đúng cho shard 17, hệ thống sẽ bị **split-brain** và làm hỏng dữ liệu.
+
+- **Dịch vụ điều phối dùng thuật toán đồng thuận (consensus):** HBase và SolrCloud dùng **ZooKeeper**; Kubernetes dùng **etcd**; còn Kafka, CockroachDB (qua meta range), YugabyteDB, TiDB và ScyllaDB nhúng thẳng **Raft** vào lõi. Bộ định tuyến đăng ký nhận cập nhật từ kho metadata này nên luôn chỉ có một chủ sở hữu hợp lệ tại một thời điểm.
+- **Giao thức truyền tin đồn (gossip):** Riak bỏ qua bộ điều phối trung tâm và để các node tự truyền tin cho nhau. Cách này chấp nhận có lúc các máy nhìn thấy bản đồ hơi lệch nhau—chỉ hợp với mô hình leaderless vốn chấp nhận nhất quán yếu.
+
+Kể cả khi có Raft hay ZooKeeper, hãy luôn để ý **khoảng chuyển giao (cutover window)** lúc shard đang dời từ máy A sang máy B: các request đang bay tới A ngay trước tích tắc chuyển đổi cần được điều hướng lại hoặc retry sạch sẽ. Còn DNS? Chỉ nên dùng DNS để trỏ tới địa chỉ IP ít thay đổi của tầng router hoặc node, không bao giờ dùng để tra vị trí khoá-tới-shard.
+
+<Callout type="tip" title="Đừng quên bài toán số lượng kết nối khi re-shard">
+Khi Notion tăng gấp ba từ 32 lên 96 máy Postgres, việc ghi song song và chuyển mạch tạm thời làm số kết nối từ tầng PgBouncer vọt ngưỡng. Họ buộc phải chia nhỏ chính cụm PgBouncer thành 4 nhóm độc lập trước khi chuyển shard, vừa đủ tải vừa khoanh vùng sự cố proxy chỉ ảnh hưởng tối đa 25% hệ thống.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Request routing (định tuyến truy vấn)**: tìm ra đúng địa chỉ IP và port của máy đang giữ shard chứa khoá cần đọc/ghi.
+- **Routing tier (tầng định tuyến)**: lớp proxy không trạng thái nhưng nắm bản đồ chia shard (như `VTGate` hay `mongos`) đứng giữa app và database.
+- **Coordination service (dịch vụ điều phối)**: kho lưu metadata dựa trên đồng thuận (như ZooKeeper hoặc etcd) giữ nguồn chân lý duy nhất về việc shard nào nằm ở node nào.
+- **Split-brain (não phân đôi)**: lỗi hai phần của cụm mất đồng bộ và cùng tự nhận quyền làm chủ cho cùng một shard tại một thời điểm.
+
+</Concepts>
+
+---
+
+## 6. Secondary index khi dữ liệu nằm nhiều shard
+
+Mọi phần ở trên đều giả sử bạn luôn biết partition key khi truy vấn. Chỉ cần sản phẩm thêm một bộ lọc `WHERE customer_id = 42` hay `WHERE status = 'pending'` trên bảng đang chia theo `order_id`, bạn lập tức cần **secondary index (chỉ mục phụ)**—và secondary index thì không nằm khớp theo ranh giới của khoá chính.
+
+Các database chọn một trong hai kiến trúc dưới đây, mỗi bên lật ngược cán cân chi phí giữa đọc và ghi:
+
+</Vi>
+
+<ShardingLocalVsGlobalIndex />
+
+<En>
+
+### Local indexes: fast writes, tail-amplified reads
+
+In a **local (document-partitioned) index**—used by MongoDB, Cassandra, Elasticsearch, SolrCloud, Riak, and VoltDB—each shard maintains secondary indexes covering only the rows it stores. Writing or deleting a row updates just one shard synchronously.
+
+The pain arrives on reads when you do not know the partition key. Querying `WHERE customer_id = 42` triggers a **scatter/gather**: the coordinator queries *every* shard in parallel and waits for all of them to reply. Even in parallel, two things hurt:
+
+1. **Tail latency amplification.** If 99 out of 100 shards answer in 5 ms and shard 73 hits a slow disk or GC pause taking 92 ms, the whole query takes 92 ms.
+2. **A throughput ceiling.** Adding more shards lets you store more data, yet if every secondary-index search still wakes up every shard, cluster read QPS barely improves.
+
+And a warning from DDIA: if you run a pure key-value store without built-in secondary indexes, do not hand-roll index tables in application code unless you have multi-object transactions—one crash mid-request leaves ghost IDs in your index forever.
+
+### Global indexes: fast index lookups, cross-shard writes
+
+In a **global (term-partitioned) index**—supported by CockroachDB, TiDB, YugabyteDB, and DynamoDB GSIs—the index itself is sharded by the indexed value (`customer_id`), separate from the primary table. Finding matching IDs for `customer_id = 42` hits a single index shard.
+
+That single-shard index lookup comes with three real trade-offs:
+
+- **Writes touch multiple shards.** Inserting one order with three indexed columns can update four shards (one data shard, three index shards). DynamoDB updates its Global Secondary Indexes **asynchronously** so primary writes stay fast, meaning a read right after a write can return stale index results; CockroachDB and TiDB update global indexes synchronously via **distributed transactions**, trading write latency for strict consistency.
+- **Fetching full rows still fans out.** The index shard returns primary keys (`105, 812, 1204`); if your query needs columns not projected into the index, the engine still fetches those rows from their respective data shards.
+- **Multi-term `AND` queries cross the network.** Searching `color = 'red' AND make = 'honda'` hits two different index shards and has to ship long postings lists over the network to intersect them.
+
+| Dimension | Local (document-partitioned) | Global (term-partitioned) |
+|---|---|---|
+| Write path | 1 shard (fast, synchronous) | 2+ shards (async lag or distributed tx) |
+| Single-term read | All shards (scatter/gather, high p99) | 1 index shard for IDs (+ data shards if full row needed) |
+| Multi-term `AND` | Intersected locally inside each shard | Intersects postings lists across index shards |
+| Systems | MongoDB, Elasticsearch, Cassandra, Riak | CockroachDB, TiDB, YugabyteDB, DynamoDB GSI |
+
+<Concepts>
+
+- **Local secondary index**: an index stored inside each shard covering only that shard's own rows (document-partitioned).
+- **Global secondary index**: a separate, independently sharded index spanning all rows across the cluster (term-partitioned).
+- **Scatter/gather**: broadcasting one read query to every shard in parallel and merging their replies.
+- **Postings list**: the list of matching record IDs stored under a single value in an index.
+
+</Concepts>
+
+---
+
+## Key takeaways
+
+- **Delay sharding until replication and vertical scaling run out of room.** Sharding breaks cross-shard joins and cheap single-node transactions, so start simple—and when you shard for multitenancy, isolate tenants by cell or tenant ID while planning early for giant whale customers.
+- **Pick compound keys `(partition_key, sort_key)` over pure timestamps or pure hashes.** Hashing only the entity prefix spreads writes evenly across machines while keeping each entity's timeline sorted inside one shard, as Discord did with `(channel_id, bucket)`.
+- **Remember that uniform hashing cannot save a celebrity hot key.** Isolate hot keys to dedicated shards, salt writes (`#00..#99`) only for tracked hot keys, and use request coalescing in front of the database for read storms.
+- **Never ship `hash(key) % N` to production.** Use pre-allocated highly composite logical shards (like Notion's 480), dynamic range splitting/merging, or virtual-node consistent hashing—and keep human approval or throttling in the loop so auto-rebalancing does not trigger cascading failures.
+- **Choose local vs. global secondary indexes by your read/write ratio and staleness budget.** Local indexes keep writes single-shard at the cost of scatter/gather tail latency; global indexes speed up single-term lookups while pushing complexity onto async replication lag or distributed transactions.
+
+---
+
+## Review questions
+
+1. Notion sharded Postgres into **480** logical shards across 32 physical machines rather than 512 or directly using `hash(workspace_id) % 32`. What two operational problems would `512` or `% 32` have caused two years later when CPU hit 90%? *(Section 1, Section 4)*
+2. An IoT pipeline stores readings with `timestamp` as the partition key using key-range sharding. Why do 99% of writes hit one machine, and what single change to the key keeps both writes balanced and per-sensor time scans fast? *(Section 2)*
+3. Adding `#00..#99` suffixes to a viral product key immediately fixes write saturation on its shard. What breaks on the read path, and why must you avoid salting normal cold keys? *(Section 3)*
+4. During a peak spike, one overloaded node starts answering cluster health checks slowly, and the cluster has fully automatic failure detection and automatic rebalancing turned on. Walk through the chain reaction that can take down the whole cluster. *(Section 4)*
+5. You build an e-commerce search page filtering orders by `customer_email` on a table sharded by `order_id`. Compare what slows down—or goes stale—under a local index, a DynamoDB-style async global index, and a CockroachDB-style transactional global index. *(Section 6)*
+
+</En>
+
+<Vi>
+
+### Local index: ghi cực nhanh, đọc dễ dính tail latency
+
+Với **local index (chia theo từng shard dữ liệu)**—được dùng ở MongoDB, Cassandra, Elasticsearch, SolrCloud, Riak và VoltDB—mỗi shard chỉ đánh index cho riêng các dòng nằm trên nó. Ghi hay xoá một bản ghi chỉ chạm đúng một shard, đồng bộ và rất gọn.
+
+Đau đầu bắt đầu ở chiều đọc khi truy vấn không chứa partition key. Lệnh `WHERE customer_id = 42` buộc hệ thống chạy **scatter/gather**: gửi truy vấn tới *tất cả* các shard song song rồi chờ gom đủ kết quả. Kể cả khi chạy song song, hai nhược điểm xuất hiện ngay:
+
+1. **Khuếch đại độ trễ đuôi (tail latency amplification).** Chỉ cần 99 shard trả lời trong 5 ms nhưng shard thứ 73 kẹt đĩa hoặc kẹt GC mất 92 ms, người dùng vẫn phải chờ trọn 92 ms.
+2. **Trần thông lượng đọc.** Thêm máy mới giúp chứa thêm dữ liệu, nhưng nếu mỗi lệnh tìm secondary index vẫn đánh thức toàn bộ cụm shard, năng lực phục vụ QPS gần như dậm chân tại chỗ.
+
+Sách cũng cảnh báo rõ: nếu dùng key-value store không có secondary index tích hợp sẵn, đừng tự viết code ứng dụng duy trì bảng index thủ công khi chưa có transaction đa đối tượng—chỉ cần sập máy giữa chừng là dữ liệu và index lệch nhau vĩnh viễn.
+
+### Global index: tra index gọn, nhưng ghi vất vả xuyên shard
+
+Với **global index (chia theo giá trị tìm kiếm)**—hỗ trợ bởi CockroachDB, TiDB, YugabyteDB và DynamoDB GSI—bản thân index được chia shard độc lập theo giá trị cần tìm (`customer_id`), tách rời khỏi cách chia của bảng chính. Tìm danh sách ID cho `customer_id = 42` chỉ cần hỏi đúng một shard index.
+
+Cú hỏi thẳng một shard index đó đánh đổi bằng ba chi phí thực tế:
+
+- **Lệnh ghi đụng nhiều shard.** Thêm một đơn hàng có ba cột đánh index có thể phải cập nhật tới bốn shard (một shard dữ liệu, ba shard index). DynamoDB cập nhật Global Secondary Index **bất đồng bộ (asynchronous)** để giữ ghi nhanh, nghĩa là đọc ngay sau khi ghi có thể thấy dữ liệu index cũ; còn CockroachDB và TiDB đồng bộ global index bằng **giao dịch phân tán (distributed transaction)**, đánh đổi tốc độ ghi lấy tính nhất quán chặt chẽ.
+- **Lấy đủ cột vẫn phải gọi nhiều máy.** Shard index chỉ giữ danh sách khoá chính (`105, 812, 1204`); nếu truy vấn đòi các cột khác không có trong index, hệ thống vẫn phải đi gom dòng thật từ các shard dữ liệu.
+- **Truy vấn nhiều điều kiện `AND` tốn băng thông mạng.** Lọc `color = 'red' AND make = 'honda'` phải hỏi hai shard index khác nhau rồi truyền các danh sách ID dài qua mạng để lấy phần giao.
+
+| Tiêu chí | Local index (chia theo shard dữ liệu) | Global index (chia theo giá trị tìm) |
+|---|---|---|
+| Đường ghi | 1 shard (nhanh, đồng bộ) | Từ 2 shard trở lên (trễ bất đồng bộ hoặc distributed tx) |
+| Đọc 1 điều kiện | Hỏi mọi shard (scatter/gather, p99 cao) | 1 shard index lấy ID (+ gọi thêm shard dữ liệu nếu lấy cả dòng) |
+| Đọc nhiều điều kiện `AND` | Giao kết quả ngay bên trong từng shard | Phải truyền danh sách ID qua mạng để lấy giao giữa các shard index |
+| Hệ thống dùng | MongoDB, Elasticsearch, Cassandra, Riak | CockroachDB, TiDB, YugabyteDB, DynamoDB GSI |
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Local secondary index (chỉ mục cục bộ)**: index nằm ngay bên trong mỗi shard, chỉ lập chỉ mục cho các dòng thuộc riêng shard đó.
+- **Global secondary index (chỉ mục toàn cục)**: index tách riêng phủ toàn bộ dữ liệu cụm và tự chia shard theo giá trị được đánh chỉ mục.
+- **Scatter/gather (phát tán và thu gom)**: gửi một truy vấn đọc tới đồng loạt mọi shard rồi gộp kết quả trả về.
+- **Postings list (danh sách xuất hiện)**: danh sách các ID bản ghi khớp với một giá trị trong index.
+
+</Concepts>
+
+---
+
+## Điểm rút ra
+
+- **Đừng chia shard khi replication và nâng cấp phần cứng còn chịu nổi.** Sharding đánh mất `JOIN` đơn giản và giao dịch nhanh trên một máy; khi chia cho SaaS đa khách hàng, hãy dùng cell hoặc tenant ID nhưng tính sẵn đường xử lý các khách hàng khổng lồ.
+- **Ưu tiên khoá ghép `(partition_key, sort_key)` thay vì chỉ băm hay chỉ lấy mốc thời gian.** Băm phần đầu để rải tải ghi và giữ phần sau sắp xếp ngay bên trong shard, như cách Discord làm với `(channel_id, bucket)`.
+- **Hàm băm đều không tự chống được hot key người nổi tiếng.** Tách riêng hot key sang shard độc lập, chỉ thêm muối (`#00..#99`) cho số ít khoá thật sự nóng, và đặt lớp gộp request phía trước DB cho các cơn bão đọc.
+- **Tuyệt đối không dùng `hash(key) % N` ngoài production.** Dùng số shard logic chia hết cho nhiều ước (như 480 của Notion), tách/gộp dải động, hoặc consistent hashing có virtual node—và giữ bước duyệt của con người để tự động rebalance không tự kích hoạt sập dây chuyền.
+- **Chọn local hay global secondary index theo tỉ lệ đọc/ghi và mức độ chấp nhận dữ liệu trễ.** Local index giúp ghi gọn một shard nhưng chịu độ trễ đuôi khi scatter/gather; global index giúp tra cứu nhanh nhưng đẩy cái giá sang độ trễ đồng bộ ngầm hoặc giao dịch phân tán.
+
+---
+
+## Câu hỏi ôn tập
+
+1. Notion chia Postgres thành **480** shard logic trên 32 máy thay vì chọn 512 hay dùng thẳng `hash(workspace_id) % 32`. Hai vấn đề vận hành nào sẽ nổ ra sau hai năm khi CPU chạm 90% nếu họ lỡ chọn 512 hoặc `% 32`? *(Phần 1, Phần 4)*
+2. Một hệ thống IoT lấy `timestamp` làm partition key với cách chia theo dải khoá. Vì sao 99% lệnh ghi đổ dồn vào một máy, và sửa khoá thế nào để vừa rải đều lệnh ghi vừa giữ được tốc độ quét lịch sử của từng cảm biến? *(Phần 2)*
+3. Gắn hậu tố `#00..#99` vào một khoá sản phẩm đang viral lập tức hạ tải ghi trên shard. Nhưng đường đọc bị ảnh hưởng ra sao, và vì sao không được thêm muối bừa bãi cho mọi khoá bình thường? *(Phần 3)*
+4. Vào giờ cao điểm, một node bị quá tải nên phản hồi kiểm tra sức khoẻ (heartbeat) chậm lại, trong khi cụm đang bật tự động phát hiện node chết lẫn tự động rebalance. Hãy lần lại phản ứng dây chuyền có thể kéo sập toàn bộ cụm máy. *(Phần 4)*
+5. Bạn xây tính năng tìm đơn hàng theo `customer_email` trên bảng đang chia shard theo `order_id`. So sánh thao tác nào bị chậm đi—hoặc có thể trả dữ liệu cũ—khi dùng local index, global index bất đồng bộ kiểu DynamoDB và global index dùng transaction kiểu CockroachDB. *(Phần 6)*
+
+</Vi>
