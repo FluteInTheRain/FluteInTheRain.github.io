@@ -7,6 +7,7 @@ Extracted from Iconify JSON packages (body + viewBox only, no package installed)
 - `logos`: Gil Barbara, CC0-1.0 (https://github.com/gilbarbara/logos)
 - `fluent-emoji-flat`: Microsoft Fluent UI Emoji, MIT (https://github.com/microsoft/fluentui-emoji)
 - `flat-color-icons`: Icons8, MIT (https://github.com/icons8/flat-color-icons)
+- `fluent-color`: Microsoft Fluent UI System Color Icons, MIT (https://github.com/microsoft/fluentui-system-icons)
 - `drawn`: drawn for this site (`server`, `log`, `db`)
 
 | file | set | icon | meaning |
@@ -19,7 +20,7 @@ Extracted from Iconify JSON packages (body + viewBox only, no package installed)
 | `phone.svg` | fluent-emoji-flat | mobile-phone | mobile client |
 | `user.svg` | fluent-emoji-flat | bust-in-silhouette | one person |
 | `users.svg` | flat-color-icons | conference-call | many people / tenants |
-| `cloud.svg` | fluent-emoji-flat | cloud | cloud provider / region |
+| `cloud.svg` | fluent-color | cloud-48 | cloud provider / region |
 | `disk.svg` | fluent-emoji-flat | computer-disk | disk / SSD / file on disk |
 | `file.svg` | fluent-emoji-flat | page-facing-up | a file, record or document |
 | `folder.svg` | flat-color-icons | folder | directory / bucket prefix |
