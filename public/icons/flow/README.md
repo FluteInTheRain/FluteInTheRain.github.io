@@ -29,3 +29,4 @@ Used by `src/components/demos/AnimatedFlow.tsx` (node `icon` key -> file). Extra
 | `log.svg` | fluent-emoji-flat | scroll |
 | `merge.svg` | fluent-emoji-flat | shuffle-tracks-button |
 | `ec2.svg` | logos | aws-ec2 |
+| `mysql.svg` | logos | mysql-icon |
