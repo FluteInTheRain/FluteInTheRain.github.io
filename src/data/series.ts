@@ -277,7 +277,275 @@ const refactoringUi: Series = {
   ],
 };
 
-export const SERIES: Record<string, Series> = { [refactoringUi.id]: refactoringUi };
+const D = {
+  tradeOffs: 'trade-offs-in-data-systems-architecture',
+  nfr: 'reliable-scalable-maintainable-data-systems',
+  models: 'data-models-and-query-languages',
+  storage: 'storage-engines-logs-lsm-btree-columns',
+  encoding: 'encoding-and-schema-evolution',
+  replication: 'replication-when-copies-disagree',
+  sharding: 'sharding-keys-ranges-hashes-hot-spots',
+  transactions: 'transactions-acid-isolation-anomalies-serializability',
+  trouble: 'trouble-with-distributed-systems-networks-clocks-fencing',
+  consensus: 'consistency-consensus-linearizability-logical-clocks-raft',
+  batch: 'batch-processing-unix-pipes-shuffle-dataflow-lakehouse',
+  stream: 'stream-processing-event-logs-cdc-windows-joins',
+  unbundling: 'philosophy-of-streaming-systems-unbundling-end-to-end-correctness',
+  ethics: 'doing-the-right-thing-ethics-privacy-algorithmic-bias',
+};
+
+const ddia: Series = {
+  id: 'ddia',
+  title: {
+    en: 'Data systems, explained by the outages that shaped them',
+    vi: 'Hệ thống dữ liệu, giải thích qua những sự cố đã định hình chúng',
+  },
+  kicker: { en: 'A 14-part series', vi: 'Series 14 bài' },
+  tagline: {
+    en: 'From one disk to many machines: what each design choice costs, shown with real incidents and demos you can break.',
+    vi: 'Từ một ổ đĩa tới nhiều máy: mỗi lựa chọn thiết kế phải trả giá gì, minh hoạ bằng sự cố thật và demo để bạn tự làm hỏng.',
+  },
+  pitch: [
+    {
+      en: 'Most data bugs are not code bugs. A replica that lags, a clock that jumps, a retry that charges twice: the code is fine and the system is still wrong.',
+      vi: 'Phần lớn lỗi dữ liệu không nằm ở code. Replica chạy chậm, đồng hồ nhảy giờ, một lần retry trừ tiền hai lần: code không sai mà hệ thống vẫn sai.',
+    },
+    {
+      en: 'Each post takes one layer, from how a database lays bytes on disk to how a fleet of nodes agrees on one log, and walks through the real outage, the diagram of the system involved, and the idea that would have prevented it.',
+      vi: 'Mỗi bài lấy một tầng, từ cách database xếp byte xuống đĩa tới cách nhiều node thống nhất một log chung, rồi đi qua sự cố có thật, sơ đồ hệ thống liên quan và ý tưởng lẽ ra đã ngăn được nó.',
+    },
+  ],
+  credit: {
+    en: 'Built on Designing Data-Intensive Applications (2nd edition) by Martin Kleppmann and Chris Riccomini, extended with postmortems, architecture diagrams and live demos.',
+    vi: 'Dựa trên Designing Data-Intensive Applications (bản 2) của Martin Kleppmann và Chris Riccomini, bổ sung postmortem thật, sơ đồ kiến trúc và demo tương tác.',
+  },
+  outcomes: [
+    {
+      en: 'Pick a data model and storage engine from the access pattern, not from habit.',
+      vi: 'Chọn data model và storage engine theo cách dữ liệu được đọc ghi, không theo thói quen.',
+    },
+    {
+      en: 'Predict what users see when replicas lag, shards run hot, or the network splits.',
+      vi: 'Đoán trước người dùng thấy gì khi replica chậm, shard quá tải hay mạng bị chia cắt.',
+    },
+    {
+      en: 'Name the isolation anomaly or clock bug behind a "can\'t happen" incident.',
+      vi: 'Gọi đúng tên lỗi isolation hay lỗi đồng hồ đứng sau một sự cố "không thể xảy ra".',
+    },
+    {
+      en: 'Design pipelines around logs and derived data that stay correct under retries.',
+      vi: 'Thiết kế pipeline xoay quanh log và dữ liệu dẫn xuất, vẫn đúng khi bị retry.',
+    },
+  ],
+  acts: [
+    {
+      id: 'foundations',
+      label: { en: 'Foundations', vi: 'Nền tảng' },
+      blurb: { en: 'How one system stores and shapes data', vi: 'Một hệ thống cất và định hình dữ liệu ra sao' },
+    },
+    {
+      id: 'distributed',
+      label: { en: 'Distributed data', vi: 'Dữ liệu phân tán' },
+      blurb: { en: 'When data lives on many machines', vi: 'Khi dữ liệu nằm trên nhiều máy' },
+    },
+    {
+      id: 'derived',
+      label: { en: 'Derived data', vi: 'Dữ liệu dẫn xuất' },
+      blurb: { en: "Built from other systems' data", vi: 'Dựng từ dữ liệu hệ thống khác' },
+    },
+  ],
+  parts: [
+    {
+      slug: D.tradeOffs,
+      topic: { en: 'Trade-offs', vi: 'Đánh đổi' },
+      hook: {
+        en: 'OLTP or analytics, cloud or own servers, one service or many: the choices made before the first line.',
+        vi: 'OLTP hay phân tích, cloud hay máy riêng, một service hay nhiều: những lựa chọn có trước dòng code đầu tiên.',
+      },
+      act: 'foundations',
+      builds: [],
+    },
+    {
+      slug: D.nfr,
+      topic: { en: 'Reliable and scalable', vi: 'Tin cậy và mở rộng' },
+      hook: {
+        en: 'Why average latency lies, how one celebrity post fans out, and what "maintainable" means in practice.',
+        vi: 'Vì sao độ trễ trung bình đánh lừa, một bài của người nổi tiếng lan ra thế nào, và "dễ bảo trì" thực ra là gì.',
+      },
+      act: 'foundations',
+      builds: [D.tradeOffs],
+    },
+    {
+      slug: D.models,
+      topic: { en: 'Data models', vi: 'Data model' },
+      hook: {
+        en: 'Documents, tables, graphs and event logs, chosen through migrations real teams made.',
+        vi: 'Document, bảng, graph và event log, chọn qua những lần migration các team thật đã làm.',
+      },
+      act: 'foundations',
+      builds: [D.tradeOffs],
+    },
+    {
+      slug: D.storage,
+      topic: { en: 'Storage engines', vi: 'Storage engine' },
+      hook: {
+        en: 'Logs, LSM-trees, B-trees and columns: how bytes sit on disk decides what is fast.',
+        vi: 'Log, LSM-tree, B-tree và lưu theo cột: byte nằm trên đĩa ra sao quyết định thao tác nào nhanh.',
+      },
+      act: 'foundations',
+      builds: [D.models],
+    },
+    {
+      slug: D.encoding,
+      topic: { en: 'Encoding', vi: 'Encoding' },
+      hook: {
+        en: 'Change a data format while old and new code run side by side, without breaking readers.',
+        vi: 'Đổi định dạng dữ liệu khi code cũ và code mới chạy song song mà không làm vỡ bên đọc.',
+      },
+      act: 'foundations',
+      builds: [D.models],
+    },
+    {
+      slug: D.replication,
+      topic: { en: 'Replication', vi: 'Replication' },
+      hook: {
+        en: 'Leaders, followers and quorums, and what users see when the copies disagree.',
+        vi: 'Leader, follower và quorum, và người dùng thấy gì khi các bản sao lệch nhau.',
+      },
+      act: 'distributed',
+      builds: [D.nfr, D.encoding],
+    },
+    {
+      slug: D.sharding,
+      topic: { en: 'Sharding', vi: 'Sharding' },
+      hook: {
+        en: 'Split data across nodes by key range or hash, rebalance it, and keep hot spots and indexes in check.',
+        vi: 'Chia dữ liệu qua nhiều node theo dải khoá hoặc hash, cân bằng lại, và giữ hot spot cùng index trong tầm kiểm soát.',
+      },
+      act: 'distributed',
+      builds: [D.storage, D.replication],
+    },
+    {
+      slug: D.transactions,
+      topic: { en: 'Transactions', vi: 'Transaction' },
+      hook: {
+        en: 'What ACID really promises: isolation anomalies, snapshots, write skew and two-phase commit.',
+        vi: 'ACID thật sự hứa gì: lỗi isolation, snapshot, write skew và two-phase commit.',
+      },
+      act: 'distributed',
+      builds: [D.storage, D.replication],
+    },
+    {
+      slug: D.trouble,
+      topic: { en: 'What breaks', vi: 'Thứ hay hỏng' },
+      hook: {
+        en: 'Lost packets, jumping clocks and paused processes, and why locks need fencing tokens.',
+        vi: 'Mất gói tin, đồng hồ nhảy giờ, tiến trình khựng, và vì sao khoá cần fencing token.',
+      },
+      act: 'distributed',
+      builds: [D.replication],
+    },
+    {
+      slug: D.consensus,
+      topic: { en: 'Consensus', vi: 'Đồng thuận' },
+      hook: {
+        en: 'Linearizability, logical clocks and Raft: how unreliable nodes agree on one log.',
+        vi: 'Linearizability, đồng hồ logic và Raft: các node hay lỗi thống nhất một log chung ra sao.',
+      },
+      act: 'distributed',
+      builds: [D.transactions, D.trouble],
+    },
+    {
+      slug: D.batch,
+      topic: { en: 'Batch processing', vi: 'Xử lý theo lô' },
+      hook: {
+        en: 'From Unix pipes to distributed shuffles and lakehouses, and where hot keys break them.',
+        vi: 'Từ Unix pipe tới shuffle phân tán và lakehouse, và chỗ hot key làm chúng gãy.',
+      },
+      act: 'derived',
+      builds: [D.sharding],
+    },
+    {
+      slug: D.stream,
+      topic: { en: 'Stream processing', vi: 'Xử lý luồng' },
+      hook: {
+        en: 'Event logs, change data capture, windows, watermarks and stream joins.',
+        vi: 'Event log, change data capture, window, watermark và join luồng.',
+      },
+      act: 'derived',
+      builds: [D.replication, D.batch],
+    },
+    {
+      slug: D.unbundling,
+      topic: { en: 'Unbundling', vi: 'Tháo rời database' },
+      hook: {
+        en: 'Build one system from logs and derived views, and keep it correct end to end.',
+        vi: 'Dựng một hệ thống từ log và view dẫn xuất, và giữ nó đúng từ đầu tới cuối.',
+      },
+      act: 'derived',
+      builds: [D.consensus, D.stream],
+    },
+    {
+      slug: D.ethics,
+      topic: { en: 'Doing it right', vi: 'Làm cho đúng' },
+      hook: {
+        en: 'Bias that survives dropped columns, feedback loops, and user data as a liability.',
+        vi: 'Thiên kiến vẫn còn dù đã xoá cột, vòng lặp phản hồi, và dữ liệu người dùng như một món nợ.',
+      },
+      act: 'derived',
+      builds: [D.unbundling],
+    },
+  ],
+  paths: [
+    {
+      id: 'full',
+      label: { en: 'Read it all', vi: 'Đọc trọn bộ' },
+      who: {
+        en: 'You want the whole picture, from one disk up to systems built from logs.',
+        vi: 'Bạn muốn nắm cả bức tranh, từ một ổ đĩa tới hệ thống dựng từ log.',
+      },
+      order: Object.values(D),
+    },
+    {
+      id: 'interview',
+      label: { en: 'System design interview', vi: 'Phỏng vấn system design' },
+      who: {
+        en: 'The topics interviewers probe most: latency, replication, sharding, transactions, failure and consensus.',
+        vi: 'Những chủ đề hay bị hỏi nhất: độ trễ, replication, sharding, transaction, lỗi và đồng thuận.',
+      },
+      order: [D.nfr, D.replication, D.sharding, D.transactions, D.trouble, D.consensus, D.stream],
+    },
+    {
+      id: 'distributed',
+      label: { en: 'My data is on more than one machine', vi: 'Dữ liệu của tôi nằm trên nhiều máy' },
+      who: {
+        en: 'You already run replicas or shards and want to know what can go wrong.',
+        vi: 'Bạn đã chạy replica hoặc shard và muốn biết điều gì có thể hỏng.',
+      },
+      order: [D.replication, D.sharding, D.trouble, D.consensus],
+    },
+    {
+      id: 'pipelines',
+      label: { en: 'I build data pipelines', vi: 'Tôi làm data pipeline' },
+      who: {
+        en: 'ETL, CDC and streaming jobs: formats that evolve, batch and stream, and correctness under retries.',
+        vi: 'ETL, CDC và job streaming: định dạng thay đổi theo thời gian, batch và stream, và tính đúng khi bị retry.',
+      },
+      order: [D.tradeOffs, D.encoding, D.batch, D.stream, D.unbundling],
+    },
+    {
+      id: 'database',
+      label: { en: 'Picking a database', vi: 'Chọn database' },
+      who: {
+        en: 'Model first, then storage, then the guarantees you need, then how it splits.',
+        vi: 'Chọn model trước, rồi storage, rồi các đảm bảo bạn cần, rồi cách chia dữ liệu.',
+      },
+      order: [D.models, D.storage, D.transactions, D.sharding],
+    },
+  ],
+};
+
+export const SERIES: Record<string, Series> = { [refactoringUi.id]: refactoringUi, [ddia.id]: ddia };
 export const SERIES_IDS = Object.keys(SERIES);
 
 export function seriesOfPost(slug: string) {
