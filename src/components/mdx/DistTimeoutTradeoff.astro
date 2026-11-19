@@ -1,0 +1,339 @@
+---
+import DiagramIcon from './DiagramIcon.astro';
+// Simulated RTT trace comparing static short timeout, static long timeout,
+// and an adaptive threshold (e.g. Phi Accrual), plus why silence is ambiguous.
+// Seeded PRNG keeps server output deterministic across builds.
+// Plain inline SVG with site tokens; arrowheads are polygons (no duplicate marker ids).
+
+const W = 900;
+const H = 448;
+const L = 66;
+const R = 880;
+const plotTop = 70;
+const plotBot = 204;
+const MAX_MS = 1000;
+
+function rng(seed: number) {
+  let a = seed | 0;
+  return () => {
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+const rand = rng(907);
+const N = 60;
+const CRASH_AT = 44;
+
+// Generate 60 samples: calm ~26ms, noisy-neighbor bump around 20..28, crash from 44 onward.
+const samples: { i: number; ms: number; lost: boolean }[] = [];
+for (let i = 0; i < N; i++) {
+  if (i >= CRASH_AT) {
+    samples.push({ i, ms: MAX_MS, lost: true });
+    continue;
+  }
+  const base = 24 + (rand() - 0.5) * 14;
+  // Gradual noisy-neighbor burst peaking ~260ms around i=24
+  const dist = Math.abs(i - 24);
+  const spike = dist <= 4 ? (1 - dist / 5) * (210 + rand() * 55) : 0;
+  samples.push({ i, ms: Math.min(MAX_MS, Math.max(10, base + spike)), lost: false });
+}
+
+// Compute simple adaptive mean + 3*std threshold from a sliding window of non-lost samples
+const adaptive: number[] = [];
+for (let i = 0; i < N; i++) {
+  const start = Math.max(0, i - 8);
+  const win = samples.slice(start, Math.min(i + 1, CRASH_AT)).map((s) => s.ms);
+  const mean = win.reduce((a, b) => a + b, 0) / win.length;
+  const variance = win.reduce((a, b) => a + (b - mean) ** 2, 0) / win.length;
+  const thresh = Math.min(460, Math.max(85, mean + 2.6 * Math.sqrt(variance) + 40));
+  adaptive.push(thresh);
+}
+
+const tx = (i: number) => L + (i / (N - 1)) * (R - L);
+const ey = (ms: number) => plotBot - Math.sqrt(Math.min(ms, MAX_MS) / MAX_MS) * (plotBot - plotTop);
+
+const rttPath = samples
+  .filter((s) => !s.lost)
+  .map((s, idx) => `${idx === 0 ? 'M' : 'L'} ${tx(s.i).toFixed(1)} ${ey(s.ms).toFixed(1)}`)
+  .join(' ');
+
+const adaptPath = adaptive
+  .slice(0, CRASH_AT + 1)
+  .map((ms, i) => `${i === 0 ? 'M' : 'L'} ${tx(i).toFixed(1)} ${ey(ms).toFixed(1)}`)
+  .join(' ');
+
+const SHORT_TO = 120;
+const LONG_TO = 800;
+const ticks = [0, 120, 400, 800];
+
+const cards = [
+  {
+    x: 20,
+    titleEn: '1. Request lost or queued',
+    titleVi: '1. Request mất hoặc kẹt',
+    line1En: 'Dropped or stuck in a switch queue.',
+    line2En: 'May still arrive and run late.',
+    line1Vi: 'Rớt gói hoặc kẹt trong switch.',
+    line2Vi: 'Vẫn có thể đến muộn và chạy.',
+  },
+  {
+    x: 315,
+    titleEn: '2. Node paused or crashed',
+    titleVi: '2. Node khựng hoặc sập',
+    line1En: 'Crash, GC pause, or VM CPU steal.',
+    line2En: 'If paused, it may wake and write.',
+    line1Vi: 'Sập, khựng GC, hoặc CPU steal.',
+    line2Vi: 'Nếu chỉ khựng, nó sẽ ghi tiếp.',
+  },
+  {
+    x: 610,
+    titleEn: '3. Reply lost on return',
+    titleVi: '3. Mất phản hồi chiều về',
+    line1En: 'Node already ran your write.',
+    line2En: 'ACK dropped on the way back.',
+    line1Vi: 'Node đã xử lý xong lệnh ghi.',
+    line2Vi: 'Gói ACK bị rớt trên đường về.',
+  },
+];
+---
+<figure class="dtto">
+  <div class="dtto-scroll">
+    <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Timeout tradeoff chart and three failure ambiguities. A short 120 ms timeout triggers false positives during a noisy-neighbor latency spike, while an 800 ms timeout waits too long after a real crash. An adaptive threshold tracks variance. Below, three boxes show that silence looks identical whether the request was lost, the node paused, or the response was lost.">
+      <text x={L} y="24" class="dtto-h">
+        <tspan data-lang-en>Why fixed timeouts are a bad guess</tspan>
+        <tspan data-lang-vi>Vì sao timeout cố định luôn là canh bạc</tspan>
+      </text>
+      <text x={L} y="44" class="dtto-sub">
+        <tspan data-lang-en>Simulated round-trip time (square-root scale): a traffic spike trips a short timeout, a real crash stalls a long one.</tspan>
+        <tspan data-lang-vi>Mô phỏng thời gian khứ hồi RTT (thang căn bậc hai): nghẽn mạng làm timeout ngắn báo nhầm, còn timeout dài phản ứng quá chậm.</tspan>
+      </text>
+
+      {/* horizontal grid & ticks */}
+      {ticks.map((ms) => (
+        <g>
+          <line x1={L} x2={R} y1={ey(ms)} y2={ey(ms)} class="dtto-grid" />
+          <text x={L - 8} y={ey(ms) + 4} text-anchor="end" class="dtto-tick">{ms}</text>
+        </g>
+      ))}
+      <text x={L - 8} y={plotTop - 6} text-anchor="end" class="dtto-tick">ms</text>
+
+      {/* False alarm highlight band around samples 21..27 */}
+      <rect x={tx(20.5)} y={plotTop} width={tx(27.5) - tx(20.5)} height={plotBot - plotTop} class="dtto-zone" />
+      <text x={tx(24)} y={plotTop + 14} text-anchor="middle" class="dtto-note-red">
+        <tspan data-lang-en>noisy-neighbor spike</tspan>
+        <tspan data-lang-vi>nghẽn mạng cục bộ</tspan>
+      </text>
+      <text x={tx(24)} y={plotTop + 30} text-anchor="middle" class="dtto-sub-sm">
+        <tspan data-lang-en>false-dead if timeout = 120 ms</tspan>
+        <tspan data-lang-vi>báo chết nhầm nếu timeout 120 ms</tspan>
+      </text>
+
+      {/* Real crash marker at sample 44 */}
+      <line x1={tx(CRASH_AT)} x2={tx(CRASH_AT)} y1={plotTop} y2={plotBot} class="dtto-crash" />
+      <text x={tx(CRASH_AT) + 8} y={ey(470)} class="dtto-note-red">
+        <tspan data-lang-en>real crash (t = 44)</tspan>
+        <tspan data-lang-vi>sập thật (t = 44)</tspan>
+      </text>
+      <text x={tx(CRASH_AT) + 8} y={ey(470) + 17} class="dtto-sub-sm">
+        <tspan data-lang-en>no reply; 800 ms waits</tspan>
+        <tspan data-lang-vi>mất hồi âm; chờ đủ 800 ms</tspan>
+      </text>
+
+      {/* Static long timeout line (800 ms) */}
+      <line x1={L} x2={R} y1={ey(LONG_TO)} y2={ey(LONG_TO)} class="dtto-to-long" />
+      <text x={L + 6} y={ey(LONG_TO) - 6} class="dtto-label-muted">
+        <tspan data-lang-en>long static timeout (800 ms)</tspan>
+        <tspan data-lang-vi>timeout tĩnh dài (800 ms)</tspan>
+      </text>
+
+      {/* Adaptive Phi Accrual-style threshold */}
+      <path d={adaptPath} class="dtto-adapt" />
+      <text x={tx(10)} y={ey(adaptive[10]) - 8} class="dtto-label-dark">
+        <tspan data-lang-en>adaptive (Phi Accrual style)</tspan>
+        <tspan data-lang-vi>ngưỡng thích nghi (kiểu Phi Accrual)</tspan>
+      </text>
+
+      {/* Static short timeout line (120 ms) */}
+      <line x1={L} x2={R} y1={ey(SHORT_TO)} y2={ey(SHORT_TO)} class="dtto-to-short" />
+      <text x={R - 4} y={ey(SHORT_TO) - 6} text-anchor="end" class="dtto-note-red">
+        <tspan data-lang-en>short static timeout (120 ms)</tspan>
+        <tspan data-lang-vi>timeout tĩnh ngắn (120 ms)</tspan>
+      </text>
+
+      {/* Measured RTT curve & lost dots */}
+      <path d={rttPath} class="dtto-rtt" />
+      {samples.filter((s) => s.lost).map((s) => (
+        <circle cx={tx(s.i)} cy={ey(MAX_MS)} r="3.2" class="dtto-lost-dot" />
+      ))}
+
+      {/* Bottom panel: three identical silences */}
+      <line x1="20" x2={W - 20} y1="226" y2="226" class="dtto-rule" />
+      <text x="20" y="252" class="dtto-h">
+        <tspan data-lang-en>When a timeout fires, three realities look identical</tspan>
+        <tspan data-lang-vi>Khi hết giờ mà không thấy hồi âm, ba sự thật này trông y hệt nhau</tspan>
+      </text>
+
+      {cards.map((c, i) => (
+        <g>
+          <rect x={c.x} y="268" width="270" height="122" rx="8" class="dtto-card" />
+          <DiagramIcon name={['network', 'hourglass', 'mail'][i]} x={c.x + 246} y={288} size={26} />
+          <text x={c.x + 14} y="294" class="dtto-card-t">
+            <tspan data-lang-en>{c.titleEn}</tspan>
+            <tspan data-lang-vi>{c.titleVi}</tspan>
+          </text>
+          <text x={c.x + 14} y="320" class="dtto-card-b">
+            <tspan data-lang-en>{c.line1En}</tspan>
+            <tspan data-lang-vi>{c.line1Vi}</tspan>
+          </text>
+          <text x={c.x + 14} y="342" class="dtto-card-b">
+            <tspan data-lang-en>{c.line2En}</tspan>
+            <tspan data-lang-vi>{c.line2Vi}</tspan>
+          </text>
+          <text x={c.x + 14} y="372" class="dtto-card-tag">
+            <tspan data-lang-en>sender sees: silence</tspan>
+            <tspan data-lang-vi>bên gửi chỉ thấy: im lặng</tspan>
+          </text>
+        </g>
+      ))}
+
+      <text x={W / 2} y="424" text-anchor="middle" class="dtto-foot">
+        <tspan data-lang-en>A TCP ACK only proves the remote OS kernel buffered the packet — only an application reply confirms it ran.</tspan>
+        <tspan data-lang-vi>TCP ACK chỉ chứng tỏ kernel máy nhận đã cất gói tin vào buffer — chỉ phản hồi từ ứng dụng mới xác nhận lệnh đã chạy.</tspan>
+      </text>
+    </svg>
+  </div>
+  <figcaption>
+    <span data-lang-en>Illustrative simulation (seeded RTT trace). A static short timeout treats transient congestion as a dead node, piling load onto surviving servers. Adaptive detectors like Cassandra's and Akka's Phi Accrual track recent jitter instead, though no timeout can distinguish a dropped packet from a dropped reply.</span>
+    <span data-lang-vi>Số liệu mô phỏng minh họa (RTT sinh theo seed cố định). Timeout ngắn cố định dễ hiểu nhầm nghẽn mạng là sập node, đẩy thêm tải lên các máy còn lại. Bộ phát hiện thích nghi như Phi Accrual ở Cassandra hay Akka theo dõi độ dao động gần đây, nhưng không timeout nào phân biệt nổi mất gói đi với mất gói về.</span>
+  </figcaption>
+</figure>
+
+<style>
+  .dtto {
+    margin: 2em 0;
+    width: 100%;
+  }
+  .dtto-scroll {
+    overflow-x: auto;
+  }
+  .dtto svg {
+    display: block;
+    width: 100%;
+    min-width: 640px;
+    height: auto;
+  }
+  .dtto text {
+    font-size: 13.5px;
+    fill: var(--text-body);
+  }
+  .dtto .dtto-h {
+    font-size: 15.5px;
+    font-weight: 700;
+    fill: var(--text);
+  }
+  .dtto .dtto-sub {
+    font-size: 13px;
+    fill: var(--text-muted);
+  }
+  .dtto .dtto-sub-sm {
+    font-size: 12px;
+    fill: var(--text-muted);
+  }
+  .dtto .dtto-tick {
+    font-size: 12px;
+    fill: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .dtto-grid {
+    stroke: var(--border);
+  }
+  .dtto-zone {
+    fill: var(--red-tint-bg);
+    opacity: 0.7;
+  }
+  .dtto-crash {
+    stroke: var(--red);
+    stroke-dasharray: 4 3;
+    stroke-width: 1.4;
+  }
+  .dtto-to-long {
+    stroke: var(--text-muted);
+    stroke-dasharray: 6 4;
+    stroke-width: 1.4;
+  }
+  .dtto-to-short {
+    stroke: var(--red);
+    stroke-dasharray: 5 4;
+    stroke-width: 1.5;
+  }
+  .dtto-adapt {
+    fill: none;
+    stroke: var(--text);
+    stroke-width: 1.6;
+    stroke-dasharray: 3 3;
+    opacity: 0.75;
+  }
+  .dtto-rtt {
+    fill: none;
+    stroke: var(--text);
+    stroke-width: 2.2;
+    stroke-linejoin: round;
+  }
+  .dtto-lost-dot {
+    fill: var(--red-tint-bg);
+    stroke: var(--red);
+    stroke-width: 1.6;
+  }
+  .dtto .dtto-note-red {
+    font-size: 12.5px;
+    font-weight: 700;
+    fill: var(--red);
+  }
+  .dtto .dtto-label-muted {
+    font-size: 12.5px;
+    fill: var(--text-muted);
+    font-weight: 600;
+  }
+  .dtto .dtto-label-dark {
+    font-size: 12.5px;
+    fill: var(--text);
+    font-weight: 600;
+  }
+  .dtto-rule {
+    stroke: var(--border);
+  }
+  .dtto-card {
+    fill: var(--bg-alt);
+    stroke: var(--border);
+    stroke-width: 1.2;
+  }
+  .dtto .dtto-card-t {
+    font-size: 14px;
+    font-weight: 700;
+    fill: var(--text);
+  }
+  .dtto .dtto-card-b {
+    font-size: 12.5px;
+    fill: var(--text-body);
+  }
+  .dtto .dtto-card-tag {
+    font-size: 12px;
+    font-weight: 700;
+    fill: var(--red);
+  }
+  .dtto .dtto-foot {
+    font-size: 13px;
+    font-weight: 600;
+    fill: var(--text-muted);
+  }
+  .dtto figcaption {
+    margin-top: 10px;
+    font-size: 14px;
+    color: var(--text-muted);
+    line-height: 1.55;
+    text-align: center;
+  }
+</style>

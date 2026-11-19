@@ -1,0 +1,803 @@
+---
+title: "Why distributed systems break in slow motion: networks, clocks, pauses, and fencing"
+title_vi: "Vì sao hệ thống phân tán hỏng âm thầm: mạng, đồng hồ, tiến trình khựng và fencing token"
+description: "Cloudflare's leap-second panic, GitHub's 24-hour split, HBase zombie writes: why networks, clocks, and pauses break distributed locks, and how fencing tokens fix it."
+description_vi: "Sự cố giây nhuận Cloudflare, 24 giờ chia đôi cluster ở GitHub, zombie ghi đè ở HBase: vì sao mạng, đồng hồ và GC pause phá khóa phân tán, và cách chặn bằng fencing token."
+date: 2026-11-19
+category: "system-design"
+tags: ["distributed-systems", "networks", "clocks", "fencing-tokens", "system-models", "ddia"]
+draft: true
+sources:
+  - { title: "Designing Data-Intensive Applications, 2nd Edition", author: "Martin Kleppmann & Chris Riccomini", chapters: "Ch. 9", url: "https://dataintensive.net/" }
+  - { title: "How and why the leap second affected Cloudflare DNS", author: "John Graham-Cumming (Cloudflare)", url: "https://blog.cloudflare.com/how-and-why-the-leap-second-affected-cloudflare-dns/" }
+  - { title: "October 21 post-incident analysis", author: "Jason Warner (GitHub)", url: "https://github.blog/news-insights/company-news/oct21-post-incident-analysis/" }
+  - { title: "Spanner: Google's Globally Distributed Database", author: "James C. Corbett et al. (Google)", url: "https://research.google/pubs/spanner-googles-globally-distributed-database/" }
+  - { title: "It's About Time: Microsecond-Accurate Clocks on Amazon EC2 Instances", author: "Josh Levinson & Julien Ridoux (AWS)", url: "https://aws.amazon.com/blogs/compute/its-about-time-microsecond-accurate-clocks-on-amazon-ec2-instances/" }
+  - { title: "AWS ClockBound", author: "Amazon Web Services", url: "https://github.com/aws/clock-bound" }
+  - { title: "How to do distributed locking", author: "Martin Kleppmann", url: "https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html" }
+  - { title: "Use of Formal Methods at Amazon Web Services", author: "Chris Newcombe et al. (AWS)", url: "https://lamport.azurewebsites.net/tla/formal-methods-amazon.pdf" }
+  - { title: "Simulation and Testing — FoundationDB Documentation", author: "Apple & FoundationDB authors", url: "https://apple.github.io/foundationdb/testing.html" }
+  - { title: "Simulation Testing For Liveness", author: "Alex Kladov (TigerBeetle)", url: "https://tigerbeetle.com/blog/2023-07-06-simulation-testing-for-liveness/" }
+  - { title: "Jepsen Analyses", author: "Kyle Kingsbury", url: "https://jepsen.io/analyses" }
+  - { title: "Marine Chronometer #2299 with telegraph break circuit (photo, CC BY-SA 4.0)", author: "Charles Frodsham / Ladd Observatory", url: "https://commons.wikimedia.org/wiki/File:Frodsham_chronometer_mechanism.jpg" }
+---
+
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import En from '../../components/mdx/En.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import LinkCard from '../../components/mdx/LinkCard.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import DistTimeoutTradeoff from '../../components/mdx/DistTimeoutTradeoff.astro';
+import DistTrueTimeIntervals from '../../components/mdx/DistTrueTimeIntervals.astro';
+import DistFencingTokens from '../../components/mdx/DistFencingTokens.astro';
+import DistLeaseFencing from '../../components/mdx/DistLeaseFencing.astro';
+import DistSilenceCauses from '../../components/mdx/DistSilenceCauses.astro';
+import DistGithubFailover from '../../components/mdx/DistGithubFailover.astro';
+import DistPauseTimeline from '../../components/mdx/DistPauseTimeline.astro';
+import DistSimulationHarness from '../../components/mdx/DistSimulationHarness.astro';
+import DistIncidentCards from '../../components/mdx/DistIncidentCards.astro';
+import DistAckLayers from '../../components/mdx/DistAckLayers.astro';
+import DistCircuitVsPacket from '../../components/mdx/DistCircuitVsPacket.astro';
+import DistPhiAccrual from '../../components/mdx/DistPhiAccrual.astro';
+import DistClockDrift from '../../components/mdx/DistClockDrift.astro';
+import DistTwoClocks from '../../components/mdx/DistTwoClocks.astro';
+import DistPauseSources from '../../components/mdx/DistPauseSources.astro';
+import DistQuorumAsym from '../../components/mdx/DistQuorumAsym.astro';
+import DistByzantineLies from '../../components/mdx/DistByzantineLies.astro';
+import DistNtpOutlier from '../../components/mdx/DistNtpOutlier.astro';
+import heroChronometer from '../../assets/blog/trouble-with-distributed-systems-networks-clocks-fencing/frodsham-chronometer-mechanism.jpg';
+import githubInvalidTopology from '../../assets/blog/trouble-with-distributed-systems-networks-clocks-fencing/github-invalid-topology.png';
+import cloudflareLeapSecond from '../../assets/blog/trouble-with-distributed-systems-networks-clocks-fencing/cloudflare-leap-second-chart.png';
+
+<En>
+
+<Figure src={heroChronometer} alt="Brass gearwork of Charles Frodsham marine chronometer #2299 inside a gimballed wooden box, fitted with a telegraph break circuit" caption="A 19th-century marine chronometer fitted with a telegraph circuit: precision timekeeping wired into an unreliable line. Distributed systems live at that exact seam. Photo: CC BY-SA 4.0." sourceTitle="Wikimedia Commons: Frodsham chronometer mechanism" sourceUrl="https://commons.wikimedia.org/wiki/File:Frodsham_chronometer_mechanism.jpg" />
+
+> "They're funny things, Accidents. You never have them till you're having them."
+> &mdash; *A.A. Milne*, *The House at Pooh Corner* (1928)
+
+### When one-in-a-million happens every Tuesday
+
+On a single laptop, code feels clean and mathematical: either a function returns the right result or the whole machine crashes. Add a network cable and a second server, and that neat abstraction shatters. Here is what real teams ran into when reality pushed back:
+
+- **Cloudflare, January 1, 2017.** At midnight UTC, a one-second leap adjustment caused Go's `time.Now()` to step backward. Subtracting start time from end time produced a negative round-trip latency, which made Cloudflare's DNS router panic inside `rand.Int63n()` across part of its 102 data centers.
+- **GitHub, October 21, 2018.** Routine maintenance on 100G optical gear cut connectivity between a US East hub and its primary data center for just 43 seconds. Automated failover promoted MySQL primaries on the US West Coast while the East kept accepting local writes, forcing 24 hours and 11 minutes of recovery.
+- **Google, HBase, and the physical world.** Cows grazing above a fiber line bent it enough to drop links; sharks chewed undersea cables; and HBase hit split-brain corruption when a Java garbage-collection pause froze a leaseholder long enough for another client to take over.
+
+<DistIncidentCards lang="en" />
+
+The safe way to design for all this is to turn pessimism up to maximum and map every assumption you cannot make. We will walk through the six pieces that separate fragile clusters from survivable ones:
+
+1. **Faults and partial failures**: why distributed uncertainty breaks single-machine intuition.
+2. **Unreliable networks**: why TCP is not an application guarantee, and why static timeouts misfire.
+3. **Unreliable clocks**: wall clocks vs. monotonic clocks, silent LWW data loss, and `[earliest, latest]` intervals.
+4. **Process pauses**: how garbage collection, VM migration, and disk stalls freeze code mid-function.
+5. **Knowledge, truth, and fencing tokens**: majority quorums, zombie locks, and why storage must enforce monotonic tokens.
+6. **System models and testing**: safety vs. liveness, TLA+, Jepsen, and Deterministic Simulation Testing.
+
+<Callout type="note" title="TL;DR">
+On one machine, hardware hides physical messiness behind a deterministic crash-or-work model. Across a network, packets vanish or stall, clocks drift or jump backward, and threads freeze for seconds without noticing. You cannot make these faults disappear cheaply, so reliable systems drop the illusion of shared truth: they use majority quorums to decide membership, monotonic fencing tokens checked by storage to block zombie writes, and deterministic simulation testing to find broken interleavings before production does.
+</Callout>
+
+<Concepts>
+
+- **Partial failure**: a state where some machines or links in a cluster are broken or slow while the rest keep running, leaving callers unsure what succeeded.
+- **Nondeterministic**: capable of producing different outcomes on identical inputs because timing, packet order, or pauses vary between runs.
+- **Leap second**: an extra one-second adjustment inserted into UTC (`23:59:60`) to keep calendar clocks aligned with Earth's slowing rotation; scheduled to be retired from 2035.
+- **Split-brain**: a failure where two nodes or groups both believe they hold sole authority, accepting conflicting writes at the same time.
+- **Garbage collection (GC) pause**: a runtime stop-the-world pause where application threads freeze so memory can be reclaimed.
+
+</Concepts>
+
+---
+
+## 1. Faults and partial failures
+
+Software on a single machine runs inside a polite fiction. Hardware engineers deliberately design CPUs and operating systems so that if memory or a bus breaks, the computer halts with a kernel panic rather than returning silent nonsense.
+
+Because of that choice, single-node code is almost always **deterministic**: run the same instructions on the same state and you get the same answer. Imagine a solo shopkeeper at a cash register: either the shop is open and rings up your receipt, or the lights are out and the door is locked.
+
+Now put two clerks in separate rooms passing paper slips through a pneumatic tube. When you drop an order in the tube and hear nothing back, did the tube jam, did the second clerk faint, or did the receipt slip blow off the counter on the return trip?
+
+</En>
+
+<Vi>
+
+<Figure src={heroChronometer} alt="Bộ máy đồng hồ hàng hải bằng đồng thau Charles Frodsham số 2299 trong hộp gỗ khớp các-đăng, có gắn mạch ngắt điện báo" caption="Một chiếc đồng hồ hàng hải thế kỷ 19 được gắn thêm mạch điện báo: đo thời gian chính xác nối vào một đường dây bất ổn. Hệ thống phân tán nằm đúng ở ranh giới đó. Ảnh: CC BY-SA 4.0." sourceTitle="Wikimedia Commons: Frodsham chronometer mechanism" sourceUrl="https://commons.wikimedia.org/wiki/File:Frodsham_chronometer_mechanism.jpg" />
+
+> "Tai nạn là thứ kỳ quặc lắm. Bạn chẳng bao giờ gặp nó, cho tới đúng lúc bạn đang gặp."
+> &mdash; *A.A. Milne*, *The House at Pooh Corner* (1928)
+
+### Khi chuyện một phần triệu xảy ra vào mỗi thứ Ba
+
+Trên một máy tính đơn lẻ, code chạy khá ngoan: hoặc xong việc, hoặc sập hẳn. Chỉ cần thêm một sợi dây mạng nối sang máy thứ hai, mọi sự chắc chắn biến mất. Dưới đây là những gì các team thật đã va phải khi thế giới vật lý lên tiếng:
+
+- **Cloudflare, ngày 1/1/2017.** Đúng nửa đêm UTC, một giây nhuận (leap second) khiến hàm `time.Now()` của Go nhảy lùi. Phép trừ thời gian khứ hồi cho ra số âm, làm bộ định tuyến DNS của Cloudflare hoảng loạn (panic) trong `rand.Int63n()` trên một phần mạng lưới 102 data center.
+- **GitHub, ngày 21/10/2018.** Khi bảo trì thiết bị quang 100G, đường nối giữa hub bờ Đông Mỹ và data center chính bị đứt đúng 43 giây. Hệ thống failover tự động bầu primary MySQL mới ở bờ Tây trong khi bờ Đông vẫn nhận ghi cục bộ, dẫn tới 24 giờ 11 phút khắc phục hậu quả.
+- **Google, HBase và thế giới thực.** Bò giẫm làm cong cáp quang, cá mập cắn cáp biển, còn HBase từng bị hỏng dữ liệu kiểu split-brain khi một cú khựng garbage collection (GC pause) đóng băng máy giữ lease đủ lâu để máy khác nhảy vào thế chỗ.
+
+<DistIncidentCards lang="vi" />
+
+Cách thiết kế an toàn là bật chế độ bi quan tối đa và liệt kê mọi giả định bạn không được phép tin. Mình sẽ đi qua sáu mảnh ghép phân biệt một cụm máy mong manh với một hệ thống sống sót qua bão:
+
+1. **Lỗi toàn phần và lỗi một phần**: vì sao sự bất định phân tán phá vỡ trực giác lập trình trên một máy.
+2. **Mạng không đáng tin**: vì sao TCP không bảo đảm app đã xử lý, và vì sao timeout cố định luôn dở.
+3. **Đồng hồ cũng biết nói dối**: đồng hồ giờ (wall clock) đối đầu đồng hồ đơn điệu (monotonic clock), mất dữ liệu ở LWW và khoảng tin cậy `[earliest, latest]`.
+4. **Tiến trình bị đóng băng**: GC, chuyển VM trực tiếp và I/O đĩa làm code đứng hình ngay giữa hàm ra sao.
+5. **Sự thật, đa số và fencing token**: quorum quá bán, khóa zombie và vì sao tầng lưu trữ phải tự chặn token cũ.
+6. **Mô hình hệ thống và kiểm chứng**: safety đối đầu liveness, TLA+, Jepsen và Deterministic Simulation Testing.
+
+<Callout type="note" title="Tóm tắt nhanh">
+Trên một máy tính, phần cứng giấu đi sự hỗn loạn vật lý sau quy tắc "hoặc chạy đúng, hoặc sập hẳn". Qua mạng, gói tin có thể rớt hoặc kẹt, đồng hồ trôi hoặc nhảy lùi, còn tiến trình đứng hình hàng giây mà chẳng hay biết. Không thể xóa bỏ các lỗi này với chi phí rẻ, nên hệ thống đáng tin phải bỏ ảo tưởng về một "sự thật chung": dùng biểu quyết quá bán (majority quorum) để loại node hỏng, dùng fencing token tăng dần kiểm tra ở tầng lưu trữ để chặn zombie, và dùng mô phỏng tất định (deterministic simulation testing) để bắt lỗi trước khi lên production.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Partial failure (lỗi một phần)**: trạng thái một vài máy hoặc đường mạng bị hỏng hay chậm trong khi phần còn lại vẫn chạy, khiến bên gọi không biết lệnh của mình có thành công hay chưa.
+- **Nondeterministic (bất định)**: cùng một đầu vào nhưng mỗi lần chạy có thể cho kết quả hoặc thứ tự khác nhau do trễ mạng, nghẽn hàng đợi hay tiến trình khựng.
+- **Leap second (giây nhuận)**: một giây cộng thêm vào giờ UTC (`23:59:60`) để khớp với tốc độ quay chậm dần của Trái Đất; dự kiến sẽ ngừng áp dụng từ năm 2035.
+- **Split-brain (chia đôi não)**: sự cố hai node hoặc hai nửa cluster cùng tin mình là chủ duy nhất và cùng nhận lệnh ghi mâu thuẫn nhau.
+- **GC pause (khựng dọn rác)**: khoảnh khắc runtime tạm dừng toàn bộ luồng ứng dụng để bộ thu gom rác giải phóng bộ nhớ.
+
+</Concepts>
+
+---
+
+## 1. Lỗi toàn phần và lỗi một phần
+
+Code chạy trên một máy tính được bảo bọc bởi một lời nói dối dễ chịu. Kỹ sư phần cứng cố tình thiết kế CPU và hệ điều hành sao cho khi RAM hay bus gặp sự cố, máy sập hẳn (kernel panic) thay vì âm thầm trả ra kết quả sai.
+
+Nhờ vậy, phần mềm trên một máy gần như luôn **tất định (deterministic)**: chạy cùng câu lệnh trên cùng trạng thái thì ra cùng kết quả. Cứ hình dung một chủ tiệm đứng một mình ở quầy thu ngân: hoặc tiệm mở cửa và in hóa đơn đàng hoàng, hoặc mất điện đóng cửa nghỉ bán.
+
+Giờ đặt hai nhân viên ở hai phòng khác nhau, liên lạc qua ống chuyển giấy khí nén. Bạn thả đơn hàng vào ống rồi đợi mãi không thấy hồi âm: ống bị kẹt, người bên kia ngất xỉu, hay tờ biên nhận đã bị thổi bay trên đường quay về?
+
+</Vi>
+
+<DistSilenceCauses />
+
+<En>
+
+| Property | Single computer | Distributed system |
+|---|---|---|
+| Memory model | Shared RAM with mutexes and atomics | Shared-nothing: separate RAM and disks |
+| Failure style | Usually total stop (crash or panic) | Partial failure (some nodes fine, some broken) |
+| Determinism | Same input almost always gives same output | Nondeterministic delays, pauses, and orderings |
+| Feedback | Error code or crash happens locally | Silence hides lost request vs. lost reply |
+
+In his famous 2010 note, Coda Hale summed up the physical messiness operators face: switch failures, whole-rack power cycles, data center network splits, and even a driver crashing a Ford pickup truck into a data center's air-conditioning unit. Once you run across multiple machines, one-in-a-million events happen every day.
+
+That partial-failure nature is a double-edged sword. It makes coordination hard, yet it is also the only reason you can run a rolling upgrade—rebooting one server at a time while keeping users online—and build a system more reliable than any individual machine inside it.
+
+<Concepts>
+
+- **Shared-nothing architecture**: a cluster design where each machine owns its own CPU, RAM, and disk, communicating only by passing messages over a network.
+- **Deterministic**: producing the exact same state transitions and outputs whenever the same inputs arrive in the same order.
+- **Rolling upgrade**: updating software on one node or small batch at a time while the rest of the cluster continues serving traffic.
+
+</Concepts>
+
+---
+
+</En>
+
+<Vi>
+
+| Thuộc tính | Một máy tính | Hệ thống phân tán |
+|---|---|---|
+| Bộ nhớ | RAM dùng chung, có mutex và atomic | Shared-nothing: RAM và đĩa tách rời |
+| Kiểu hỏng | Thường dừng hẳn (crash hoặc panic) | Lỗi một phần (chỗ sống, chỗ chết) |
+| Tính tất định | Cùng đầu vào hầu như ra cùng đầu ra | Trễ mạng, khựng tiến trình, đảo thứ tự bất định |
+| Phản hồi | Lỗi trả về hoặc sập ngay tại chỗ | Im lặng không phân biệt được mất đi hay mất về |
+
+Trong bài viết nổi tiếng năm 2010, Coda Hale liệt kê những gì anh từng chứng kiến: hỏng switch, mất điện nguyên tủ rack, đứt mạng nội bộ data center, thậm chí một tài xế lái xe bán tải Ford đâm thẳng vào hệ thống điều hòa của data center. Khi cụm máy đủ lớn, chuyện xác suất một phần triệu xảy ra hàng ngày.
+
+Bản chất lỗi một phần vừa là lời nguyền vừa là sức mạnh. Nó khiến việc phối hợp khó hơn hẳn, nhưng cũng là lý do duy nhất bạn làm được rolling upgrade — khởi động lại từng máy để cập nhật mà người dùng không hề thấy gián đoạn — tạo nên hệ thống bền hơn từng linh kiện rời rạc cấu thành nó.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Shared-nothing architecture (kiến trúc không dùng chung)**: mỗi máy có CPU, RAM và ổ đĩa riêng, chỉ giao tiếp qua tin nhắn mạng.
+- **Deterministic (tất định)**: luôn tạo ra đúng một chuỗi chuyển trạng thái và kết quả mỗi khi lặp lại cùng tập đầu vào theo cùng thứ tự.
+- **Rolling upgrade (nâng cấp cuốn chiếu)**: cập nhật từng node hoặc từng nhóm nhỏ một lúc để cả hệ thống vẫn phục vụ liên tục.
+
+</Concepts>
+
+---
+
+</Vi>
+
+<En>
+
+## 2. Unreliable networks
+
+Most distributed data systems use **shared-nothing** clusters over Ethernet and IP: **asynchronous packet networks**. You drop a packet onto the wire and get zero guarantee on when it arrives, or whether it arrives at all.
+
+Wait—does TCP fix that? No. When you write bytes to a socket, the OS buffers them, chops them into packets, and retransmits dropped segments over that single connection.
+
+A TCP `ACK` proves only one thing: the remote machine's **operating system kernel** put those bytes in a receive buffer. If the remote app crashed a microsecond before calling `read()`, your TCP `ACK` lied to your intuition—only an application-level reply confirms execution.
+
+<DistAckLayers lang="en" />
+
+Real datacenter networks fail far more often than most developers expect. One measurement of a medium-sized datacenter counted roughly 12 network faults a month, half isolating one machine and half isolating an entire rack. Wide-area links have been severed by anchors, beavers, and cows stepping on buried fiber, and switches sometimes suffer **asymmetric faults** where a port receives inbound traffic cleanly while silently dropping outbound packets.
+
+<Figure src={githubInvalidTopology} alt="GitHub October 21, 2018 invalid database topology diagram showing US West Coast promoted to primary while US East Coast primary is crossed out across a 60 ms link" caption="A 43-second optical link interruption between GitHub's US East hub and data center caused Orchestrator's Raft quorum to fail MySQL primaries over to US West, leaving divergent writes across a 60 ms cross-country link for over 24 hours." sourceTitle="GitHub Engineering — October 21 post-incident analysis" sourceUrl="https://github.blog/news-insights/company-news/oct21-post-incident-analysis/" />
+
+### Case: GitHub's 43 seconds
+
+The figure above comes from a real incident, and it shows a majority being right and still causing harm. GitHub stores its metadata in MySQL clusters and uses Orchestrator, a tool built on Raft consensus, to manage them and fail over automatically. At 22:52 UTC on October 21, 2018, maintenance on optical equipment cut the link between its US East Coast network hub and its primary East Coast data center. The link came back after 43 seconds.
+
+In those 43 seconds, the Orchestrator nodes in the West Coast data center and in an East Coast public cloud formed a quorum and moved the MySQL primaries to the West. The East data center still held a short stretch of writes that had not been replicated. When the link returned, the application tier began sending writes to the new West primaries. Now each side held writes the other lacked, so GitHub could not fail back safely.
+
+The quorum answered "who is the leader?" correctly by its own rules. It never asked "can the applications live with that leader?" They could not: East Coast apps could not cope with a cross-country round trip on most database calls. GitHub chose to protect the data, restored the East clusters from backups, and the service ran degraded for 24 hours and 11 minutes. Its fix was to configure Orchestrator so it no longer promotes a primary across a regional boundary.
+
+</En>
+
+<Vi>
+
+## 2. Mạng không đáng tin
+
+Phần lớn hệ thống dữ liệu phân tán chạy trên cụm **shared-nothing** nối bằng Ethernet và IP — tức **mạng gói bất đồng bộ (asynchronous packet network)**. Bạn thả một gói tin lên đường dây mà chẳng có lời hứa nào về lúc nó tới, hay liệu nó có tới nơi không.
+
+Khoan đã, TCP chẳng phải giao thức "đáng tin cậy" sao? Không hẳn. Khi bạn ghi byte vào socket, hệ điều hành cất vào buffer, cắt thành từng gói rồi tự gửi lại phần bị rớt trên đúng kết nối đó.
+
+Một gói `ACK` của TCP chỉ chứng minh đúng một việc: **kernel hệ điều hành** bên máy nhận đã cất dữ liệu vào bộ đệm nhận. Nếu app bên kia sập một micro-giây trước khi kịp gọi `read()`, TCP `ACK` không hề hay biết — chỉ phản hồi từ chính tầng ứng dụng mới xác nhận lệnh đã chạy.
+
+<DistAckLayers lang="vi" />
+
+Mạng data center thật hỏng nhiều hơn lập trình viên vẫn tưởng. Một nghiên cứu ở data center cỡ vừa ghi nhận trung bình khoảng 12 sự cố mạng mỗi tháng, nửa làm đứt một máy, nửa làm đứt cả tủ rack. Cáp đường dài từng bị mỏ neo, hải ly hay bò giẫm làm gián đoạn, còn switch đôi khi dính **lỗi bất đối xứng (asymmetric fault)**: nhận gói đi vào bình thường nhưng âm thầm đánh rơi toàn bộ gói trả ra.
+
+<Figure src={githubInvalidTopology} alt="Sơ đồ topology lỗi ngày 21/10/2018 của GitHub cho thấy US West được nâng lên primary trong khi primary ở US East bị gạch bỏ qua đường truyền trễ 60 ms" caption="Chỉ 43 giây gián đoạn tuyến quang ở bờ Đông Mỹ đã khiến quorum Raft của Orchestrator chuyển quyền primary MySQL sang bờ Tây, tạo ra dữ liệu phân kỳ qua đường truyền 60 ms và mất hơn 24 giờ để đồng bộ lại." sourceTitle="GitHub Engineering — October 21 post-incident analysis" sourceUrl="https://github.blog/news-insights/company-news/oct21-post-incident-analysis/" />
+
+### Ca thực tế: 43 giây của GitHub
+
+Hình trên lấy từ một sự cố có thật, và nó cho thấy một đa số có thể đúng mà vẫn gây hại. GitHub lưu metadata trong các cụm MySQL và dùng Orchestrator, công cụ xây trên đồng thuận Raft, để quản lý cụm và tự động failover. Lúc 22:52 UTC ngày 21/10/2018, việc bảo trì thiết bị quang làm đứt đường nối giữa hub mạng bờ Đông Mỹ và data center chính ở bờ Đông. Đường nối trở lại sau 43 giây.
+
+Trong 43 giây đó, các node Orchestrator ở data center bờ Tây và ở một public cloud bờ Đông lập được quorum và chuyển primary MySQL sang bờ Tây. Data center bờ Đông vẫn giữ một đoạn ghi chưa kịp sao chép. Khi đường nối trở lại, tầng ứng dụng bắt đầu gửi lệnh ghi tới các primary mới ở bờ Tây. Lúc này mỗi bên đều có dữ liệu ghi mà bên kia thiếu, nên GitHub không thể chuyển ngược lại một cách an toàn.
+
+Theo luật của nó, quorum trả lời đúng câu "ai là leader?". Nó không hỏi "ứng dụng có sống nổi với leader đó không?". Mà ứng dụng không sống nổi: app ở bờ Đông không chịu được một vòng khứ hồi xuyên nước Mỹ cho phần lớn lệnh gọi database. GitHub chọn bảo vệ dữ liệu, dựng lại các cụm bờ Đông từ bản backup, và dịch vụ chạy suy giảm suốt 24 giờ 11 phút. Cách sửa của họ là cấu hình Orchestrator để không nâng primary xuyên ranh giới vùng nữa.
+
+</Vi>
+
+<DistGithubFailover />
+
+<En>
+
+### Timeout trade-offs
+
+When a remote node goes silent, your only fallback is a **timeout**. Yet fixed timeouts trap you between two bad choices:
+
+- **Too short**: a temporary traffic burst or noisy neighbor on shared cloud hardware triggers a false alarm. Shifting load off a "dead" node that is merely busy piles extra traffic onto healthy nodes, risking a cascading failure.
+- **Too long**: users stare at spinners or errors while you wait to declare a genuinely crashed server dead.
+
+</En>
+
+<Vi>
+
+### Đánh đổi khi đặt timeout
+
+Khi node bên kia im lặng, công cụ cuối cùng của bạn là **timeout (hết giờ chờ)**. Nhưng timeout cố định luôn kẹt giữa hai cái bẫy:
+
+- **Quá ngắn**: một đợt nghẽn nhẹ hoặc "hàng xóm ồn ào" (noisy neighbor) trên hạ tầng cloud dùng chung sẽ gây báo động giả. Việc dồn tải khỏi một node "chết giả" đang quá tải sang các máy còn lại dễ kéo cả cụm sập dây chuyền (cascading failure).
+- **Quá dài**: người dùng phải chờ mòn mỏi trước khi hệ thống chịu tin một máy đã sập thật.
+
+</Vi>
+
+<DistTimeoutTradeoff />
+
+<En>
+
+Why can't datacenter networks give us bounded latency like old fixed-line telephone networks? An ISDN circuit statically reserves 16 bits in every 250-microsecond frame end-to-end, guaranteeing bounded delay—at the cost of leaving reserved capacity idle whenever nobody speaks. Packet-switched networks dynamically share wires across bursty traffic to cut cost per byte, trading predictability for high utilization and switch queueing.
+
+<DistCircuitVsPacket lang="en" />
+
+Latency-sensitive apps like VoIP pick UDP over TCP for the same reason: a delayed audio frame is worthless, so it is better to skip the packet than stall for a retransmission. Meanwhile, cloud providers leave QoS prioritization mechanisms (such as L4S or Linux `tc`) turned off on shared networks. Instead of guessing a static constant timeout, systems like Cassandra and Akka use the **Phi Accrual failure detector**, which tracks recent heartbeat arrival times and adapts its suspicion threshold to current network jitter.
+
+<DistPhiAccrual lang="en" />
+
+<Concepts>
+
+- **Asynchronous packet network**: a network like IP/Ethernet that shares links dynamically across packets without guaranteeing delivery time or order.
+- **Asymmetric fault**: a failure where node A can hear node B, or inbound packets arrive while outbound replies are dropped, breaking two-way assumptions.
+- **Network partition (netsplit)**: a fault that cuts a cluster into isolated subgroups unable to reach each other over the network.
+- **Noisy neighbor**: another tenant sharing the same physical cloud host, NIC, or switch whose burst of traffic causes queueing delays for you.
+- **Phi Accrual failure detector**: an adaptive detector that outputs a continuous suspicion level based on the observed distribution of recent heartbeat delays.
+
+</Concepts>
+
+---
+
+</En>
+
+<Vi>
+
+Tại sao mạng máy tính không cam kết độ trễ trần (bounded delay) như mạng điện thoại cố định ngày xưa? Một mạch ISDN cắt cứng 16 bit mỗi khung 250 micro-giây suốt tuyến gọi, nên không bao giờ xếp hàng đợi — đổi lại phần băng thông bỏ trống lúc im lặng bị lãng phí. Mạng chuyển gói (packet-switched) chia sẻ đường dây động cho lưu lượng giật cục nhằm tối ưu chi phí mỗi byte, chấp nhận xếp hàng tại switch và độ trễ vô hạn (unbounded delay).
+
+<DistCircuitVsPacket lang="vi" />
+
+Các ứng dụng nhạy độ trễ như gọi thoại VoIP chọn UDP thay cho TCP cũng vì thế: khung âm thanh đến trễ chẳng còn giá trị gì, nên bỏ qua gói mất tốt hơn là đứng hình chờ gửi lại. Còn các cơ chế ưu tiên QoS (như L4S hay Linux `tc`) thường bị tắt trên mạng cloud dùng chung. Thay vì chốt cứng một con số timeout, Cassandra và Akka dùng **Phi Accrual failure detector**: liên tục đo phân phối độ trễ heartbeat gần đây và tự điều chỉnh ngưỡng nghi ngờ theo mức độ rung lắc (jitter) thực tế của mạng.
+
+<DistPhiAccrual lang="vi" />
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Asynchronous packet network (mạng gói bất đồng bộ)**: mạng như IP/Ethernet chia sẻ đường truyền động cho từng gói tin, không cam kết thời gian hay thứ tự tới nơi.
+- **Asymmetric fault (lỗi bất đối xứng)**: lỗi chỉ đứt một chiều — ví dụ máy nhận được request nhưng mọi gói trả về đều bị rớt.
+- **Network partition / netsplit (chia cắt mạng)**: sự cố khiến một phần cụm máy bị cô lập, không liên lạc được với phần còn lại (khác với partitioning/sharding dữ liệu).
+- **Noisy neighbor (hàng xóm ồn ào)**: khách thuê khác dùng chung máy chủ vật lý, card mạng hay switch trên cloud chiếm hết băng thông, đẩy hàng đợi của bạn dài ra.
+- **Phi Accrual failure detector**: thuật toán phát hiện lỗi thích nghi, tính xác suất node chết dựa trên phân phối thời gian phản hồi thực tế thay vì ngưỡng cứng.
+
+</Concepts>
+
+---
+
+</Vi>
+
+<En>
+
+## 3. Unreliable clocks
+
+Every server carries two completely different physical clocks inside its operating system, and mixing them up causes production outages:
+
+1. **Time-of-day (wall) clocks** (`clock_gettime(CLOCK_REALTIME)`, Java `System.currentTimeMillis()`): return calendar date and time since the Unix epoch, synced over the network by **NTP**. Think of your kitchen wall clock—if it runs fast, someone reaches up and turns the hands backward.
+2. **Monotonic clocks** (`clock_gettime(CLOCK_MONOTONIC)`, `CLOCK_BOOTTIME`, Java `System.nanoTime()`): act like a stopwatch that only ticks forward. NTP can nudge their speed slightly (**slewing** up to 0.05%), yet they never jump backward. Their raw value is arbitrary (such as nanoseconds since boot), so comparing monotonic values across two different servers makes no sense.
+
+<DistTwoClocks lang="en" />
+
+In 2017, Cloudflare learned the price of mixing them up. At 00:00 UTC on January 1, a leap second made servers step backward. Go's `time.Now()` then lacked a monotonic component, so `rtt := time.Now().Sub(start)` inside Cloudflare's DNS service RRDNS produced negative durations. After smoothing, negative values reached `rand.Int63n()`, which panicked on negative bounds and broke DNS lookups for CNAME records (peaking around 0.2% of DNS queries and under 1% of HTTP requests across 102 data centers).
+
+<Figure src={cloudflareLeapSecond} alt="Stacked area chart of Cloudflare DNS error rates across data centers starting abruptly at 00:00 UTC and dropping as patches rolled out until 06:45 UTC" caption="Cloudflare's DNS error rate by data center on January 1, 2017. Errors spiked the instant midnight UTC inserted a leap second and stepped wall clocks backward, disappearing only as patched RRDNS builds rolled out over nearly seven hours." sourceTitle="Cloudflare Blog — How and why the leap second affected Cloudflare DNS" sourceUrl="https://blog.cloudflare.com/how-and-why-the-leap-second-affected-cloudflare-dns/" />
+
+### Point timestamps vs. TrueTime intervals
+
+Even if you keep clocks synced to within a few milliseconds, quartz crystals drift with temperature—Google budgets up to **200 ppm** (6 ms drift every 30 seconds, or 17 seconds a day without sync). Over the public internet, NTP errors sit around tens of milliseconds and spike past 100 ms under congestion, while VM pauses make guest clocks jump forward abruptly.
+
+<DistClockDrift lang="en" />
+
+Worse, using wall-clock timestamps for **Last-Write-Wins (LWW)** conflict resolution (as in Cassandra and ScyllaDB) silently destroys data. Imagine Client A writes `x = 1` on Node 1 (whose clock is 2 ms fast, stamping `42.004 s`), then Client B reads `x = 1` and increments it to `x = 2` on Node 3 (whose clock lags by 3 ms, stamping `42.003 s`). Any replica comparing timestamps sees `42.004 > 42.003` and silently drops `x = 2`—even though B causally happened after A! Logical clocks (incrementing counters rather than physical crystals) track causal ordering without trusting wall clocks.
+
+
+</En>
+
+<Vi>
+
+## 3. Đồng hồ cũng biết nói dối
+
+Mỗi máy chủ đều giữ hai loại đồng hồ hoàn toàn khác nhau trong hệ điều hành, và dùng nhầm cái này thay cái kia là công thức tạo sự cố production:
+
+1. **Đồng hồ giờ thực (time-of-day / wall clock)** (`clock_gettime(CLOCK_REALTIME)`, Java `System.currentTimeMillis()`): trả về ngày giờ UTC từ mốc Epoch, đồng bộ qua mạng bằng **NTP**. Nó giống đồng hồ treo tường: chạy nhanh quá thì có người vặn kim lùi lại.
+2. **Đồng hồ đơn điệu (monotonic clock)** (`clock_gettime(CLOCK_MONOTONIC)`, `CLOCK_BOOTTIME`, Java `System.nanoTime()`): giống đồng hồ bấm giờ chỉ tiến lên phía trước. NTP có thể chỉnh nhẹ tốc độ chạy (**slewing**, tối đa 0,05%) nhưng không bao giờ kéo nó nhảy lùi. Giá trị tuyệt đối của nó vô nghĩa (chẳng hạn số nano-giây từ lúc bật máy), nên không thể mang so giữa hai server khác nhau.
+
+<DistTwoClocks lang="vi" />
+
+Năm 2017, Cloudflare thấm đòn vì nhầm hai loại đồng hồ này. Đúng 00:00 UTC ngày 1/1, một giây nhuận làm đồng hồ hệ thống bước lùi. Lúc đó `time.Now()` của Go chưa gắn thành phần monotonic, nên phép trừ `rtt := time.Now().Sub(start)` trong dịch vụ DNS RRDNS ra số âm. Sau vài bước làm mượt, số âm lọt vào `rand.Int63n()`, kích hoạt panic và làm lỗi phân giải CNAME (lên đỉnh ở khoảng 0,2% truy vấn DNS và dưới 1% HTTP request trên mạng lưới 102 data center).
+
+<Figure src={cloudflareLeapSecond} alt="Biểu đồ diện tích xếp chồng cho thấy tỉ lệ lỗi DNS của Cloudflare theo từng data center vọt lên đúng 00:00 UTC và giảm dần theo bản vá tới 06:45 UTC" caption="Tỉ lệ lỗi DNS theo từng data center của Cloudflare ngày 1/1/2017. Lỗi vọt lên ngay khoảnh khắc nửa đêm UTC chèn giây nhuận làm đồng hồ giờ nhảy lùi, và chỉ biến mất sau gần 7 tiếng triển khai bản vá RRDNS." sourceTitle="Cloudflare Blog — How and why the leap second affected Cloudflare DNS" sourceUrl="https://blog.cloudflare.com/how-and-why-the-leap-second-affected-cloudflare-dns/" />
+
+### Timestamp một điểm hay khoảng tin cậy
+
+Kể cả khi cấu hình NTP tử tế, tinh thể thạch anh vẫn trôi theo nhiệt độ — Google dự trù độ trôi (**clock drift**) tới **200 ppm** (tức lệch 6 ms sau mỗi 30 giây, hoặc 17 giây một ngày nếu không đồng bộ). Đồng bộ NTP qua internet công cộng thường sai số vài chục mili-giây và dễ vọt quá 100 ms lúc nghẽn mạng, còn VM tạm dừng làm đồng hồ máy khách nhảy cóc về phía trước.
+
+<DistClockDrift lang="vi" />
+
+Nguy hiểm hơn, dùng timestamp wall-clock cho cơ chế **Last-Write-Wins (LWW)** (như ở Cassandra hay ScyllaDB) có thể làm bốc hơi lệnh ghi mới mà không báo lỗi. Giả sử Client A ghi `x = 1` lên Node 1 (đồng hồ nhanh 2 ms, đóng dấu `42,004 s`), rồi Client B đọc `x = 1` và tăng lên `x = 2` trên Node 3 (đồng hồ chậm 3 ms, đóng dấu `42,003 s`). Replica nhận cả hai bản ghi sẽ thấy `42,004 > 42,003` và âm thầm vứt bỏ `x = 2` — dù xét nhân quả, B rõ ràng xảy ra sau A! Đồng hồ logic (dùng bộ đếm tăng dần thay cho dao động thạch anh vật lý) giúp theo dõi quan hệ nhân quả mà không phải đặt niềm tin vào giờ tường.
+
+
+</Vi>
+
+<DistTrueTimeIntervals />
+
+<En>
+
+Calling `clock_gettime()` gives you a single deceptive point in time (`10:00:42.004000`), hiding whether your actual error is 1 millisecond or 10 seconds. Google Spanner's **TrueTime** API—and now **AWS ClockBound** paired with microsecond-accurate EC2 Nitro clocks—fixes this by returning an explicit confidence interval `[earliest, latest]`.
+
+Spanner puts GPS receivers and atomic clocks in datacenters to bound uncertainty to roughly **7 ms**. Before committing a read/write transaction, it waits out that uncertainty window (`commit-wait`) so no future transaction can overlap its interval, guaranteeing causal order across continents—an approach YugabyteDB can also use via ClockBound, while systems like CockroachDB fall back to hybrid logical clocks without atomic hardware.
+
+<Concepts>
+
+- **Time-of-day (wall) clock**: a clock synced via NTP to report calendar UTC time; it can jump forward or backward on resets and leap seconds.
+- **Monotonic clock**: a local stopwatch clock guaranteed never to move backward, ideal for timeouts and latency measurements on a single host.
+- **Clock drift / skew**: drift is the rate error of a quartz oscillator (e.g., 200 parts per million); skew is the instantaneous time difference between two nodes' clocks.
+- **NTP smearing**: spreading a one-second leap adjustment gradually across 24 hours so wall clocks never jump abruptly backward.
+- **Confidence interval (`[earliest, latest]`)**: a clock API that exposes clock uncertainty directly as a range containing true time, rather than a fake-exact point.
+
+</Concepts>
+
+---
+
+</En>
+
+<Vi>
+
+Hàm `clock_gettime()` trả về một con số trông như chính xác tuyệt đối (`10:00:42.004000`), nhưng giấu nhẹm việc sai số thật đang là 1 mili-giây hay 10 giây. API **TrueTime** của Google Spanner — và gần đây là **AWS ClockBound** kết hợp đồng hồ chuẩn micro-giây trên EC2 Nitro — giải quyết bằng cách trả về hẳn một khoảng tin cậy `[earliest, latest]`.
+
+Spanner đặt bộ thu GPS và đồng hồ nguyên tử tại mỗi data center để ghìm sai số quanh **7 ms**. Trước khi chốt giao dịch ghi, nó chủ động chờ hết độ rộng khoảng bất định (`commit-wait`) để không giao dịch nào đến sau có thể chồng lấn thời gian, đảm bảo thứ tự nhân quả toàn cầu — cách mà YugabyteDB cũng tận dụng được qua ClockBound, trong khi CockroachDB dùng đồng hồ logic lai khi không có phần cứng nguyên tử.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Time-of-day / wall clock (đồng hồ giờ thực)**: đồng hồ đồng bộ qua NTP báo ngày giờ lịch UTC; có thể nhảy cóc tới hoặc lùi khi đồng bộ lại hay gặp giây nhuận.
+- **Monotonic clock (đồng hồ đơn điệu)**: đồng hồ bấm giờ cục bộ chỉ tiến chứ không bao giờ lùi, dùng để đo thời gian trôi qua và timeout trên cùng một máy.
+- **Clock drift / skew**: drift là tốc độ chạy nhanh/chậm của thạch anh (vd 200 ppm); skew là độ lệch thời gian giữa hai máy tại cùng một thời điểm.
+- **NTP smearing (trải mịn giây nhuận)**: chia đều một giây nhuận ra khắp 24 giờ bằng cách làm chậm đồng hồ cực nhẹ để tránh bước nhảy lùi đột ngột.
+- **Confidence interval (`[earliest, latest]`)**: cách API đồng hồ báo thẳng cận dưới và cận trên chứa thời gian thật, thay vì giả vờ chính xác từng nano-giây.
+
+</Concepts>
+
+---
+
+</Vi>
+
+<En>
+
+## 4. Process pauses
+
+Suppose a database shard allows only one leader at a time, enforced by a **lease** (a lock with an expiration timer). The leader checks its lease in a loop before handling every write:
+
+```java
+while (true) {
+    request = getIncomingRequest();
+    // Ensure the lease always has at least 10 seconds remaining
+    if (lease.expiryTimeMillis - System.currentTimeMillis() < 10000) {
+        lease = lease.renew();
+    }
+    if (lease.isValid()) {
+        process(request);
+    }
+}
+```
+
+Two bugs hide in those eight lines. First, `lease.expiryTimeMillis` came from the lock service's clock while `System.currentTimeMillis()` reads the local wall clock—any clock skew or NTP jump breaks the math.
+
+Second, and far subtler: **even if you rewrite this with a monotonic stopwatch, the line after `if (lease.isValid())` has no timing guarantee.** Nothing stops the runtime from freezing this thread for 15 seconds right between checking the lease and executing `process(request)`. By the time it wakes up, the lease has long expired and another leader has taken over—yet this thread has no clue it was asleep.
+
+
+
+</En>
+
+<Vi>
+
+## 4. Khi tiến trình bị đóng băng giữa chừng
+
+Giả sử một shard database chỉ cho phép duy nhất một node làm leader tại một thời điểm, giữ quyền bằng **lease** (khóa có hạn giờ). Vòng lặp xử lý request trông sẽ kiểu thế này:
+
+```java
+while (true) {
+    request = getIncomingRequest();
+    // Đảm bảo lease luôn còn ít nhất 10 giây
+    if (lease.expiryTimeMillis - System.currentTimeMillis() < 10000) {
+        lease = lease.renew();
+    }
+    if (lease.isValid()) {
+        process(request);
+    }
+}
+```
+
+Có tới hai cái bẫy nằm gọn trong tám dòng code trên. Thứ nhất, `lease.expiryTimeMillis` tính theo đồng hồ của lock service, còn `System.currentTimeMillis()` đọc wall-clock cục bộ — chỉ cần hai máy lệch giờ hoặc NTP giật lùi là phép tính sai bét.
+
+Thứ hai, tinh vi hơn nhiều: **kể cả khi bạn đổi toàn bộ sang đồng hồ monotonic, không có gì bảo đảm dòng lệnh ngay sau `if (lease.isValid())` sẽ chạy ngay lập tức.** Hệ điều hành hoặc runtime hoàn toàn có thể đóng băng luồng này suốt 15 giây đúng ngay khe hở giữa kiểm tra lease và `process(request)`. Lúc tỉnh dậy, lease đã hết hạn và node khác đã lên làm leader — nhưng luồng vừa thức giấc không hề biết mình vừa ngủ quên.
+
+
+
+</Vi>
+
+<DistPauseTimeline />
+
+<En>
+
+<DistPauseSources lang="en" />
+
+| Pause source | Why it stalls your thread | Typical mitigation |
+|---|---|---|
+| Stop-the-world GC | Runtime freezes all threads to trace/compact heap | Low-pause collectors (ZGC, Shenandoah), object pools, or Rust/Zig |
+| VM live migration & steal time | Hypervisor suspends VM or schedules another tenant on the core | Dedicated instances, watch CPU steal metrics |
+| Synchronous disk I/O | `fsync`, lazy Java classloading, or EBS network storage stall | Async I/O, pre-warmed classes, timeouts inside storage layer |
+| OS paging / thrashing | Page fault swaps memory pages from disk under RAM pressure | Disable swap on servers (`OOM killer` beats minute-long stalls) |
+| OS signals (`SIGSTOP`) | Operator accidentally pauses process (`Ctrl-Z` in a shell) | Never assume user-space threads keep wall-clock deadlines |
+
+Hard real-time systems (like airbag controllers or flight computers) eliminate these pauses using specialized RTOS schedulers, documented worst-case execution paths, and restricted dynamic allocation—trading throughput for strict deadlines. Server-side software rejects that trade for better hardware utilization, which means **any server thread can freeze at any line for an arbitrary time**.
+
+Some teams shrink the blast radius: Netflix and LinkedIn have experimented with draining traffic away from a JVM node right before a full GC, or periodically restarting nodes in a rolling fashion before long-lived heap objects trigger a major pause. Those tricks cut tail latency, yet they cannot guarantee a pause never happens—so correctness cannot rest on timing alone.
+
+<Concepts>
+
+- **Lease**: a time-limited lock granted to one node; if the holder fails to renew before expiry, another node can claim it.
+- **Steal time**: CPU time that a hypervisor takes away from your virtual machine to run another customer's VM on the same physical core.
+- **Thrashing**: a state where high memory pressure forces the OS to spend almost all its time swapping pages between RAM and disk instead of running code.
+- **Hard real-time system**: a system (like avionics or braking) engineered from hardware up to guarantee response deadlines, distinct from web "real-time" streaming.
+
+</Concepts>
+
+---
+
+</En>
+
+<Vi>
+
+<DistPauseSources lang="vi" />
+
+| Nguồn gây khựng | Vì sao luồng bị treo | Cách giảm nhẹ phổ biến |
+|---|---|---|
+| Stop-the-world GC | Runtime dừng mọi luồng để quét và dọn heap | Dùng ZGC, Shenandoah, object pool, hoặc chuyển sang Rust/Zig |
+| Chuyển VM & steal time | Hypervisor tạm ngưng VM hoặc nhường nhân CPU cho máy ảo khác | Thuê máy vật lý riêng, theo dõi chỉ số CPU steal |
+| I/O đĩa đồng bộ | `fsync`, Java nạp class trễ, hay nghẽn mạng tới ổ đĩa EBS | Dùng I/O bất đồng bộ, nạp sẵn class, không đặt niềm tin vào thời gian đĩa |
+| Swap / thrashing | Thiếu RAM khiến OS lôi từng trang bộ nhớ từ đĩa lên | Tắt swap trên server (thà để OOM kill còn hơn treo cả phút) |
+| Tín hiệu OS (`SIGSTOP`) | Kỹ sư lỡ tay bấm `Ctrl-Z` trong shell làm tiến trình đứng im | Tuyệt đối không giả định tiến trình chạy liên tục không bị ngắt |
+
+Hệ thống thời gian thực cứng (hard real-time, như túi khí ô tô hay điều khiển bay) loại bỏ mọi cú khựng bằng RTOS chuyên dụng, phân tích thời gian chạy xấu nhất và hạn chế cấp phát bộ nhớ động — hy sinh thông lượng (throughput) để lấy hạn chót tuyệt đối. Phần mềm server chọn tận dụng phần cứng giá rẻ, đồng nghĩa **bất kỳ luồng nào cũng có thể bị đóng băng ở bất kỳ dòng code nào**.
+
+Nhiều team giảm tác động bằng cách ngắt traffic khỏi một node JVM trước khi chạy full GC, hoặc chủ động restart cuốn chiếu trước khi heap phình to. Mấy mẹo đó giúp giảm độ trễ đuôi (tail latency), nhưng không thể đảm bảo 100% không bao giờ khựng — nên tính đúng đắn không bao giờ được phép dựa vào tốc độ đồng hồ.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Lease (hợp đồng thuê khóa)**: một dạng khóa có thời hạn; nếu bên giữ không gia hạn kịp trước khi hết giờ, hệ thống có quyền cấp cho bên khác.
+- **Steal time**: khoảng thời gian CPU mà hypervisor lấy từ máy ảo của bạn để nhường cho máy ảo của khách hàng khác chạy trên cùng nhân vật lý.
+- **Thrashing (giằng co bộ nhớ ảo)**: tình trạng thiếu RAM trầm trọng khiến hệ điều hành mất gần hết thời gian tráo trang nhớ qua lại với ổ đĩa thay vì chạy ứng dụng.
+- **Hard real-time system**: hệ thống (như phanh, túi khí, hàng không) được thiết kế từ phần cứng tới phần mềm để cam kết không trễ hạn chót, khác hẳn nghĩa "real-time" đẩy dữ liệu trên web.
+
+</Concepts>
+
+---
+
+</Vi>
+
+<En>
+
+## 5. Knowledge, truth, and fencing tokens
+
+With asynchronous networks, drifting clocks, and arbitrary process pauses, a distributed node cannot even trust its own eyes. Imagine a node hit by a one-way asymmetric fault—it receives every heartbeat cleanly, yet all its replies get dropped on the way out. The rest of the cluster times out and declares it dead, dragging it to the graveyard while it screams "I'm not dead!"
+
+Because one node's perception can be wrong, distributed algorithms rely on a **quorum**—usually an absolute majority (more than half the nodes). Two majorities cannot exist simultaneously, so if a majority declares a node dead or elects a new leader, the minority node must step down even if it feels completely healthy.
+
+<DistQuorumAsym lang="en" />
+
+### Why fencing tokens close the zombie loop
+
+Unfortunately, stepping down politely does not protect storage when a former leaseholder pauses mid-request (as HBase experienced with long GC pauses) or crashes right after sending a write whose packet gets delayed in a switch for a minute. Some clusters try **STONITH** ("shoot the other node in the head" by cutting power via IPMI or cloud APIs), yet killing a server cannot intercept an already-sent packet still sitting in a network queue.
+
+The clean fix is a **fencing token**:
+
+1. Every time the lock or consensus service grants a lease, it hands out a **strictly monotonically increasing number** (`33`, `34`, `35`, …)—such as ZooKeeper's `zxid` or `cversion`, etcd's `revision`, Chubby's sequencer, Raft's `term`, or Kafka's epoch number.
+2. Every write sent to the storage service carries that token.
+3. The storage service tracks the highest token it has accepted and **rejects any write with an older (smaller) token**.
+
+</En>
+
+<Vi>
+
+## 5. Sự thật, đa số và fencing token
+
+Khi mạng bất đồng bộ, đồng hồ lệch nhịp và tiến trình có thể khựng bất chợt, một node trong hệ thống phân tán thậm chí không tin nổi mắt mình. Thử hình dung một node dính lỗi mạng một chiều: nó nhận đủ mọi tin nhắn gửi tới, nhưng mọi câu trả lời của nó đều bị switch đánh rơi. Cả cụm chờ quá hạn rồi tuyên bố nó đã chết, khiêng thẳng ra nghĩa địa mặc cho nó gào lên "Tôi còn sống mà!"
+
+Vì góc nhìn của một máy đơn lẻ dễ bị đánh lừa, các thuật toán phân tán dựa vào **quorum (biểu quyết tối thiểu)** — phổ biến nhất là **quá bán (majority quorum)** tức hơn một nửa số node. Không thể tồn tại hai nhóm quá bán cùng lúc, nên một khi đa số đã phán một node chết hay bầu leader mới, node thiểu số bắt buộc phải lùi bước dù tự thấy mình hoàn toàn khỏe mạnh.
+
+<DistQuorumAsym lang="vi" />
+
+### Vì sao chỉ fencing token mới bịt kín lỗ hổng zombie
+
+Nhưng nhường ghế một cách lịch sự vẫn chưa cứu được dữ liệu nếu chủ lease cũ khựng lại đúng lúc chuẩn bị ghi (như HBase từng dính với GC pause dài), hoặc kịp bấm gửi gói ghi xuống mạng rồi mới sập, còn gói tin bị kẹt ở switch cả phút sau mới tới nơi. Một số hệ thống dùng **STONITH** (rút điện hoặc tắt máy ảo qua API để "bắn hạ" node cũ), nhưng tắt hẳn máy cũng vô dụng trước một gói tin đã nằm sẵn trên đường truyền.
+
+Lời giải triệt để nằm ở **fencing token (thẻ rào chắn)**:
+
+1. Mỗi lần dịch vụ khóa/đồng thuận cấp lease, nó phát kèm một **con số tăng đơn điệu nghiêm ngặt** (`33`, `34`, `35`, …) — ví dụ `zxid` hoặc `cversion` của ZooKeeper, `revision` của etcd, sequencer của Chubby, `term` của Raft hay epoch của Kafka.
+2. Mọi lệnh ghi gửi tới tầng lưu trữ đều phải kẹp theo token này.
+3. Chính tầng lưu trữ tự nhớ token lớn nhất đã từng phục vụ, và **từ chối thẳng mọi lệnh ghi mang token nhỏ hơn**.
+
+</Vi>
+
+<DistFencingTokens />
+
+<En>
+
+If your storage layer already supports atomic conditional writes—like Amazon S3's `If-Match` / ETag conditional puts, Azure Blob conditional headers, or Google Cloud Storage preconditions—the storage service itself can guard each overwrite directly. And when writing across multiple leaderless replicas using Last-Write-Wins, you can pack the fencing token into the highest-order bits of each write's timestamp so a new leaseholder's writes (`34...`) always beat any zombie's (`33...`).
+
+Play with the simulator below to see all three faults side by side: notice what monotonic clocks fix (NTP backward jumps) and where **only** storage-side fencing tokens save your data (GC pauses after the check and delayed network packets).
+
+</En>
+
+<Vi>
+
+Nếu tầng lưu trữ hỗ trợ sẵn ghi có điều kiện nguyên tử — như `If-Match` / conditional writes trên Amazon S3, conditional headers của Azure Blob hay preconditions của Google Cloud Storage — bạn có thể chặn ghi đè trực tiếp trên storage. Còn nếu ghi vào cơ sở dữ liệu sao chép không leader dùng LWW, bạn nhét fencing token vào các bit cao nhất của timestamp để mọi lệnh ghi từ chủ lease mới (`34...`) luôn đè bẹp mọi zombie (`33...`).
+
+Bạn thử ngay trình mô phỏng bên dưới với cả ba sự cố: hãy để ý xem monotonic clock cứu được tình huống nào (nhảy lùi NTP), và chỗ nào thì **chỉ** fencing token kiểm tra tại storage mới cứu nổi dữ liệu (GC pause sau dòng kiểm tra và gói tin kẹt mạng).
+
+</Vi>
+
+<DistLeaseFencing />
+
+<En>
+
+### Byzantine faults: when nodes can lie
+
+Fencing tokens assume nodes are unreliable yet honest: Client 1 does not forge `token 999` out of malice. Once nodes can lie, forge votes, or send contradictory messages—a **Byzantine fault**, named after Lamport, Shostak, and Pease's 1982 Byzantine Generals Problem—consensus gets far harder and typically requires more than two-thirds of nodes to stay honest.
+
+<DistByzantineLies lang="en" />
+
+Most datacenter data systems skip full Byzantine fault tolerance (BFT): you control all nodes inside your firewall, and cosmic radiation flipping CPU bits is rare enough outside aerospace (or future orbital datacenters!) that traditional access control, TLS, and application-level checks give far better bang for the buck. Still, guarding against **weak forms of lying** is cheap and smart: add application checksums on top of TCP/UDP CRCs (which occasionally miss corrupted packets), validate external inputs strictly, and configure NTP clients against multiple servers so one misconfigured clock gets voted out as an outlier.
+
+<DistNtpOutlier lang="en" />
+
+<Concepts>
+
+- **Quorum**: the minimum number of node votes required to make a cluster decision; a majority quorum (`> n/2`) ensures no two conflicting majorities can form at once.
+- **Zombie client**: a former leaseholder that paused or lost touch without realizing its lease expired and keeps acting as if it still owns the lock.
+- **Fencing token**: a strictly increasing number issued with every lock grant and verified by the storage server to reject stale writes.
+- **Byzantine fault**: an arbitrary fault where a node disobeys the protocol, corrupts state, or sends conflicting/deceptive messages to peers.
+
+</Concepts>
+
+---
+
+</En>
+
+<Vi>
+
+### Lỗi Byzantine: khi các node biết nói dối
+
+Fencing token mặc định các node tuy chập chờn nhưng trung thực: Client 1 không cố tình làm giả `token 999`. Một khi node có thể nói dối, bỏ phiếu hai mặt hay gửi tin nhắn sai lệch — gọi là **lỗi Byzantine (Byzantine fault)**, theo bài toán Các vị tướng Byzantine năm 1982 của Lamport, Shostak và Pease — việc đồng thuận trở nên cực kỳ tốn kém và thường đòi hỏi hơn hai phần ba số node phải trung thực.
+
+<DistByzantineLies lang="vi" />
+
+Phần lớn hệ thống dữ liệu trong data center bỏ qua BFT toàn phần: bạn kiểm soát mọi máy sau tường lửa, và bức xạ vũ trụ làm lật bit hiếm tới mức chỉ ngành hàng không vũ trụ (hoặc các data center trên quỹ đạo sau này!) mới phải gánh chi phí đó; xác thực, TLS và phân quyền truyền thống hiệu quả hơn nhiều. Tuy vậy, chống lại các **"dạng nói dối nhẹ"** lại rất rẻ và đáng làm: thêm checksum ở tầng ứng dụng bên trên CRC của TCP/UDP (vốn vẫn có xác suất lọt gói lỗi), kiểm tra kỹ dữ liệu đầu vào, và cấu hình NTP hỏi nhiều server để tự loại bỏ một máy báo sai giờ.
+
+<DistNtpOutlier lang="vi" />
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Quorum (số phiếu tối thiểu)**: số node tối thiểu phải đồng ý cho một quyết định; quorum quá bán (`> n/2`) bảo đảm không thể có hai nhóm đa số đối lập cùng tồn tại.
+- **Zombie client**: bên từng giữ lease nhưng bị khựng hay mất kết nối mà không hay biết lease đã hết hạn, tiếp tục ghi như thể mình vẫn nắm quyền.
+- **Fencing token (thẻ rào chắn)**: con số tăng nghiêm ngặt được cấp kèm mỗi lượt khóa và được server lưu trữ kiểm tra để từ chối mọi lệnh ghi cũ.
+- **Byzantine fault (lỗi Byzantine)**: lỗi tùy ý khi một node cố tình hoặc vô ý làm sai giao thức, gửi dữ liệu sai lệch hoặc hai mặt cho các node khác.
+
+</Concepts>
+
+---
+
+</Vi>
+
+<En>
+
+## 6. System models and proving correctness
+
+To design or verify an algorithm without hardcoding details of every switch and SSD, engineers formalize what faults may happen using a **system model**:
+
+| Timing model | Network delay & pauses | Clock drift | Real-world match |
+|---|---|---|---|
+| **Synchronous** | Strictly bounded upper limit | Bounded | Hard real-time embedded hardware; unrealistic for clouds |
+| **Partially synchronous** | Bounded most of the time, unbounded spikes occasionally | Bounded except during glitches | **Most real distributed systems and datacenters** |
+| **Asynchronous** | Arbitrarily delayed; no clocks or timeouts allowed | No clocks at all | Extremely restrictive theoretical baseline |
+
+Alongside timing, you choose a node fault model: **crash-stop** (a node dies once and never returns), **crash-recovery** (nodes crash, lose RAM, preserve disk storage, and restart later), **fail-slow / gray failures** (limping nodes whose NIC drops to 1 Kb/s or whose background thread deadlocks while health checks still return `200 OK`), or **Byzantine**.
+
+In practice, **partially synchronous + crash-recovery** captures most server clusters—yet reality still surprises models, like firmware bugs that forget attached drives after a reboot and break quorum assumptions that disk storage never suffers amnesia.
+
+Within a model, correctness splits into two complementary guarantees (Alpern & Schneider, 1985):
+
+- **Safety** ("nothing bad happens"): e.g., two clients never receive the same fencing token, and tokens strictly increase. When safety breaks, you can point to the exact moment it failed, and the damage is already done—so distributed algorithms insist safety holds **always**, even if every link drops.
+- **Liveness** ("something good eventually happens"): e.g., a healthy client requesting a token eventually gets a reply, or replicas eventually converge. Liveness properties carry caveats: they hold *provided* a majority is up and the network eventually heals.
+
+### Testing with TLA+, Jepsen, and DST
+
+Because concurrency, delays, and pauses create astronomical state spaces, unit tests barely scratch the surface. Here is how leading infrastructure teams verify distributed correctness today:
+
+1. **Formal model checking (`TLA+`, `P`, `FizzBee`)**: write a concise mathematical specification of your protocol and let a model checker exhaustively explore bounded states for broken invariants. AWS famously used TLA+ on DynamoDB and S3, while Kafka, CockroachDB, and TiDB check protocol specs this way—catching subtle flaws like a Viewstamped Replication data-loss edge case hidden in prose. The catch: your specification can drift away from your actual code.
+2. **Fault injection (`Jepsen`, `Chaos Monkey`)**: run the real cluster and violently cut networks, pause processes with `SIGSTOP`, and unmount disks while checking whether linearizability or serializability holds. Jepsen has exposed data-loss bugs across dozens of production databases, though failures can be hard to replay deterministically.
+3. **Deterministic Simulation Testing (DST)**: run your **real production code** inside a simulator that replaces every source of nondeterminism—network sockets, disk I/O, timers, RNGs—with mocked, seeded deterministic shims.
+
+
+
+</En>
+
+<Vi>
+
+## 6. Mô hình hệ thống và kiểm chứng trước khi sập
+
+Để thiết kế hay chứng minh thuật toán mà không phụ thuộc chi tiết từng đời switch hay SSD, kỹ sư hình thức hóa những lỗi được phép xảy ra thành một **mô hình hệ thống (system model)**:
+
+| Mô hình thời gian | Trễ mạng & khựng tiến trình | Sai số đồng hồ | Độ khớp ngoài đời thực |
+|---|---|---|---|
+| **Synchronous (đồng bộ)** | Có trần trên tuyệt đối | Có giới hạn cứng | Phần cứng nhúng thời gian thực; không thực tế trên cloud |
+| **Partially synchronous** | Ổn định phần lớn thời gian, thỉnh thoảng vượt ngưỡng bất định | Ổn định trừ lúc trục trặc | **Mô tả đúng hầu hết cụm máy chủ và data center thật** |
+| **Asynchronous (bất đồng bộ)** | Trễ vô hạn; cấm dùng đồng hồ hay timeout | Không có đồng hồ | Chuẩn lý thuyết cực kỳ khắt khe |
+
+Đi kèm thời gian là mô hình lỗi node: **crash-stop** (sập là mất hút vĩnh viễn), **crash-recovery** (sập rồi mất RAM nhưng đĩa bền vững còn nguyên và có thể bật lại), **fail-slow / gray failure** (node "đi khập khiễng": card mạng tụt xuống 1 Kb/s hay luồng nền bị deadlock trong khi health check vẫn trả `200 OK`), hoặc **Byzantine**.
+
+Thực tế, cặp **partially synchronous + crash-recovery** phản ánh sát nhất hệ thống máy chủ — dù đời thực vẫn có lúc vượt cả mô hình, chẳng hạn lỗi firmware làm server quên sạch ổ cứng khi khởi động lại, phá vỡ giả định đĩa bền vững không bị mất trí nhớ.
+
+Trong mô hình đã chọn, tính đúng đắn chia làm hai tính chất bổ sung cho nhau (Alpern & Schneider, 1985):
+
+- **Safety ("điều xấu không bao giờ xảy ra")**: ví dụ không bao giờ có hai client nhận cùng fencing token, và token luôn tăng dần. Khi safety bị phá, ta chỉ ra được đúng khoảnh khắc hỏng và thiệt hại đã thành sự thật — nên thuật toán phân tán bắt buộc safety luôn đúng **trong mọi hoàn cảnh**, kể cả lúc mạng đứt sạch.
+- **Liveness ("điều tốt cuối cùng sẽ xảy ra")**: ví dụ client còn sống xin token rồi sẽ nhận được phản hồi, hay các replica cuối cùng sẽ hội tụ. Liveness được phép kèm điều kiện: nó chỉ giữ khi đa số node còn sống và mạng cuối cùng hồi phục.
+
+### Kiểm chứng bằng TLA+, Jepsen và DST
+
+Do song song hóa, độ trễ và các cú khựng tạo ra không gian trạng thái khổng lồ, unit test thông thường gần như bất lực. Đây là cách các đội ngũ hạ tầng hàng đầu kiểm chứng hệ thống phân tán ngày nay:
+
+1. **Kiểm tra mô hình hình thức (`TLA+`, `P`, `FizzBee`)**: viết đặc tả toán học gọn nhẹ của giao thức để công cụ duyệt vét cạn các trạng thái giới hạn tìm lỗi bất biến. AWS dùng TLA+ cho DynamoDB và S3; Kafka, CockroachDB và TiDB cũng kiểm tra thiết kế giao thức theo cách này — thậm chí phát hiện lỗ hổng mất dữ liệu trong bài báo gốc của Viewstamped Replication. Điểm yếu là bản đặc tả có thể dần lệch khỏi code chạy thật.
+2. **Tiêm lỗi (`Jepsen`, `Chaos Monkey`)**: dựng cụm chạy thật rồi thẳng tay cắt mạng, đóng băng tiến trình bằng `SIGSTOP` và gỡ ổ đĩa xem tính nhất quán có gãy không. Jepsen đã lôi ra lỗi mất dữ liệu ở hàng chục database nổi tiếng, nhưng lỗi bắt được lại khó tái hiện y hệt từng bước.
+3. **Mô phỏng tất định (`Deterministic Simulation Testing — DST`)**: chạy **chính code production của bạn** trong một bộ mô phỏng thay thế toàn bộ nguồn gây bất định — socket mạng, I/O đĩa, bộ đếm giờ, hàm ngẫu nhiên — bằng các bản giả lập chạy theo một hạt giống (seed) cố định.
+
+
+
+</Vi>
+
+<DistSimulationHarness />
+
+<En>
+
+FoundationDB pioneered application-level DST with its asynchronous **Flow** runtime, running an entire multi-node cluster inside one thread for 18 months before ever sending a real packet. **TigerBeetle** executes its state machine inside a single deterministic event loop and splits its simulator (**VOPR**) into safety mode and protocol-aware **liveness mode** so fault storms do not hide deadlock bugs. At the runtime and machine levels, **MadSim** swaps Rust's Tokio/S3/Kafka libraries for deterministic mocks, FrostDB patches Go's scheduler, and **Antithesis** runs unmodified containers inside a deterministic custom hypervisor that compresses simulated time and replays any bug from a single random seed. Even then, determinism takes discipline: random hash-map iteration order or sudden memory limits can still introduce surprises.
+
+<LinkCard url="https://apple.github.io/foundationdb/testing.html" title="Simulation and Testing — FoundationDB Documentation" description="How FoundationDB simulates entire clusters, disks, and network partitions deterministically on a single thread from a repeatable seed." tag="DST Pioneer" />
+
+<LinkCard url="https://tigerbeetle.com/blog/2023-07-06-simulation-testing-for-liveness/" title="Simulation Testing For Liveness — TigerBeetle" description="Why uniform random fault injection can mask progress bugs, and how TigerBeetle's VOPR splits testing into Safety and Liveness modes." tag="VOPR" />
+
+<Concepts>
+
+- **System model**: the formal set of timing and fault assumptions an algorithm is allowed to rely on.
+- **Gray failure (fail-slow / limping node)**: degraded hardware or a deadlocked worker thread that still passes basic health checks while failing real work.
+- **Safety vs. liveness**: safety guarantees no wrong transition ever happens; liveness guarantees valid requests eventually make progress once faults subside.
+- **Model checking**: exhaustively verifying invariants on an abstract state-machine specification (such as TLA+) before or alongside coding.
+- **Deterministic Simulation Testing (DST)**: replacing clocks, disks, and networks with seeded mocks so real cluster code runs deterministically and any rare failure seed replays identically.
+
+</Concepts>
+
+---
+
+## Key takeaways
+
+- **Treat silence as unknown, never as "failed cleanly".** After a timeout you cannot distinguish a lost request, a slow node, and a dropped reply; design idempotent operations and adaptive failure detection instead of brittle fixed timeouts.
+- **Use monotonic clocks for durations and intervals for cross-node time.** Never subtract `time.Now()` wall-clock timestamps to compute latency or lease deadlines; if you order events across hosts with physical time, rely on explicit `[earliest, latest]` bounds like TrueTime or AWS ClockBound rather than point LWW timestamps.
+- **Stop relying on leases alone for correctness.** Any thread can pause right after `if (lease.isValid())`, and delayed packets outlive `kill -9`; enforce monotonically increasing fencing tokens (or storage conditional writes) inside the storage layer itself.
+- **Require majority quorums for cluster truth.** A single node experiencing an asymmetric partition or GC freeze cannot judge its own health; let a majority vote decide leadership and membership.
+- **Test with controlled chaos and determinism.** Pair formal specs (`TLA+`), real-world fault injection (`Jepsen`), and Deterministic Simulation Testing (`FoundationDB`, `TigerBeetle`, `Antithesis`) so rare timing bugs appear on your laptop instead of at 3 a.m.
+
+---
+
+## Review questions
+
+1. When a client hits a 5-second timeout talking to a payment service over TCP, why does receiving a TCP `ACK` earlier not guarantee the payment was processed? *(Section 2)*
+2. What caused Cloudflare's RRDNS panic on January 1, 2017, and how would switching from a wall clock to `CLOCK_MONOTONIC` have changed the outcome—yet why is `CLOCK_MONOTONIC` useless for comparing two servers' logs? *(Section 3)*
+3. Suppose Client 1 uses `CLOCK_MONOTONIC` to check `lease.remaining() > 10s` before writing to S3. Name two distinct ways Client 1 can still corrupt Client 2's newer data if S3 accepts blind overwrites. *(Section 4, Section 5)*
+4. Why does storing a ZooKeeper `zxid` or etcd `revision` in the client help **only** if the storage server inspects it too? *(Section 5)*
+5. Compare TLA+ model checking, Jepsen fault injection, and Deterministic Simulation Testing: what gap in the first two does DST close, and what subtle nondeterminism traps still remain even when clocks and sockets are mocked? *(Section 6)*
+
+</En>
+
+<Vi>
+
+FoundationDB mở đường cho DST ở tầng ứng dụng bằng runtime bất đồng bộ **Flow**, cho cả cụm nhiều node chạy giả lập trong một luồng suốt 18 tháng trước khi gửi gói tin thật đầu tiên. **TigerBeetle** thiết kế toàn bộ database như một máy trạng thái chạy trong một event loop đơn và tách bộ mô phỏng (**VOPR**) thành hai chế độ: Safety và **Liveness có nhận thức giao thức** để bão lỗi không che khuất bug deadlock. Ở tầng runtime và máy ảo, **MadSim** thay các thư viện Tokio/S3/Kafka của Rust bằng bản tất định, FrostDB vá bộ lập lịch goroutine của Go, còn **Antithesis** chạy nguyên các container không cần sửa code bên trong một hypervisor tùy biến tất định, tua nhanh thời gian và tái hiện mọi bug hiếm chỉ bằng một con số seed. Dù vậy, giữ được tính tất định vẫn đòi hỏi kỷ luật: thứ tự duyệt bảng băm ngẫu nhiên hay giới hạn bộ nhớ đột ngột vẫn có thể lọt bất định vào bài test.
+
+<LinkCard url="https://apple.github.io/foundationdb/testing.html" title="Simulation and Testing — Tài liệu FoundationDB" description="Cách FoundationDB mô phỏng tất định cả cụm máy, ổ đĩa và chia cắt mạng trên một luồng duy nhất từ một seed lặp lại được." tag="DST Pioneer" />
+
+<LinkCard url="https://tigerbeetle.com/blog/2023-07-06-simulation-testing-for-liveness/" title="Simulation Testing For Liveness — TigerBeetle" description="Vì sao tiêm lỗi ngẫu nhiên đều tay lại che mất bug treo tiến độ, và cách VOPR của TigerBeetle tách riêng chế độ Safety với Liveness." tag="VOPR" />
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **System model (mô hình hệ thống)**: tập hợp các giả định hình thức về thời gian và loại lỗi mà thuật toán được phép tin tưởng.
+- **Gray failure / fail-slow (lỗi xám)**: phần cứng xuống cấp hoặc luồng nền bị kẹt khiến node vẫn trả lời health check bình thường nhưng làm hỏng hoặc làm chậm công việc thật.
+- **Safety và Liveness**: safety bảo đảm chuyện sai trái không bao giờ xảy ra; liveness bảo đảm yêu cầu hợp lệ cuối cùng sẽ đi tới đích khi sự cố lắng xuống.
+- **Model checking (kiểm tra mô hình)**: duyệt vét cạn các trạng thái trên bản đặc tả trừu tượng (như TLA+) để tìm chỗ vi phạm bất biến trước hoặc song song lúc viết code.
+- **Deterministic Simulation Testing (DST)**: thay đồng hồ, đĩa và mạng bằng bản giả lập gắn seed cố định để code cụm chạy tất định hoàn toàn, gặp bug hiếm là phát lại được y nguyên.
+
+</Concepts>
+
+---
+
+## Điểm rút ra
+
+- **Coi sự im lặng là "không biết", đừng coi là "thất bại sạch sẽ".** Khi chạm ngưỡng timeout, bạn không thể phân biệt mất gói đi, node chạy chậm hay mất gói về; hãy thiết kế thao tác chống lặp (idempotent) và phát hiện lỗi thích nghi thay vì chốt cứng timeout tĩnh.
+- **Dùng đồng hồ monotonic để đo khoảng thời gian, và dùng khoảng tin cậy giữa các máy.** Đừng bao giờ lấy `time.Now()` trừ nhau để đo độ trễ hay hạn lease; nếu buộc phải sắp thứ tự sự kiện liên máy bằng giờ vật lý, hãy dùng khoảng `[earliest, latest]` như TrueTime hay AWS ClockBound thay cho LWW điểm đơn.
+- **Đừng chỉ dựa vào lease để bảo vệ dữ liệu.** Bất kỳ luồng nào cũng có thể khựng ngay sau dòng kiểm tra hạn lease, và gói tin kẹt mạng sống dai hơn cả `kill -9`; hãy ép tầng lưu trữ kiểm tra fencing token tăng đơn điệu (hoặc ghi có điều kiện nguyên tử).
+- **Lấy quorum quá bán làm thước đo sự thật.** Một máy dính chia cắt bất đối xứng hoặc ngủ quên trong GC không tự đánh giá đúng trạng thái mình; hãy để đa số biểu quyết quyền leader và thành viên cụm.
+- **Kiểm thử bằng hỗn loạn có kiểm soát và tính tất định.** Kết hợp đặc tả hình thức (`TLA+`), tiêm lỗi thực tế (`Jepsen`) và mô phỏng tất định (`FoundationDB`, `TigerBeetle`, `Antithesis`) để bug hiếm lộ mặt trên máy bạn lúc ban ngày thay vì lúc 3 giờ sáng.
+
+---
+
+## Câu hỏi ôn tập
+
+1. Khi client chạm timeout 5 giây lúc gọi dịch vụ thanh toán qua TCP, vì sao việc trước đó nhận được TCP `ACK` vẫn không chứng minh khoản tiền đã được xử lý? *(Phần 2)*
+2. Điều gì đã gây ra lỗi panic trong RRDNS của Cloudflare ngày 1/1/2017, chuyển sang `CLOCK_MONOTONIC` khắc phục được chỗ nào — và vì sao `CLOCK_MONOTONIC` lại vô dụng khi đem so sánh log giữa hai server khác nhau? *(Phần 3)*
+3. Giả sử Client 1 dùng `CLOCK_MONOTONIC` kiểm tra `lease.remaining() > 10s` ngay trước khi ghi lên S3. Hãy kể hai kịch bản khác nhau mà Client 1 vẫn có thể ghi đè hỏng dữ liệu mới của Client 2 nếu S3 cho ghi đè tự do. *(Phần 4, Phần 5)*
+4. Vì sao việc lưu `zxid` của ZooKeeper hay `revision` của etcd ở phía client chỉ có tác dụng **nếu** chính server lưu trữ cũng kiểm tra nó? *(Phần 5)*
+5. So sánh kiểm tra mô hình TLA+, tiêm lỗi Jepsen và Deterministic Simulation Testing: DST lấp được khoảng trống nào của hai phương pháp đầu, và ngay cả khi đã giả lập sạch đồng hồ lẫn mạng, vẫn còn những bẫy bất định tinh vi nào có thể sót lại? *(Phần 6)*
+
+</Vi>
