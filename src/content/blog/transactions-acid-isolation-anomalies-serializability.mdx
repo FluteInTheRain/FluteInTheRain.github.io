@@ -1,0 +1,911 @@
+---
+title: "What ACID actually promises: isolation anomalies, serializability, and two-phase commit"
+title_vi: "ACID thật sự hứa gì: các lỗi isolation, serializability và two-phase commit"
+description: "Why Flexcoin, Poloniex, and Horizon failed despite databases: what ACID really guarantees: MVCC snapshots, lost updates, write skew, SSI, and two-phase commit."
+description_vi: "Vì sao Flexcoin, Poloniex và Horizon vẫn mất tiền dù dùng database: ACID thật sự bảo đảm gì: MVCC snapshot, lost update, write skew, SSI và two-phase commit."
+date: 2026-11-19
+category: "database"
+tags: ["database", "transactions", "acid", "isolation-levels", "serializability", "ssi", "2pc", "ddia"]
+draft: true
+sources:
+  - { title: "Designing Data-Intensive Applications, 2nd Edition", author: "Martin Kleppmann & Chris Riccomini", chapters: "Ch. 8", url: "https://dataintensive.net/" }
+  - { title: "Spanner: Google's Globally-Distributed Database", author: "James C. Corbett et al. (USENIX OSDI 2012)", url: "https://www.usenix.org/conference/osdi12/technical-sessions/presentation/corbett" }
+  - { title: "The race condition that led to Flexcoin bankruptcy", author: "Vlad Mihalcea", url: "https://vladmihalcea.com/race-condition/" }
+  - { title: "BTC Stolen from Poloniex", author: "Tristan D'Agosta (BitcoinTalk, 2014)", url: "https://bitcointalk.org/index.php?topic=499580" }
+  - { title: "Hacking Starbucks for unlimited coffee", author: "Egor Homakov (Sakurity, 2015)", url: "https://sakurity.com/blog/2015/05/21/starbucks.html" }
+  - { title: "What went wrong with Horizon: learning from the Post Office Trial", author: "Steven J. Murdoch (Bentham's Gaze, 2021)", url: "https://www.benthamsgaze.org/2021/07/15/what-went-wrong-with-horizon-learning-from-the-post-office-trial/" }
+  - { title: "Hermitage: Testing the “I” in ACID", author: "Martin Kleppmann (2014)", url: "https://martin.kleppmann.com/2014/11/25/hermitage-testing-the-i-in-acid.html" }
+  - { title: "PostgreSQL Documentation: 13.2. Transaction Isolation", author: "PostgreSQL Global Development Group", url: "https://www.postgresql.org/docs/current/transaction-iso.html" }
+  - { title: "PostgreSQL source: predicate.c (SIREAD predicate locks)", author: "PostgreSQL (postgres/postgres)", url: "https://github.com/postgres/postgres/blob/ba11c48390004ed49b889cbd718c9e5f691fe493/src/backend/storage/lmgr/predicate.c#L27-L58" }
+  - { title: "Serializable Snapshot Isolation in PostgreSQL", author: "Dan R. K. Ports & Kevin Grittner (VLDB 2012)", url: "https://vldb.org/pvldb/vol5/p1850_danrkports_vldb2012.pdf" }
+  - { title: "MySQL 8.0.34", author: "Peter Alvaro & Kyle Kingsbury (Jepsen, 2023)", url: "https://jepsen.io/analyses/mysql-8.0.34" }
+  - { title: "What write skew looks like", author: "Justin Jaffray (Cockroach Labs, 2022)", url: "https://www.cockroachlabs.com/blog/what-write-skew-looks-like/" }
+  - { title: "Snapshot Isolation vs Serializability", author: "Marc Brooker (2024)", url: "https://brooker.co.za/blog/2024/12/17/occ-and-isolation.html" }
+  - { title: "Hacking Starbucks for unlimited coffee (receipt photo)", author: "Egor Homakov (Sakurity, 2015)", url: "https://sakurity.com/img/sbcheck.jpg" }
+  - { title: "Mechanical interlocking frame (Mechanisches Stellwerk, photo, CC BY-SA 4.0)", author: "W. Bulach", url: "https://commons.wikimedia.org/wiki/File:00_0250_Eisenbahntechnik_-_Mechanisches_Stellwerk.jpg" }
+---
+
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import En from '../../components/mdx/En.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import GitHubCode from '../../components/mdx/GitHubCode.astro';
+import LinkCard from '../../components/mdx/LinkCard.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import TxIncidents from '../../components/mdx/TxIncidents.astro';
+import TxMultiObject from '../../components/mdx/TxMultiObject.astro';
+import TxReadSkew from '../../components/mdx/TxReadSkew.astro';
+import TxMvccUpdate from '../../components/mdx/TxMvccUpdate.astro';
+import TxIsolationNames from '../../components/mdx/TxIsolationNames.astro';
+import TxStarbucksSteps from '../../components/mdx/TxStarbucksSteps.astro';
+import TxSerialExec from '../../components/mdx/TxSerialExec.astro';
+import TxLockPhases from '../../components/mdx/TxLockPhases.astro';
+import TxSsiFlow from '../../components/mdx/TxSsiFlow.astro';
+import TxXaVsRaft from '../../components/mdx/TxXaVsRaft.astro';
+import TxExactlyOnce from '../../components/mdx/TxExactlyOnce.astro';
+import TxIsolation from '../../components/mdx/TxIsolation.astro';
+import TxLostUpdate from '../../components/mdx/TxLostUpdate.astro';
+import TxMvccVisibility from '../../components/mdx/TxMvccVisibility.astro';
+import TxStarbucksRace from '../../components/mdx/TxStarbucksRace.astro';
+import TxTwoPhaseCommit from '../../components/mdx/TxTwoPhaseCommit.astro';
+import TxWriteSkewDoctors from '../../components/mdx/TxWriteSkewDoctors.astro';
+import starbucksReceipt from '../../assets/blog/transactions-acid-isolation-anomalies-serializability/starbucks-receipt-race.jpg';
+import heroInterlocking from '../../assets/blog/transactions-acid-isolation-anomalies-serializability/railway-mechanical-interlocking.jpg';
+
+<En>
+
+<Figure src={heroInterlocking} alt="A mechanical railway signal-box interlocking frame with iron levers and locking bars in the Bayerisch Eisenstein Railway Museum" caption="A railway interlocking frame physically prevents two conflicting routes from engaging at once. Database transactions promise the same safety for concurrent reads and writes, yet most default settings quietly leave several levers unlocked. Photo: W. Bulach, CC BY-SA 4.0." sourceTitle="Wikimedia Commons: Mechanisches Stellwerk" sourceUrl="https://commons.wikimedia.org/wiki/File:00_0250_Eisenbahntechnik_-_Mechanisches_Stellwerk.jpg" />
+
+> "We believe it is better to have application programmers deal with performance problems due to overuse of transactions as bottlenecks arise, rather than always coding around the lack of transactions."
+> &mdash; *James Corbett et al.*, "Spanner: Google's Globally-Distributed Database" (2012), a sentence that sums up the argument for transactions
+
+### When a database transaction still loses money
+
+Developers love to reply "just use an ACID database" whenever a payments bug hits Hacker News. The catch is that most production relational databases default to **weak isolation**, where concurrent requests can still read stale balances and overwrite or double-spend funds. Look at what actually broke in real systems:
+
+- **Flexcoin, March 2014.** Attackers fired concurrent transfer requests between accounts before the balance deduction ran, draining 896 BTC from the hot wallet and shutting the service down permanently.
+- **Poloniex, two days later.** Simultaneous withdrawal requests slipped past balance checks into negative numbers (`-8 BTC`), letting an attacker drain 12.3 percent of every bitcoin on the exchange.
+- **Starbucks gift cards, 2015.** Security researcher Egor Homakov sent concurrent transfer confirmations from two browser sessions (`session1` and `session2`) against one `$5` card; two `$5` transfers went through and the cards ended up holding `$15` and `$5`.
+- **UK Post Office Horizon.** A High Court trial documented how a crash mid-transfer (`PEAK 0195561`) issued duplicate `£4,000` receipts while leaving a branch stock unit short by `£4,000`, contributing to wrongful criminal convictions of subpostmasters.
+
+</En>
+
+<Vi>
+
+<Figure src={heroInterlocking} alt="Hệ thống cần gạt khoá liên động cơ khí trong phòng tín hiệu đường sắt tại bảo tàng Bayerisch Eisenstein" caption="Khung khoá liên động đường sắt ngăn hai tuyến tàu xung đột gạt cần cùng lúc bằng cơ khí thuần tuý. Transaction trong database cũng hứa điều tương tự cho đọc ghi song song, nhưng hầu hết cấu hình mặc định lại âm thầm bỏ ngỏ vài cần gạt. Ảnh: W. Bulach, CC BY-SA 4.0." sourceTitle="Wikimedia Commons: Mechanisches Stellwerk" sourceUrl="https://commons.wikimedia.org/wiki/File:00_0250_Eisenbahntechnik_-_Mechanisches_Stellwerk.jpg" />
+
+> "Chúng tôi tin rằng để lập trình viên xử lý các vấn đề hiệu năng do lạm dụng transaction khi cổ chai xuất hiện vẫn tốt hơn là lúc nào cũng phải code vòng vèo để bù đắp cho việc thiếu transaction."
+> &mdash; *James Corbett và cộng sự*, "Spanner: Google's Globally-Distributed Database" (2012), câu tóm gọn lý do nên dùng transaction
+
+### Dùng database có transaction rồi mà vẫn mất tiền
+
+Mỗi lần có sự cố thanh toán lên trang nhất Hacker News, câu bình luận quen thuộc luôn là "sao không dùng database ACID?". Vấn đề là hầu hết database quan hệ ngoài thực tế mặc định chạy ở **isolation yếu (weak isolation)**, nơi các request song song vẫn đọc nhầm số dư cũ rồi ghi đè hoặc rút tiền hai lần. Đây là những vụ đã xảy ra thật:
+
+- **Flexcoin, tháng 3/2014.** Kẻ tấn công bắn hàng loạt lệnh chuyển tiền giữa các tài khoản cùng lúc trước khi số dư kịp trừ, rút cạn 896 BTC khỏi ví nóng và khiến dịch vụ phá sản ngay lập tức.
+- **Poloniex, hai ngày sau đó.** Hàng loạt lệnh rút tiền gửi vào gần như cùng một tích tắc đã lách qua bước kiểm tra số dư, đẩy tài khoản xuống số âm (`-8 BTC`) và rút mất 12,3% tổng lượng Bitcoin trên sàn.
+- **Thẻ quà tặng Starbucks, 2015.** Chuyên gia bảo mật Egor Homakov mở hai phiên trình duyệt (`session1` và `session2`), gửi lệnh xác nhận chuyển tiền song song từ một thẻ `$5`; hai lệnh chuyển `$5` đều lọt qua và hai thẻ cuối cùng chứa `$15` và `$5`.
+- **Hệ thống Horizon của Bưu điện Anh.** Hồ sơ phiên toà cấp cao ghi nhận lỗi crash giữa chừng (`PEAK 0195561`) đã in ra hai biên lai `£4.000` trùng số phiên trong khi một kho quỹ bị hụt mất `£4.000`, góp phần gây ra hàng trăm án oan cho các trưởng bưu cục.
+
+</Vi>
+
+<TxIncidents />
+
+<En>
+
+Below, we peel back what transactions actually guarantee across six layers:
+
+1. **What ACID promises (and leaves to you)**: why atomicity means abortability, not concurrency, and why durability has edges.
+2. **Weak isolation (Read Committed & MVCC)**: dirty reads, read skew, snapshot visibility rules, and the `REPEATABLE READ` naming mess.
+3. **Preventing lost updates**: why read-modify-write drops increments, plus four fixes from atomic SQL to CAS.
+4. **Write skew and phantoms**: disjoint updates that violate shared rules, plus an interactive stepper to test every isolation level.
+5. **True serializability**: serial execution, two-phase locking (2PL), and serializable snapshot isolation (SSI).
+6. **Distributed transactions and 2PC**: two-phase commit, the blocking in-doubt window, XA vs Raft-backed NewSQL, and idempotency.
+
+<Callout type="note" title="TL;DR">
+Putting queries inside `BEGIN ... COMMIT` does not automatically block race conditions. Default isolation levels stop dirty reads and dirty writes, yet still allow read skew, lost updates, and write skew depending on the engine and query pattern. Knowing which anomalies your isolation level lets through, and when to switch to atomic writes, `SELECT FOR UPDATE`, SSI, or idempotent retries, is what keeps financial and inventory state intact under concurrency.
+</Callout>
+
+<Concepts>
+
+- **Transaction**: a group of reads and writes bundled into one logical unit that either commits together or aborts completely.
+- **Race condition**: a bug whose outcome depends on the unlucky timing of concurrent requests hitting shared data.
+- **Isolation level**: a setting that trades concurrency safety for performance by deciding which interferences concurrent transactions can see.
+- **Serializability**: the strongest isolation guarantee: concurrent transactions produce the same final state as if they had run one after another.
+- **MVCC (multiversion concurrency control)**: keeping multiple timestamped versions of a row so readers see a consistent snapshot without blocking writers.
+
+</Concepts>
+
+---
+
+## 1. What ACID actually guarantees
+
+ACID was coined in 1983 by Theo Härder and Andreas Reuter to pin down fault-tolerance guarantees, yet today it behaves almost like a marketing label. One database's "ACID" can omit isolation guarantees that another enforces by default. Breaking the acronym down letter by letter clears up where the database stops and your code begins.
+
+| Letter | Common myth | What ACID actually means in a database |
+|---|---|---|
+| **A — Atomicity** | "Concurrent threads cannot interleave." | **Abortability**: on any error or crash mid-transaction, every prior write in that unit is rolled back so retrying is safe. |
+| **C — Consistency** | "The database enforces all business rules." | **Application invariants** (credits equal debits): the DB enforces only declared constraints like foreign keys and `UNIQUE`. |
+| **I — Isolation** | "Transactions always run as if alone." | Concurrent transactions do not step on each other — though default **weak isolation** relaxes this rule heavily. |
+| **D — Durability** | "Once committed, data can never be lost." | Committed writes sit on non-volatile disk (via `fsync` and WAL) or replicated nodes — subject to hardware and firmware bugs. |
+
+Notice **atomicity** first. In multithreaded code, "atomic" means another thread never sees a half-finished operation; in databases, that concurrency rule belongs to **isolation**. ACID atomicity is all-or-nothing recovery: if your payment fails on step 3 of 4, the database undoes steps 1 and 2 instead of leaving half a transfer on disk like Horizon's `£4,000` receipt glitch.
+
+**Consistency** in ACID is overloaded with five different meanings across distributed systems (eventual consistency, consistent snapshots, consistent hashing, linearizability in CAP, and schema invariants). In ACID, consistency is a property of your **application**, not the storage engine alone. If you forget a `CHECK (balance >= 0)` or `UNIQUE` constraint, the database will happily commit invalid business state.
+
+<Callout type="warning" title="Even fsync and durability have edges">
+Calling `fsync()` tells the OS to flush buffered writes to storage, yet real incidents show surprises: SSDs under sudden power cuts have violated durability guarantees, HPE shipped SAS SSDs with a firmware bug that failed drives at 32,768 hours, and PostgreSQL engineers discovered in 2018 that PostgreSQL had mishandled `fsync()` kernel errors for over 20 years. Combine WAL, checksums, replication, and tested backups instead of trusting any single disk guarantee.
+</Callout>
+
+### Single-object vs. multi-object writes
+
+Storage engines almost always give you single-object atomicity and isolation on one node: writing a 20 KB JSON document will not leave 10 KB spliced with old bytes if power drops. Some non-relational engines also offer single-object conditional writes (compare-and-set) or atomic increments.
+
+Multi-object transactions exist because real data rarely lives in one record. Relational foreign keys, denormalized counters (like an unread-email badge paired with an `emails` row), and secondary indexes all span multiple objects that drift out of sync without atomic multi-object commits. Even then, ORMs like ActiveRecord and Django often bubble deadlocks or serialization aborts straight to the user as HTTP 500s instead of retrying them — throwing away the main benefit of clean rollbacks.
+
+</En>
+
+<Vi>
+
+Phần dưới bóc tách những gì transaction thật sự bảo đảm qua sáu tầng:
+
+1. **ACID hứa gì và bỏ ngỏ gì**: vì sao atomicity nghĩa là huỷ sạch được khi lỗi (abortability), chứ không phải khoá tranh chấp đồng thời, và giới hạn của durability.
+2. **Isolation yếu (Read Committed & MVCC)**: dirty read, read skew, quy tắc nhìn thấy bản ghi snapshot và ma trận tên gọi `REPEATABLE READ`.
+3. **Chặn lỗi mất bản cập nhật (lost update)**: vì sao vòng lặp đọc-sửa-ghi làm rơi số đếm, cùng bốn cách vá từ SQL nguyên tử tới CAS.
+4. **Write skew và lỗi phantom**: hai lệnh ghi vào hai dòng khác nhau vẫn phá vỡ quy tắc chung, kèm trình mô phỏng tương tác từng bước.
+5. **Ba cách đạt serializability thật sự**: chạy tuần tự trên một luồng, khoá hai pha (2PL) và serializable snapshot isolation (SSI).
+6. **Giao dịch phân tán và 2PC**: giao thức two-phase commit, khoảng treo in-doubt, XA so với NewSQL dùng Raft/Paxos và cách tránh bằng idempotency.
+
+<Callout type="note" title="Tóm tắt nhanh">
+Gói các câu SQL vào `BEGIN ... COMMIT` không tự động chặn hết race condition. Các mức isolation mặc định chỉ chặn được dirty read và dirty write, nhưng vẫn có thể để lọt read skew, lost update hoặc write skew tuỳ vào từng engine và cách viết truy vấn. Biết rõ mức isolation mình đang bật để hở lỗ hổng nào — để kịp chuyển sang lệnh ghi nguyên tử, `SELECT FOR UPDATE`, SSI hoặc retry idempotent — mới là thứ giữ nguyên vẹn số dư và tồn kho khi tải cao.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Transaction (giao dịch)**: một nhóm lệnh đọc và ghi gom thành một đơn vị logic, hoặc thành công tất cả (commit), hoặc huỷ sạch (abort).
+- **Race condition (điều kiện tranh đua)**: lỗi mà kết quả đúng hay sai phụ thuộc vào thứ tự đến xui rủi của các request chạy song song.
+- **Isolation level (mức cô lập)**: cấu hình đánh đổi giữa độ an toàn khi chạy đồng thời và hiệu năng, quyết định hai giao dịch thấy được gì của nhau.
+- **Serializability (tính tuần tự hoá)**: mức cô lập mạnh nhất, bảo đảm kết quả cuối cùng giống hệt như các giao dịch chạy nối đuôi nhau từng cái một.
+- **MVCC (multiversion concurrency control)**: giữ nhiều phiên bản gắn mốc giao dịch của cùng một dòng để lệnh đọc thấy ảnh chụp nhất quán mà không phải chờ lệnh ghi.
+
+</Concepts>
+
+---
+
+## 1. ACID thật sự bảo đảm điều gì
+
+Thuật ngữ ACID do Theo Härder và Andreas Reuter đặt ra năm 1983 để chuẩn hoá cơ chế chịu lỗi, nhưng ngày nay nó gần như bị biến thành khẩu hiệu tiếp thị. Chữ "ACID" của database này có thể thiếu hẳn bảo đảm isolation mà database khác bật sẵn. Tách từng chữ cái ra giúp bạn nhìn rõ ranh giới giữa phần việc của database và phần code bạn phải tự lo.
+
+| Chữ cái | Hiểu lầm phổ biến | Ý nghĩa thật trong database |
+|---|---|---|
+| **A — Atomicity** | "Các luồng không chen ngang nhau." | **Khả năng huỷ sạch (abortability)**: gặp lỗi hay sập giữa chừng thì mọi thay đổi đã ghi đều bị hoàn tác để ứng dụng retry an toàn. |
+| **C — Consistency** | "Database tự giữ đúng mọi luật nghiệp vụ." | **Bất biến ứng dụng (invariant)** (tổng nợ bằng tổng có): database chỉ ép các ràng buộc bạn khai báo như khoá ngoại hay `UNIQUE`. |
+| **I — Isolation** | "Transaction nào cũng như chạy một mình." | Các giao dịch song song không giẫm chân nhau — nhưng các mức **isolation yếu** mặc định nới lỏng quy tắc này rất nhiều. |
+| **D — Durability** | "Commit xong là vĩnh viễn không mất." | Dữ liệu đã commit được ghi ra đĩa bền vững (qua `fsync` và WAL) hoặc nhân bản sang nhiều node — vẫn chịu rủi ro lỗi phần cứng và firmware. |
+
+Hãy để ý chữ **atomicity** trước. Trong lập trình đa luồng, "atomic" nghĩa là luồng khác không bao giờ nhìn thấy kết quả dang dở; nhưng trong database, việc chặn chen ngang nằm ở chữ **isolation**. Atomicity của ACID chỉ nói về phục hồi tất cả-hoặc-không-có-gì: nếu bước 3 trên 4 bị lỗi, database xoá sạch bước 1 và 2 thay vì để lại trạng thái nửa vời như vụ in đúp biên lai `£4.000` của Horizon.
+
+Chữ **consistency** trong ACID bị quá tải vì mang tới năm nghĩa khác nhau (eventual consistency, snapshot nhất quán, consistent hashing, linearizability trong CAP, và tính đúng đắn nghiệp vụ). Ở đây consistency là trách nhiệm của **ứng dụng**, không phải của riêng database. Nếu bạn không khai báo `CHECK (balance >= 0)` hay ràng buộc `UNIQUE`, database vẫn vui vẻ commit dữ liệu sai nghiệp vụ.
+
+<Callout type="warning" title="Ngay cả fsync và durability cũng có điểm mù">
+Gọi `fsync()` yêu cầu hệ điều hành đẩy dữ liệu từ RAM xuống ổ lưu trữ, nhưng đã có hàng loạt sự cố thật: SSD mất điện đột ngột có thể làm rơi dữ liệu đã báo ghi xong, HPE từng gặp lỗi firmware làm SSD đồng loạt hỏng đúng mốc 32.768 giờ chạy, và đến năm 2018 cộng đồng PostgreSQL mới phát hiện Postgres đã xử lý sai lỗi `fsync()` của kernel suốt hơn 20 năm. Hãy kết hợp WAL, checksum, replication và bản sao lưu có kiểm thử thay vì tin tuyệt đối vào một lớp đơn lẻ.
+</Callout>
+
+### Ghi một đối tượng so với nhiều đối tượng
+
+Hầu hết storage engine đều tự bảo đảm atomicity và isolation cho **từng đối tượng đơn lẻ (single-object)** trên một node: ghi một JSON 20 KB mà mất điện giữa chừng sẽ không trộn lẫn 10 KB mới với 10 KB cũ. Một số hệ thống phi quan hệ còn hỗ trợ ghi có điều kiện (compare-and-set) hoặc phép tăng nguyên tử trên một bản ghi.
+
+Giao dịch nhiều đối tượng (multi-object transaction) sinh ra vì dữ liệu thật hiếm khi nằm gọn trong một dòng. Khoá ngoại giữa các bảng, bộ đếm phi chuẩn hoá (như số tin nhắn chưa đọc phải khớp bảng `emails`), và các index phụ đều là nhiều đối tượng phải cập nhật đồng bộ. Tiếc là nhiều ORM như ActiveRecord hay Django lại ném thẳng lỗi deadlock hoặc serialization abort thành HTTP 500 thay vì retry, làm mất luôn giá trị lớn nhất của rollback.
+
+</Vi>
+
+<TxMultiObject />
+
+<En>
+
+<Concepts>
+
+- **Abortability**: the guarantee that a failed transaction leaves zero partial writes behind, making a retry safe.
+- **Invariant**: a rule about your data that must always stay true after every commit, such as total account debits equaling credits.
+- **Write-ahead log (WAL)**: an append-only log flushed to disk before data pages change, used to recover committed transactions after a crash.
+- **fsync**: the operating system call that forces dirty file buffers out of RAM onto non-volatile storage.
+- **Denormalization**: storing a precomputed copy of derived data (such as an unread count) alongside source rows to speed up reads.
+
+</Concepts>
+
+---
+
+## 2. Weak isolation: Read Committed and MVCC
+
+Full serializability has a cost, so Oracle, PostgreSQL, SQL Server, and MySQL default to weaker isolation levels. Understanding **Read Committed** and **Snapshot Isolation** explains why some bugs vanish while subtler ones walk right past your tests.
+
+### Read Committed: stopping dirty reads and dirty writes
+
+Read Committed makes two promises. First, **no dirty reads**: you only see data that has been committed, never uncommitted writes from another open transaction that might roll back later and trigger cascading aborts. Second, **no dirty writes**: if two transactions overwrite the same row, the second writer waits on a row-level write lock until the first commits or aborts, preventing mixed updates (like awarding a used car listing to Bryce while billing the invoice to Aaliyah).
+
+Notice how databases avoid taking read locks under Read Committed. Holding read locks during a long transaction would stall writers across unrelated queries, so most engines keep two versions of a modified row — the old committed value for concurrent readers, and the uncommitted locked value for the writer.
+
+### Read skew and consistent snapshots
+
+Read Committed still fails when one transaction reads two related rows across time. Imagine Aaliyah has `$1,000` split evenly across two `$500` accounts (`A` and `B`) while a concurrent transfer moves `$100` from `A` to `B`. If her balance page reads `A` before the transfer commits (`$500`), waits a millisecond while the transfer commits, and then reads `B` (`$600`), her screen shows `$1,100` — money appeared out of thin air.
+
+</En>
+
+<Vi>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Abortability (khả năng huỷ sạch)**: bảo đảm một giao dịch thất bại không để lại dấu vết ghi dở dang nào, giúp chạy lại (retry) luôn an toàn.
+- **Invariant (tính bất biến)**: quy tắc đúng đắn của dữ liệu phải luôn giữ nguyên sau mỗi commit, ví dụ tổng tiền gửi vào bằng tổng tiền rút ra.
+- **Write-ahead log (WAL)**: file log chỉ ghi nối vào cuối, ép xuống đĩa trước khi sửa trang dữ liệu, dùng để khôi phục giao dịch đã commit sau sự cố.
+- **fsync**: lời gọi hệ điều hành buộc đẩy toàn bộ dữ liệu đệm trong RAM xuống ổ đĩa vật lý.
+- **Denormalization (phi chuẩn hoá)**: lưu sẵn một bản sao giá trị dẫn xuất (như bộ đếm chưa đọc) bên cạnh dữ liệu gốc để đọc nhanh hơn.
+
+</Concepts>
+
+---
+
+## 2. Isolation yếu: Read Committed và MVCC
+
+Serializability toàn phần tốn chi phí, nên Oracle, PostgreSQL, SQL Server và MySQL mặc định chạy ở các mức cô lập yếu hơn. Hiểu rõ **Read Committed** và **Snapshot Isolation** sẽ giải thích được vì sao nhiều lỗi biến mất trong khi các lỗi tinh vi hơn vẫn lọt qua bộ test.
+
+### Read Committed: chặn dirty read và dirty write
+
+Read Committed giữ hai lời hứa. Thứ nhất, **không dirty read**: bạn chỉ đọc được dữ liệu đã commit, không bao giờ đọc nhầm dữ liệu dở dang của một giao dịch khác đang mở rồi lỡ nó rollback làm hỏng dây chuyền (cascading abort). Thứ hai, **không dirty write**: hai giao dịch cùng sửa một dòng thì người đến sau phải đợi lock ghi cấp dòng tới khi người trước commit hoặc abort, tránh cảnh bán xe cho Bryce nhưng lại xuất hoá đơn cho Aaliyah.
+
+Để ý cách Read Committed né không dùng lock đọc. Nếu một giao dịch chạy lâu giữ lock đọc thì hàng loạt truy vấn khác sẽ tắc nghẽn theo, nên phần lớn database giữ song song hai bản của dòng đang sửa — bản cũ đã commit cho người đọc, còn bản mới gắn lock cho người ghi.
+
+### Read skew và snapshot nhất quán
+
+Read Committed vẫn gãy khi một giao dịch đọc hai dòng liên quan tại hai thời điểm lệch nhau. Giả sử Aaliyah có `$1.000` chia đều vào hai tài khoản `$500` (`A` và `B`) đúng lúc có lệnh chuyển `$100` từ `A` sang `B`. Nếu trang xem số dư đọc `A` ngay trước lúc lệnh chuyển commit (`$500`), chững một mili-giây cho lệnh chuyển commit xong, rồi mới đọc `B` (`$600`), màn hình sẽ báo tổng là `$1.100` — dư `$100` từ hư không.
+
+</Vi>
+
+<TxReadSkew />
+
+<En>
+
+This anomaly is **read skew** (a nonrepeatable read), because Read Committed refreshes visibility on every SQL statement. A human hitting refresh shrugs it off, yet a multi-hour backup or an integrity-check query scanning millions of rows will capture a permanently corrupted mix of past and future states.
+
+**Snapshot Isolation** fixes read skew with one rule: every query inside a transaction reads from a single consistent snapshot frozen at the moment that transaction started. Because **readers never block writers, and writers never block readers**, analytics and backups run cleanly alongside live OLTP traffic.
+
+</En>
+
+<Vi>
+
+Hiện tượng đó gọi là **read skew** (hay nonrepeatable read), vì ở Read Committed mỗi câu SQL tự mở một góc nhìn mới. Người dùng F5 lại trang thì hết, nhưng một bản sao lưu chạy vài tiếng hay một câu truy vấn kiểm tra toàn vẹn dữ liệu sẽ chụp ra một mớ dữ liệu nửa cũ nửa mới hỏng vĩnh viễn.
+
+**Snapshot Isolation** trị read skew bằng một quy tắc đơn giản: mọi câu lệnh trong cùng một transaction chỉ nhìn thấy một ảnh chụp nhất quán đóng băng ngay tại thời điểm transaction đó bắt đầu. Nhờ nguyên tắc **người đọc không bao giờ chặn người ghi, và người ghi không bao giờ chặn người đọc**, các tác vụ phân tích và backup chạy song song mượt mà với traffic OLTP.
+
+</Vi>
+
+<TxMvccVisibility />
+
+<En>
+
+### Inside MVCC and the `REPEATABLE READ` naming trap
+
+Databases implement Snapshot Isolation using **multiversion concurrency control (MVCC)**: instead of overwriting a row in place, every `UPDATE` tags the old tuple with `deleted_by = txid` and inserts a brand-new tuple with `inserted_by = txid`. PostgreSQL assigns an increasing transaction ID (`txid`), records which transactions were still open when your transaction began, and hides their writes, any aborted writes, and any higher `txid` — while immutable B-tree engines like Datomic, CouchDB, and LMDB simply publish a new tree root per write batch.
+
+</En>
+
+<Vi>
+
+### Bên trong MVCC và cái bẫy tên gọi `REPEATABLE READ`
+
+Các database hiện thực Snapshot Isolation bằng **multiversion concurrency control (MVCC)**: thay vì ghi đè trực tiếp lên dòng cũ, mỗi lệnh `UPDATE` gắn `deleted_by = txid` lên bản ghi cũ rồi chèn thêm một bản ghi mới gắn `inserted_by = txid`. PostgreSQL cấp cho mỗi giao dịch một `txid` tăng dần, chụp danh sách các giao dịch đang chạy dở lúc mở màn, rồi ẩn toàn bộ thay đổi của nhóm đó, của giao dịch đã abort và của mọi `txid` lớn hơn — còn các engine dùng B-tree bất biến như Datomic, CouchDB hay LMDB thì đơn giản tạo một nút gốc (root) mới cho mỗi lô ghi.
+
+</Vi>
+
+<TxMvccUpdate />
+
+<En>
+
+Watch out for SQL standard names here. Snapshot Isolation did not exist when ANSI SQL-92 was drafted around IBM System R's 1975 lock rules, so vendors picked confusing names for it:
+
+| Engine | Isolation level name | What it actually gives you |
+|---|---|---|
+| **PostgreSQL** | `REPEATABLE READ` | True Snapshot Isolation; stops read skew and automatically aborts concurrent lost updates (write skew still possible). |
+| **Oracle** | `SERIALIZABLE` | Actually implements Snapshot Isolation — not true serializability! Write skew still passes silently. |
+| **MySQL (InnoDB)** | `REPEATABLE READ` (default) | MVCC snapshots with weaker rules: Jepsen's 2023 test of MySQL 8.0.34 confirmed it allows lost updates, `G-single`, and non-monotonic atomic views. |
+| **IBM Db2** | `REPEATABLE READ` | Actually implements full serializability (via locking). |
+
+</En>
+
+<Vi>
+
+Hãy cẩn thận với tên gọi theo chuẩn SQL ở đây. Khi chuẩn ANSI SQL-92 ra đời dựa trên mô hình khoá năm 1975 của IBM System R, khái niệm Snapshot Isolation còn chưa xuất hiện, nên mỗi hãng đặt một tên khác nhau:
+
+| Database | Tên mức isolation | Thứ bạn nhận được thật sự |
+|---|---|---|
+| **PostgreSQL** | `REPEATABLE READ` | Đúng chuẩn Snapshot Isolation; chặn được read skew và tự huỷ khi đụng lost update (vẫn lọt write skew). |
+| **Oracle** | `SERIALIZABLE` | Thực chất chỉ là Snapshot Isolation — không phải serializability thật! Write skew vẫn lọt qua êm ru. |
+| **MySQL (InnoDB)** | `REPEATABLE READ` (mặc định) | Snapshot MVCC nhưng lỏng hơn: kiểm thử Jepsen năm 2023 trên MySQL 8.0.34 xác nhận vẫn để lọt lost update, `G-single` và vi phạm nhất quán đọc nguyên tử. |
+| **IBM Db2** | `REPEATABLE READ` | Thực chất là full serializability (dùng khoá). |
+
+</Vi>
+
+<TxIsolationNames />
+
+<En>
+
+Martin Kleppmann built the **Hermitage** test suite precisely because vendor labels conflicted so wildly across PostgreSQL, MySQL, Oracle, and SQL Server.
+
+<Concepts>
+
+- **Dirty read**: reading data written by a concurrent transaction that has not committed yet and might still roll back.
+- **Dirty write**: overwriting data written by another transaction that has not committed yet, interleaving two transactions' changes.
+- **Read skew**: seeing two parts of the database from different points in time within one transaction, such as reading pre-transfer account A and post-transfer account B.
+- **Tuple (row version)**: one physical version of a row inside a heap table, tagged with `inserted_by` and `deleted_by` transaction IDs.
+- **Vacuum / garbage collection**: the background cleanup pass that removes dead row versions once no open snapshot can possibly read them anymore.
+
+</Concepts>
+
+---
+
+## 3. Preventing lost updates
+
+Snapshot Isolation gives read-only queries a clean world, yet two writers updating the **same** row can still collide. The classic bug is a **lost update**, where two clients perform a read-modify-write cycle in parallel: both read `42`, both compute `43` in application memory, and the second write silently overwrites the first increment.
+
+You hit this pattern everywhere: incrementing counters or account balances, parsing and appending to a JSON array, or saving a full wiki page over someone else's edit. To see how fast naive read-modify-write drops writes, I ran 4 Python threads in SQLite WAL mode doing 100 increments each (400 expected total):
+
+</En>
+
+<Vi>
+
+Martin Kleppmann từng viết hẳn bộ test **Hermitage** chỉ vì tên gọi giữa PostgreSQL, MySQL, Oracle và SQL Server lệch nhau quá xa.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Dirty read (đọc bẩn)**: đọc trúng dữ liệu do giao dịch khác vừa ghi nhưng chưa commit và có thể bị rollback.
+- **Dirty write (ghi bẩn)**: ghi đè lên dữ liệu chưa commit của giao dịch khác, làm kết quả hai bên trộn lẫn vào nhau.
+- **Read skew (lệch góc nhìn đọc)**: một giao dịch đọc thấy hai mảnh dữ liệu ở hai thời điểm khác nhau, ví dụ đọc tài khoản A trước lúc chuyển tiền và tài khoản B sau lúc chuyển.
+- **Tuple (phiên bản dòng)**: một bản sao vật lý của dòng nằm trong heap table, mang hai thẻ `inserted_by` và `deleted_by`.
+- **Vacuum / garbage collection (dọn rác)**: tiến trình chạy ngầm xoá các bản ghi cũ đã chết khi không còn snapshot nào có quyền đọc chúng nữa.
+
+</Concepts>
+
+---
+
+## 3. Chặn lỗi mất bản cập nhật (lost update)
+
+Snapshot Isolation giúp lệnh đọc nhìn thấy thế giới nhất quán, nhưng hai lệnh ghi cùng đụng **một dòng** vẫn có thể giẫm chân nhau. Lỗi kinh điển nhất là **lost update (mất bản cập nhật)**: hai client cùng thực hiện vòng đọc-sửa-ghi song song, cùng đọc số `42`, cùng tự tính ra `43` trong code, rồi người ghi sau đè thẳng lên kết quả của người ghi trước.
+
+Mẫu lỗi này gặp ở khắp nơi: tăng bộ đếm hay trừ số dư, đọc sửa một trường trong JSON rồi ghi đè cả chuỗi, hoặc hai người cùng lưu trang wiki. Để thấy lỗi này xảy ra dễ cỡ nào, mình cho 4 luồng Python chạy cùng lúc trên SQLite chế độ WAL, mỗi luồng tăng biến đếm 100 lần (kỳ vọng tổng cộng 400):
+
+</Vi>
+
+<TxLostUpdate />
+
+<En>
+
+To see how fast naive read-modify-write drops writes, I ran 4 Python threads in SQLite WAL mode doing 100 increments each (400 expected total):
+
+<TerminalOutput command="python3 lost_update_bench.py" label="SQLite WAL, 4 concurrent threads × 100 increments" caption="Measured locally on macOS (Apple Silicon, Python 3.15, SQLite WAL mode). Naive read-modify-write dropped 281 of 400 increments in under 50 ms; explicit write locking (BEGIN IMMEDIATE) and atomic SQL kept every single update.">
+```text
+read_modify_write     expected 400  final 119  lost 281  ( 49.5 ms)
+begin_immediate       expected 400  final 400  lost   0  ( 45.6 ms)
+atomic_update         expected 400  final 400  lost   0  ( 46.5 ms)
+```
+</TerminalOutput>
+
+Lost-update defenses fall into four tools, ranked from simplest to most general:
+
+1. **Atomic write operations**: push the increment into the database with `UPDATE counters SET value = value + 1 WHERE key = 'foo'`. The engine takes an exclusive lock during execution (or runs single-threaded as in Redis), removing the round-trip read from your app. Watch out for ORMs: they frequently pull rows into objects and write back full values, accidentally smuggling read-modify-write cycles back in.
+2. **Explicit locking (`SELECT ... FOR UPDATE`)**: when business rules cannot fit in one SQL statement (like validating a chess move before updating coordinates), explicitly lock the fetched row until commit. You must remember the lock on every code path and retry deadlocks when two transactions lock rows in opposite orders.
+3. **Automatic lost-update detection**: PostgreSQL `REPEATABLE READ`, Oracle `SERIALIZABLE`, and SQL Server `SNAPSHOT` allow concurrent writes in parallel, then abort the second committer if both touched the same row (**first-committer-wins**). MySQL InnoDB `REPEATABLE READ` skips this check, which is why Jepsen and Kleppmann caution against calling MySQL's default mode true Snapshot Isolation.
+4. **Compare-and-set (`WHERE version = old_ver`)**: in systems without full transactions, guard updates with `AND content = 'old'` or a monotonically bumped `version` column. Beware a subtle trap inside MVCC databases: if `WHERE` evaluates against your frozen snapshot instead of the newest committed version on disk, a stale check can still pass — many MVCC engines carve out an exception on `UPDATE`/`DELETE` `WHERE` clauses specifically to stop this.
+
+### What changes under multi-leader and leaderless replication
+
+Locks and compare-and-set rely on a single authoritative copy of the row. In multi-leader or leaderless databases (such as Cassandra, Dynamo-style stores, or offline-first apps) where nodes accept concurrent writes asynchronously, there is no single lock manager to ask. Those systems preserve concurrent versions (**siblings**) and merge them with commutative data types like CRDTs — and if they fall back to **Last-Write-Wins (LWW)** based on wall-clock timestamps, silent lost updates come right back.
+
+### A real case: Starbucks gift cards
+
+**Setup.** In March 2015 the security researcher Egor Homakov bought three Starbucks gift cards at `$5` each. The website lets a signed-in user move money between cards in two requests: `POST /step1` stores the amount and both cards in the session, and `POST /step2?confirm` performs the transfer and clears the session. A second confirm inside the same session fails, so the flow looks protected.
+
+**What broke.** The protection lives in the session, and nothing stops the same account from holding two sessions. Homakov logged in from two browsers (`session1` and `session2`), prepared the same transfer in both, and fired both confirms at once. The first five attempts failed. The sixth created two `$5` transfers out of a card holding `$5`, leaving cards with `$15` and `$5`, `$20` in total. He then paid a `$16.70` bill at a store with the two cards, after putting in `$15`. The cause is the same check-then-act gap as in the earlier sections: each request read the `$5` balance, saw it was enough, and acted before the other request's debit became visible.
+
+</En>
+
+<Vi>
+
+Để thấy lỗi này xảy ra dễ cỡ nào, mình cho 4 luồng Python chạy cùng lúc trên SQLite chế độ WAL, mỗi luồng tăng biến đếm 100 lần (kỳ vọng tổng cộng 400):
+
+<TerminalOutput command="python3 lost_update_bench.py" label="SQLite WAL, 4 luồng đồng thời × 100 lần tăng" caption="Đo trực tiếp trên macOS (Apple Silicon, Python 3.15, SQLite chế độ WAL). Cách đọc-rồi-ghi ngây thơ làm rơi tới 281 trên 400 lần tăng chỉ trong chưa đầy 50 ms; khoá ghi chủ động (BEGIN IMMEDIATE) và câu UPDATE nguyên tử giữ đủ cả 400.">
+```text
+read_modify_write     expected 400  final 119  lost 281  ( 49.5 ms)
+begin_immediate       expected 400  final 400  lost   0  ( 45.6 ms)
+atomic_update         expected 400  final 400  lost   0  ( 46.5 ms)
+```
+</TerminalOutput>
+
+Các cách chống lost update chia thành bốn vũ khí, xếp từ gọn nhất tới tổng quát nhất:
+
+1. **Thao tác ghi nguyên tử (atomic write)**: đẩy phép tính thẳng vào database bằng `UPDATE counters SET value = value + 1 WHERE key = 'foo'`. Database tự gắn lock độc quyền khi thực thi (hoặc chạy đơn luồng như Redis), bỏ hoàn toàn nhịp đọc-về-app. Hãy coi chừng ORM: rất nhiều ORM kéo cả object về RAM, sửa một thuộc tính rồi save lại toàn bộ cột, vô tình tạo ra vòng lặp đọc-sửa-ghi nguy hiểm.
+2. **Khoá tường minh (`SELECT ... FOR UPDATE`)**: khi logic kiểm tra quá phức tạp để nhét vào một câu SQL (như kiểm tra luật đi cờ trước khi dời quân), hãy khoá luôn các dòng vừa đọc cho tới khi commit. Nhớ đặt khoá ở mọi nhánh code đụng tới dữ liệu đó và viết vòng retry phòng khi gặp deadlock.
+3. **Tự động phát hiện lost update**: `REPEATABLE READ` của PostgreSQL, `SERIALIZABLE` của Oracle và `SNAPSHOT` của SQL Server cho ghi song song rồi tự huỷ bên commit sau nếu hai bên chạm cùng dòng (**first-committer-wins**). `REPEATABLE READ` của MySQL InnoDB lại không bắt lỗi này, nên Jepsen và Kleppmann đều lưu ý không nên đánh đồng nó với Snapshot Isolation chuẩn.
+4. **Ghi có điều kiện (compare-and-set / CAS)**: trong hệ thống không có transaction đầy đủ, thêm `WHERE version = old_ver` (optimistic locking) để lệnh ghi vô hiệu nếu có người nhanh tay sửa trước. Lưu ý một bẫy ngầm trong MVCC: nếu mệnh đề `WHERE` đọc theo snapshot cũ thay vì bản mới nhất trên đĩa thì kiểm tra vẫn lọt — nhiều engine MVCC phải làm ngoại lệ riêng cho mệnh đề `WHERE` của `UPDATE`/`DELETE` để vá lỗ hổng này.
+
+### Với sao chép đa node (multi-leader và leaderless)
+
+Khoá và CAS đều giả định có duy nhất một bản dữ liệu chuẩn để hỏi. Ở hệ thống đa chủ (multi-leader) hoặc không chủ (leaderless) nhận ghi bất đồng bộ ở nhiều node, không có bộ quản lý khoá trung tâm nào cả. Lúc đó hệ thống phải giữ lại các phiên bản xung đột (**siblings**) rồi gộp bằng cấu trúc giao hoán như CRDT — còn nếu chọn **Last-Write-Wins (LWW)** theo đồng hồ hệ thống thì lỗi lost update lại âm thầm quay về.
+
+### Một vụ thật: thẻ quà tặng Starbucks
+
+**Bối cảnh.** Tháng 3/2015, chuyên gia bảo mật Egor Homakov mua ba thẻ quà tặng Starbucks, mỗi thẻ `$5`. Website cho người đã đăng nhập chuyển tiền giữa các thẻ bằng hai request: `POST /step1` lưu số tiền và hai thẻ vào session, còn `POST /step2?confirm` mới chuyển tiền thật rồi xoá session. Gửi confirm lần hai trong cùng một session thì bị từ chối, nên luồng này trông có vẻ an toàn.
+
+**Chuyện gì đã vỡ.** Lớp bảo vệ nằm ở session, mà không gì ngăn một tài khoản có hai session. Homakov đăng nhập từ hai trình duyệt (`session1` và `session2`), chuẩn bị cùng một lệnh chuyển ở cả hai, rồi bắn hai lệnh confirm cùng lúc. Năm lần đầu thất bại. Lần thứ sáu tạo ra hai lệnh chuyển `$5` từ một thẻ chỉ có `$5`, để lại hai thẻ `$15` và `$5`, tổng `$20`. Sau đó anh trả một hoá đơn `$16,70` tại cửa hàng bằng hai thẻ, trong khi chỉ bỏ vào `$15`. Nguyên nhân vẫn là khoảng hở kiểm tra-rồi-mới-làm như ở các phần trước: mỗi request đọc số dư `$5`, thấy đủ, rồi hành động trước khi lệnh trừ tiền của request kia kịp hiện ra.
+
+</Vi>
+
+<TxStarbucksSteps />
+
+<En>
+
+<Figure src={starbucksReceipt} alt="A crumpled Starbucks receipt from a store on Market Street in San Francisco showing a 16.70 dollar total paid with two gift cards" caption="The receipt Homakov kept as proof: a $16.70 bill paid with two gift cards, after the race created the extra balance." sourceTitle="Egor Homakov, Sakurity: Hacking Starbucks for unlimited coffee" sourceUrl="https://sakurity.com/blog/2015/05/21/starbucks.html" />
+
+</En>
+
+<Vi>
+
+<Figure src={starbucksReceipt} alt="Biên lai nhàu của một cửa hàng Starbucks trên phố Market, San Francisco, ghi tổng 16,70 đô la trả bằng hai thẻ quà tặng" caption="Biên lai Homakov giữ làm bằng chứng: hoá đơn $16,70 trả bằng hai thẻ quà tặng, sau khi lỗi race tạo ra số dư dư." sourceTitle="Egor Homakov, Sakurity: Hacking Starbucks for unlimited coffee" sourceUrl="https://sakurity.com/blog/2015/05/21/starbucks.html" />
+
+</Vi>
+
+<TxStarbucksRace />
+
+<En>
+
+**Which idea resolves it.** Rate limits per IP, random delays, and a transaction used the wrong way all leave the gap open. Homakov's verdict is that the only right fix is a pessimistic lock, the `FOR UPDATE` clause from this section. With it, the second confirm waits on the wallet row, re-reads the new balance, and is refused. An atomic `UPDATE ... SET balance = balance - 5 WHERE balance >= 5` closes the same gap in one statement. Disclosure was slow: he could find no technical contact at Starbucks, and he got the bug fixed in about 10 days.
+
+<Concepts>
+
+- **Read-modify-write cycle**: reading a value into application code, computing a new value, and writing it back in a separate query.
+- **Lost update**: a concurrency bug where two concurrent read-modify-write cycles overwrite each other so one update vanishes.
+- **Compare-and-set (CAS) / optimistic locking**: updating a row only `WHERE version = expected_version`, forcing a retry if someone else bumped the version first.
+- **Deadlock**: two or more transactions stuck forever waiting for each other to release locks; databases break deadlocks by aborting one transaction.
+- **First-committer-wins**: the rule in PostgreSQL and Oracle Snapshot Isolation that aborts the second transaction if two concurrent writers modify the same row.
+
+</Concepts>
+
+---
+
+## 4. Write skew and phantoms
+
+Stop dirty writes and lost updates, and you have fixed every conflict where two transactions write the **same** object. One trap still waits under Snapshot Isolation: two transactions can read the same premise, write to **different** rows, and still break your database invariant.
+
+Consider a hospital on-call roster where at least one doctor must always stay on shift. Two doctors on shift `#42` — Dr. Lan and Dr. Minh — both feel ill and click "go off call" at the same instant.
+
+</En>
+
+<Vi>
+
+**Ý tưởng nào giải quyết.** Giới hạn request theo IP, độ trễ ngẫu nhiên hay dùng transaction sai cách đều để hở khoảng trống đó. Kết luận của Homakov là cách sửa đúng duy nhất là khoá bi quan, tức mệnh đề `FOR UPDATE` của phần này. Có nó, lệnh confirm thứ hai phải chờ trên dòng ví, đọc lại số dư mới và bị từ chối. Một câu `UPDATE ... SET balance = balance - 5 WHERE balance >= 5` cũng bịt được khoảng hở đó trong một câu lệnh. Việc báo lỗi lại chậm: anh không tìm được đầu mối kỹ thuật nào ở Starbucks, và anh đã xử lý để lỗi được sửa trong khoảng 10 ngày.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Read-modify-write cycle (vòng đọc-sửa-ghi)**: đọc dữ liệu về code ứng dụng, tính giá trị mới, rồi gửi câu lệnh ghi đè lại trong một truy vấn riêng.
+- **Lost update (mất bản cập nhật)**: lỗi tranh chấp khi hai vòng đọc-sửa-ghi chạy song song đè lên nhau làm biến mất một phần thay đổi.
+- **Compare-and-set (CAS) / optimistic locking**: chỉ cho ghi nếu cột `version` hoặc giá trị cũ chưa thay đổi, buộc phải thử lại nếu đã có người sửa trước.
+- **Deadlock (khoá chết)**: hai hoặc nhiều giao dịch đứng chờ vòng tròn nhau nhả khoá; database phải tự chọn huỷ một bên để hệ thống chạy tiếp.
+- **First-committer-wins**: quy tắc ở Snapshot Isolation của Postgres và Oracle: ai commit sau trên cùng một dòng đã bị sửa song song sẽ bị abort.
+
+</Concepts>
+
+---
+
+## 4. Write skew và lỗi phantom
+
+Chặn được dirty write và lost update là bạn đã khoá chặt mọi xung đột trên **cùng một đối tượng**. Nhưng dưới Snapshot Isolation vẫn còn một cái bẫy tinh vi hơn: hai giao dịch có thể đọc cùng một điều kiện tiền đề, sửa **hai dòng hoàn toàn khác nhau**, và vẫn làm gãy luật bất biến của hệ thống.
+
+Hãy tưởng tượng phần mềm xếp ca trực bệnh viện với quy tắc bắt buộc: mỗi ca phải có ít nhất một bác sĩ trực. Hai bác sĩ của ca `#42` — BS Lan và BS Minh — cùng bị ốm và bấm nút xin nghỉ gần như cùng một tích tắc.
+
+</Vi>
+
+<TxWriteSkewDoctors />
+
+<En>
+
+Both transactions saw two doctors on call inside their snapshot, updated disjoint rows (`Lan` and `Minh`), and committed cleanly under Snapshot Isolation — leaving **zero** doctors on call. First-committer-wins stays silent because their write sets never overlap.
+
+Look closely, and you realize write skew pops up across everyday backend code:
+
+- **Meeting room double-booking**: checking `SELECT COUNT(*) FROM bookings WHERE ...` returns `0`, then two transactions insert conflicting rows for noon–1 p.m.
+- **Preventing double-spending**: inserting a tentative debit row, summing all debits on the account, and checking balance &ge; 0 — two concurrent spend transactions miss each other's uncommitted inserts and drive the balance negative (just like Flexcoin and Poloniex).
+- **Multiplayer board rules or claiming usernames**: checking that a square or username is free, then inserting a row claiming it (fortunately, a `UNIQUE` index fixes username claims automatically).
+
+### Why `SELECT ... FOR UPDATE` misses phantoms
+
+In the doctors example, both rows already exist in the table, so `SELECT * FROM doctors WHERE shift_id = 42 AND on_call = true FOR UPDATE` locks both rows and stops write skew. In the room booking and double-spending examples, however, the initial `SELECT` checks for the **absence** of rows (`COUNT = 0`).
+
+When a query returns zero rows, `SELECT FOR UPDATE` has no rows to attach locks to. One transaction's `INSERT` silently changes the search result of another transaction's earlier `SELECT` — an effect called a **phantom**. When no serializable isolation is available, teams sometimes **materialize conflicts** by pre-creating dummy lock rows (such as 15-minute room slots for the next six months) just so `FOR UPDATE` has something physical to lock, though leaking concurrency hacks into your schema is a brittle last resort.
+
+Try every combination yourself in the interactive stepper below. Notice how Snapshot Isolation fixes Read Skew, aborts Lost Updates (in Postgres/Oracle style), yet still lets Write Skew commit with `0` doctors left on call.
+
+</En>
+
+<Vi>
+
+Cả hai giao dịch đều nhìn thấy 2 bác sĩ đang trực trong snapshot của mình, mỗi bên sửa một dòng riêng (`Lan` và `Minh`), rồi cả hai đều commit trót lọt dưới Snapshot Isolation — để lại **0** bác sĩ trực. Luật first-committer-wins không hề kêu báo động vì hai tập ghi không chạm nhau một pixel nào.
+
+Để ý kỹ bạn sẽ thấy write skew ẩn nấp trong hàng đống bài toán backend hằng ngày:
+
+- **Đặt trùng phòng họp**: truy vấn `SELECT COUNT(*) FROM bookings WHERE ...` trả về `0`, rồi hai giao dịch cùng chèn một lịch đặt từ 12g–13g.
+- **Chặn tiêu quá số dư (double-spending)**: chèn một dòng chi tiêu tạm, cộng tổng rồi kiểm tra số dư không âm — hai lệnh rút song song không thấy dòng mới của nhau và đẩy số dư xuống âm (y hệt vụ Flexcoin và Poloniex).
+- **Tranh ô bàn cờ hoặc đăng ký username**: kiểm tra xem tên đã có ai lấy chưa rồi mới `INSERT` (may mắn là ràng buộc `UNIQUE` tự chặn được vụ trùng username).
+
+### Vì sao `SELECT ... FOR UPDATE` bó tay trước phantom
+
+Ở ví dụ bác sĩ, cả hai dòng đã nằm sẵn trong bảng, nên `SELECT * FROM doctors WHERE shift_id = 42 AND on_call = true FOR UPDATE` khoá được cả hai dòng và chặn được write skew. Nhưng ở bài toán đặt phòng họp hay kiểm tra số dư kiểu chèn dòng mới, câu `SELECT` đầu tiên lại đi tìm **sự vắng mặt** của dữ liệu (`COUNT = 0`).
+
+Khi câu truy vấn trả về 0 dòng, `SELECT FOR UPDATE` chẳng có dòng nào để gắn khoá lên cả. Lệnh `INSERT` của giao dịch này âm thầm làm thay đổi kết quả câu `SELECT` trước đó của giao dịch kia — hiệu ứng đó gọi là **phantom**. Nếu database không có mức serializable, đôi khi người ta phải dùng hạ sách **materializing conflicts**: tạo sẵn một bảng khoá ảo (như mọi khung giờ 15 phút của từng phòng trong sáu tháng tới) để có dòng thật mà `FOR UPDATE`, chấp nhận làm xấu cả thiết kế bảng.
+
+Bạn hãy tự bấm thử từng tình huống trong trình mô phỏng tương tác ngay bên dưới. Để ý cách Snapshot Isolation chữa được Read Skew, tự abort Lost Update (kiểu Postgres/Oracle), nhưng vẫn để Write Skew commit trót lọt với 0 bác sĩ trực.
+
+</Vi>
+
+<TxIsolation />
+
+<En>
+
+<Concepts>
+
+- **Write skew**: a concurrency anomaly where two transactions read the same premise, update disjoint objects, and violate an invariant together.
+- **Premise**: a condition checked by a `SELECT` query (such as "2 doctors are on call") that a transaction relies on when deciding what to write next.
+- **Phantom**: a write in one transaction that changes the set of rows matching another transaction's `WHERE` condition, often because the matching row did not exist yet when the read ran.
+- **Materializing conflicts**: artificially creating lockable placeholder rows (like pre-populated time-slot rows) so `SELECT FOR UPDATE` can lock a phantom space.
+
+</Concepts>
+
+---
+
+## 5. Three ways to get serializability
+
+For decades, textbooks gave one answer to weak isolation traps: turn on **serializable isolation**, so concurrent executions always match some serial one-at-a-time ordering. Today, databases achieve true serializability using three distinct architectures — one old, one ultra-minimalist, and one optimistic.
+
+### 1. Actual serial execution (single-threaded + stored procedures)
+
+Why fight concurrency races when you can remove concurrency altogether? Because RAM got cheap enough to hold active OLTP datasets in memory and OLTP writes are short, engines like **VoltDB/H-Store**, **Redis**, and **Datomic** execute every write transaction sequentially on **one CPU core** per partition (while long read-only analytics run separately on snapshots).
+
+The catch is network latency. An interactive client/server transaction spends most of its time sitting idle across TCP round-trips waiting for the app to send the next query, which would crush a single thread's throughput. So serial engines disallow interactive multistatement transactions: the app submits the whole transaction upfront as a deterministic **stored procedure** (written in Java, Lua, or Clojure rather than legacy PL/SQL). Throughput scales linearly across CPU cores *only* if transactions stay inside one shard — VoltDB notes cross-shard writes drop to roughly 1,000 per second regardless of cluster size.
+
+</En>
+
+<Vi>
+
+## 5. Ba cách đạt serializability
+
+Suốt nhiều thập kỷ, sách giáo khoa chỉ có một câu trả lời cho các cái bẫy của isolation yếu: bật **serializable isolation**, để các transaction chạy đồng thời luôn cho kết quả giống như chạy lần lượt từng cái một theo một thứ tự nào đó. Ngày nay database đạt serializability thật sự bằng ba kiến trúc khác nhau: một cái cũ, một cái cực kỳ tối giản và một cái lạc quan.
+
+### 1. Chạy tuần tự thật sự (một luồng + stored procedure)
+
+Sao phải vật lộn với race condition khi có thể bỏ luôn sự đồng thời? Vì RAM giờ đủ rẻ để chứa toàn bộ dữ liệu OLTP đang dùng, và các lệnh ghi OLTP vốn ngắn, nên những engine như **VoltDB/H-Store**, **Redis** và **Datomic** chạy mọi transaction ghi lần lượt trên **một lõi CPU** cho mỗi partition (còn các truy vấn phân tích chỉ-đọc dài thì chạy riêng trên snapshot).
+
+Cái khó là độ trễ mạng. Một transaction tương tác kiểu client/server dành phần lớn thời gian ngồi chờ qua các vòng TCP để app gửi câu truy vấn kế tiếp, và điều đó sẽ bóp nghẹt thông lượng của một luồng đơn. Vì vậy engine tuần tự không cho phép transaction tương tác nhiều câu lệnh: app phải gửi trọn transaction ngay từ đầu dưới dạng một **stored procedure** có tính xác định (viết bằng Java, Lua hoặc Clojure thay vì PL/SQL kiểu cũ). Thông lượng chỉ tăng tuyến tính theo số lõi CPU *khi* transaction nằm gọn trong một shard; VoltDB cho biết ghi xuyên shard tụt xuống khoảng 1.000 lệnh mỗi giây bất kể cụm lớn cỡ nào.
+
+</Vi>
+
+<TxSerialExec />
+
+<En>
+
+### 2. Two-Phase Locking (2PL / SS2PL)
+
+For 30 years, strong strict **two-phase locking (2PL)** was the only practical game in town — and it still powers `SERIALIZABLE` in MySQL InnoDB and SQL Server, plus `REPEATABLE READ` in IBM Db2. Unlike Snapshot Isolation, **readers block writers and writers block readers**:
+
+- Every object carries a **shared lock** (`S-lock`, allowing multiple readers) and an **exclusive lock** (`X-lock`, allowing one writer and blocking every reader).
+- Transactions acquire locks while executing (growing phase) and hold all of them until commit or abort (shrinking phase).
+- To catch **phantoms** where no row exists yet, 2PL uses **predicate locks** or their faster approximation, **index-range (next-key) locks** attached to index entries (or falls back to locking the entire table if no index matches).
+
+</En>
+
+<Vi>
+
+### 2. Two-Phase Locking (2PL / SS2PL)
+
+Trong 30 năm, **two-phase locking (2PL)** nghiêm ngặt là lựa chọn thực tế duy nhất, và nó vẫn đang chạy sau `SERIALIZABLE` của MySQL InnoDB và SQL Server, cùng `REPEATABLE READ` của IBM Db2. Khác với Snapshot Isolation, ở đây **người đọc chặn người ghi và người ghi chặn người đọc**:
+
+- Mỗi đối tượng có một **khoá chia sẻ** (`S-lock`, cho nhiều người đọc cùng lúc) và một **khoá độc quyền** (`X-lock`, chỉ cho một người ghi và chặn mọi người đọc).
+- Transaction xin khoá trong lúc chạy (pha tăng) và giữ toàn bộ cho tới khi commit hoặc abort (pha giảm).
+- Để bắt **phantom** khi dòng chưa tồn tại, 2PL dùng **predicate lock** hoặc bản xấp xỉ nhanh hơn là **index-range (next-key) lock** gắn vào các mục chỉ mục (hoặc khoá cả bảng nếu không có chỉ mục phù hợp).
+
+</Vi>
+
+<TxLockPhases />
+
+<En>
+
+The pain of 2PL is unstable tail latency and frequent deadlocks. One slow table scan acquires shared locks across rows and freezes concurrent writers behind it. (Also remember: **2PL** is a single-node/distributed concurrency-control locking algorithm; **2PC**, covered next, is a distributed atomic-commit protocol — unrelated despite similar acronyms.)
+
+### 3. Serializable Snapshot Isolation (SSI)
+
+Introduced in 2008 and shipped in **PostgreSQL**, **CockroachDB**, **FoundationDB**, and SQL Server Hekaton, **Serializable Snapshot Isolation (SSI)** gives full serializability without blocking readers behind writers. Instead of blocking upfront, SSI is **optimistic**: it runs transactions on top of MVCC snapshots, watches for outdated premises, and aborts (`SQLSTATE 40001`) at commit only when two transactions form a dangerous `rw-antidependency` cycle.
+
+SSI checks two clues: reading a stale MVCC version whose uncommitted writer commits before you do, and writes that land *after* another transaction's `SELECT` read that range. To catch the second case without blocking, PostgreSQL attaches non-blocking **predicate tripwires** (`SIREAD` locks) to tuples, index ranges, or tables — and waits until commit before aborting so read-only transactions never cause needless retries (and `BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE READ ONLY DEFERRABLE` avoids SSI overhead completely).
+
+</En>
+
+<Vi>
+
+Cái đau của 2PL là độ trễ đuôi (tail latency) thất thường và deadlock xảy ra thường xuyên. Một lần quét bảng chậm xin khoá chia sẻ trên hàng loạt dòng và làm các lệnh ghi đồng thời xếp hàng đứng chờ. (Nhớ thêm: **2PL** là thuật toán khoá điều khiển đồng thời, còn **2PC** ở phần sau là giao thức atomic commit phân tán; hai thứ không liên quan dù viết tắt nghe giống nhau.)
+
+### 3. Serializable Snapshot Isolation (SSI)
+
+Ra đời năm 2008 và có mặt trong **PostgreSQL**, **CockroachDB**, **FoundationDB** và SQL Server Hekaton, **Serializable Snapshot Isolation (SSI)** cho serializability đầy đủ mà không bắt người đọc chờ người ghi. Thay vì chặn từ đầu, SSI **lạc quan**: nó chạy transaction trên các snapshot MVCC, theo dõi những tiền đề đã lỗi thời, và chỉ abort (`SQLSTATE 40001`) lúc commit khi hai transaction tạo thành một vòng `rw-antidependency` nguy hiểm.
+
+SSI kiểm tra hai dấu hiệu: đọc một phiên bản MVCC cũ mà người ghi chưa commit lại commit trước bạn, và những lệnh ghi rơi vào vùng mà `SELECT` của transaction khác đã đọc *trước đó*. Để bắt trường hợp thứ hai mà không chặn ai, PostgreSQL gắn các **bẫy predicate không chặn** (`SIREAD` lock) lên tuple, dải chỉ mục hoặc cả bảng, và đợi tới lúc commit mới abort để transaction chỉ-đọc không bao giờ bị thử lại vô ích (còn `BEGIN TRANSACTION ISOLATION LEVEL SERIALIZABLE READ ONLY DEFERRABLE` thì tránh hẳn chi phí của SSI).
+
+</Vi>
+
+<TxSsiFlow />
+
+<En>
+
+<GitHubCode repo="postgres/postgres" path="src/backend/storage/lmgr/predicate.c" lines="L27-L58" url="https://github.com/postgres/postgres/blob/ba11c48390004ed49b889cbd718c9e5f691fe493/src/backend/storage/lmgr/predicate.c#L27-L58" caption="Inside PostgreSQL's SSI engine: SIREAD predicate locks never block queries — they act as non-blocking flags in RAM that survive COMMIT until overlapping transactions finish so rw-conflicts can be spotted.">
+```c
+ * Predicate locks for Serializable Snapshot Isolation (SSI) are SIREAD
+ * locks, which are so different from normal locks that a distinct set of
+ * structures is required to handle them.  They are needed to detect
+ * rw-conflicts when the read happens before the write.  (When the write
+ * occurs first, the reading transaction can check for a conflict by
+ * examining the MVCC data.)
+ *
+ * (1)	Besides tuples actually read, they must cover ranges of tuples
+ *		which would have been read based on the predicate.  This will
+ *		require modelling the predicates through locks against database
+ *		objects such as pages, index ranges, or entire tables.
+ *
+ * (2)	They must be kept in RAM for quick access.  Because of this, it
+ *		isn't possible to always maintain tuple-level granularity -- when
+ *		the space allocated to store these approaches exhaustion, a
+ *		request for a lock may need to scan for situations where a single
+ *		transaction holds many fine-grained locks which can be coalesced
+ *		into a single coarser-grained lock.
+ *
+ * (3)	They never block anything; they are more like flags than locks
+ *		in that regard; although they refer to database objects and are
+ *		used to identify rw-conflicts with normal write locks.
+ *
+ * (4)	While they are associated with a transaction, they must survive
+ *		a successful COMMIT of that transaction, and remain until all
+ *		overlapping transactions complete.  This even means that they
+ *		must survive termination of the transaction's process.
+```
+</GitHubCode>
+
+| Technique | Concurrency model | Read-only queries | Contention behavior | Multi-shard scaling |
+|---|---|---|---|---|
+| **Serial execution** (VoltDB, Redis) | Single-threaded loop; stored procedures only | Separate snapshot reads | One slow query stalls its entire core/shard | Fast inside 1 shard; cross-shard hits wall (~1k/s) |
+| **2PL** (MySQL / SQL Server `SERIALIZABLE`) | Pessimistic shared & exclusive + index-range locks | Take shared locks; block concurrent writers | High tail latency; frequent deadlocks | Works, though lock waits compound across nodes |
+| **SSI** (PostgreSQL, CockroachDB, FoundationDB) | Optimistic MVCC + `SIREAD` tripwire cycle checks | Never block writers and never abort | Aborts & retries rise under hot write contention | Scales horizontally across shards (e.g. FoundationDB) |
+
+Even today, engineers debate the trade-off: Marc Brooker argued in December 2024 why Snapshot Isolation hits a practical sweet spot for Aurora DSQL (avoiding write-skew abort costs when apps can use constraints or `SELECT FOR UPDATE`), while CockroachDB runs `SERIALIZABLE` by default and argues weak isolation leaves silent logic bugs ticking in production.
+
+<Concepts>
+
+- **Stored procedure**: transaction code submitted as a single program to run inside the database without interactive client network round-trips.
+- **Two-Phase Locking (2PL)**: pessimistic locking where locks are acquired during execution (growing phase) and all released together at commit/abort (shrinking phase).
+- **Index-range (next-key) lock**: locking a range of entries in an index to prevent phantom inserts without locking the whole table.
+- **SSI (Serializable Snapshot Isolation)**: optimistic concurrency control built on MVCC that lets reads and writes run freely and aborts at commit on dangerous `rw-antidependency` cycles.
+- **SIREAD lock**: PostgreSQL's non-blocking tripwire flag tracking what rows or index ranges a transaction read so later conflicting writes can trigger a serialization check.
+
+</Concepts>
+
+---
+
+## 6. Distributed transactions and 2PC
+
+On a single node, atomic commit comes down to one hard drive controller: write the changes to the WAL, then write the commit record. If power fails before the commit record lands, roll back on restart; if it lands, recover forward.
+
+Split a transaction across two shards, or across a database and a message broker, and sending `COMMIT` directly to both nodes breaks atomicity immediately. Node 2 might commit and expose the row to other users while Node 1 hits a constraint error or times out — and once Node 2 has committed under Read Committed or higher, you cannot un-commit it without rewriting history for everyone who already read it.
+
+### Two-Phase Commit: a system of promises
+
+**Two-Phase Commit (2PC)** solves atomic commitment across nodes by introducing a **coordinator** (transaction manager) and splitting commit into two phases with two irrevocable points of no return.
+
+</En>
+
+<Vi>
+
+### Bên trong mã nguồn và cái nhìn tổng thể ba hướng
+
+Hãy nhìn trực tiếp cách PostgreSQL hiện thực bẫy SSI trong nhân lưu trữ của họ (`predicate.c`): `SIREAD` lock thực chất không chặn bất kỳ ai mà chỉ đóng vai cờ báo hiệu trong RAM, tồn tại vượt qua cả thời điểm `COMMIT` cho tới khi các giao dịch gối đầu chạy xong để kịp bắt vòng xung đột `rw-conflict`.
+
+<GitHubCode repo="postgres/postgres" path="src/backend/storage/lmgr/predicate.c" lines="L27-L58" url="https://github.com/postgres/postgres/blob/ba11c48390004ed49b889cbd718c9e5f691fe493/src/backend/storage/lmgr/predicate.c#L27-L58" caption="Trích mã nguồn PostgreSQL cho SSI: SIREAD lock không chặn câu lệnh nào cả — chúng hoạt động như các lá cờ trong RAM sống qua cả lúc COMMIT để phát hiện xung đột đọc-ghi.">
+```c
+ * Predicate locks for Serializable Snapshot Isolation (SSI) are SIREAD
+ * locks, which are so different from normal locks that a distinct set of
+ * structures is required to handle them.  They are needed to detect
+ * rw-conflicts when the read happens before the write.  (When the write
+ * occurs first, the reading transaction can check for a conflict by
+ * examining the MVCC data.)
+ *
+ * (1)	Besides tuples actually read, they must cover ranges of tuples
+ *		which would have been read based on the predicate.  This will
+ *		require modelling the predicates through locks against database
+ *		objects such as pages, index ranges, or entire tables.
+ *
+ * (2)	They must be kept in RAM for quick access.  Because of this, it
+ *		isn't possible to always maintain tuple-level granularity -- when
+ *		the space allocated to store these approaches exhaustion, a
+ *		request for a lock may need to scan for situations where a single
+ *		transaction holds many fine-grained locks which can be coalesced
+ *		into a single coarser-grained lock.
+ *
+ * (3)	They never block anything; they are more like flags than locks
+ *		in that regard; although they refer to database objects and are
+ *		used to identify rw-conflicts with normal write locks.
+ *
+ * (4)	While they are associated with a transaction, they must survive
+ *		a successful COMMIT of that transaction, and remain until all
+ *		overlapping transactions complete.  This even means that they
+ *		must survive termination of the transaction's process.
+```
+</GitHubCode>
+
+Mỗi kỹ thuật đạt serializability đều có một điểm đánh đổi rõ rệt:
+
+| Kỹ thuật | Cách chạy đồng thời | Lệnh chỉ đọc | Khi tranh chấp cao | Mở rộng nhiều shard |
+|---|---|---|---|---|
+| **Chạy tuần tự thật (Serial execution)** (VoltDB, Redis) | Một luồng duy nhất mỗi shard; bắt buộc stored procedure | Chạy trên snapshot riêng | Một câu chậm làm kẹt cả nhân CPU / cả shard | Rất nhanh trong 1 shard; đụng nhiều shard tụt còn ~1.000/s |
+| **Khoá hai pha (2PL)** (MySQL / SQL Server `SERIALIZABLE`) | Bi quan: lock chia sẻ, lock độc quyền và index-range lock | Giữ shared lock nên chặn người ghi | Độ trễ đuôi giật cục; hay dính deadlock | Chạy được nhưng thời gian chờ lock cộng dồn qua mạng |
+| **SSI** (PostgreSQL, CockroachDB, FoundationDB) | Lạc quan trên MVCC + bẫy `SIREAD` kiểm tra vòng `rw` | Không chặn người ghi, không bao giờ bị abort | Tỉ lệ abort & retry tăng nếu nhiều lệnh sửa cùng dòng nóng | Mở rộng ngang qua nhiều shard (ví dụ FoundationDB) |
+
+Cuộc tranh luận này tới giờ vẫn tiếp diễn: tháng 12/2024, Marc Brooker giải thích vì sao Aurora DSQL chọn Snapshot Isolation làm điểm cân bằng ngọt ngào nhất (tránh chi phí abort khi ứng dụng tự xử lý được bằng ràng buộc hoặc `SELECT FOR UPDATE`), trong khi CockroachDB mặc định chạy `SERIALIZABLE` vì cho rằng isolation yếu luôn để lại các lỗi logic âm thầm trên production.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Stored procedure (thủ tục lưu trữ)**: đoạn code chứa cả transaction gửi một lượt vào chạy bên trong database để triệt tiêu độ trễ mạng giữa các câu lệnh.
+- **Two-Phase Locking (2PL — khoá hai pha)**: cơ chế bi quan lấy lock trong lúc chạy (pha tăng) và giữ chặt cho tới khi commit/abort mới nhả hết cùng lúc (pha giảm).
+- **Index-range / next-key lock**: khoá một dải giá trị trên index để chặn lệnh chèn dòng phantom mà không phải khoá cả bảng.
+- **SSI (Serializable Snapshot Isolation)**: điều khiển đồng thời lạc quan trên nền MVCC, cho đọc ghi chạy tự do và chỉ abort lúc commit nếu thấy vòng xung đột `rw-antidependency`.
+- **SIREAD lock**: cờ bẫy không chặn của PostgreSQL, ghi dấu các dòng hoặc dải index vừa đọc để phát hiện nếu giao dịch khác sửa đè tiền đề đó.
+
+</Concepts>
+
+---
+
+## 6. Giao dịch phân tán và 2PC
+
+Trên một máy đơn lẻ, tính nguyên tử khi commit nằm gọn ở bộ điều khiển của một chiếc ổ đĩa: ghi thay đổi vào WAL rồi ghi tiếp bản ghi commit. Mất điện trước khi bản ghi commit xuống đĩa thì rollback; đã xuống đĩa rồi thì khôi phục tiếp.
+
+Nhưng khi một giao dịch trải qua hai shard, hoặc qua một database và một message broker, việc gửi thẳng lệnh `COMMIT` tới cả hai nơi sẽ phá hỏng atomicity ngay lập tức. Node 2 có thể commit xong và để người dùng khác đọc thấy, trong khi Node 1 gặp lỗi ràng buộc hoặc rớt mạng — và một khi Node 2 đã commit dưới Read Committed trở lên, bạn không thể rút lại lịch sử đã lộ ra ngoài nữa.
+
+### Two-Phase Commit: một hệ thống của những lời hứa
+
+**Two-Phase Commit (2PC)** giải bài toán atomic commit qua nhiều node bằng cách thêm một **điều phối viên (coordinator)** và tách việc commit thành hai pha với hai điểm không thể quay đầu.
+
+</Vi>
+
+<TxTwoPhaseCommit />
+
+<En>
+
+The blocking catch sits right after Phase 1. Once a participant replies `Yes`, it has promised to stay ready to commit even across crashes, which means it **must keep all transaction row locks held** while in doubt. If the coordinator crashes or loses its disk log at that moment, participants stay blocked indefinitely — even rebooting the database server keeps those orphaned locks pinned until the coordinator recovers or an engineer risks atomicity with a manual heuristic decision. (A non-blocking theoretical alternative, **Three-Phase Commit**, assumes bounded network delays and bounded process pauses that do not hold in real networks.)
+
+### Heterogeneous XA vs. homogeneous Raft-backed 2PC
+
+There is a sharp line between two styles of 2PC that engineers often lump together:
+
+- **XA transactions across heterogeneous systems** (such as Java JTA coordinating PostgreSQL plus ActiveMQ): XA is an old 1991 C API, not a network protocol, so the coordinator usually runs inside the **application process** itself using local disk logs and database client drivers. Because XA targets the lowest common denominator, it cannot detect deadlocks across two different products, fails with SSI, and breaks if the app machine crashes while locks are in doubt.
+- **Database-internal distributed transactions** (such as Google Spanner, CockroachDB, FoundationDB, TiDB, and YugabyteDB): every participant runs the same database software, coordinates directly over replicated Raft or Paxos consensus groups instead of fragile app-server local disks, and couples 2PC with distributed concurrency control so failover happens automatically without hanging locks.
+
+</En>
+
+<Vi>
+
+Cái bẫy treo hệ thống nằm ngay sau Pha 1. Một khi nút tham gia đã trả lời `Yes`, nó cam kết phải sẵn sàng commit kể cả khi vừa khởi động lại, nghĩa là nó **bắt buộc phải giữ chặt mọi lock ghi trên các dòng liên quan** suốt trạng thái in-doubt. Nếu điều phối viên sập hoặc mất file log đĩa ngay lúc đó, các shard kia sẽ bị treo lock vô thời hạn — kể cả reboot database server cũng vẫn phải giữ lại các lock mồ côi đó cho tới khi điều phối viên sống lại hoặc kỹ sư buộc phải đánh liều atomicity bằng quyết định thủ công (heuristic decision). (Giao thức lý thuyết **Three-Phase Commit** né được việc treo bằng cách giả định mạng và máy có giới hạn độ trễ cứng, điều không tồn tại trên mạng thật.)
+
+### XA đa hệ thống so với 2PC nội bộ chạy trên Raft/Paxos
+
+Có một ranh giới rất rõ giữa hai kiểu 2PC thường bị gộp chung:
+
+- **XA xuyên nhiều công nghệ khác nhau** (ví dụ Java JTA điều phối giữa PostgreSQL và ActiveMQ): XA là một C API ra đời năm 1991 chứ không phải giao thức mạng, nên điều phối viên thường nhúng thẳng vào **tiến trình ứng dụng**, ghi log ra ổ đĩa máy app và nói chuyện qua driver. Vì phải hạ chuẩn cho mọi hãng tương thích, XA không phát hiện được deadlock xuyên hệ thống, không chạy được với SSI, và sẽ treo cứng lock nếu máy app sập giữa lúc in-doubt.
+- **Giao dịch phân tán nội bộ trong một database** (như Google Spanner, CockroachDB, FoundationDB, TiDB, YugabyteDB): toàn bộ node đều chạy chung một phần mềm database, điều phối trực tiếp qua nhóm đồng thuận Raft hoặc Paxos thay vì ổ đĩa đơn lẻ trên máy app, và gắn chặt 2PC với điều khiển đồng thời phân tán để tự chuyển dự phòng khi mất node.
+
+</Vi>
+
+<TxXaVsRaft />
+
+<En>
+
+### Exactly-once processing without 2PC
+
+You often hear that you need XA/2PC to consume a queue message and update a database row "exactly once". In practice, you can get effective **exactly-once processing** using only a single-database transaction:
+
+1. Assign every incoming message a unique `message_id`.
+2. Inside the same local DB transaction that writes your business updates, insert `message_id` into a `processed_messages` table guarded by a `UNIQUE` primary key (if already present, skip the business write).
+3. Commit the database transaction first, then acknowledge the message to the broker (and delete old `message_id` records later if desired).
+
+If the worker crashes before acknowledging the broker, the redelivered message hits the `UNIQUE` constraint and deduplicates cleanly — giving you idempotent, exactly-once side effects without paying 2PC's latency and lock penalties across unrelated systems.
+
+</En>
+
+<Vi>
+
+### Xử lý đúng một lần (exactly-once) mà không cần 2PC
+
+Người ta hay nghĩ muốn lấy một tin nhắn từ queue và ghi vào database "đúng một lần" thì bắt buộc phải dùng XA/2PC. Thực tế, bạn làm được hiệu ứng **exactly-once** hoàn chỉnh chỉ bằng một transaction cục bộ trong database:
+
+1. Gắn cho mỗi tin nhắn một mã `message_id` duy nhất.
+2. Trong cùng transaction ghi dữ liệu nghiệp vụ vào database, chèn `message_id` vào bảng `processed_messages` có khoá `UNIQUE` (nếu đã tồn tại thì bỏ qua bước xử lý nghiệp vụ).
+3. Commit transaction database trước, rồi mới gửi xác nhận (ack) cho broker (có thể dọn các `message_id` cũ sau).
+
+Nếu worker sập trước khi kịp báo ack cho broker, tin nhắn được gửi lại sẽ đụng ngay ràng buộc `UNIQUE` và bị loại bỏ sạch sẽ — đạt hiệu ứng xử lý đúng một lần mà không phải gánh chi phí độ trễ và nguy cơ treo lock của 2PC xuyên hệ thống.
+
+</Vi>
+
+<TxExactlyOnce />
+
+<En>
+
+<LinkCard url="https://martin.kleppmann.com/2014/11/25/hermitage-testing-the-i-in-acid.html" title="Hermitage: Testing the “I” in ACID" description="Martin Kleppmann's live test suite comparing how PostgreSQL, MySQL, Oracle, and SQL Server handle weak isolation anomalies in practice." tag="Reference" />
+
+<Concepts>
+
+- **Atomic commitment problem**: ensuring every node participating in a distributed transaction either all commits or all aborts, never a split mix.
+- **In-doubt transaction**: a participant that already voted `Yes` in 2PC Phase 1 and must hold locks waiting to hear `Commit` or `Abort` from a crashed coordinator.
+- **Heuristic decision**: an emergency manual override letting an operator force-commit or force-abort an orphaned in-doubt transaction, risking broken atomicity.
+- **X/Open XA**: a 1991 C API standard for running 2PC across different database and message-broker vendors via application client drivers.
+- **Idempotency**: making an operation safe to run multiple times with the same effect as running it once, often by recording unique message IDs inside a local DB transaction.
+
+</Concepts>
+
+---
+
+## Key takeaways
+
+- **Never assume `BEGIN ... COMMIT` prevents race conditions.** Default isolation levels (`Read Committed` in PostgreSQL/Oracle/SQL Server, `REPEATABLE READ` in MySQL) still leave specific anomalies open; check Hermitage or test concurrent paths explicitly.
+- **Push single-row math into the database.** Prefer atomic updates (`SET balance = balance - $x WHERE balance >= $x`) or explicit `SELECT ... FOR UPDATE` over ORM read-modify-write cycles, and always retry transient `40001` or deadlock errors.
+- **Watch for disjoint-row invariants.** Snapshot Isolation stops read skew and (in Postgres/Oracle) lost updates, yet still lets write skew and phantoms break rules like "at least one doctor on call" or "no double-booked rooms" unless you switch to `SERIALIZABLE` (SSI) or `UNIQUE` constraints.
+- **Prefer optimistic SSI over 2PL for mixed read/write workloads.** In PostgreSQL and CockroachDB, SSI keeps read-only snapshots lock-free while using `SIREAD` tripwires to abort dangerous `rw-antidependency` cycles before data corrupts.
+- **Avoid XA across separate technologies when idempotency works.** Database-internal 2PC over Raft/Paxos scales cleanly, whereas cross-vendor XA ties lock availability to app-host crashes; deduplicating `message_id` inside one local transaction gives exactly-once processing without 2PC.
+
+---
+
+## Review questions
+
+1. Why did Flexcoin and Poloniex lose funds even though they stored balances in relational databases, and why is "use an ACID database" incomplete advice? *(Intro, Section 1, Section 3)*
+2. In PostgreSQL MVCC, why can reader transaction `50` still read a `$250` row marked `deleted_by = 48` while ignoring a `$600` row marked `inserted_by = 48`? *(Section 2)*
+3. Why does `SELECT ... FOR UPDATE` stop write skew in the on-call doctors scenario, yet fail completely in a meeting-room double-booking check when no booking exists yet? *(Section 4)*
+4. How do PostgreSQL's `SIREAD` tripwires prevent write skew without blocking concurrent readers behind writers like 2PL does? *(Section 5)*
+5. What makes XA two-phase commit vulnerable to long lock outages if an application server crashes, and how do Spanner, CockroachDB, or message-ID deduplication avoid that trap? *(Section 6)*
+
+</En>
+
+<Vi>
+
+<LinkCard url="https://martin.kleppmann.com/2014/11/25/hermitage-testing-the-i-in-acid.html" title="Hermitage: Testing the “I” in ACID" description="Bộ test mã nguồn mở của Martin Kleppmann đối chiếu thực tế cách PostgreSQL, MySQL, Oracle và SQL Server xử lý từng lỗi isolation." tag="Tài liệu tham khảo" />
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Atomic commitment problem (bài toán cam kết nguyên tử)**: bảo đảm mọi node tham gia một giao dịch phân tán phải hoặc cùng commit hoặc cùng abort, không bao giờ nửa nạc nửa mỡ.
+- **In-doubt transaction (giao dịch treo nghi ngờ)**: trạng thái nút tham gia đã trả lời `Yes` ở Pha 1 của 2PC và phải giữ chặt lock chờ lệnh `Commit`/`Abort` từ điều phối viên đang sập.
+- **Heuristic decision (quyết định cưỡng bức thủ công)**: cửa thoát hiểm khẩn cấp cho phép quản trị viên ép commit hoặc ép huỷ một giao dịch bị treo mồ côi, chấp nhận rủi ro phá vỡ atomicity.
+- **X/Open XA**: chuẩn C API năm 1991 để điều phối 2PC xuyên các database và message broker khác hãng thông qua driver ứng dụng.
+- **Idempotency (tính luỹ đẳng)**: thiết kế thao tác sao cho chạy lặp nhiều lần vẫn cho đúng kết quả như chạy một lần, thường bằng cách lưu `message_id` duy nhất ngay trong transaction database cục bộ.
+
+</Concepts>
+
+---
+
+## Điểm rút ra
+
+- **Đừng mặc định `BEGIN ... COMMIT` tự chặn race condition.** Các mức isolation mặc định (`Read Committed` ở PostgreSQL/Oracle/SQL Server, `REPEATABLE READ` ở MySQL) vẫn mở cửa cho một số lỗi nhất định; hãy kiểm tra bảng Hermitage hoặc viết test chạy song song thật.
+- **Đẩy phép tính trên một dòng xuống database.** Ưu tiên lệnh cập nhật nguyên tử (`SET balance = balance - $x WHERE balance >= $x`) hoặc `SELECT ... FOR UPDATE` thay vì kéo về ORM rồi ghi đè, và luôn viết logic retry cho lỗi `40001` hay deadlock.
+- **Cảnh giác với quy tắc bất biến trải trên nhiều dòng.** Snapshot Isolation chặn được read skew và lost update (ở Postgres/Oracle), nhưng vẫn để write skew và phantom phá vỡ các luật như "còn ít nhất 1 bác sĩ trực" hoặc "không đặt trùng phòng" nếu không nâng lên `SERIALIZABLE` (SSI) hay đặt ràng buộc `UNIQUE`.
+- **Ưu tiên SSI lạc quan thay cho 2PL khi vừa đọc nhiều vừa ghi.** Trên PostgreSQL hay CockroachDB, SSI giữ cho lệnh đọc snapshot không bao giờ phải chờ lock, đồng thời dùng bẫy `SIREAD` bắt vòng xung đột `rw` trước khi dữ liệu sai lệch.
+- **Tránh dùng XA xuyên hệ thống khi làm được bằng idempotency.** 2PC nội bộ chạy trên Raft/Paxos có thể tự phục hồi mượt mà, còn XA đa hãng lại gắn chặt trạng thái lock vào máy chạy app; ghi `message_id` chống trùng ngay trong transaction cục bộ giúp đạt xử lý đúng một lần mà không cần 2PC.
+
+---
+
+## Câu hỏi ôn tập
+
+1. Vì sao Flexcoin và Poloniex vẫn bị rút cạn tiền dù lưu số dư trong database quan hệ, và vì sao lời khuyên "cứ dùng database ACID" lại chưa đủ? *(Mở đầu, Phần 1, Phần 3)*
+2. Trong MVCC của PostgreSQL, vì sao giao dịch đọc `tx 50` vẫn nhìn thấy bản ghi `$250` có `deleted_by = 48` trong khi lại ẩn bản ghi `$600` có `inserted_by = 48`? *(Phần 2)*
+3. Vì sao `SELECT ... FOR UPDATE` chặn được write skew ở ví dụ bác sĩ trực ca nhưng lại thất bại hoàn toàn ở ví dụ kiểm tra trùng lịch phòng họp khi chưa có lịch nào được tạo? *(Phần 4)*
+4. Cơ chế bẫy `SIREAD` trong PostgreSQL ngăn write skew bằng cách nào mà không bắt các lệnh đọc phải đứng chờ lệnh ghi như 2PL? *(Phần 5)*
+5. Điều gì làm XA two-phase commit dễ gây sập diện rộng nếu máy chạy app bị treo, và Spanner, CockroachDB hay bảng chống trùng `message_id` né cái bẫy đó ra sao? *(Phần 6)*
+
+</Vi>
