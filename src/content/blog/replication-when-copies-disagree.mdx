@@ -1,0 +1,1024 @@
+---
+title: "Replication: what your users see when the copies disagree"
+title_vi: "Replication: người dùng thấy gì khi các bản sao lệch nhau"
+description: "GitHub's 24-hour failover, GitLab's wiped primary, Bitbucket's replica routing, Figma's conflicts: DDIA chapter 6 on replication, told through real incidents."
+description_vi: "43 giây mất mạng thành 24 giờ sự cố ở GitHub, replica không cứu nổi GitLab khi lỡ xoá nhầm, Bitbucket đọc từ replica mà không làm mất bài vừa đăng: chương 6 DDIA về replication, kể qua sự cố thật."
+date: 2026-11-18
+category: "database"
+tags: ["database", "replication", "distributed-systems", "consistency", "failover", "ddia"]
+draft: true
+sources:
+  - { title: "Designing Data-Intensive Applications, 2nd Edition", author: "Martin Kleppmann & Chris Riccomini", chapters: "Ch. 6", url: "https://dataintensive.net/" }
+  - { title: "October 21 post-incident analysis", author: "Jason Warner (GitHub)", url: "https://github.blog/news-insights/company-news/oct21-post-incident-analysis/" }
+  - { title: "GitHub availability this week", author: "Jesse Newland (GitHub)", url: "https://github.blog/news-insights/the-library/github-availability-this-week/" }
+  - { title: "Downtime last Saturday", author: "Mark Imbriaco (GitHub)", url: "https://github.blog/news-insights/the-library/downtime-last-saturday/" }
+  - { title: "Postmortem of database outage of January 31", author: "GitLab", url: "https://about.gitlab.com/blog/postmortem-of-database-outage-of-january-31/" }
+  - { title: "Postmortem: VSTS 4 September 2018", author: "Buck Hodges (Microsoft)", url: "https://devblogs.microsoft.com/devopsservice/postmortem-vsts-4-september-2018/" }
+  - { title: "Zero downtime Postgres upgrades", author: "Knock", url: "https://knock.app/blog/zero-downtime-postgres-upgrades" }
+  - { title: "Scaling Bitbucket's database", author: "Nithin Tharakan (Atlassian)", url: "https://www.atlassian.com/blog/bitbucket/scaling-bitbuckets-database" }
+  - { title: "Amazon DynamoDB Developer Guide: DynamoDB read consistency", url: "https://docs.aws.amazon.com/amazondynamodb/latest/developerguide/HowItWorks.ReadConsistency.html" }
+  - { title: "How Figma's multiplayer technology works", author: "Evan Wallace (Figma)", url: "https://www.figma.com/blog/how-figmas-multiplayer-technology-works/" }
+  - { title: "Dynamo: Amazon's Highly Available Key-value Store", author: "Giuseppe DeCandia et al. (Amazon), SOSP 2007", url: "https://www.allthingsdistributed.com/files/amazon-dynamo-sosp2007.pdf" }
+  - { title: "Apache Cassandra documentation: Hints", url: "https://cassandra.apache.org/doc/latest/cassandra/managing/operating/hints.html" }
+  - { title: "Jepsen: Cassandra", author: "Kyle Kingsbury", url: "https://aphyr.com/posts/294-jepsen-cassandra" }
+  - { title: "Jean Miélot at his desk (miniature, public domain)", author: "Unknown miniaturist, Royal Library of Belgium, MS 9278", url: "https://commons.wikimedia.org/wiki/File:Jean_Mi%C3%A9lot,_Brussels.jpg" }
+---
+
+import AnimatedFlow from '../../components/mdx/AnimatedFlow.astro';
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import En from '../../components/mdx/En.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import ReplicationLag from '../../components/mdx/ReplicationLag.astro';
+import QuorumPlayground from '../../components/mdx/QuorumPlayground.astro';
+import ReplicationLwwVsSiblings from '../../components/mdx/ReplicationLwwVsSiblings.astro';
+import figureScribe from '../../assets/blog/replication-when-copies-disagree/jean-mielot-copying-a-book.jpg';
+
+<En>
+
+<Figure src={figureScribe} alt="A medieval scribe at a slanted desk copies text from a book on a lectern above him into a new book" caption="Jean Miélot copies a book from the lectern into his own, one line at a time. A replica is the same thing: a copy of a source, written a little later. Miniature, second half of the 15th century, Royal Library of Belgium, MS 9278. Public domain." sourceTitle="Wikimedia Commons: Jean Miélot, Brussels" sourceUrl="https://commons.wikimedia.org/wiki/File:Jean_Mi%C3%A9lot,_Brussels.jpg" />
+
+> "The major difference between a thing that might go wrong and a thing that cannot possibly go wrong is that when a thing that cannot possibly go wrong goes wrong, it usually turns out to be impossible to get at or repair."
+> &mdash; *Douglas Adams*, quoted at the start of DDIA chapter 6
+
+### What real teams ran into
+
+Replication sounds like the easy part of running a database: keep a copy of the same data on several machines. Making the copies is easy. The trouble starts when they disagree, and in a busy system they always disagree a little: by milliseconds on a good day, by hours on a bad one. These teams found out what that costs and wrote it up:
+
+- **GitHub, 2018.** A network link was down for 43 seconds. Automated failover moved MySQL primaries across the country, and GitHub ran degraded for 24 hours and 11 minutes. One busy cluster alone had 954 writes that never reached the new primary.
+- **GitLab, 2017.** A replica fell behind and had to be rebuilt. During the rebuild, an engineer wiped the data directory on the primary instead of the replica. The replica could not help, and about six hours of data were lost.
+- **Bitbucket, 2020.** Reading from replicas could make a user's new pull request vanish from the list. Bitbucket started routing each user's reads by log position, and shifted most of the primary's traffic to replicas.
+- **Figma, 2019.** When two people change the same property at the same moment, the server keeps whichever value reached it last. Two people typing into one text box get one person's edit, never both.
+- **Amazon, 2007.** Dynamo's shopping cart never loses an "add to cart". The price is that a deleted item can come back.
+
+Chapter 6 of Kleppmann and Riccomini's *Designing Data-Intensive Applications* (2nd edition) explains the machinery behind each of these. This post goes through it in the order you tend to meet it in production:
+
+1. **Leaders and followers**: why most replication is asynchronous.
+2. **A replica is not a backup**: what GitLab learned.
+3. **Failover**: where acknowledged writes get lost, at GitHub three times.
+4. **The replication log**: what gets sent, and why it decides how you upgrade.
+5. **Reading from a follower**: your own writes, time going backwards, and how Bitbucket fixed it.
+6. **More than one leader**: conflicts, and Figma's simple answer.
+7. **No leader at all**: quorums in Dynamo and Cassandra.
+8. **Concurrent writes and clocks**: why "last write wins" loses data.
+
+<Callout type="note" title="TL;DR">
+Every replica is a copy that is a little late. With one leader, the lag shows up in two places: users who read from a follower see the past, and a failover to a follower that is behind throws away writes the client was told had succeeded. Fix the first with routing rules (read your own writes from an up-to-date replica, keep each user on one replica). Guard the second by choosing the most up-to-date follower, fencing the old leader, and keeping failover inside one region. With several leaders or none, concurrent writes conflict, so you must choose how to resolve them: last write wins is simple and silently drops data; version vectors and CRDTs keep it. And none of this replaces backups, because replicas copy your mistakes too.
+</Callout>
+
+<Concepts>
+
+- **Replica**: a machine (or process) that holds a copy of the same data as others.
+- **Primary / leader**: the one replica that accepts writes. MySQL calls it the primary or source.
+- **Failover**: making another replica the leader when the leader fails.
+- **Network partition**: some machines can still run but cannot reach each other over the network.
+- **Orchestrator**: an open-source tool GitHub uses to manage MySQL replication topologies and run automated failover.
+- **Raft**: an algorithm that lets a group of machines agree on one leader, as long as a majority can talk to each other.
+
+</Concepts>
+
+---
+
+## 1. Leaders and followers
+
+Replication means keeping a copy of the same data on several machines connected by a network. The book gives three reasons to do it: keep data close to users, keep working when some machines fail, and serve more reads than one machine can. If the data never changed, you would copy it once and be done. All the difficulty is in the changes.
+
+The most common design has one **leader** (also called the primary or source). Clients send every write to the leader. The leader writes the change locally and sends it to the **followers** in a replication log, and each follower applies the changes in the same order.
+
+Reads can go to any replica. PostgreSQL, MySQL, SQL Server, MongoDB and Kafka all work this way.
+
+Think of one cook who owns the master recipe book. Anyone can read a copy, but only the cook edits, and every edit goes out as a note that the copy holders paste in, in order.
+
+### Wait for the follower, or not?
+
+The big choice is when the leader tells the client "done":
+
+| | Synchronous | Semi-synchronous | Asynchronous |
+|---|---|---|---|
+| Leader waits for | every follower | one follower | no follower |
+| A follower goes down | writes stop | another follower becomes the synchronous one | writes carry on |
+| The leader dies | nothing lost | nothing lost, the synchronous follower has it | recent writes may be lost |
+| Used | rarely for all followers | when you want a second up-to-date copy | most setups, especially with many followers or far-away ones |
+
+Normally a follower is less than a second behind. The book's warning is that nothing guarantees it: a follower that is recovering, a system near capacity or a network problem can push the lag to minutes or more.
+
+### Azure DevOps, 2018: why not make it synchronous?
+
+On 4 September 2018, a lightning storm near Microsoft's South Central US datacenters caused voltage sags that hit the cooling systems, and hardware powered itself down. VSTS (now Azure DevOps) went down in that region, and it took more than 21 hours to recover all its services there.
+
+The obvious question was why VSTS did not fail over to another region. Buck Hodges answered it in the postmortem. The data did exist in a second region, as backups and geo-redundant storage.
+
+But failing over to the backups would have lost data "due to the latency of the backups", and the team did not want to make that choice for customers. So they waited for the datacenter.
+
+He also explained why synchronous replication across regions was not the answer. The paired region, North Central US, is about 70 ms away per round trip, and every write would pay that. For some key services that was too slow. And with two regions on every write, there is twice the chance of a slow machine or a network problem: "either availability suffers (halted while waiting for the secondary write to commit) or the system must fall back to asynchronous replication."
+
+Their plan was availability zones: datacenters in one region, close enough for synchronous replication. Across regions they would explore asynchronous replication, and perhaps let customers choose whether to fail over and accept losing recent writes.
+
+<Concepts>
+
+- **Leader / follower**: the replica that takes writes, and the replicas that copy its changes. Followers are also called read replicas, secondaries or standbys.
+- **Replication log**: the stream of changes the leader sends to followers, in order.
+- **Synchronous replication**: the leader waits for a follower to confirm before telling the client the write succeeded.
+- **Asynchronous replication**: the leader confirms right away and sends the change in the background.
+- **Region / availability zone**: a region is a geographic area; a zone is one datacenter in it, with its own power and cooling. Zones in a region are close enough for fast links.
+- **Round trip**: the time for a message to go to another machine and for the reply to come back.
+
+</Concepts>
+
+---
+
+## 2. A replica is not a backup
+
+A follower copies every change within a second or so. That includes the bad ones. Drop a table on the leader and it is gone from the followers a moment later.
+
+A **backup** is different: an old snapshot you can go back to. The book says you need both.
+
+How a new follower is set up matters here. You take a consistent **snapshot** of the leader, copy it over, and the follower asks for every change since that snapshot. That needs the snapshot's exact position in the log: PostgreSQL calls it the **log sequence number** (LSN), MySQL uses binlog coordinates or GTIDs.
+
+The leader keeps its log until the followers have it. If a follower is away too long and the leader deletes that log, the follower cannot catch up and must be rebuilt from a full copy.
+
+It is like a shared doc that syncs every few seconds: your colleague's copy fills in your typo just as fast as your fix.
+
+### GitLab, 31 January 2017
+
+GitLab.com ran one PostgreSQL primary (`db1`) and one hot-standby secondary (`db2`) used only for failover. Its postmortem has the timeline:
+
+| Time (UTC) | What happened |
+|---|---|
+| about 17:20 | An engineer takes an LVM snapshot of production to load into staging for a load test. |
+| about 19:00 | Database load rises, from suspected spam and from a background job hard-deleting an employee account flagged by mistake. |
+| about 23:00 | The secondary falls behind. The WAL segments it needs are already gone from the primary, and there is no WAL archiving, so it must be rebuilt: wipe its data directory and run `pg_basebackup`. |
+| | `pg_basebackup` hangs with no output. The team raises `max_wal_senders` from 3 to 32, and has to cut `max_connections` from 8000 to 2000 before Postgres will restart. |
+| about 23:30 | An engineer wipes the data directory again, but on the primary. They stop it after a second or two; about 300 GB are already gone. |
+
+Then the backups failed one after another. The daily `pg_dump` to S3 had been failing because it ran version 9.2 against a 9.6 database, and the error emails were rejected by DMARC, so nobody saw them. Azure disk snapshots were not enabled for the database servers. Replication was broken, and both hosts were now wiped.
+
+What saved GitLab was an LVM snapshot made for staging, roughly six hours before the outage. Changes between 17:20 and 00:00 UTC were lost: by their estimate about 5,000 projects, 5,000 comments and 700 new user accounts. Git repositories and wikis were not affected.
+
+<Callout type="warning" title="Replication copies your mistakes too">
+GitLab's own list of procedures described replication between the PostgreSQL hosts as "primarily used for failover purposes and not for disaster recovery". GitHub's MySQL backups ran every four hours and their restore was tested daily, and in 2018 a full restore still took hours.
+</Callout>
+
+<Concepts>
+
+- **Backup**: a copy of the data as it was at some earlier time, kept so you can go back.
+- **Snapshot**: a consistent picture of the whole database at one moment.
+- **Log sequence number (LSN)**: a position in PostgreSQL's write-ahead log. Comparing two LSNs tells you which replica is further along.
+- **WAL archiving**: copying the write-ahead log to separate storage, so replicas and restores can replay it even after the primary deleted it.
+- **`pg_basebackup`**: PostgreSQL's tool for copying a running primary to build a new replica.
+- **Catch-up**: a follower replaying the changes it missed until it matches the leader.
+
+</Concepts>
+
+---
+
+## 3. Failover is where writes get lost
+
+When a follower dies, recovery is simple: it restarts, looks at the last position in its own log, and asks the leader for everything after it. When the leader dies, you need a **failover**:
+
+1. **Decide the leader is dead.** There is no reliable way to tell, so systems use a timeout: no answer for, say, 30 seconds means dead.
+2. **Choose a new leader.** The best candidate is the follower with the most recent data, to lose as little as possible.
+3. **Reconfigure.** Clients send writes to the new leader, the other followers follow it, and the old leader must step down if it comes back.
+
+It is like a band losing its singer mid-song. Someone has to take the microphone, everyone has to follow the new voice, and the old singer must not walk back on stage singing a different verse.
+
+Each step can go wrong. With asynchronous replication, the new leader may be missing writes the old one had already confirmed, and those writes are usually thrown away. Two nodes may both believe they are the leader, which the book calls **split brain**.
+
+A timeout that is too short fails over during a load spike and makes things worse. GitHub has written up all of these.
+
+### GitHub, September 2012: an out-of-date replica takes over
+
+On Monday 10 September, a schema migration put so much load on the MySQL primary that the health checks of Percona Replication Manager failed. It failed over to a server with a cold InnoDB buffer pool, which was too slow, so the health checks failed again and it failed back. The team put the cluster into maintenance mode to stop the flapping.
+
+On Tuesday, turning maintenance mode off hit a Pacemaker segfault and split the cluster: nodes `a` and `b` on one side, node `c` on the other. Node `c`, which the team already knew was out of date, elected itself at 8:19 AM. They powered it off at 8:26 AM, which took all of github.com down.
+
+GitHub uses MySQL-generated IDs to look up data in Redis, such as dashboard events and repository routes. Records created on the stale node during those seven minutes got IDs that no longer matched what Redis held, so some events appeared on the wrong users' dashboards and 16 private repositories were reachable by outsiders for those seven minutes. The fix was organisational: from then on, failover of the main database "will only occur when initiated by a member of our operations team".
+
+### GitHub, December 2012: split brain, then both nodes down
+
+Three months later the same safety mechanism backfired on GitHub's fileservers. Each fileserver was an active/passive pair using DRBD, with **STONITH** ("shoot the other node in the head") to cut power to the active node before the passive one took over, so the two could never write at once.
+
+A switch upgrade went wrong and blocked traffic between access switches for about a minute and a half. Many pairs passed their heartbeat timeout, and both sides sent STONITH commands, some of which never arrived. When the network came back, both nodes of several pairs expected to be active.
+
+They "terminated one another", and both stopped. Working out which node of each pair had the latest data, sometimes by booting one and reading its local logs, took over five hours.
+
+### GitHub, October 2018: a failover the apps could not live with
+
+By 2018 GitHub ran Orchestrator, which handles MySQL failover on top of Raft. Each cluster had its primary in the East Coast data center, replicas on the West Coast, and up to dozens of read replicas. Step through what 43 seconds of lost connectivity did:
+
+</En>
+
+<Vi>
+
+<Figure src={figureScribe} alt="Một người chép sách thời trung cổ ngồi bên bàn nghiêng, chép chữ từ cuốn sách đặt trên giá phía trên sang một cuốn sách mới" caption="Jean Miélot chép cuốn sách trên giá sang cuốn của mình, từng dòng một. Replica cũng y như vậy: một bản sao của nguồn, được viết ra chậm hơn một chút. Tranh minh hoạ nửa sau thế kỷ 15, Thư viện Hoàng gia Bỉ, MS 9278. Phạm vi công cộng." sourceTitle="Wikimedia Commons: Jean Miélot, Brussels" sourceUrl="https://commons.wikimedia.org/wiki/File:Jean_Mi%C3%A9lot,_Brussels.jpg" />
+
+> "Khác biệt lớn nhất giữa thứ có thể hỏng và thứ không thể nào hỏng là: khi thứ không thể nào hỏng lại hỏng, thường thì hoá ra chẳng có cách nào chạm tới hay sửa được nó."
+> &mdash; *Douglas Adams*, câu mở đầu chương 6 của DDIA
+
+### Các team thật đã vấp phải gì
+
+Nghe thì replication là phần dễ nhất khi vận hành database: giữ một bản sao của cùng dữ liệu trên vài máy. Tạo bản sao thì dễ thật. Rắc rối bắt đầu khi các bản sao lệch nhau, mà hệ thống bận thì lúc nào chúng cũng lệch một chút: ngày đẹp trời thì vài mili giây, ngày xui thì vài tiếng. Mấy team dưới đây đã trả giá cho chuyện đó và viết lại:
+
+- **GitHub, 2018.** Một đường mạng đứt 43 giây. Failover tự động chuyển các primary MySQL sang bờ bên kia nước Mỹ, và GitHub chạy chập chờn suốt 24 giờ 11 phút. Riêng một cluster bận rộn đã có 954 lần ghi chưa bao giờ tới được primary mới.
+- **GitLab, 2017.** Replica bị tụt lại và phải dựng lại. Đang dựng lại thì một kỹ sư xoá thư mục dữ liệu trên primary thay vì trên replica. Replica không cứu được gì, và khoảng sáu tiếng dữ liệu mất trắng.
+- **Bitbucket, 2020.** Đọc từ replica có thể làm pull request vừa tạo biến mất khỏi danh sách. Bitbucket chuyển sang điều hướng lượt đọc của từng người dùng theo vị trí trong log, và đẩy được phần lớn tải của primary sang replica.
+- **Figma, 2019.** Khi hai người sửa cùng một thuộc tính cùng lúc, server giữ giá trị nào tới nó sau cùng. Hai người cùng gõ vào một ô chữ thì chỉ còn chỉnh sửa của một người, không bao giờ cả hai.
+- **Amazon, 2007.** Giỏ hàng trên Dynamo không bao giờ làm mất một lần "thêm vào giỏ". Cái giá là món hàng đã xoá có thể quay lại.
+
+Chương 6 cuốn *Designing Data-Intensive Applications* (bản 2) của Kleppmann và Riccomini giải thích cỗ máy nằm dưới từng chuyện trên. Bài này đi qua theo thứ tự bạn hay gặp chúng trên production:
+
+1. **Leader và follower**: vì sao phần lớn replication là bất đồng bộ.
+2. **Replica không phải backup**: bài học của GitLab.
+3. **Failover**: nơi những lần ghi đã được xác nhận bị mất, ba lần ở GitHub.
+4. **Replication log**: gửi đi cái gì, và vì sao nó quyết định cách bạn nâng cấp.
+5. **Đọc từ follower**: không thấy cái mình vừa ghi, thời gian chạy lùi, và cách Bitbucket xử lý.
+6. **Nhiều hơn một leader**: xung đột, và lời giải đơn giản của Figma.
+7. **Không có leader nào**: quorum trong Dynamo và Cassandra.
+8. **Ghi đồng thời và đồng hồ**: vì sao "last write wins" làm mất dữ liệu.
+
+<Callout type="note" title="Tóm tắt nhanh">
+Replica nào cũng là một bản sao hơi trễ. Với một leader, độ trễ lộ ra ở hai chỗ: người dùng đọc từ follower thì thấy quá khứ, và failover sang một follower đang tụt lại sẽ vứt đi những lần ghi mà client đã được báo là thành công. Chỗ thứ nhất sửa bằng luật điều hướng (đọc dữ liệu mình vừa ghi từ replica đã bắt kịp, giữ mỗi người dùng ở một replica). Chỗ thứ hai thì phòng bằng cách chọn follower mới nhất, chặn (fence) leader cũ, và giữ failover trong một region. Khi có nhiều leader hoặc không có leader nào, các lần ghi đồng thời sẽ xung đột, nên bạn phải chọn cách giải quyết: last write wins thì đơn giản nhưng âm thầm làm mất dữ liệu; version vector và CRDT thì giữ lại được. Và không thứ nào ở trên thay được backup, vì replica chép luôn cả lỗi của bạn.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Replica (bản sao)**: một máy (hoặc process) giữ bản sao của cùng dữ liệu như các máy khác.
+- **Primary / leader**: replica duy nhất nhận lệnh ghi. MySQL gọi nó là primary hoặc source.
+- **Failover (chuyển dự phòng)**: đưa một replica khác lên làm leader khi leader hỏng.
+- **Network partition (phân mảnh mạng)**: các máy vẫn chạy nhưng không liên lạc được với nhau qua mạng.
+- **Orchestrator**: công cụ mã nguồn mở GitHub dùng để quản lý topology replication của MySQL và chạy failover tự động.
+- **Raft**: thuật toán giúp một nhóm máy thống nhất chọn một leader, miễn là đa số còn nói chuyện được với nhau.
+
+</Concepts>
+
+---
+
+## 1. Leader và follower
+
+Replication (sao chép) nghĩa là giữ bản sao của cùng dữ liệu trên nhiều máy nối với nhau qua mạng. Sách đưa ra ba lý do: để dữ liệu gần người dùng, để hệ thống vẫn chạy khi vài máy hỏng, và để phục vụ nhiều lượt đọc hơn sức một máy. Nếu dữ liệu không bao giờ đổi, bạn chép một lần là xong. Toàn bộ cái khó nằm ở các thay đổi.
+
+Thiết kế phổ biến nhất có một **leader** (còn gọi là primary hay source). Client gửi mọi lệnh ghi tới leader. Leader ghi thay đổi xuống máy mình rồi gửi nó cho các **follower** qua một replication log, và mỗi follower áp dụng thay đổi theo đúng thứ tự đó.
+
+Lệnh đọc thì gửi tới replica nào cũng được. PostgreSQL, MySQL, SQL Server, MongoDB và Kafka đều chạy kiểu này.
+
+Hình dung một đầu bếp giữ cuốn sổ công thức gốc. Ai cũng đọc được bản chép, nhưng chỉ đầu bếp được sửa, và mỗi lần sửa thì gửi đi một mẩu ghi chú để người giữ bản chép dán vào, đúng thứ tự.
+
+### Có chờ follower hay không?
+
+Lựa chọn lớn nhất là lúc nào leader báo "xong" cho client:
+
+| | Đồng bộ (synchronous) | Bán đồng bộ (semi-synchronous) | Bất đồng bộ (asynchronous) |
+|---|---|---|---|
+| Leader chờ | mọi follower | một follower | không follower nào |
+| Một follower sập | lệnh ghi dừng hẳn | một follower khác lên làm bản đồng bộ | vẫn ghi tiếp |
+| Leader chết | không mất gì | không mất gì, follower đồng bộ đã có | có thể mất các lần ghi gần nhất |
+| Dùng khi | hiếm khi áp cho mọi follower | muốn có thêm một bản luôn mới | đa số hệ thống, nhất là khi nhiều follower hoặc follower ở xa |
+
+Bình thường follower chỉ chậm dưới một giây. Sách cảnh báo rằng chẳng gì đảm bảo điều đó: follower đang hồi phục, hệ thống gần hết công suất, hay mạng trục trặc đều có thể đẩy độ trễ lên vài phút hoặc hơn.
+
+### Azure DevOps, 2018: sao không chạy đồng bộ luôn?
+
+Ngày 4/9/2018, một cơn bão sét gần các datacenter South Central US của Microsoft gây sụt áp, ảnh hưởng hệ thống làm mát, và phần cứng tự tắt. VSTS (nay là Azure DevOps) sập ở region đó, và mất hơn 21 giờ mới khôi phục xong mọi dịch vụ ở đấy.
+
+Câu hỏi hiển nhiên là sao VSTS không failover sang region khác. Buck Hodges trả lời trong postmortem. Dữ liệu có nằm ở region thứ hai, dưới dạng backup và storage geo-redundant.
+
+Nhưng failover sang backup sẽ mất dữ liệu "do backup bị trễ", và team không muốn quyết định thay khách hàng chuyện đó. Nên họ chờ datacenter.
+
+Ông cũng giải thích vì sao sao chép đồng bộ giữa hai region không phải lời giải. Region cặp đôi, North Central US, cách khoảng 70 ms mỗi vòng đi về, và lần ghi nào cũng phải trả khoản đó. Với vài dịch vụ quan trọng thì quá chậm. Mà mỗi lần ghi phụ thuộc hai region thì khả năng gặp máy chậm hay mạng lỗi cũng tăng gấp đôi: "hoặc tính sẵn sàng bị ảnh hưởng (dừng lại chờ lần ghi bên phụ commit) hoặc hệ thống phải lùi về sao chép bất đồng bộ."
+
+Kế hoạch của họ là availability zone: các datacenter trong cùng một region, đủ gần để sao chép đồng bộ. Còn giữa các region thì tìm hiểu sao chép bất đồng bộ, và có thể để khách hàng tự chọn có failover hay không, chấp nhận mất các lần ghi gần nhất.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Leader / follower**: replica nhận lệnh ghi, và các replica chép lại thay đổi của nó. Follower còn được gọi là read replica, secondary hay standby.
+- **Replication log (nhật ký sao chép)**: dòng thay đổi leader gửi cho follower, theo đúng thứ tự.
+- **Synchronous replication (sao chép đồng bộ)**: leader chờ một follower xác nhận rồi mới báo client là ghi thành công.
+- **Asynchronous replication (sao chép bất đồng bộ)**: leader xác nhận ngay và gửi thay đổi đi ở chế độ nền.
+- **Region / availability zone**: region là một vùng địa lý; zone là một datacenter trong đó, có nguồn điện và làm mát riêng. Các zone trong cùng region đủ gần để nối mạng nhanh.
+- **Round trip (vòng đi về)**: thời gian để một thông điệp tới máy kia và câu trả lời quay lại.
+
+</Concepts>
+
+---
+
+## 2. Replica không phải backup
+
+Follower chép mọi thay đổi trong vòng một giây hay đại loại vậy. Kể cả thay đổi tệ. Xoá một bảng trên leader thì lát sau nó cũng biến mất trên follower.
+
+**Backup** thì khác: một bản chụp cũ để bạn quay lại được. Sách nói bạn cần cả hai.
+
+Cách dựng một follower mới liên quan trực tiếp ở đây. Bạn chụp một **snapshot** nhất quán của leader, chép sang, rồi follower xin mọi thay đổi kể từ snapshot đó. Việc này cần vị trí chính xác của snapshot trong log: PostgreSQL gọi là **log sequence number** (LSN), MySQL dùng toạ độ binlog hoặc GTID.
+
+Leader giữ log cho tới khi các follower đã nhận. Nếu một follower vắng mặt quá lâu và leader đã xoá phần log đó, follower không đuổi kịp được nữa và phải dựng lại từ một bản sao đầy đủ.
+
+Giống một tài liệu dùng chung, cứ vài giây đồng bộ một lần: bản của đồng nghiệp nhận lỗi đánh máy của bạn cũng nhanh y như nhận bản sửa.
+
+### GitLab, 31/1/2017
+
+GitLab.com chạy một primary PostgreSQL (`db1`) và một secondary hot-standby (`db2`) chỉ dùng để failover. Postmortem của họ có dòng thời gian:
+
+| Giờ (UTC) | Chuyện gì xảy ra |
+|---|---|
+| khoảng 17:20 | Một kỹ sư chụp snapshot LVM của production để nạp vào staging chạy thử tải. |
+| khoảng 19:00 | Tải database tăng, do nghi là spam, cộng thêm một job nền đang xoá cứng tài khoản một nhân viên bị gắn cờ nhầm. |
+| khoảng 23:00 | Secondary tụt lại. Các WAL segment nó cần đã bị xoá khỏi primary, mà lại không bật WAL archiving, nên phải dựng lại: xoá thư mục dữ liệu của nó rồi chạy `pg_basebackup`. |
+| | `pg_basebackup` treo, không in gì. Team tăng `max_wal_senders` từ 3 lên 32, và phải hạ `max_connections` từ 8000 xuống 2000 thì Postgres mới chịu khởi động lại. |
+| khoảng 23:30 | Một kỹ sư xoá thư mục dữ liệu lần nữa, nhưng lại trên primary. Họ dừng lệnh sau một hai giây; khoảng 300 GB đã mất. |
+
+Sau đó các bản backup lần lượt thất bại. Bản `pg_dump` hằng ngày lên S3 đã hỏng từ lâu vì chạy phiên bản 9.2 với database 9.6, và email báo lỗi bị DMARC chặn nên không ai thấy. Snapshot đĩa Azure không bật cho máy database. Replication thì đã hỏng, và giờ cả hai máy đều bị xoá.
+
+Thứ cứu GitLab là một snapshot LVM làm cho staging, khoảng sáu tiếng trước sự cố. Mọi thay đổi từ 17:20 tới 00:00 UTC bị mất: theo ước tính của họ, khoảng 5.000 project, 5.000 bình luận và 700 tài khoản mới. Git repository và wiki không bị ảnh hưởng.
+
+<Callout type="warning" title="Replication chép luôn cả lỗi của bạn">
+Chính danh sách quy trình của GitLab mô tả replication giữa các máy PostgreSQL là "chủ yếu dùng cho failover chứ không dùng để khôi phục sau thảm hoạ". Backup MySQL của GitHub chạy bốn giờ một lần và việc restore được kiểm tra hằng ngày, vậy mà năm 2018 restore trọn vẹn vẫn mất nhiều giờ.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Backup (bản sao lưu)**: bản sao dữ liệu như nó từng là ở một thời điểm trước, giữ lại để quay về được.
+- **Snapshot (ảnh chụp)**: hình ảnh nhất quán của cả database ở đúng một thời điểm.
+- **Log sequence number (LSN)**: một vị trí trong write-ahead log của PostgreSQL. So hai LSN là biết replica nào đi xa hơn.
+- **WAL archiving (lưu trữ WAL)**: chép write-ahead log sang kho riêng, để replica và việc khôi phục vẫn phát lại được dù primary đã xoá log.
+- **`pg_basebackup`**: công cụ của PostgreSQL chép một primary đang chạy để dựng replica mới.
+- **Catch-up (đuổi kịp)**: follower phát lại các thay đổi nó lỡ mất cho tới khi khớp với leader.
+
+</Concepts>
+
+---
+
+## 3. Failover là chỗ mất lần ghi
+
+Follower chết thì phục hồi đơn giản: khởi động lại, xem vị trí cuối trong log của chính nó, rồi xin leader mọi thứ sau vị trí đó. Leader chết thì cần **failover**:
+
+1. **Kết luận leader đã chết.** Không có cách nào chắc chắn, nên hệ thống dùng timeout: không trả lời trong, chẳng hạn, 30 giây là coi như chết.
+2. **Chọn leader mới.** Ứng viên tốt nhất là follower có dữ liệu mới nhất, để mất ít nhất.
+3. **Cấu hình lại.** Client gửi lệnh ghi tới leader mới, các follower khác theo nó, và leader cũ nếu quay lại thì phải chịu lùi xuống.
+
+Giống một ban nhạc mất ca sĩ giữa bài hát. Phải có người cầm micro, cả ban phải theo giọng mới, và ca sĩ cũ không được bước lại lên sân khấu hát một đoạn khác.
+
+Bước nào cũng có thể hỏng. Với sao chép bất đồng bộ, leader mới có thể thiếu những lần ghi leader cũ đã xác nhận, và chúng thường bị vứt đi. Hai node có thể cùng tin mình là leader, sách gọi là **split brain**.
+
+Timeout quá ngắn thì failover ngay lúc tải vọt lên và làm mọi thứ tệ hơn. GitHub đã viết về đủ cả mấy chuyện này.
+
+### GitHub, tháng 9/2012: một replica cũ lên nắm quyền
+
+Thứ Hai 10/9, một đợt migration schema đè tải lên primary MySQL tới mức health check của Percona Replication Manager thất bại. Nó failover sang một server có InnoDB buffer pool còn nguội, chạy quá chậm, nên health check lại thất bại và nó failover ngược về. Team đưa cluster vào maintenance mode để dừng cái vòng lặp đó.
+
+Thứ Ba, lúc tắt maintenance mode thì Pacemaker bị segfault và chia đôi cluster: node `a` và `b` một bên, node `c` một bên. Node `c`, mà team đã biết là dữ liệu cũ, tự bầu mình lên lúc 8:19 sáng. Họ tắt nguồn nó lúc 8:26, kéo sập toàn bộ github.com.
+
+GitHub dùng ID do MySQL sinh ra để tra dữ liệu trong Redis, như sự kiện trên dashboard và đường dẫn tới repository. Các bản ghi tạo trên node cũ trong bảy phút đó nhận ID không còn khớp với thứ Redis đang giữ, nên vài sự kiện hiện trên dashboard của người khác và 16 repository private bị người ngoài truy cập được trong bảy phút ấy. Cách sửa là thay đổi quy trình: từ đó, failover database chính "chỉ xảy ra khi một thành viên team vận hành ra lệnh".
+
+### GitHub, tháng 12/2012: split brain, rồi cả hai cùng tắt
+
+Ba tháng sau, chính cơ chế an toàn đó phản tác dụng ở các fileserver của GitHub. Mỗi fileserver là một cặp active/passive dùng DRBD, với **STONITH** ("shoot the other node in the head", bắn vào đầu node kia) để cắt điện node active trước khi node passive tiếp quản, để hai node không bao giờ cùng ghi.
+
+Một đợt nâng cấp switch trục trặc chặn traffic giữa các access switch khoảng một phút rưỡi. Nhiều cặp vượt timeout heartbeat, và cả hai bên cùng gửi lệnh STONITH, có lệnh không bao giờ tới nơi. Mạng có lại thì cả hai node của nhiều cặp đều nghĩ mình là active.
+
+Chúng "kết liễu lẫn nhau", và cả hai cùng dừng. Việc xác định node nào trong mỗi cặp có dữ liệu mới nhất, có khi phải bật một node lên đọc log cục bộ của nó, mất hơn năm tiếng.
+
+### GitHub, tháng 10/2018: một lần failover mà ứng dụng không sống nổi
+
+Tới 2018 GitHub dùng Orchestrator, công cụ lo failover MySQL chạy trên Raft. Mỗi cluster có primary ở data center bờ Đông, replica ở bờ Tây, và tới vài chục read replica. Bấm qua từng bước xem 43 giây mất kết nối đã gây ra những gì:
+
+</Vi>
+
+<AnimatedFlow preset="github-failover" title="GitHub, 21 to 22 October 2018: 43 seconds, then 24 hours" titleVi="GitHub, 21 tới 22/10/2018: 43 giây, rồi 24 giờ" />
+
+<En>
+
+The postmortem is clear that Orchestrator "behaved as configured". Promoting a West Coast replica was a valid move for the database. It was not a valid move for applications in the East that suddenly had a cross-country round trip on most database calls. The first fix on GitHub's list was to stop Orchestrator from promoting primaries across regional boundaries.
+
+GitHub also did not fail back to the East right away, because that would have thrown away nearly 40 minutes of writes on the West Coast. It chose to "prioritize data integrity over site usability and time to recovery", rebuilt the East from backups, and reconciled the few seconds of unreplicated East Coast writes by hand afterwards.
+
+<Callout type="tip" title="What the three GitHub incidents have in common">
+In every case, an automated system made a reasonable local decision with an incomplete view of the world. The book's advice lines up with what GitHub changed: promote the follower with the highest log position, make sure the old leader is fenced off, and accept that some teams prefer to fail over by hand even when the software can do it.
+</Callout>
+
+<Concepts>
+
+- **Heartbeat / timeout**: replicas ping each other regularly; no reply within the timeout means "assume it is dead". Too short and a slow node gets replaced; too long and recovery waits.
+- **Split brain**: two nodes both act as leader and both accept writes, so the data forks.
+- **Fencing / STONITH**: making sure the old leader cannot write any more, for example by cutting its power, before a new one takes over.
+- **Buffer pool**: the database's in-memory cache of pages. A replica with a "cold" pool has to read everything from disk at first, so it starts slow.
+- **Auto-increment ID**: an ID the database assigns by counting up. A leader that is behind counts from an older number and can reuse IDs.
+- **Fail forward**: keep the new state and repair from there, instead of rolling back to the old one.
+
+</Concepts>
+
+---
+
+## 4. What goes in the replication log
+
+The leader has to describe each change to its followers somehow. There are three common ways, and the choice decides more than it seems to:
+
+| | Statement-based | WAL shipping | Logical (row-based) |
+|---|---|---|---|
+| What is sent | the SQL statement itself | the storage engine's write-ahead log: which bytes changed in which disk blocks | one record per changed row: new values, or the key of a deleted row |
+| Breaks when | the statement is not deterministic: `NOW()`, `RAND()`, auto-increment order, triggers | leader and follower run different storage formats, so a major upgrade usually needs downtime | something is not a row, such as a sequence counter |
+| Used by | MySQL before 5.1; VoltDB, which requires deterministic transactions | PostgreSQL streaming replication, Oracle | MySQL's binlog in row format, PostgreSQL logical replication, change data capture |
+
+The WAL is the same log the [chapter 4 post](/blog/storage-engines-logs-lsm-btree-columns/) covered for crash recovery: shipping it to another machine gives you a byte-for-byte copy. That is also its weakness. Because the log describes disk blocks, followers must run the same storage format as the leader.
+
+A logical log is decoupled from the storage engine, so leader and follower can run different versions. That gives you a way to upgrade without downtime: upgrade a follower, let it catch up, then fail over to it.
+
+### Knock: Postgres 11.9 to 15.3 without downtime
+
+Knock had run Postgres 11.9 since the company started, and Amazon RDS was retiring that version on 29 February 2024, which would have forced an upgrade with downtime. The team's bar was that any downtime beyond 60 seconds was unacceptable. Going to 15.3 meant four major versions, and in-place upgrades were out.
+
+They used logical replication instead. A new 15.3 server subscribed to a publication on the old primary, and over a few weeks they added tables to it one at a time, after hours. Simplified from their post:
+
+```sql
+-- On the old primary (Postgres 11.9): publish row changes, one table at a time
+CREATE PUBLICATION pg_upgrade_pub;
+ALTER PUBLICATION pg_upgrade_pub ADD TABLE my_table_name;
+
+-- On the new server (15.3): subscribe, which copies the table and then streams changes
+CREATE SUBSCRIPTION pg_upgrade_sub
+  CONNECTION 'host=old-primary dbname=app'   -- placeholder connection string
+  PUBLICATION pg_upgrade_pub;
+
+-- Right before cutover: sequences are not replicated, so push each one ahead with a buffer
+SELECT setval('orders_id_seq', 1234567 + 100000);  -- value read from the old database
+```
+
+The catch was the one GitHub hit in 2012, from the other side: ID counters. Logical replication copies rows, not sequences, so the new database's counters were still at the start. Right before cutover, a script read the next value of every sequence on the old database and set it on the new one plus 100,000, a gap that is a rounding error for bigint IDs.
+
+At cutover, the application sent new queries to the new database and gave running queries 500 ms to finish. In their words: "Reading this paragraph took longer than the cutover itself."
+
+<Concepts>
+
+- **Statement-based replication**: sending the SQL text and running it again on every follower.
+- **WAL shipping**: sending the storage engine's low-level log, so followers rebuild identical files.
+- **Logical (row-based) replication**: sending row-level changes, independent of how the storage engine lays out data.
+- **Change data capture (CDC)**: reading a database's logical log to feed other systems, such as a warehouse or a search index.
+- **Publication / subscription**: in PostgreSQL logical replication, the source publishes changes to chosen tables and the target subscribes to them.
+- **Sequence**: a PostgreSQL counter that hands out increasing numbers, usually for IDs. It lives outside the rows, so logical replication does not copy it.
+
+</Concepts>
+
+---
+
+## 5. Reading from a follower
+
+Most apps read far more than they write, so a tempting setup is one leader for writes and many followers for reads. That only works with asynchronous replication, and asynchronous followers can be behind. Run the same query on the leader and on a follower at the same moment and you may get different answers.
+
+Stop writing and wait, and the followers catch up. That is **eventual consistency**, and the "eventually" has no upper limit.
+
+The book's warning is one line: "Pretending that replication is synchronous when in fact it is asynchronous is a recipe for problems down the line."
+
+Lag shows up to users as three kinds of strange behaviour:
+
+| What the user sees | The guarantee that prevents it | A common fix |
+|---|---|---|
+| Posts a comment, refreshes, and it is gone | **Read-after-write** (read your own writes) | Read what the user may have changed from the leader, or from a replica that has reached the user's last write |
+| Sees a new comment, refreshes, and it vanishes | **Monotonic reads** | Send each user's reads to the same replica, for example by a hash of the user ID |
+| Sees an answer before the question it answers | **Consistent prefix reads** | Write causally related data to the same shard, or track dependencies |
+
+### Bitbucket: route by log position
+
+Bitbucket runs PostgreSQL with one primary and several read replicas. In 2020, almost all traffic from its two main services still went to the primary, and at peak hours requests waited for a connection from the pool. Developers could send a code path to the replicas by hand, but rarely did.
+
+The new rule: inside one request, send reads to a replica until the first write, then send everything to the primary. Across requests, the danger is the one in the table above: "Imagine creating a pull request, then going to the pull request list page and not seeing what you just created." So after a user writes, Bitbucket saves the primary's current LSN for that user.
+
+On the user's next request, it picks a replica that has replayed at least that far. The saved positions live in Redis, keyed by Atlassian ID, together with a list of replicas to avoid.
+
+The idea fits in two PostgreSQL functions. This is an illustration, not Bitbucket's code:
+
+```sql
+-- On the primary, right after the user's write: remember this position for the user
+SELECT pg_current_wal_lsn();                        -- e.g. 3/9A1C2B40
+
+-- On a replica, before serving that user's next read: has it replayed that far?
+SELECT pg_last_wal_replay_lsn() >= '3/9A1C2B40'::pg_lsn;
+```
+
+The extra lookups cost latency, and the team set itself a margin of about 10 ms. Their traffic analysis said 80 percent of the primary's load could move. After the change, the majority of traffic did move to replicas, with added latency close to 10 ms.
+
+### When the lag is hours, not milliseconds
+
+GitHub's 2018 incident shows the other end of the scale. At 11:12 UTC on 22 October, all primaries were back in the East, but dozens of read replicas were hours behind. Reads were spread across a large pool of replicas, so each request had a good chance of hitting a stale one, and users saw inconsistent data until more replicas were added and replication caught up.
+
+### DynamoDB makes you choose per read
+
+Some databases put the choice in the API. In DynamoDB, reads are eventually consistent by default and "might not reflect the results of a recently completed write operation". You can ask for a strongly consistent read with `ConsistentRead`, at twice the cost: eventually consistent reads are half the price. Global secondary indexes and streams only offer eventual consistency.
+
+Try the anomalies yourself. Post as Alice and refresh at once; then let Bob post, wait two seconds and refresh a few times. Then switch the routing rules on.
+
+</En>
+
+<Vi>
+
+Postmortem nói rõ Orchestrator "đã làm đúng như được cấu hình". Đẩy một replica bờ Tây lên primary là nước đi hợp lệ với database. Nhưng nó không hợp lệ với các ứng dụng ở bờ Đông, vốn bỗng dưng phải chịu một vòng đi về xuyên lục địa cho phần lớn lệnh gọi database. Việc sửa đầu tiên trong danh sách của GitHub là chặn Orchestrator đẩy primary lên ở region khác.
+
+GitHub cũng không failover ngược về bờ Đông ngay, vì làm vậy sẽ vứt đi gần 40 phút ghi ở bờ Tây. Họ chọn "ưu tiên tính toàn vẹn dữ liệu hơn khả năng sử dụng trang và thời gian khôi phục", dựng lại bờ Đông từ backup, rồi đối soát bằng tay vài giây ghi ở bờ Đông chưa kịp sao chép.
+
+<Callout type="tip" title="Ba sự cố của GitHub giống nhau ở chỗ nào">
+Lần nào cũng vậy, một hệ thống tự động đưa ra quyết định hợp lý ở phạm vi của nó, với cái nhìn chưa đủ về toàn cảnh. Lời khuyên của sách khớp với những gì GitHub đã đổi: đẩy lên follower có vị trí log cao nhất, đảm bảo leader cũ đã bị chặn (fence), và chấp nhận rằng có team thích failover bằng tay dù phần mềm làm tự động được.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Heartbeat / timeout (nhịp tim / thời gian chờ)**: các replica ping nhau đều đặn; quá thời gian chờ không thấy trả lời thì coi như đã chết. Quá ngắn thì node chỉ chậm thôi cũng bị thay; quá dài thì phục hồi phải chờ.
+- **Split brain (não chia đôi)**: hai node cùng đóng vai leader và cùng nhận lệnh ghi, khiến dữ liệu rẽ làm hai nhánh.
+- **Fencing / STONITH (chặn leader cũ)**: đảm bảo leader cũ không ghi được nữa, ví dụ cắt điện nó, trước khi leader mới tiếp quản.
+- **Buffer pool**: bộ nhớ đệm các trang dữ liệu trong RAM của database. Replica có buffer pool "nguội" phải đọc mọi thứ từ đĩa lúc đầu, nên chạy chậm.
+- **Auto-increment ID (ID tự tăng)**: ID database cấp bằng cách đếm tăng dần. Leader bị tụt lại sẽ đếm từ một số cũ hơn và có thể cấp lại ID đã dùng.
+- **Fail forward (đi tiếp)**: giữ trạng thái mới và sửa từ đó, thay vì quay về trạng thái cũ.
+
+</Concepts>
+
+---
+
+## 4. Trong replication log có gì
+
+Leader phải mô tả từng thay đổi cho follower bằng cách nào đó. Có ba cách phổ biến, và lựa chọn này quyết định nhiều hơn bạn tưởng:
+
+| | Theo câu lệnh (statement-based) | Gửi WAL (WAL shipping) | Logic, theo dòng (row-based) |
+|---|---|---|---|
+| Gửi đi cái gì | chính câu SQL | write-ahead log của storage engine: byte nào đổi trong block đĩa nào | mỗi dòng bị đổi một bản ghi: giá trị mới, hoặc khoá của dòng bị xoá |
+| Hỏng khi | câu lệnh không tất định: `NOW()`, `RAND()`, thứ tự auto-increment, trigger | leader và follower khác định dạng lưu trữ, nên nâng cấp major thường phải downtime | có thứ không phải là dòng, như bộ đếm sequence |
+| Ai dùng | MySQL trước bản 5.1; VoltDB, với điều kiện transaction phải tất định | streaming replication của PostgreSQL, Oracle | binlog dạng row của MySQL, logical replication của PostgreSQL, change data capture |
+
+WAL chính là cái log mà [bài chương 4](/blog/storage-engines-logs-lsm-btree-columns/) đã nói tới để khôi phục khi sập: gửi nó sang máy khác là có một bản sao giống từng byte. Đó cũng là điểm yếu của nó. Vì log mô tả các block trên đĩa, follower phải chạy cùng định dạng lưu trữ với leader.
+
+Log logic thì tách khỏi storage engine, nên leader và follower có thể chạy khác phiên bản. Nhờ vậy có cách nâng cấp không downtime: nâng cấp một follower, để nó đuổi kịp, rồi failover sang nó.
+
+### Knock: từ Postgres 11.9 lên 15.3 không downtime
+
+Knock chạy Postgres 11.9 từ ngày thành lập, và Amazon RDS sẽ ngừng hỗ trợ bản đó vào 29/2/2024, tức là bị ép nâng cấp kèm downtime. Tiêu chuẩn của team là downtime quá 60 giây thì không chấp nhận được. Lên 15.3 nghĩa là vượt bốn bản major, và nâng cấp tại chỗ thì bị loại.
+
+Họ dùng logical replication thay vào đó. Một server 15.3 mới subscribe vào một publication trên primary cũ, và trong vài tuần họ thêm từng bảng một vào đó, ngoài giờ làm việc. Rút gọn từ bài viết của họ:
+
+```sql
+-- On the old primary (Postgres 11.9): publish row changes, one table at a time
+CREATE PUBLICATION pg_upgrade_pub;
+ALTER PUBLICATION pg_upgrade_pub ADD TABLE my_table_name;
+
+-- On the new server (15.3): subscribe, which copies the table and then streams changes
+CREATE SUBSCRIPTION pg_upgrade_sub
+  CONNECTION 'host=old-primary dbname=app'   -- placeholder connection string
+  PUBLICATION pg_upgrade_pub;
+
+-- Right before cutover: sequences are not replicated, so push each one ahead with a buffer
+SELECT setval('orders_id_seq', 1234567 + 100000);  -- value read from the old database
+```
+
+Cái bẫy chính là thứ GitHub gặp năm 2012, nhìn từ phía bên kia: bộ đếm ID. Logical replication chép dòng, không chép sequence, nên bộ đếm ở database mới vẫn nằm ở vạch xuất phát. Ngay trước khi chuyển, một script đọc giá trị kế tiếp của mọi sequence ở database cũ rồi đặt sang database mới cộng thêm 100.000, một khoảng hở chẳng đáng kể với ID kiểu bigint.
+
+Lúc chuyển, ứng dụng gửi truy vấn mới sang database mới và cho các truy vấn đang chạy 500 ms để xong. Theo lời họ: "Đọc đoạn này còn lâu hơn cả lúc chuyển."
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Statement-based replication (sao chép theo câu lệnh)**: gửi nguyên văn câu SQL và chạy lại nó trên mọi follower.
+- **WAL shipping (gửi WAL)**: gửi log cấp thấp của storage engine, để follower dựng lại các file y hệt.
+- **Logical / row-based replication (sao chép logic)**: gửi thay đổi theo từng dòng, không phụ thuộc cách storage engine xếp dữ liệu.
+- **Change data capture (CDC)**: đọc log logic của database để đổ sang hệ thống khác, như kho dữ liệu hay index tìm kiếm.
+- **Publication / subscription**: trong logical replication của PostgreSQL, bên nguồn công bố thay đổi của các bảng được chọn, bên đích đăng ký nhận.
+- **Sequence (bộ đếm)**: bộ đếm của PostgreSQL cấp số tăng dần, thường dùng làm ID. Nó nằm ngoài các dòng, nên logical replication không chép nó.
+
+</Concepts>
+
+---
+
+## 5. Đọc từ follower
+
+Phần lớn ứng dụng đọc nhiều hơn ghi rất nhiều, nên có một thiết kế rất hấp dẫn: một leader nhận ghi, thật nhiều follower lo đọc. Cách này chỉ chạy được với sao chép bất đồng bộ, mà follower bất đồng bộ thì có thể chậm. Chạy cùng một truy vấn trên leader và trên follower cùng lúc, bạn có thể nhận hai kết quả khác nhau.
+
+Ngừng ghi và chờ một lúc thì follower đuổi kịp. Đó là **eventual consistency** (nhất quán sau cùng), và chữ "sau cùng" không có giới hạn trên nào.
+
+Lời cảnh báo của sách chỉ có một câu: "Giả vờ như replication là đồng bộ trong khi thật ra nó bất đồng bộ là công thức cho rắc rối về sau."
+
+Với người dùng, độ trễ sao chép (replication lag) lộ ra thành ba kiểu hành vi kỳ lạ:
+
+| Người dùng thấy gì | Đảm bảo ngăn được nó | Cách sửa thường gặp |
+|---|---|---|
+| Đăng bình luận, tải lại trang, bình luận biến mất | **Read-after-write** (đọc được cái mình vừa ghi) | Đọc thứ người dùng có thể đã sửa từ leader, hoặc từ replica đã tới được lần ghi cuối của họ |
+| Thấy một bình luận mới, tải lại, nó biến mất | **Monotonic reads** (đọc đơn điệu) | Gửi mọi lượt đọc của một người dùng tới cùng một replica, ví dụ theo hash của user ID |
+| Thấy câu trả lời trước câu hỏi | **Consistent prefix reads** (đọc theo tiền tố nhất quán) | Ghi dữ liệu có quan hệ nhân quả vào cùng một shard, hoặc theo dõi phụ thuộc |
+
+### Bitbucket: điều hướng theo vị trí log
+
+Bitbucket chạy PostgreSQL với một primary và vài read replica. Năm 2020, gần như toàn bộ traffic của hai service chính vẫn đổ vào primary, và giờ cao điểm thì request phải chờ lấy connection từ pool. Developer có thể tự chuyển một đoạn code sang replica, nhưng hiếm ai làm.
+
+Luật mới: trong một request, lệnh đọc đi tới replica cho tới lần ghi đầu tiên, từ đó trở đi mọi thứ đi tới primary. Giữa các request, nguy cơ là đúng cái trong bảng trên: "Thử tưởng tượng bạn tạo một pull request, rồi mở trang danh sách pull request mà không thấy cái vừa tạo."
+
+Nên sau khi người dùng ghi, Bitbucket lưu LSN hiện tại của primary cho người dùng đó. Ở request tiếp theo, nó chọn một replica đã phát lại ít nhất tới vị trí đó. Các vị trí đã lưu nằm trong Redis, khoá theo Atlassian ID, cùng một danh sách replica cần tránh.
+
+Ý tưởng gói gọn trong hai hàm của PostgreSQL. Đây là ví dụ minh hoạ, không phải code của Bitbucket:
+
+```sql
+-- On the primary, right after the user's write: remember this position for the user
+SELECT pg_current_wal_lsn();                        -- e.g. 3/9A1C2B40
+
+-- On a replica, before serving that user's next read: has it replayed that far?
+SELECT pg_last_wal_replay_lsn() >= '3/9A1C2B40'::pg_lsn;
+```
+
+Mấy lần tra thêm này tốn độ trễ, và team tự đặt mức chấp nhận khoảng 10 ms. Phân tích traffic cho thấy 80% tải của primary có thể chuyển đi. Sau thay đổi, phần lớn traffic đã thật sự sang replica, với độ trễ tăng thêm gần 10 ms.
+
+### Khi độ trễ là vài giờ chứ không phải vài mili giây
+
+Sự cố 2018 của GitHub cho thấy đầu kia của thang đo. Lúc 11:12 UTC ngày 22/10, mọi primary đã về bờ Đông, nhưng vài chục read replica chậm nhiều giờ. Lượt đọc được rải trên một dàn replica lớn, nên request nào cũng dễ trúng một replica cũ, và người dùng thấy dữ liệu không nhất quán cho tới khi thêm replica và sao chép đuổi kịp.
+
+### DynamoDB bắt bạn chọn cho từng lượt đọc
+
+Có database đưa hẳn lựa chọn này vào API. Trong DynamoDB, lượt đọc mặc định là eventually consistent và "có thể không phản ánh kết quả của một lần ghi vừa hoàn tất". Bạn có thể xin đọc strongly consistent bằng `ConsistentRead`, với giá gấp đôi: đọc eventually consistent chỉ tốn nửa tiền. Global secondary index và stream thì chỉ có eventual consistency.
+
+Bạn tự thử các hiện tượng này. Đăng bài với tư cách Alice rồi tải lại ngay; sau đó cho Bob đăng, chờ hai giây và tải lại vài lần. Rồi bật các luật điều hướng lên.
+
+</Vi>
+
+<ReplicationLag />
+
+<En>
+
+Read-your-writes alone does not stop time going backwards on other people's comments, and pinning Alice to one follower alone does not show her own comment sooner. You need both rules, and each one costs something: the first sends some reads back to the leader, the second ties a user's fate to one replica, so if it fails, their reads must move elsewhere.
+
+<Concepts>
+
+- **Read scaling**: adding followers to serve more reads, while all writes still go to one leader.
+- **Replication lag**: how far a follower is behind the leader, in time or in log positions.
+- **Eventual consistency**: if writes stop, all replicas end up the same. It says nothing about how long that takes.
+- **Read-after-write consistency**: a user always sees their own changes after a reload. Other users' changes may still be late.
+- **Monotonic reads**: once a user has seen data from some point in time, they never see older data afterwards.
+- **Consistent prefix reads**: writes that happened in an order are seen in that order, so a reply never shows up before its question.
+
+</Concepts>
+
+---
+
+## 6. More than one leader
+
+With one leader, every write goes through one node. If you cannot reach it, for example from another region during a network problem, you cannot write. **Multi-leader** replication lets more than one node accept writes, and each leader also acts as a follower of the others.
+
+It rarely pays off inside one region. The book names three places where it does:
+
+- **Several regions**: a leader in each, so writes are fast locally and a region can keep working when the link to the others breaks.
+- **Offline clients**: a calendar on your phone and on your laptop. Each device is a leader for its local copy, and they sync when online, sometimes hours or days later.
+- **Real-time collaboration**: Google Docs, Figma, Linear. Each open browser tab is a replica that applies your edit at once and syncs it in the background.
+
+The price is **write conflicts**. Two leaders accept writes to the same record, each fine on its own, and replication then finds they disagree. The book defines **concurrent** carefully: two writes are concurrent if neither knew about the other when it was made.
+
+They do not have to happen at the same instant. Multi-leader systems also cannot enforce constraints like "usernames are unique" or "the account never goes negative", because each leader can accept a write that only breaks the rule in combination with another.
+
+| Strategy | How it works | What you give up |
+|---|---|---|
+| Avoid conflicts | Route all writes for a record to one leader, for example a user's home region | Breaks when you move a user or a region fails |
+| Last write wins (LWW) | Keep the write with the highest timestamp, drop the rest | Data: concurrent writes are silently lost |
+| Keep siblings | Store all concurrent values and let the app or the user merge them | A harder API: a single value becomes a set of values |
+| Merge automatically (CRDT, OT) | Algorithms that merge text, lists, counters and maps so every replica ends the same | Complexity, and rules like "at most five items" still cannot be guaranteed |
+
+The book notes that OT is mostly used for collaborative text editing, as in Google Docs, while CRDTs appear in Redis Enterprise, Riak and Azure Cosmos DB, and in sync libraries such as Automerge and Yjs.
+
+### Figma: last writer wins, with the server as the clock
+
+Evan Wallace's 2019 post explains the design and what it gives up. Figma clients talk to a multiplayer server over WebSockets, with a separate server process per document. The team looked at OT, the approach behind Google Docs, and found it "unnecessarily complex for our problem space". They took ideas from CRDTs instead, but not true CRDTs: CRDTs are built for systems with no central authority, and Figma has one, its server.
+
+The server keeps the latest value any client sent for each property of each object. Two people changing different properties of one object do not conflict. When they change the same property, the document keeps the last value that reached the server.
+
+The post calls this "similar to a last-writer-wins register ... except we don't need a timestamp because the server can define the order of events."
+
+The consequence is spelled out: if a text value is B and one person changes it to AB while another changes it to BC, the result is AB or BC, never ABC. For a design tool, that is acceptable. For a text editor it would not be, which is why text editors pay for OT or CRDTs.
+
+Two more details are worth stealing:
+
+- **No flicker.** A client applies its own change at once. Until the server acknowledges it, the client ignores incoming changes to that same property, since its own change is the best guess of the final value.
+- **Conflict avoidance for IDs.** New objects can be created offline, so the server cannot hand out IDs. Each client has a unique client ID that goes into every object ID it creates, so two clients never pick the same one. It is the same problem as GitHub's reused IDs in 2012 and Knock's sequences, solved by giving each writer its own range.
+
+<Concepts>
+
+- **Multi-leader replication**: several nodes accept writes and replicate to each other. Also called active/active.
+- **Write conflict**: two writes to the same data that the replicas later find disagree.
+- **Concurrent writes**: writes where neither knew about the other when it was made, whatever the clock says.
+- **Last write wins (LWW)**: resolve a conflict by keeping the write with the highest timestamp and dropping the others.
+- **CRDT (conflict-free replicated data type)**: a data structure whose copies can be changed independently and always merge to the same result.
+- **OT (operational transformation)**: a technique that adjusts each edit (for example, shifts a text position) to account for edits that happened concurrently.
+- **Sync engine / local-first**: software that keeps data on the device, works offline, and syncs in the background.
+
+</Concepts>
+
+---
+
+## 7. No leader: quorums
+
+Some databases drop the leader entirely. The client, or a coordinator node acting for it, sends every write to several replicas and reads from several replicas. There is no failover, because there is no leader to replace. Amazon's Dynamo paper made this design popular in 2007, and Riak, Cassandra and ScyllaDB follow it, so the book calls it **Dynamo-style**.
+
+Since replicas can miss writes, every value carries a version, and a read keeps the newest one it sees. Replicas that missed a write catch up in three ways:
+
+- **Read repair**: a read that sees a stale replica writes the newer value back to it.
+- **Hinted handoff**: when a replica is down, another node keeps its writes as hints and hands them over when it returns.
+- **Anti-entropy**: a background process compares replicas and copies what is missing.
+
+### n, w and r
+
+With `n` replicas, a write counts as successful once `w` replicas confirm it, and a read asks `r` replicas. If `w + r > n`, every read set overlaps every write set in at least one replica, so a read sees the newest successful write. With `n = 3, w = 2, r = 2`, one replica can be down and both reads and writes still work.
+
+It is like checking a rumour: if enough people heard the announcement, and you ask enough people, at least one of them was in the room.
+
+### Dynamo: an always-writeable cart
+
+The Dynamo paper states what Amazon wanted: an "always writeable" store, because for the shopping cart an "Add to Cart" operation "can never be forgotten or rejected". Its common configuration was `(N, R, W) = (3, 2, 2)`. Applications that needed the highest availability could set W to 1, so a write was accepted as long as a single node had stored it.
+
+To stay writeable during failures, Dynamo uses a **sloppy quorum**: reads and writes go to the first N healthy nodes on the key's preference list, which may not be the usual N. In the paper's example, if node A is down, a write meant for A goes to node D with a hint naming A. When A recovers, D hands the data over and deletes its copy. That is hinted handoff.
+
+Cassandra does the same today, with a limit: its documentation says a coordinator keeps hints for an unavailable replica only up to `max_hint_window`, three hours by default. A replica that is down longer has to be repaired by other means.
+
+<Callout type="note" title="DynamoDB is not Dynamo">
+The book points out a common mix-up. The original Dynamo was described in the 2007 paper but never released outside Amazon. DynamoDB, the cloud service, has a completely different architecture: single-leader replication based on Multi-Paxos. That is why it can offer the strongly consistent reads from the previous section.
+</Callout>
+
+### Why the quorum promise is weaker than it looks
+
+Even with `w + r > n`, the book lists cases where a read can return an old value: a node with the new value fails and is restored from a stale replica, a write fails on some nodes but is not rolled back on others, a rebalance changes which nodes hold a key, or clocks decide which write is newer. Its advice is to treat `w` and `r` as a way to make stale reads less likely, not as a guarantee.
+
+In return, leaderless systems handle slow nodes well. Requests already go to several replicas, so a slow one barely matters: the client uses the fastest answers. The cost is more replicas to wait for as quorums grow, which is why the book says quorums are seldom larger than four of seven or five of nine.
+
+Play with it below. Set `w = 1, r = 1` and read a few times after a write, then compare with `w = 2, r = 2`. Then take replicas down until writes fail, and read again.
+
+</En>
+
+<Vi>
+
+Chỉ bật read-your-writes thì không ngăn được thời gian chạy lùi với bình luận của người khác, còn chỉ ghim Alice vào một follower thì không làm bình luận của chính cô ấy hiện ra sớm hơn. Cần cả hai luật, và luật nào cũng có giá: luật đầu đẩy một phần lượt đọc về leader, luật sau buộc số phận người dùng vào một replica, replica đó hỏng thì lượt đọc của họ phải chuyển đi chỗ khác.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Read scaling (mở rộng đọc)**: thêm follower để phục vụ thêm lượt đọc, trong khi mọi lệnh ghi vẫn đi qua một leader.
+- **Replication lag (độ trễ sao chép)**: follower chậm hơn leader bao xa, tính bằng thời gian hoặc vị trí log.
+- **Eventual consistency (nhất quán sau cùng)**: nếu ngừng ghi, mọi replica rồi sẽ giống nhau. Nó không nói mất bao lâu.
+- **Read-after-write consistency (đọc được cái mình vừa ghi)**: người dùng luôn thấy thay đổi của chính mình sau khi tải lại. Thay đổi của người khác thì có thể vẫn tới trễ.
+- **Monotonic reads (đọc đơn điệu)**: đã thấy dữ liệu ở một thời điểm thì về sau không bao giờ thấy dữ liệu cũ hơn.
+- **Consistent prefix reads (đọc theo tiền tố nhất quán)**: các lần ghi xảy ra theo thứ tự nào thì được thấy theo thứ tự đó, nên câu trả lời không bao giờ hiện trước câu hỏi.
+
+</Concepts>
+
+---
+
+## 6. Nhiều hơn một leader
+
+Với một leader, mọi lệnh ghi đi qua một node. Không tới được node đó, chẳng hạn từ region khác lúc mạng trục trặc, là không ghi được. Sao chép **multi-leader** cho phép nhiều node cùng nhận ghi, và mỗi leader đồng thời là follower của các leader khác.
+
+Trong cùng một region thì hiếm khi đáng. Sách nêu ba chỗ nó đáng:
+
+- **Nhiều region**: mỗi region một leader, nên ghi cục bộ rất nhanh và một region vẫn chạy tiếp khi đường nối với các region khác đứt.
+- **Client offline**: lịch trên điện thoại và trên laptop. Mỗi thiết bị là leader của bản cục bộ, và chúng đồng bộ khi có mạng, có khi sau vài giờ hay vài ngày.
+- **Cộng tác thời gian thực**: Google Docs, Figma, Linear. Mỗi tab trình duyệt đang mở là một replica, áp dụng chỉnh sửa của bạn ngay và đồng bộ ở chế độ nền.
+
+Cái giá là **xung đột ghi (write conflict)**. Hai leader nhận ghi vào cùng một bản ghi, riêng từng lần thì ổn, rồi lúc sao chép mới phát hiện chúng mâu thuẫn. Sách định nghĩa **đồng thời (concurrent)** rất cẩn thận: hai lần ghi là đồng thời nếu lúc thực hiện, không lần nào biết tới lần kia.
+
+Chúng không cần xảy ra cùng một khoảnh khắc. Hệ multi-leader cũng không giữ được ràng buộc kiểu "username là duy nhất" hay "tài khoản không bao giờ âm", vì mỗi leader có thể nhận một lần ghi mà chỉ khi gộp với lần ghi khác mới phạm luật.
+
+| Chiến lược | Cách làm | Bạn mất gì |
+|---|---|---|
+| Tránh xung đột | Dồn mọi lệnh ghi của một bản ghi về một leader, ví dụ region "nhà" của người dùng | Hỏng khi chuyển người dùng đi hoặc một region sập |
+| Last write wins (LWW) | Giữ lần ghi có timestamp lớn nhất, bỏ các lần còn lại | Dữ liệu: các lần ghi đồng thời âm thầm biến mất |
+| Giữ các bản song song (siblings) | Lưu mọi giá trị ghi đồng thời, để ứng dụng hoặc người dùng tự gộp | API khó hơn: một giá trị biến thành một tập giá trị |
+| Tự động gộp (CRDT, OT) | Thuật toán gộp văn bản, danh sách, bộ đếm và map để mọi replica ra cùng kết quả | Độ phức tạp, và luật kiểu "tối đa năm món" vẫn không đảm bảo được |
+
+Sách ghi rằng OT chủ yếu dùng cho soạn văn bản cộng tác, như Google Docs, còn CRDT có trong Redis Enterprise, Riak, Azure Cosmos DB, và trong các thư viện đồng bộ như Automerge và Yjs.
+
+### Figma: ai ghi sau cùng thì thắng, server làm đồng hồ
+
+Bài viết năm 2019 của Evan Wallace giải thích thiết kế này và cái giá của nó. Client Figma nói chuyện với server multiplayer qua WebSocket, mỗi tài liệu một process riêng trên server. Team đã xem xét OT, cách làm đằng sau Google Docs, và thấy nó "phức tạp không cần thiết với bài toán của bọn mình". Họ lấy ý tưởng từ CRDT, nhưng không phải CRDT thật sự: CRDT làm ra cho hệ thống không có ai làm trọng tài trung tâm, còn Figma có một, chính là server.
+
+Server giữ giá trị mới nhất mà bất kỳ client nào gửi cho từng thuộc tính của từng object. Hai người sửa hai thuộc tính khác nhau của một object thì không xung đột. Khi họ sửa cùng một thuộc tính, tài liệu giữ giá trị tới server sau cùng.
+
+Bài viết gọi đó là "giống một last-writer-wins register ... chỉ khác là không cần timestamp, vì server tự quyết thứ tự các sự kiện."
+
+Hệ quả được nói thẳng: nếu một ô chữ đang là B, một người sửa thành AB trong khi người khác sửa thành BC, kết quả là AB hoặc BC, không bao giờ là ABC. Với công cụ thiết kế thì chấp nhận được. Với trình soạn văn bản thì không, nên trình soạn văn bản phải trả giá cho OT hoặc CRDT.
+
+Thêm hai chi tiết đáng học theo:
+
+- **Không nhấp nháy.** Client áp dụng thay đổi của chính nó ngay. Cho tới khi server xác nhận, client bỏ qua các thay đổi gửi về cho đúng thuộc tính đó, vì thay đổi của nó là dự đoán tốt nhất về giá trị cuối.
+- **Tránh xung đột cho ID.** Object mới có thể được tạo lúc offline, nên server không cấp ID được. Mỗi client có một client ID duy nhất, gắn vào mọi object ID nó tạo, nên hai client không bao giờ chọn trùng. Đây chính là bài toán ID bị dùng lại của GitHub năm 2012 và sequence của Knock, giải bằng cách cho mỗi bên ghi một dải riêng.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Multi-leader replication (sao chép nhiều leader)**: nhiều node cùng nhận ghi và sao chép cho nhau. Còn gọi là active/active.
+- **Write conflict (xung đột ghi)**: hai lần ghi vào cùng dữ liệu mà về sau các replica thấy là mâu thuẫn.
+- **Concurrent writes (ghi đồng thời)**: các lần ghi mà lúc thực hiện, không lần nào biết tới lần kia, bất kể đồng hồ nói gì.
+- **Last write wins (LWW)**: giải xung đột bằng cách giữ lần ghi có timestamp lớn nhất và bỏ các lần khác.
+- **CRDT (kiểu dữ liệu sao chép không xung đột)**: cấu trúc dữ liệu mà các bản sao sửa độc lập được và luôn gộp ra cùng một kết quả.
+- **OT (operational transformation)**: kỹ thuật điều chỉnh từng chỉnh sửa (ví dụ dời vị trí trong văn bản) để tính tới các chỉnh sửa xảy ra đồng thời.
+- **Sync engine / local-first**: phần mềm giữ dữ liệu ngay trên thiết bị, chạy được khi offline, và đồng bộ ở chế độ nền.
+
+</Concepts>
+
+---
+
+## 7. Không leader: quorum
+
+Có database bỏ hẳn leader. Client, hoặc một node điều phối (coordinator) làm thay client, gửi mỗi lệnh ghi tới vài replica và đọc từ vài replica. Không có failover, vì chẳng có leader nào để thay. Bài báo Dynamo của Amazon làm thiết kế này nổi tiếng năm 2007, và Riak, Cassandra, ScyllaDB đi theo, nên sách gọi nó là **kiểu Dynamo (Dynamo-style)**.
+
+Vì replica có thể lỡ lần ghi, mỗi giá trị mang theo một phiên bản, và lượt đọc giữ cái mới nhất nó thấy. Replica lỡ ghi đuổi kịp theo ba cách:
+
+- **Read repair (sửa khi đọc)**: lượt đọc thấy một replica cũ thì ghi giá trị mới hơn ngược lại vào nó.
+- **Hinted handoff (giao lại theo gợi ý)**: khi một replica sập, node khác giữ hộ các lần ghi của nó dưới dạng hint và trao lại khi nó quay về.
+- **Anti-entropy (chống lệch)**: một tiến trình nền so các replica và chép phần còn thiếu.
+
+### n, w và r
+
+Với `n` replica, một lần ghi tính là thành công khi `w` replica xác nhận, và một lần đọc hỏi `r` replica. Nếu `w + r > n`, tập đọc nào cũng giao tập ghi ở ít nhất một replica, nên lần đọc thấy được lần ghi thành công mới nhất. Với `n = 3, w = 2, r = 2`, một replica sập thì đọc và ghi vẫn chạy.
+
+Giống kiểm chứng một tin đồn: nếu đủ nhiều người đã nghe thông báo, và bạn hỏi đủ nhiều người, thì ít nhất một người bạn hỏi đã có mặt lúc đó.
+
+### Dynamo: giỏ hàng lúc nào cũng ghi được
+
+Bài báo Dynamo nêu rõ Amazon muốn gì: một kho "lúc nào cũng ghi được", vì với giỏ hàng, thao tác "Thêm vào giỏ" thì "không bao giờ được quên hay từ chối". Cấu hình phổ biến là `(N, R, W) = (3, 2, 2)`. Ứng dụng nào cần tính sẵn sàng cao nhất có thể đặt W bằng 1, để lần ghi được nhận miễn là có một node lưu xong.
+
+Để vẫn ghi được khi có sự cố, Dynamo dùng **sloppy quorum** (quorum lỏng): đọc và ghi tới N node khoẻ mạnh đầu tiên trong danh sách ưu tiên của khoá, có thể không phải N node thường lệ. Trong ví dụ của bài báo, nếu node A sập, lần ghi dành cho A sẽ tới node D kèm một hint ghi tên A. Khi A hồi phục, D trao dữ liệu lại rồi xoá bản của mình. Đó là hinted handoff.
+
+Cassandra ngày nay làm y vậy, có giới hạn: tài liệu của nó nói coordinator chỉ giữ hint cho một replica không truy cập được trong `max_hint_window`, mặc định ba giờ. Replica sập lâu hơn thì phải sửa bằng cách khác.
+
+<Callout type="note" title="DynamoDB không phải Dynamo">
+Sách chỉ ra một nhầm lẫn hay gặp. Dynamo gốc được mô tả trong bài báo năm 2007 nhưng chưa bao giờ phát hành ra ngoài Amazon. DynamoDB, dịch vụ cloud, có kiến trúc khác hẳn: sao chép một leader dựa trên Multi-Paxos. Vì vậy nó mới cung cấp được kiểu đọc strongly consistent ở phần trước.
+</Callout>
+
+### Vì sao lời hứa của quorum yếu hơn vẻ ngoài
+
+Kể cả khi `w + r > n`, sách vẫn liệt kê những trường hợp lượt đọc trả về giá trị cũ: một node giữ giá trị mới bị hỏng rồi được khôi phục từ một replica cũ, một lần ghi thất bại ở vài node nhưng không bị gỡ ở các node khác, một đợt cân bằng lại làm đổi tập node giữ khoá, hay đồng hồ quyết định lần ghi nào mới hơn. Lời khuyên của sách là coi `w` và `r` như cách làm đọc dữ liệu cũ ít xảy ra hơn, chứ không phải một đảm bảo.
+
+Đổi lại, hệ không leader xử lý node chậm rất tốt. Request vốn đã tới nhiều replica, nên một replica chậm gần như không ảnh hưởng: client dùng các câu trả lời nhanh nhất. Cái giá là quorum càng lớn thì càng phải chờ nhiều replica, nên sách nói quorum hiếm khi lớn hơn bốn trên bảy hay năm trên chín.
+
+Bạn thử ở bên dưới. Đặt `w = 1, r = 1` rồi đọc vài lần sau một lần ghi, rồi so với `w = 2, r = 2`. Sau đó tắt bớt replica cho tới khi ghi thất bại, rồi đọc lại.
+
+</Vi>
+
+<QuorumPlayground />
+
+<En>
+
+A write that reached fewer than `w` replicas is reported as an error, but the book points out it is not rolled back where it did land, so a later read may or may not return it. "Failed" in a leaderless store means "not confirmed", not "did not happen".
+
+<Concepts>
+
+- **Leaderless (Dynamo-style) replication**: any replica accepts writes; clients write to and read from several replicas in parallel.
+- **Quorum**: the minimum number of replicas that must answer for a read or write to count.
+- **n, w, r**: replicas per key, confirmations needed for a write, replicas asked on a read.
+- **Read repair / hinted handoff / anti-entropy**: three ways stale replicas catch up: fixed during a read, handed their missed writes later, or compared in the background.
+- **Sloppy quorum**: when the usual replicas are unreachable, accept the write on other healthy nodes and hand it over later.
+- **Multi-Paxos**: a consensus algorithm, like Raft, that keeps one agreed leader per group of replicas.
+
+</Concepts>
+
+---
+
+## 8. Concurrent writes and clocks
+
+In a leaderless or multi-leader system, replicas receive the same writes in different orders, because of network delays and partial failures. If each one simply overwrites, they end up permanently different. To converge, they need a rule.
+
+The book separates two cases. If B knew about A, or built on it, then A **happened before** B, and B should overwrite A. If neither knew about the other, they are **concurrent**, and something has to resolve the conflict. The question is whether the database can tell which case it is in.
+
+Last write wins cannot. It compares timestamps, and a timestamp says when something happened by some clock, not whether one write knew about the other. Worse, if one node's clock runs ahead, writes from the other nodes can lose even when they came later.
+
+### Jepsen: Cassandra and last write wins
+
+Kyle Kingsbury's 2013 Jepsen analysis tested exactly this. Cassandra, he wrote, chose last write wins instead of vector clocks for performance: vector clocks need a read before each write, so dropping them cuts a write from two round trips to one. The downside: "there is no safe way to modify a Cassandra cell."
+
+His first test mutated the same cell repeatedly, with "perfectly synchronized clocks, QUORUM consistency, and a perfect lock service". Of 2,000 writes, 1,009 were acknowledged and 724 survived: 285 acknowledged writes lost, about 28 percent. A second test found that timestamps were being taken in milliseconds and padded with three zeros to look like microseconds, so collisions were common, and roughly 1 in 200 rows ended up corrupt.
+
+These are results for the Cassandra of 2013. The lasting lesson is in the same post: Cassandra users avoid modifying cells and write each change to its own cell, then merge at read time.
+
+Here is the difference on a made-up example: two people add a label to the same issue at the same time.
+
+</En>
+
+<Vi>
+
+Lần ghi tới được ít hơn `w` replica sẽ báo lỗi, nhưng sách chỉ ra nó không bị gỡ ở những chỗ nó đã tới, nên một lần đọc sau có thể trả về nó, cũng có thể không. "Thất bại" trong kho không leader nghĩa là "chưa được xác nhận", chứ không phải "chưa xảy ra".
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Leaderless replication (sao chép không leader, kiểu Dynamo)**: replica nào cũng nhận ghi; client ghi và đọc song song trên nhiều replica.
+- **Quorum (số phiếu tối thiểu)**: số replica tối thiểu phải trả lời thì một lần đọc hay ghi mới được tính.
+- **n, w, r**: số replica của mỗi khoá, số xác nhận cần cho một lần ghi, số replica được hỏi khi đọc.
+- **Read repair / hinted handoff / anti-entropy**: ba cách để replica cũ đuổi kịp: được sửa lúc đọc, được trao lại các lần ghi lỡ mất, hoặc được so sánh ở chế độ nền.
+- **Sloppy quorum (quorum lỏng)**: khi các replica thường lệ không liên lạc được, nhận ghi ở các node khoẻ khác rồi trao lại sau.
+- **Multi-Paxos**: thuật toán đồng thuận, giống Raft, giữ một leader được thống nhất cho mỗi nhóm replica.
+
+</Concepts>
+
+---
+
+## 8. Ghi đồng thời và đồng hồ
+
+Trong hệ không leader hay nhiều leader, các replica nhận cùng các lần ghi theo những thứ tự khác nhau, do độ trễ mạng và sự cố cục bộ. Nếu mỗi replica cứ ghi đè, chúng sẽ khác nhau mãi mãi. Muốn hội tụ, chúng cần một luật.
+
+Sách tách hai trường hợp. Nếu B biết tới A, hoặc xây trên A, thì A **xảy ra trước (happens before)** B, và B nên ghi đè A. Nếu không bên nào biết bên kia, chúng **đồng thời (concurrent)**, và phải có thứ gì đó giải xung đột. Câu hỏi là database có phân biệt được mình đang ở trường hợp nào không.
+
+Last write wins thì không. Nó so timestamp, mà timestamp chỉ nói một việc xảy ra lúc nào theo một chiếc đồng hồ nào đó, chứ không nói lần ghi này có biết lần ghi kia hay không. Tệ hơn, nếu đồng hồ của một node chạy nhanh, các lần ghi từ node khác có thể thua dù tới sau.
+
+### Jepsen: Cassandra và last write wins
+
+Bài phân tích Jepsen năm 2013 của Kyle Kingsbury kiểm tra đúng chuyện này. Ông viết rằng Cassandra chọn last write wins thay vì vector clock vì hiệu năng: vector clock cần đọc trước mỗi lần ghi, nên bỏ nó đi thì một lần ghi giảm từ hai vòng đi về xuống một. Mặt trái: "không có cách nào an toàn để sửa một ô (cell) trong Cassandra."
+
+Bài test đầu tiên của ông sửa đi sửa lại cùng một ô, với "đồng hồ đồng bộ hoàn hảo, consistency QUORUM, và một dịch vụ khoá hoàn hảo". Trong 2.000 lần ghi, 1.009 lần được xác nhận và 724 lần còn sống: 285 lần ghi đã xác nhận bị mất, khoảng 28%. Bài test thứ hai phát hiện timestamp được lấy theo mili giây rồi đệm thêm ba số 0 cho giống micro giây, nên trùng nhau rất thường, và khoảng 1 trên 200 dòng bị hỏng.
+
+Đây là kết quả với Cassandra của năm 2013. Bài học còn nguyên giá trị nằm ngay trong bài đó: người dùng Cassandra tránh sửa ô, mà ghi mỗi thay đổi vào một ô riêng, rồi gộp lúc đọc.
+
+Đây là khác biệt trên một ví dụ đặt ra cho bài này: hai người cùng lúc thêm nhãn vào cùng một issue.
+
+</Vi>
+
+<ReplicationLwwVsSiblings />
+
+<En>
+
+### Version numbers, then version vectors
+
+The book builds the fix in two steps. With one replica, give each key a version number. A read returns every value not yet overwritten (the **siblings**) plus the current version.
+
+A write must send back the version it read and a merge of the siblings it saw. The server then overwrites everything at or below that version and keeps anything newer as a sibling, because a newer value must be concurrent with this write.
+
+With several replicas accepting writes, one number is not enough. Each replica keeps its own counter, and the set of counters for a key is a **version vector**. Clients send it back on every write, so any replica can tell an overwrite from a concurrent write. Riak 2.0 uses a variant called dotted version vectors and calls the value it hands to clients the "causal context".
+
+Dynamo used vector clocks, and the paper reports how they behaved:
+
+- To keep them small, a clock is truncated once it has about 10 (node, counter) pairs, dropping the oldest. The authors admit this can lose ancestry, but say the problem "has not surfaced in production".
+- Over 24 hours of measuring the shopping cart service, 99.94 percent of requests saw exactly one version. Conflicts were rare.
+- Merging carts kept every "add to cart". But, in the paper's words, "deleted items can resurface", because a merge that only unions items cannot tell "removed" from "never seen". A delete has to be recorded too, as a tombstone.
+
+<Concepts>
+
+- **Happens-before**: A happened before B if B knew about A, depended on it or built on it.
+- **Concurrent**: neither operation knew about the other. Real time does not matter.
+- **Clock skew**: two machines disagreeing about the current time. With last write wins, the node whose clock runs ahead wins conflicts.
+- **Siblings**: concurrent values the database keeps side by side until someone merges them.
+- **Version vector**: one counter per replica for a key. Comparing two vectors tells you whether one write saw the other or they were concurrent.
+- **Tombstone**: a marker that says "this was deleted", so a merge does not bring the item back.
+
+</Concepts>
+
+---
+
+## Key takeaways
+
+- **Assume every follower can be hours behind, and route reads with that in mind.** GitHub's replicas were hours behind in 2018; Bitbucket routes each user's reads by log position so their own writes never disappear.
+- **Failover can lose writes the client was told had succeeded.** Promote the most up-to-date follower, fence the old leader, keep automatic failover inside one region, and decide in advance whether you prefer manual failover, as GitHub did after 2012.
+- **Keep tested backups and archived logs. A replica copies your mistakes.** GitLab's replica was gone, its backups had been failing silently, and a staging snapshot six hours old was all that was left.
+- **Pick the replication log format with upgrades in mind.** Logical replication let Knock move four major Postgres versions with a cutover of seconds, as long as they carried the sequences across themselves.
+- **With more than one leader, or none, choose conflict resolution on purpose.** Last write wins silently dropped 28 percent of acknowledged writes in Jepsen's test; Figma accepts it for properties but not for text; version vectors and CRDTs keep concurrent writes.
+
+---
+
+## Review questions
+
+1. GitHub's 2018 failover was correct by Orchestrator's rules. What made it a bad outcome, and what did GitHub change so it could not happen again? *(Section 3)*
+2. GitLab had a hot standby, daily `pg_dump` backups and disk snapshots. Why did none of them save the last six hours of data? *(Section 2)*
+3. Why does WAL shipping usually force downtime for a major version upgrade, while logical replication does not, and what did Knock have to copy by hand? *(Section 4)*
+4. A user posts a comment and refreshes. Explain which guarantee is broken if it is missing, and how a log-position check like Bitbucket's prevents it. Why does that check alone not give monotonic reads? *(Section 5)*
+5. With `n = 3, w = 2, r = 2`, why does a read normally see the latest write, and name two situations where it still might not. *(Section 7)*
+6. In Figma, two people edit the same text box at once. Why can the result never contain both edits, and what would a CRDT do differently? *(Sections 6 and 8)*
+
+</En>
+
+<Vi>
+
+### Số phiên bản, rồi version vector
+
+Sách dựng lời giải qua hai bước. Với một replica, cho mỗi khoá một số phiên bản. Lượt đọc trả về mọi giá trị chưa bị ghi đè (các **siblings**, bản song song) cùng số phiên bản hiện tại.
+
+Lượt ghi phải gửi kèm số phiên bản nó đã đọc và bản gộp các siblings nó đã thấy. Server khi đó ghi đè mọi thứ có phiên bản bằng hoặc thấp hơn số đó, và giữ lại mọi thứ mới hơn làm sibling, vì giá trị mới hơn hẳn phải đồng thời với lần ghi này.
+
+Khi nhiều replica cùng nhận ghi, một con số không đủ nữa. Mỗi replica giữ một bộ đếm riêng, và tập các bộ đếm của một khoá gọi là **version vector**. Client gửi nó ngược lại ở mỗi lần ghi, nên replica nào cũng phân biệt được ghi đè với ghi đồng thời. Riak 2.0 dùng một biến thể gọi là dotted version vector, và gọi giá trị nó đưa cho client là "causal context".
+
+Dynamo dùng vector clock, và bài báo kể lại chúng chạy ra sao:
+
+- Để giữ chúng nhỏ, clock bị cắt bớt khi có khoảng 10 cặp (node, bộ đếm), bỏ cặp cũ nhất. Tác giả thừa nhận điều này có thể làm mất thông tin tổ tiên, nhưng nói vấn đề "chưa từng xuất hiện trên production".
+- Qua 24 giờ đo dịch vụ giỏ hàng, 99,94% request chỉ thấy đúng một phiên bản. Xung đột hiếm khi xảy ra.
+- Gộp giỏ hàng giữ lại mọi lần "thêm vào giỏ". Nhưng, theo lời bài báo, "món đã xoá có thể xuất hiện lại", vì phép gộp chỉ lấy hợp các món thì không phân biệt được "đã xoá" với "chưa từng thấy". Lần xoá cũng phải được ghi lại, dưới dạng tombstone.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Happens-before (xảy ra trước)**: A xảy ra trước B nếu B biết tới A, phụ thuộc vào A hoặc xây trên A.
+- **Concurrent (đồng thời)**: không thao tác nào biết tới thao tác kia. Giờ thực không quan trọng.
+- **Clock skew (lệch đồng hồ)**: hai máy không thống nhất về giờ hiện tại. Với last write wins, node có đồng hồ chạy nhanh sẽ thắng các xung đột.
+- **Siblings (bản song song)**: các giá trị đồng thời mà database giữ cạnh nhau cho tới khi có người gộp chúng.
+- **Version vector (vector phiên bản)**: mỗi replica một bộ đếm cho một khoá. So hai vector là biết lần ghi này đã thấy lần ghi kia, hay chúng đồng thời.
+- **Tombstone (bia mộ)**: dấu đánh "cái này đã bị xoá", để phép gộp không làm món đó quay lại.
+
+</Concepts>
+
+---
+
+## Điểm rút ra
+
+- **Coi như follower nào cũng có thể chậm vài giờ, và điều hướng lượt đọc theo đó.** Năm 2018 replica của GitHub chậm nhiều giờ; Bitbucket điều hướng lượt đọc của từng người theo vị trí log để thứ họ vừa ghi không bao giờ biến mất.
+- **Failover có thể làm mất những lần ghi client đã được báo là thành công.** Đẩy lên follower mới nhất, chặn leader cũ, giữ failover tự động trong một region, và quyết định trước có muốn failover bằng tay không, như GitHub đã làm sau 2012.
+- **Giữ backup đã restore thử và log đã lưu trữ. Replica chép luôn cả lỗi của bạn.** Replica của GitLab đã mất, backup thì âm thầm hỏng từ lâu, và thứ duy nhất còn lại là một snapshot staging cũ sáu tiếng.
+- **Chọn định dạng replication log có tính tới chuyện nâng cấp.** Logical replication giúp Knock vượt bốn bản Postgres major chỉ với vài giây chuyển, miễn là họ tự chép sequence sang.
+- **Khi có nhiều hơn một leader, hoặc không có leader nào, hãy chủ động chọn cách giải xung đột.** Last write wins âm thầm làm mất 28% lần ghi đã xác nhận trong bài test của Jepsen; Figma chấp nhận nó cho thuộc tính nhưng không cho văn bản; version vector và CRDT giữ lại được các lần ghi đồng thời.
+
+---
+
+## Câu hỏi ôn tập
+
+1. Lần failover năm 2018 của GitHub đúng theo luật của Orchestrator. Điều gì khiến kết quả lại tệ, và GitHub đã đổi gì để nó không lặp lại? *(Phần 3)*
+2. GitLab có hot standby, backup `pg_dump` hằng ngày và snapshot đĩa. Vì sao không thứ nào cứu được sáu tiếng dữ liệu cuối? *(Phần 2)*
+3. Vì sao gửi WAL thường buộc phải downtime khi nâng cấp bản major, còn logical replication thì không, và Knock đã phải tự chép tay thứ gì? *(Phần 4)*
+4. Một người đăng bình luận rồi tải lại trang. Nếu bình luận không thấy đâu thì đảm bảo nào bị phá, và phép so vị trí log như của Bitbucket ngăn nó ra sao? Vì sao riêng phép so đó không cho đọc đơn điệu? *(Phần 5)*
+5. Với `n = 3, w = 2, r = 2`, vì sao lượt đọc thường thấy lần ghi mới nhất, và nêu hai tình huống mà nó vẫn có thể không thấy. *(Phần 7)*
+6. Trong Figma, hai người cùng sửa một ô chữ. Vì sao kết quả không bao giờ chứa cả hai chỉnh sửa, và một CRDT sẽ làm khác thế nào? *(Phần 6 và 8)*
+
+</Vi>

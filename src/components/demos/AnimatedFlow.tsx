@@ -4,7 +4,7 @@ import React, { useState, useEffect, useRef, useId } from 'react';
 // licences in its README.md); loaded with <image>, so they never clash with ids in the hidden EN/VI copy.
 const NODE_ICONS = [
   'video', 'scissors', 'storage', 'workflow', 'scan', 'split', 'memory', 'film', 'audio', 'mobile', 'gateway',
-  'database', 'engine', 'celebrity', 'queue', 'server', 'mailbox', 'friends', 'log', 'merge', 'ec2',
+  'database', 'engine', 'celebrity', 'queue', 'server', 'mailbox', 'friends', 'log', 'merge', 'ec2', 'mysql',
 ] as const;
 const iconHref = (name: FlowIconName) => `/icons/flow/${name}.svg`;
 
@@ -467,8 +467,115 @@ const STRIPE_MIGRATION_SCENARIOS: FlowScenario[] = [
   },
 ];
 
+// Preset: GitHub, 21-22 October 2018. A 43-second network cut triggers a cross-country MySQL failover.
+// Facts only from "October 21 post-incident analysis" (github.blog, Jason Warner, 2018).
+const GITHUB_FAILOVER_SCENARIOS: FlowScenario[] = [
+  {
+    id: 'github-2018-failover',
+    titleEn: 'GitHub, October 2018',
+    titleVi: 'GitHub, tháng 10/2018',
+    summaryEn: 'Each MySQL cluster has one primary on the US East Coast, replicas in the US West Coast, and up to dozens of read replicas. Orchestrator runs automated failover on top of Raft.',
+    summaryVi: 'Mỗi cluster MySQL có một primary ở bờ Đông nước Mỹ, replica ở bờ Tây, và tới vài chục read replica. Orchestrator lo failover tự động, chạy trên Raft.',
+    overallMetricEn: '43 s network cut, 24 h 11 min of degraded service',
+    overallMetricVi: 'Mất mạng 43 giây, dịch vụ chập chờn 24 giờ 11 phút',
+    nodes: [
+      { id: 'app', labelEn: 'App servers', labelVi: 'App server', subEn: 'US East Coast', subVi: 'bờ Đông', x: 20, y: 105, width: 150, height: 80, icon: 'server', type: 'source' },
+      { id: 'east', labelEn: 'MySQL, East', labelVi: 'MySQL bờ Đông', subEn: 'primary until 22:52', subVi: 'primary tới 22:52', x: 330, y: 22, width: 180, height: 80, icon: 'mysql', type: 'storage' },
+      { id: 'west', labelEn: 'MySQL, West', labelVi: 'MySQL bờ Tây', subEn: 'replica, then primary', subVi: 'replica, rồi thành primary', x: 330, y: 192, width: 180, height: 80, icon: 'mysql', type: 'storage' },
+      { id: 'replicas', labelEn: 'Read replicas', labelVi: 'Read replica', subEn: 'serve most reads', subVi: 'phục vụ phần lớn lượt đọc', x: 730, y: 105, width: 170, height: 80, icon: 'mysql', type: 'default' },
+    ],
+    edges: [
+      { id: 'w-east', from: 'app', to: 'east', labelEn: 'writes', labelVi: 'ghi', curve: 'curved-up' },
+      { id: 'w-west', from: 'app', to: 'west', labelEn: 'writes, cross-country', labelVi: 'ghi xuyên lục địa', style: 'bottleneck', weight: 'heavy', curve: 'curved-down' },
+      { id: 'repl', from: 'east', to: 'west', labelEn: 'replication', labelVi: 'sao chép', style: 'dashed', curve: 'vertical' },
+      { id: 'r-east', from: 'east', to: 'replicas', labelEn: 'replication', labelVi: 'sao chép', curve: 'curved-down' },
+      { id: 'r-west', from: 'west', to: 'replicas', labelEn: 'replication', labelVi: 'sao chép', curve: 'curved-up' },
+    ],
+    steps: [
+      {
+        stepIndex: 1,
+        activeNodeIds: ['app', 'east', 'west', 'replicas'],
+        activeEdgeIds: ['w-east', 'repl', 'r-east'],
+        packet: { edgeId: 'w-east', labelEn: 'write', labelVi: 'ghi' },
+        badge: { textEn: 'A normal day', textVi: 'Ngày bình thường', type: 'info' },
+        narrativeEn: 'Applications send writes to the primary of each cluster, in the East Coast data center. The primary streams its changes to the West Coast and to the read replicas, which serve the vast majority of reads.',
+        narrativeVi: 'Ứng dụng gửi lệnh ghi tới primary của từng cluster, đặt ở data center bờ Đông. Primary đẩy thay đổi sang bờ Tây và sang các read replica, nơi phục vụ phần lớn lượt đọc.',
+      },
+      {
+        stepIndex: 2,
+        activeNodeIds: ['east'],
+        activeEdgeIds: [],
+        alertNodeId: 'east',
+        alertLabelEn: 'cut off for 43 seconds',
+        alertLabelVi: 'mất kết nối 43 giây',
+        badge: { textEn: '22:52 UTC: link lost', textVi: '22:52 UTC: đứt mạng', type: 'warning' },
+        narrativeEn: 'Routine work to replace failing 100G optical equipment cuts the East Coast hub off from the primary East Coast data center for 43 seconds. The East primaries hold a few seconds of writes that have not reached the West yet.',
+        narrativeVi: 'Một việc bảo trì thường lệ, thay thiết bị quang 100G đang hỏng, làm hub mạng bờ Đông mất kết nối với data center chính ở bờ Đông trong 43 giây. Primary bờ Đông đang giữ vài giây dữ liệu ghi chưa kịp sang bờ Tây.',
+      },
+      {
+        stepIndex: 3,
+        activeNodeIds: ['west'],
+        activeEdgeIds: [],
+        alertNodeId: 'west',
+        alertLabelEn: 'promoted to primary',
+        alertLabelVi: 'được đẩy lên primary',
+        badge: { textEn: 'Failover to the West', textVi: 'Failover sang bờ Tây', type: 'danger' },
+        narrativeEn: 'Orchestrator nodes in the West Coast and in an East Coast public cloud still form a Raft quorum. They do what they are configured to do: fail the clusters over and make the West Coast databases the new primaries.',
+        narrativeVi: 'Các node Orchestrator ở bờ Tây và ở một public cloud bờ Đông vẫn đủ quorum Raft. Chúng làm đúng như được cấu hình: failover các cluster và biến database bờ Tây thành primary mới.',
+      },
+      {
+        stepIndex: 4,
+        activeNodeIds: ['app', 'west', 'east'],
+        activeEdgeIds: ['w-west'],
+        alertNodeId: 'west',
+        alertLabelEn: 'two copies diverge',
+        alertLabelVi: 'hai bản đã lệch nhau',
+        packet: { edgeId: 'w-west', labelEn: 'write', labelVi: 'ghi' },
+        badge: { textEn: 'Writes cross the country', textVi: 'Ghi xuyên lục địa', type: 'danger' },
+        narrativeEn: 'When the link comes back, the app tier sends writes to the West. Now each side has writes the other lacks, so failing back is unsafe. The East apps were not built for a cross-country round trip on most database calls.',
+        narrativeVi: 'Mạng có lại, tầng ứng dụng gửi lệnh ghi sang bờ Tây. Giờ mỗi bên có những lần ghi mà bên kia không có, nên không thể failover ngược về an toàn. Ứng dụng ở bờ Đông vốn không được làm để chịu một vòng đi về xuyên lục địa cho phần lớn lệnh gọi database.',
+      },
+      {
+        stepIndex: 5,
+        activeNodeIds: ['east', 'west'],
+        activeEdgeIds: ['repl'],
+        alertNodeId: 'east',
+        alertLabelEn: 'rebuilt from backups',
+        alertLabelVi: 'dựng lại từ backup',
+        badge: { textEn: 'Fail forward, restore', textVi: 'Đi tiếp, khôi phục', type: 'warning' },
+        narrativeEn: 'The West has taken writes for nearly 40 minutes, so the team keeps it as primary and pauses webhooks and Pages builds. East Coast databases are rebuilt from backups taken every four hours, which takes hours, then catch up from the West.',
+        narrativeVi: 'Bờ Tây đã nhận ghi gần 40 phút, nên team giữ nó làm primary và tạm dừng webhook cùng việc build Pages. Database bờ Đông được dựng lại từ backup chụp bốn giờ một lần, mất nhiều giờ, rồi đuổi theo bờ Tây.',
+      },
+      {
+        stepIndex: 6,
+        activeNodeIds: ['east', 'replicas', 'app'],
+        activeEdgeIds: ['w-east', 'r-east'],
+        alertNodeId: 'replicas',
+        alertLabelEn: 'hours behind',
+        alertLabelVi: 'chậm nhiều giờ',
+        packet: { edgeId: 'r-east', labelEn: 'backlog', labelVi: 'tồn đọng' },
+        badge: { textEn: 'Oct 22, 11:12: lagging reads', textVi: '22/10, 11:12: đọc dữ liệu cũ', type: 'warning' },
+        narrativeEn: 'All primaries are back in the East, but dozens of read replicas are hours behind. Each request has a good chance of landing on one, so users see inconsistent data. Catch-up follows a power decay curve, not a straight line, as Europe and the US start their workday.',
+        narrativeVi: 'Mọi primary đã về lại bờ Đông, nhưng vài chục read replica còn chậm nhiều giờ. Request nào cũng dễ rơi vào một replica như vậy, nên người dùng thấy dữ liệu không nhất quán. Tốc độ đuổi kịp chậm dần theo một đường cong chứ không đi theo đường thẳng, đúng lúc châu Âu và Mỹ bắt đầu ngày làm việc.',
+      },
+      {
+        stepIndex: 7,
+        activeNodeIds: ['app', 'east', 'west', 'replicas'],
+        activeEdgeIds: ['w-east', 'repl', 'r-east'],
+        successNodeId: 'east',
+        successLabelEn: 'primary again',
+        successLabelVi: 'lại là primary',
+        packet: { edgeId: 'w-east', labelEn: 'write', labelVi: 'ghi' },
+        badge: { textEn: 'Green at 23:03 next day', textVi: 'Xanh lại lúc 23:03 hôm sau', type: 'success' },
+        narrativeEn: 'More replicas spread the read load until replication catches up. The original topology is back at 16:24, and the backlog of over five million webhook events drains by 23:03. One busy cluster alone had 954 writes that never reached the West, left to reconcile by hand.',
+        narrativeVi: 'Thêm replica để chia tải đọc, nhờ vậy sao chép mới đuổi kịp. Topology ban đầu trở lại lúc 16:24, và hơn năm triệu webhook tồn đọng được xử lý xong lúc 23:03. Riêng một cluster bận rộn đã có 954 lần ghi chưa từng sang được bờ Tây, phải đối soát bằng tay.',
+      },
+    ],
+  },
+];
+
 interface AnimatedFlowProps {
-  preset?: 'prime-video' | 'twitter-fanout' | 'stripe-migration';
+  preset?: 'prime-video' | 'twitter-fanout' | 'stripe-migration' | 'github-failover';
   scenarioId?: string;
   title?: string;
   titleVi?: string;
@@ -486,7 +593,13 @@ export default function AnimatedFlow({
   const arrowId = (state: ArrowState, weight: EdgeWeight) => `${uid}-arrow-${state}-${weight}`;
 
   const scenarios =
-    preset === 'stripe-migration' ? STRIPE_MIGRATION_SCENARIOS : preset === 'twitter-fanout' ? TWITTER_FANOUT_SCENARIOS : PRIME_VIDEO_SCENARIOS;
+    preset === 'github-failover'
+      ? GITHUB_FAILOVER_SCENARIOS
+      : preset === 'stripe-migration'
+        ? STRIPE_MIGRATION_SCENARIOS
+        : preset === 'twitter-fanout'
+          ? TWITTER_FANOUT_SCENARIOS
+          : PRIME_VIDEO_SCENARIOS;
   const initialScenario = scenarios.find((s) => s.id === scenarioId) || scenarios[0];
   const [activeScenarioId, setActiveScenarioId] = useState<string>(initialScenario.id);
   const scenario = scenarios.find((s) => s.id === activeScenarioId) || initialScenario;
