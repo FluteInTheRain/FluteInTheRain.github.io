@@ -1,0 +1,421 @@
+{
+  "id": "set-06",
+  "title": {
+    "en": "One column changed, many writes",
+    "vi": "Đổi một cột, ghi nhiều nơi"
+  },
+  "context": {
+    "illustrative": true,
+    "text": {
+      "en": "A shop keeps its orders in Postgres. The table `orders` has 20 million rows and five indexes: the primary key, plus one each on status, city, created_at and driver_id.\n\nAt peak the app sends 2,000 updates per second to this table. 1,500 of them change `status`. The other 500 change only `note`, a free-text column that has no index, and Postgres runs them as HOT updates.",
+      "vi": "Một cửa hàng lưu đơn hàng trong Postgres. Bảng `orders` có 20 triệu dòng và năm index: khoá chính, cùng mỗi index trên status, city, created_at và driver_id.\n\nLúc cao điểm app gửi 2.000 lệnh update mỗi giây vào bảng này. 1.500 lệnh đổi `status`. 500 lệnh còn lại chỉ đổi `note`, một cột văn bản tự do không có index, và Postgres chạy chúng dưới dạng HOT update."
+    },
+    "media": [
+      {
+        "kind": "figure",
+        "component": "UpdateFanout",
+        "alt": {
+          "en": "An UPDATE aimed at one row in a Postgres heap file, with five indexes on the table, each holding an entry for that row.",
+          "vi": "Một lệnh UPDATE nhắm vào một dòng trong heap file của Postgres, bảng có năm index, mỗi index đều có một entry cho dòng đó."
+        }
+      }
+    ]
+  },
+  "questions": [
+    {
+      "id": "s06q1",
+      "level": "understand",
+      "track": "interview",
+      "type": "single",
+      "difficulty": 2,
+      "topic": "Why an update reaches indexes whose columns did not change",
+      "stem": {
+        "en": "In Postgres, an UPDATE changes only the `status` column of one row. The indexes on `city` and `driver_id` still get a new entry for that row. Why?",
+        "vi": "Trong Postgres, một lệnh UPDATE chỉ đổi cột `status` của một dòng. Các index trên `city` và `driver_id` vẫn có entry mới cho dòng đó. Vì sao?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Each index entry keeps a copy of the whole row, so every copy must be refreshed.",
+            "vi": "Mỗi entry của index giữ một bản sao cả dòng, nên mọi bản sao đều phải được làm mới."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Postgres rebuilds all the indexes of a table after every update to keep them balanced.",
+            "vi": "Postgres dựng lại mọi index của bảng sau mỗi lệnh update để giữ chúng cân bằng."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Entries point at a row's physical place, and the new version of the row sits in a new place.",
+            "vi": "Entry trỏ tới vị trí vật lý của dòng, và phiên bản mới của dòng nằm ở một vị trí mới."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "The write-ahead log needs one record per index, whether or not its column changed.",
+            "vi": "Write-ahead log cần một bản ghi cho mỗi index, dù cột của nó có đổi hay không."
+          }
+        }
+      ],
+      "answer": [
+        "c"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "Postgres never edits a row in place. An update writes a new version of the row at a new spot in the heap file. Every index entry stores the row's physical location (its `ctid`), so each index needs a new entry that points at the new spot, even if its own column did not change.",
+          "vi": "Postgres không bao giờ sửa dòng tại chỗ. Lệnh update ghi một phiên bản mới của dòng ở một chỗ mới trong heap file. Mỗi entry của index lưu vị trí vật lý của dòng (`ctid`), nên mỗi index cần một entry mới trỏ tới chỗ mới, dù cột của nó không đổi."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "An index entry holds the key and a pointer to the row, not the row itself. The refresh is needed because the pointer changes, not because a copy went stale.",
+            "vi": "Entry của index chứa khoá và một con trỏ tới dòng, không chứa cả dòng. Cần làm mới vì con trỏ đổi, không phải vì một bản sao bị cũ."
+          },
+          "b": {
+            "en": "Postgres adds one entry per index for the row that changed. It does not rebuild whole indexes on each update.",
+            "vi": "Postgres thêm một entry cho mỗi index cho đúng dòng vừa đổi. Nó không dựng lại cả index sau mỗi lệnh update."
+          },
+          "d": {
+            "en": "The log records the index writes after they are decided. It does not decide them. The cause is the changed row location.",
+            "vi": "Log ghi lại các lần ghi index sau khi chúng đã được quyết định, chứ không quyết định chúng. Nguyên nhân là vị trí của dòng đã đổi."
+          }
+        },
+        "reread": {
+          "anchor": "uber-one-column-every-index",
+          "label": {
+            "en": "Uber: one column, every index",
+            "vi": "Uber: một cột, mọi index"
+          }
+        },
+        "say": {
+          "en": "Postgres indexes point at the row's physical location, and an update moves the row, so every index needs a new entry.",
+          "vi": "Index của Postgres trỏ tới vị trí vật lý của dòng, mà update làm dòng dời chỗ, nên mọi index đều cần entry mới."
+        }
+      },
+      "ref": "Post: Uber: one column, every index"
+    },
+    {
+      "id": "s06q2",
+      "level": "apply",
+      "track": "ai",
+      "type": "ai-review",
+      "difficulty": 3,
+      "topic": "Counting the physical writes of one second of updates",
+      "stem": {
+        "en": "An AI assistant sized the disk for this table and wrote: \"2,000 updates per second means 2,000 row writes per second.\" Check it.\n\nA non-HOT update writes the new row version and one new entry in every index of the table. A HOT update writes only the new row version. Of the 2,000 updates, 1,500 are non-HOT and 500 are HOT. The table has 5 indexes.\n\nFormulas given:\n- `writes per non-HOT update = 1 + number of indexes`\n- `writes per HOT update = 1`\n- `physical writes per second = non-HOT updates × writes per non-HOT update + HOT updates × writes per HOT update`\n\nHow many physical writes per second does the table receive?",
+        "vi": "Một trợ lý AI tính dung lượng đĩa cho bảng này và viết: \"2.000 update mỗi giây nghĩa là 2.000 lần ghi dòng mỗi giây.\" Hãy kiểm tra.\n\nMột update không phải HOT ghi phiên bản dòng mới và một entry mới trong mọi index của bảng. Một HOT update chỉ ghi phiên bản dòng mới. Trong 2.000 update có 1.500 lệnh không phải HOT và 500 lệnh là HOT. Bảng có 5 index.\n\nCông thức cho sẵn:\n- `writes per non-HOT update = 1 + number of indexes`\n- `writes per HOT update = 1`\n- `physical writes per second = non-HOT updates × writes per non-HOT update + HOT updates × writes per HOT update`\n\nBảng nhận bao nhiêu lần ghi vật lý mỗi giây?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "About 2,000 writes per second",
+            "vi": "Khoảng 2.000 lần ghi mỗi giây"
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "About 12,000 writes per second",
+            "vi": "Khoảng 12.000 lần ghi mỗi giây"
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "About 8,000 writes per second",
+            "vi": "Khoảng 8.000 lần ghi mỗi giây"
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "About 9,500 writes per second",
+            "vi": "Khoảng 9.500 lần ghi mỗi giây"
+          }
+        }
+      ],
+      "answer": [
+        "d"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "Each of the 1,500 non-HOT updates writes 1 + 5 = 6 times, which is 9,000. The 500 HOT updates write once each, which is 500. Together that is 9,500, nearly five times the AI's number.",
+          "vi": "Mỗi lệnh trong 1.500 update không phải HOT ghi 1 + 5 = 6 lần, tức 9.000. 500 HOT update ghi một lần mỗi lệnh, tức 500. Cộng lại là 9.500, gần gấp năm lần số của AI."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "This counts one write per update and forgets the index entries. Each non-HOT update also writes one entry in every index.",
+            "vi": "Đây tính một lần ghi mỗi update và quên các entry của index. Mỗi update không phải HOT còn ghi thêm một entry trong mọi index."
+          },
+          "b": {
+            "en": "This charges all 2,000 updates the full 6 writes. The 500 HOT updates skip the indexes and write only the row.",
+            "vi": "Đây tính cả 2.000 update đều tốn đủ 6 lần ghi. 500 HOT update bỏ qua index và chỉ ghi dòng."
+          },
+          "c": {
+            "en": "This counts only the 5 index entries of each non-HOT update and forgets the new row version they also write.",
+            "vi": "Đây chỉ đếm 5 entry index của mỗi update không phải HOT và quên phiên bản dòng mới mà chúng cũng ghi."
+          }
+        },
+        "reread": {
+          "anchor": "uber-one-column-every-index",
+          "label": {
+            "en": "Uber: one column, every index",
+            "vi": "Uber: một cột, mọi index"
+          }
+        },
+        "say": {
+          "en": "When AI sizes an update-heavy table, I check that it counts one write per index for every update that is not HOT.",
+          "vi": "Khi AI tính tải cho bảng update nhiều, tôi kiểm tra nó có tính một lần ghi cho mỗi index với mọi update không phải HOT không."
+        }
+      },
+      "ref": "Post: Uber: one column, every index",
+      "verifiedBy": "Ran: python3 -c \"nh,h,i=1500,500,5; print(nh*(1+i)+h*1, 2000, 2000*(1+i), nh*i+h)\" -> output: 9500 2000 12000 8000 (correct, AI's one-write-per-update value, all updates at full cost, row version forgotten)"
+    },
+    {
+      "id": "s06q3",
+      "level": "apply",
+      "track": "ai",
+      "type": "scenario",
+      "difficulty": 3,
+      "topic": "The same update on InnoDB",
+      "stem": {
+        "en": "The team considers moving `orders` to MySQL with InnoDB and the same five indexes. An AI assistant estimates: \"The cost is the same. One `status` update writes the row plus a new entry in every index.\" Which correction is right?",
+        "vi": "Team cân nhắc chuyển `orders` sang MySQL với InnoDB và cùng năm index đó. Một trợ lý AI ước tính: \"Chi phí y như vậy. Một update `status` ghi dòng cộng một entry mới trong mọi index.\" Sửa thế nào là đúng?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Only the status index gets a new entry, because the other indexes point at the primary key.",
+            "vi": "Chỉ index status có entry mới, vì các index khác trỏ tới khoá chính."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "All five indexes get entries, because InnoDB also puts the new row version in a new place.",
+            "vi": "Cả năm index đều có entry mới, vì InnoDB cũng đặt phiên bản dòng mới ở một chỗ mới."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "No index changes, because InnoDB updates the row in place and keeps every key as it was.",
+            "vi": "Không index nào đổi, vì InnoDB sửa dòng tại chỗ và giữ nguyên mọi khoá như cũ."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Only the primary key index changes, and a background job refreshes the others later.",
+            "vi": "Chỉ index khoá chính đổi, còn các index khác do một job chạy ngầm làm mới sau."
+          }
+        }
+      ],
+      "answer": [
+        "a"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "In InnoDB the row lives inside the primary-key tree, and a secondary index entry holds the primary key value, not a disk location. Moving a row changes no other index. Only the index on the changed column, status, gets a new entry. The price is paid on reads: a lookup through a secondary index finds the primary key first, then the row.",
+          "vi": "Trong InnoDB dòng nằm ngay trong cây của khoá chính, và entry của index phụ giữ giá trị khoá chính, không phải vị trí trên đĩa. Dời dòng không đụng tới index nào khác. Chỉ index của cột bị đổi, tức status, có entry mới. Cái giá nằm ở lúc đọc: tra qua index phụ phải tìm khoá chính trước, rồi mới tới dòng."
+        },
+        "whyWrong": {
+          "b": {
+            "en": "This is the Postgres behaviour. InnoDB entries do not hold the row's location, so a moved row does not force a new entry in every index.",
+            "vi": "Đây là hành vi của Postgres. Entry của InnoDB không giữ vị trí dòng, nên dòng dời chỗ không bắt mọi index phải có entry mới."
+          },
+          "c": {
+            "en": "The status index is keyed on status, and its key just changed. That one entry must move to the new key, even if the row stays put.",
+            "vi": "Index status dùng status làm khoá, và khoá đó vừa đổi. Entry ấy phải chuyển sang khoá mới, dù dòng không dời chỗ."
+          },
+          "d": {
+            "en": "Indexes are kept up to date as part of the update itself. A background refresh would let queries on status read stale answers.",
+            "vi": "Index được cập nhật ngay trong chính lệnh update. Làm mới ngầm sẽ khiến query theo status đọc ra kết quả cũ."
+          }
+        },
+        "reread": {
+          "anchor": "uber-one-column-every-index",
+          "label": {
+            "en": "Uber: one column, every index",
+            "vi": "Uber: một cột, mọi index"
+          }
+        },
+        "say": {
+          "en": "When AI says a move to another engine costs the same, I ask what each index entry points at, because that decides how many indexes an update touches.",
+          "vi": "Khi AI bảo chuyển sang engine khác thì chi phí y như cũ, tôi hỏi entry của index trỏ tới cái gì, vì điều đó quyết định một update đụng bao nhiêu index."
+        }
+      },
+      "ref": "Post: Uber: one column, every index; MySQL 8.4 manual, Clustered and Secondary Indexes (https://dev.mysql.com/doc/refman/8.4/en/innodb-index-types.html)"
+    },
+    {
+      "id": "s06q4",
+      "level": "analyze",
+      "track": "interview",
+      "type": "multi",
+      "difficulty": 4,
+      "topic": "When Postgres can skip index writes",
+      "stem": {
+        "en": "Postgres can run some updates as heap-only tuple (HOT) updates. Which two statements about an update that qualifies for HOT are true?",
+        "vi": "Postgres có thể chạy một số lệnh update dưới dạng heap-only tuple (HOT). Hai phát biểu nào về một update đủ điều kiện HOT là đúng?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "It leaves every indexed column of the row unchanged.",
+            "vi": "Nó không đổi bất kỳ cột nào có index của dòng."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "The page that holds the old row has room for the new version.",
+            "vi": "Trang chứa dòng cũ còn chỗ cho phiên bản mới."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "The new version may sit on any page of the table that has room.",
+            "vi": "Phiên bản mới có thể nằm ở bất kỳ trang nào của bảng còn chỗ."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "VACUUM has already cleaned the dead versions from that page.",
+            "vi": "VACUUM đã dọn các phiên bản chết khỏi trang đó."
+          }
+        },
+        {
+          "id": "e",
+          "text": {
+            "en": "Replicas still replay a new entry in every index, as for any update.",
+            "vi": "Replica vẫn chạy lại entry mới trong mọi index, như mọi update khác."
+          }
+        }
+      ],
+      "answer": [
+        "a",
+        "b"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "The Postgres docs give two conditions: the update changes no column that an index references (summarizing indexes such as BRIN are the exception), and the old row's page has free space for the new version. Then no new index entries are needed, so there is nothing extra to write or to send to replicas.",
+          "vi": "Tài liệu Postgres nêu hai điều kiện: lệnh update không đổi cột nào mà index tham chiếu (index dạng tóm tắt như BRIN là ngoại lệ), và trang của dòng cũ còn chỗ trống cho phiên bản mới. Khi đó không cần entry index mới nào, nên không có gì thêm để ghi hay gửi tới replica."
+        },
+        "whyWrong": {
+          "c": {
+            "en": "The new version must stay on the same page as the old one. If it lands on another page, the indexes must point there and the update is not HOT.",
+            "vi": "Phiên bản mới phải nằm cùng trang với bản cũ. Nếu nó rơi sang trang khác, các index phải trỏ tới đó và update không còn là HOT."
+          },
+          "d": {
+            "en": "HOT does not wait for VACUUM. Free space is what matters, and HOT updates even clean up old versions on their own during normal work.",
+            "vi": "HOT không chờ VACUUM. Điều quan trọng là còn chỗ trống, và HOT còn tự dọn các phiên bản cũ trong lúc chạy bình thường."
+          },
+          "e": {
+            "en": "A HOT update writes no index entries, so the log has none to replay. Replicas replay the same lighter stream as the primary.",
+            "vi": "HOT update không ghi entry index nào, nên log không có gì để chạy lại. Replica chạy lại đúng luồng nhẹ hơn như máy chính."
+          }
+        },
+        "reread": {
+          "anchor": "uber-one-column-every-index",
+          "label": {
+            "en": "Uber: one column, every index",
+            "vi": "Uber: một cột, mọi index"
+          }
+        },
+        "say": {
+          "en": "A HOT update needs two things: no indexed column changes, and room on the same page for the new row version.",
+          "vi": "HOT update cần hai điều: không cột nào có index bị đổi, và trang hiện tại còn chỗ cho phiên bản dòng mới."
+        }
+      },
+      "ref": "https://www.postgresql.org/docs/current/storage-hot.html; Post: Uber: one column, every index"
+    },
+    {
+      "id": "s06q5",
+      "level": "evaluate",
+      "track": "ai",
+      "type": "ai-advice",
+      "difficulty": 5,
+      "topic": "Adding an index on every filtered column",
+      "stem": {
+        "en": "An AI assistant reviewed the slow queries and advises: \"Add an index on every column that appears in a WHERE clause.\" One such column is `note`: a single admin page filters on it a few times a day. The 500 updates per second that change only `note` are HOT today. A new index on `note` would take the table from 5 indexes to 6. Which verdict is best?",
+        "vi": "Một trợ lý AI xem các query chậm và khuyên: \"Hãy thêm index cho mọi cột xuất hiện trong mệnh đề WHERE.\" Một cột như vậy là `note`: chỉ một trang admin lọc theo nó vài lần mỗi ngày. 500 update mỗi giây chỉ đổi `note` hiện đang là HOT. Một index mới trên `note` sẽ đưa bảng từ 5 lên 6 index. Nhận định nào tốt nhất?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Agree: a missing index is a slow query, so every filtered column deserves one.",
+            "vi": "Đồng ý: thiếu index là query chậm, nên mọi cột được lọc đều đáng có một index."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Agree: an index only costs disk space, and the updates stay HOT whatever the indexes.",
+            "vi": "Đồng ý: index chỉ tốn dung lượng đĩa, và update vẫn là HOT bất kể có index nào."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Decline it for `note`: a rare page does not justify an extra write on 500 updates per second.",
+            "vi": "Từ chối với `note`: một trang hiếm dùng không đáng đổi lấy thêm một lần ghi trên 500 update mỗi giây."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Index `note`, and drop the status index so the number of indexes stays at five.",
+            "vi": "Đánh index `note`, và bỏ index status để số index vẫn là năm."
+          }
+        }
+      ],
+      "answer": [
+        "c"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "An index on `note` makes those 500 updates change an indexed column, so they stop being HOT. Each would write 1 + 6 = 7 times instead of once, and the 1,500 status updates would write 7 times instead of 6. Total writes go from 9,500 to 14,000 per second, about 47% more, to speed up a page used a few times a day. Index the columns that serious, frequent queries need, and count the write price first.",
+          "vi": "Index trên `note` khiến 500 update đó đổi một cột có index, nên chúng không còn là HOT. Mỗi lệnh ghi 1 + 6 = 7 lần thay vì một lần, và 1.500 update status ghi 7 lần thay vì 6. Tổng số lần ghi tăng từ 9.500 lên 14.000 mỗi giây, nhiều hơn khoảng 47%, chỉ để tăng tốc một trang dùng vài lần mỗi ngày. Hãy đánh index cho cột mà các query quan trọng, thường xuyên cần, và tính giá phải trả cho việc ghi trước."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "A missing index has a cost on one side, and an extra index has a cost on the other. Every filtered column is not worth a write on every update.",
+            "vi": "Thiếu index có cái giá ở một phía, còn thêm index có cái giá ở phía kia. Không phải cột nào được lọc cũng đáng đổi một lần ghi trên mọi update."
+          },
+          "b": {
+            "en": "Indexes also cost writes. Once `note` is indexed, changing it is an indexed-column change, so those updates are no longer HOT.",
+            "vi": "Index còn tốn cả lần ghi. Khi `note` có index, đổi nó là đổi một cột có index, nên các update đó không còn là HOT."
+          },
+          "d": {
+            "en": "Dropping an index that queries rely on only moves the slowness elsewhere, and `note` would still turn its 500 updates into non-HOT ones.",
+            "vi": "Bỏ một index mà các query đang dùng chỉ chuyển sự chậm sang chỗ khác, và `note` vẫn biến 500 update của nó thành update không phải HOT."
+          }
+        },
+        "reread": {
+          "anchor": "key-takeaways",
+          "label": {
+            "en": "Key takeaways",
+            "vi": "Điểm rút ra"
+          }
+        },
+        "say": {
+          "en": "When AI says to index every filtered column, I ask how often each query runs and which updates would stop being HOT.",
+          "vi": "Khi AI bảo đánh index mọi cột được lọc, tôi hỏi mỗi query chạy thường xuyên cỡ nào và update nào sẽ không còn là HOT."
+        }
+      },
+      "ref": "Post: Uber: one column, every index; https://www.postgresql.org/docs/current/storage-hot.html",
+      "verifiedBy": "Ran: python3 -c \"nh,h=1500,500; a=nh*(1+6)+h*(1+6); b=nh*(1+5)+h*1; print(a,b,a-b,round((a-b)/b*100,1))\" -> output: 14000 9500 4500 47.4 (writes per second with 6 indexes and no HOT, current writes, difference, percent more)"
+    }
+  ]
+}

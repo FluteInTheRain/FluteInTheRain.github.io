@@ -1,0 +1,427 @@
+{
+  "id": "set-04",
+  "title": {
+    "en": "Writes pile up faster than merges",
+    "vi": "Ghi dồn nhanh hơn compaction"
+  },
+  "context": {
+    "illustrative": true,
+    "text": {
+      "en": "A fleet-tracking service stores vehicle position events in an LSM engine (RocksDB style). About 20 MB/s of new data arrives, and 95% of operations are writes. Reads are rare: a dashboard fetches the latest position of one vehicle, and an export job scans old data once a night.\n\nEach event goes to the write-ahead log and the memtable. A full memtable is flushed as a new file in level 0 (L0). Background compaction merges L0 into L1, L1 into L2, and so on, and each level is 10 times bigger than the one above. The disk can write about 500 MB/s in total, flushes and compaction included.\n\nThe engine slows writes at 20 L0 files and stops them at 36. Lately L0 holds 14 files and the count keeps rising, and p99 write latency shows spikes.",
+      "vi": "Một service theo dõi đội xe lưu các sự kiện vị trí xe trong một engine LSM (kiểu RocksDB). Có khoảng 20 MB/s dữ liệu mới đổ vào, và 95% thao tác là ghi. Đọc rất ít: một dashboard lấy vị trí mới nhất của một xe, và một job xuất dữ liệu quét dữ liệu cũ mỗi đêm một lần.\n\nMỗi sự kiện đi vào write-ahead log và memtable. Memtable đầy thì được flush thành một file mới ở level 0 (L0). Compaction chạy nền trộn L0 vào L1, L1 vào L2, và cứ thế, mỗi tầng lớn gấp 10 lần tầng trên. Đĩa ghi được tổng cộng khoảng 500 MB/s, tính cả flush và compaction.\n\nEngine làm chậm ghi khi L0 có 20 file và dừng ghi ở 36 file. Gần đây L0 có 14 file và số này cứ tăng, còn p99 của ghi xuất hiện các đỉnh nhọn."
+    },
+    "media": [
+      {
+        "kind": "figure",
+        "component": "CompactionBacklog",
+        "alt": {
+          "en": "Writes enter the log and memtable, flush into a growing row of level-0 files marked with the compaction, slowdown and stop limits, and compaction merges them down into bigger levels.",
+          "vi": "Lệnh ghi vào log và memtable, flush thành hàng file level 0 đang dài ra với các mốc compaction, làm chậm và dừng, và compaction trộn chúng xuống các tầng lớn hơn."
+        }
+      }
+    ]
+  },
+  "questions": [
+    {
+      "id": "s04q1",
+      "level": "understand",
+      "track": "ai",
+      "type": "ai-advice",
+      "difficulty": 2,
+      "topic": "LSM read path",
+      "stem": {
+        "en": "An AI assistant explains the engine to a new teammate:\n\n\"A write is appended to the write-ahead log and put in the memtable. A full memtable is flushed as an SSTable. To read a vehicle's position, the engine checks the SSTables from oldest to newest and keeps the last value it finds.\"\n\nThe write part is right. What is the best correction to the read part?",
+        "vi": "Một trợ lý AI giải thích engine cho một đồng đội mới:\n\n\"Mỗi lần ghi được nối vào write-ahead log và đưa vào memtable. Memtable đầy thì được flush thành một SSTable. Để đọc vị trí của một xe, engine xem các SSTable từ cũ nhất tới mới nhất và giữ giá trị cuối cùng tìm được.\"\n\nPhần ghi là đúng. Cách sửa nào là tốt nhất cho phần đọc?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Read the write-ahead log first, since it holds the latest value of every key.",
+            "vi": "Đọc write-ahead log trước, vì nó giữ giá trị mới nhất của mọi khoá."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Read every SSTable and merge all the values found for the key.",
+            "vi": "Đọc mọi SSTable rồi trộn tất cả giá trị tìm được của khoá đó."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Check the memtable, then SSTables newest to oldest, and stop at the first hit.",
+            "vi": "Xem memtable, rồi các SSTable từ mới nhất tới cũ nhất, gặp là dừng."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Check only the newest SSTable, since older ones exist for crash recovery.",
+            "vi": "Chỉ xem SSTable mới nhất, vì các file cũ chỉ để khôi phục khi sập."
+          }
+        }
+      ],
+      "answer": [
+        "c"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "The newest data lives in the memtable, and each flush makes a newer file. So the first match going from newest to oldest is the current value, and the engine can stop there. Scanning oldest to newest would read more files and risk returning an old value.",
+          "vi": "Dữ liệu mới nhất nằm ở memtable, và mỗi lần flush tạo ra một file mới hơn. Nên lần gặp đầu tiên khi đi từ mới tới cũ là giá trị hiện tại, và engine dừng được ngay. Đi từ cũ tới mới thì phải đọc nhiều file hơn và còn có nguy cơ trả về giá trị cũ."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "The write-ahead log is only replayed after a crash. Reads are served from the memtable and SSTables, which are sorted and searchable.",
+            "vi": "Write-ahead log chỉ được chạy lại sau khi sập. Lệnh đọc được phục vụ từ memtable và SSTable, vốn đã sắp xếp và tra được."
+          },
+          "b": {
+            "en": "Values of one key are not merged on read. The newest version wins, and older ones are dropped later by compaction.",
+            "vi": "Giá trị của một khoá không được trộn lúc đọc. Bản mới nhất thắng, còn bản cũ bị compaction bỏ đi sau."
+          },
+          "d": {
+            "en": "Older SSTables hold live data too. A key written long ago may only exist in an old file, so the search must continue past the newest one.",
+            "vi": "SSTable cũ cũng chứa dữ liệu còn sống. Khoá ghi từ lâu có thể chỉ có trong file cũ, nên tìm kiếm phải đi tiếp qua file mới nhất."
+          }
+        },
+        "reread": {
+          "anchor": "2-lsm-trees-write-now-sort-later",
+          "label": {
+            "en": "2. LSM-trees: write now, sort later",
+            "vi": "2. LSM-tree: ghi trước, sắp xếp sau"
+          }
+        },
+        "say": {
+          "en": "Reads go memtable first, then SSTables newest to oldest, and stop at the first match.",
+          "vi": "Đọc đi memtable trước, rồi SSTable từ mới tới cũ, gặp khoá đầu tiên là dừng."
+        }
+      },
+      "ref": "Post: 2. LSM-trees: write now, sort later"
+    },
+    {
+      "id": "s04q2",
+      "level": "apply",
+      "track": "interview",
+      "type": "scenario",
+      "difficulty": 3,
+      "topic": "Compaction strategy for a workload",
+      "stem": {
+        "en": "For the fleet-tracking service, which compaction approach fits best?\n\nWorkload facts:\n- 95% of operations are writes; reads are rare.\n- The disk is 40% full. The limit is write bandwidth, not space.\n- Compaction already struggles to keep up.",
+        "vi": "Với service theo dõi đội xe, cách compaction nào hợp nhất?\n\nSự kiện về workload:\n- 95% thao tác là ghi; đọc rất ít.\n- Đĩa mới đầy 40%. Giới hạn là băng thông ghi, không phải dung lượng.\n- Compaction vốn đã chạy không kịp."
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Size-tiered: fewer rewrites per byte, which suits mostly writes.",
+            "vi": "Size-tiered: mỗi byte bị ghi lại ít lần hơn, hợp với workload chủ yếu là ghi."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Leveled: fewer files per read, so the rare reads stay fast.",
+            "vi": "Leveled: mỗi lần đọc xem ít file hơn, nên số ít lệnh đọc vẫn nhanh."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Turn compaction off: SSTables never change, so nothing needs merging.",
+            "vi": "Tắt compaction: SSTable không bao giờ đổi, nên chẳng cần trộn gì."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Either one: both rewrite every byte the same number of times.",
+            "vi": "Cái nào cũng được: cả hai ghi lại mỗi byte với số lần như nhau."
+          }
+        }
+      ],
+      "answer": [
+        "a"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "Size-tiered merges files of similar size, so each byte is rewritten fewer times. That saves the write bandwidth that is the bottleneck here. Its costs are more files per read and more space during big merges, and both are cheap with rare reads and a 40% full disk.",
+          "vi": "Size-tiered trộn các file cỡ gần nhau, nên mỗi byte bị ghi lại ít lần hơn. Cách này tiết kiệm băng thông ghi, vốn là điểm nghẽn ở đây. Cái giá là mỗi lần đọc xem nhiều file hơn và tốn thêm chỗ khi trộn file lớn, cả hai đều rẻ khi ít đọc và đĩa mới đầy 40%."
+        },
+        "whyWrong": {
+          "b": {
+            "en": "Leveled buys read speed and space by rewriting data more often. With rare reads and free space, that is the wrong trade, and it adds to the write load.",
+            "vi": "Leveled đổi tốc độ đọc và dung lượng lấy việc ghi lại dữ liệu nhiều lần hơn. Khi ít đọc và còn dư chỗ, đó là đánh đổi sai, và nó làm tải ghi nặng thêm."
+          },
+          "c": {
+            "en": "Immutable files are why compaction exists. Without it, old versions and tombstones pile up, and every read checks more files.",
+            "vi": "File không sửa được chính là lý do compaction tồn tại. Thiếu nó, phiên bản cũ và tombstone chất đống, và mỗi lần đọc phải xem thêm nhiều file."
+          },
+          "d": {
+            "en": "The two strategies rewrite data at very different rates. Choosing by workload matters because write cost differs a lot.",
+            "vi": "Hai chiến lược ghi lại dữ liệu với tốc độ rất khác nhau. Chọn theo workload là quan trọng vì chi phí ghi chênh nhau nhiều."
+          }
+        },
+        "reread": {
+          "anchor": "discord-when-compaction-falls-behind",
+          "label": {
+            "en": "Discord: when compaction falls behind",
+            "vi": "Discord: khi compaction chạy không kịp"
+          }
+        },
+        "say": {
+          "en": "Pick the strategy by what hurts: mostly writes and write bandwidth tight means size-tiered; read-heavy means leveled.",
+          "vi": "Chọn chiến lược theo chỗ đang đau: chủ yếu ghi và băng thông ghi eo hẹp thì size-tiered; đọc nhiều thì leveled."
+        }
+      },
+      "ref": "Post: Discord: when compaction falls behind (strategy table)"
+    },
+    {
+      "id": "s04q3",
+      "level": "apply",
+      "track": "interview",
+      "type": "scenario",
+      "difficulty": 3,
+      "topic": "Write amplification calculation",
+      "stem": {
+        "en": "The fleet-tracking engine has L0 plus three more levels (L1, L2, L3). Compaction runs 3 steps: L0 to L1, L1 to L2, and L2 to L3. Each step rewrites every byte `fan-out` times, and the fan-out is 10. The disk can write 500 MB/s in total.\n\nFormulas given:\n- `write amplification = (WAL bytes + flush bytes + compaction bytes) / user bytes`\n- `WAL bytes = user bytes`\n- `flush bytes = user bytes`\n- `compaction bytes = user bytes × fan-out × compaction steps`\n- `max user write rate = disk write rate / write amplification`\n\nWhat is the highest user write rate the disk can sustain?",
+        "vi": "Engine của service theo dõi đội xe có L0 cộng ba tầng nữa (L1, L2, L3). Compaction chạy 3 bước: L0 sang L1, L1 sang L2, và L2 sang L3. Mỗi bước ghi lại mỗi byte `fan-out` lần, và fan-out là 10. Đĩa ghi được tổng cộng 500 MB/s.\n\nCông thức cho sẵn:\n- `write amplification = (WAL bytes + flush bytes + compaction bytes) / user bytes`\n- `WAL bytes = user bytes`\n- `flush bytes = user bytes`\n- `compaction bytes = user bytes × fan-out × số bước compaction`\n- `tốc độ ghi tối đa của user = tốc độ ghi của đĩa / write amplification`\n\nTốc độ ghi cao nhất của user mà đĩa chịu được lâu dài là bao nhiêu?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "About 16.7 MB/s",
+            "vi": "Khoảng 16,7 MB/s"
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "About 41.7 MB/s",
+            "vi": "Khoảng 41,7 MB/s"
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "About 250 MB/s",
+            "vi": "Khoảng 250 MB/s"
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "About 15.6 MB/s",
+            "vi": "Khoảng 15,6 MB/s"
+          }
+        }
+      ],
+      "answer": [
+        "d"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "Write amplification = 1 + 1 + 10 × 3 = 32. So 500 / 32 = 15.6 MB/s of user data. Every user byte costs 32 bytes of disk writes, so the disk's 500 MB/s carries only a small share of it as new data.",
+          "vi": "Write amplification = 1 + 1 + 10 × 3 = 32. Vậy 500 / 32 = 15,6 MB/s dữ liệu của user. Mỗi byte của user tốn 32 byte ghi xuống đĩa, nên 500 MB/s của đĩa chỉ chở được một phần nhỏ làm dữ liệu mới."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "This leaves out the log and flush writes: 500 / 30 = 16.7. Every byte is also written to the log and to the flush file, so those two count.",
+            "vi": "Cách này bỏ quên phần ghi log và flush: 500 / 30 = 16,7. Mỗi byte còn được ghi vào log và vào file flush, nên hai phần đó phải tính."
+          },
+          "b": {
+            "en": "This counts one compaction step: 500 / 12 = 41.7. The data passes through three steps, not one.",
+            "vi": "Cách này chỉ tính một bước compaction: 500 / 12 = 41,7. Dữ liệu đi qua ba bước, không phải một."
+          },
+          "c": {
+            "en": "This counts only the log and flush writes: 500 / 2 = 250. It ignores compaction, which is most of the disk writing.",
+            "vi": "Cách này chỉ tính ghi log và flush: 500 / 2 = 250. Nó bỏ qua compaction, phần chiếm gần hết lượng ghi xuống đĩa."
+          }
+        },
+        "reread": {
+          "anchor": "4-what-one-write-really-costs",
+          "label": {
+            "en": "4. What one write really costs",
+            "vi": "4. Một lần ghi thật ra tốn bao nhiêu"
+          }
+        },
+        "say": {
+          "en": "Write amplification counts every copy of a byte: log, flush, and each compaction step. Divide the disk rate by it to get the real ingest limit.",
+          "vi": "Write amplification tính mọi bản sao của một byte: log, flush và từng bước compaction. Lấy tốc độ đĩa chia cho nó là ra giới hạn ghi thật."
+        }
+      },
+      "ref": "Post: 4. What one write really costs; all numbers are illustrative",
+      "verifiedBy": "python3 -c \"d=500;wal=1;fl=1;comp=10*3;wa=wal+fl+comp;print(wa,round(d/wa,1),round(d/(wa-2),1),round(d/(1+1+10),1),d/2)\" -> 32 15.6 16.7 41.7 250.0"
+    },
+    {
+      "id": "s04q4",
+      "level": "analyze",
+      "track": "ai",
+      "type": "multi",
+      "difficulty": 4,
+      "topic": "Bloom filters and one-sided errors",
+      "stem": {
+        "en": "Looking up a vehicle id that does not exist makes the engine check many SSTables. An AI assistant says each SSTable has a small Bloom filter to cut this cost, and lists claims about it. Tick the two claims that are true.",
+        "vi": "Tra một id xe không tồn tại khiến engine phải xem nhiều SSTable. Một trợ lý AI nói mỗi SSTable có một Bloom filter nhỏ để giảm chi phí này, và liệt kê vài nhận định về nó. Chọn hai nhận định đúng."
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "When a filter says \"maybe\", the key is surely in that file.",
+            "vi": "Khi filter nói \"có thể có\", khoá chắc chắn nằm trong file đó."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "When a filter says \"no\", the key is surely not in that file.",
+            "vi": "Khi filter nói \"không\", khoá chắc chắn không nằm trong file đó."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "A filter may say \"no\" for a key that the file does hold.",
+            "vi": "Filter có thể nói \"không\" cho một khoá mà file đang giữ."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "A filter may say \"maybe\" for a key the file does not hold.",
+            "vi": "Filter có thể nói \"có thể có\" cho khoá mà file không giữ."
+          }
+        },
+        {
+          "id": "e",
+          "text": {
+            "en": "A filter speeds up range scans across many keys.",
+            "vi": "Filter làm các lần quét theo khoảng nhiều khoá nhanh hơn."
+          }
+        }
+      ],
+      "answer": [
+        "b",
+        "d"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "A Bloom filter errs in one direction only. A \"no\" is always correct, so the engine skips that file. A \"maybe\" can be a false alarm, which costs one wasted read but never a wrong answer. A well-sized filter keeps those false alarms rare.",
+          "vi": "Bloom filter chỉ sai theo một chiều. Câu \"không\" luôn đúng, nên engine bỏ qua file đó. Câu \"có thể có\" có thể là báo nhầm, tốn một lần đọc thừa nhưng không bao giờ cho đáp án sai. Filter có kích thước hợp lý giữ các báo nhầm này ở mức hiếm."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "\"Maybe\" is not a promise. False positives exist, so the engine still has to read the file to confirm.",
+            "vi": "\"Có thể có\" không phải lời hứa. Báo nhầm có tồn tại, nên engine vẫn phải đọc file để xác nhận."
+          },
+          "c": {
+            "en": "That would lose data: a present key would look missing. A Bloom filter never does this, so its \"no\" can be trusted.",
+            "vi": "Như vậy sẽ mất dữ liệu: khoá đang có lại trông như không có. Bloom filter không bao giờ làm thế, nên câu \"không\" của nó đáng tin."
+          },
+          "e": {
+            "en": "A filter answers whether one exact key may be present. A range has no single key to test, so scans gain nothing from it.",
+            "vi": "Filter chỉ trả lời một khoá cụ thể có thể có hay không. Một khoảng không có một khoá đơn để kiểm tra, nên quét theo khoảng chẳng được lợi gì."
+          }
+        },
+        "reread": {
+          "anchor": "2-lsm-trees-write-now-sort-later",
+          "label": {
+            "en": "2. LSM-trees: write now, sort later",
+            "vi": "2. LSM-tree: ghi trước, sắp xếp sau"
+          }
+        },
+        "say": {
+          "en": "When AI explains a Bloom filter, check the direction of its errors: a \"no\" is final, a \"maybe\" is only a hint.",
+          "vi": "Khi AI giải thích Bloom filter, hãy kiểm tra chiều sai của nó: \"không\" là chắc chắn, \"có thể có\" chỉ là gợi ý."
+        }
+      },
+      "ref": "Post: 2. LSM-trees: write now, sort later (Bloom filter)"
+    },
+    {
+      "id": "s04q5",
+      "level": "evaluate",
+      "track": "ai",
+      "type": "ai-review",
+      "difficulty": 5,
+      "topic": "Level-0 limits and write stalls",
+      "stem": {
+        "en": "Writes stall when L0 reaches its limits (20 files to slow down, 36 to stop). You ask an AI assistant to remove the stalls. It returns the config below and says \"Stalls fixed, writes never wait now.\" Which review is best?",
+        "vi": "Ghi bị nghẽn khi L0 chạm giới hạn (20 file thì chậm lại, 36 file thì dừng). Bạn nhờ một trợ lý AI bỏ tình trạng nghẽn. Nó trả về config bên dưới và nói \"Đã hết nghẽn, ghi không còn phải chờ.\" Đánh giá nào là tốt nhất?"
+      },
+      "media": [
+        {
+          "kind": "code",
+          "lang": "ini",
+          "code": "# RocksDB options (written by an AI assistant)\n# Fix: remove the write stalls.\nlevel0_file_num_compaction_trigger = 4\nlevel0_slowdown_writes_trigger = 1000000\nlevel0_stop_writes_trigger = 1000000"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Approve: with no stalls, writes never wait and p99 write latency stays flat.",
+            "vi": "Chấp nhận: hết nghẽn thì ghi không phải chờ và p99 của ghi phẳng lại."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Reject: the limits hid a backlog that still grows; add compaction capacity.",
+            "vi": "Từ chối: giới hạn che đi tồn đọng vẫn đang tăng; hãy thêm năng lực compaction."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Lower both limits to 2, so stalls start early and no backlog forms.",
+            "vi": "Hạ cả hai giới hạn xuống 2, để nghẽn bắt đầu sớm và không có tồn đọng."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Keep it and add Bloom filters, so reads skip the extra L0 files.",
+            "vi": "Giữ nguyên và thêm Bloom filter, để lệnh đọc bỏ qua các file L0 thừa."
+          }
+        }
+      ],
+      "answer": [
+        "b"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "The stalls were a brake on a real problem: compaction cannot keep up with the writes. Raising the limits only removes the brake. L0 files keep piling up, reads must check more of them, and disk use grows. The RocksDB wiki's remedies make compaction faster, such as more background jobs, or flush less often with bigger write buffers.",
+          "vi": "Nghẽn ghi là cái phanh chặn một vấn đề thật: compaction không theo kịp lượng ghi. Nâng giới hạn chỉ gỡ cái phanh. File L0 cứ chất đống, lệnh đọc phải xem nhiều file hơn, và dung lượng đĩa tăng. Cách chữa trong wiki của RocksDB là làm compaction nhanh hơn, ví dụ thêm background job, hoặc flush ít hơn với write buffer lớn hơn."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "The latency spikes go away, but the cause stays. The backlog keeps growing out of sight until reads slow down or the disk fills up.",
+            "vi": "Các đỉnh latency biến mất nhưng nguyên nhân vẫn còn. Tồn đọng cứ lớn dần mà không ai thấy, tới khi đọc chậm hẳn hoặc đĩa đầy."
+          },
+          "c": {
+            "en": "Tiny limits make stalls happen sooner and more often. They do not make compaction any faster, so ingest only gets slower.",
+            "vi": "Giới hạn quá nhỏ làm nghẽn xảy ra sớm hơn và thường hơn. Chúng không làm compaction nhanh lên, nên ghi chỉ chậm thêm."
+          },
+          "d": {
+            "en": "Bloom filters help point reads only. They do not help range scans, do not free disk space, and do not remove the compaction debt.",
+            "vi": "Bloom filter chỉ giúp đọc theo khoá đơn. Chúng không giúp quét theo khoảng, không giải phóng dung lượng đĩa, và không xoá nợ compaction."
+          }
+        },
+        "reread": {
+          "anchor": "discord-when-compaction-falls-behind",
+          "label": {
+            "en": "Discord: when compaction falls behind",
+            "vi": "Discord: khi compaction chạy không kịp"
+          }
+        },
+        "say": {
+          "en": "When AI removes a limit to silence an alarm, ask what the limit was protecting, and fix that instead.",
+          "vi": "Khi AI gỡ một giới hạn để dập cảnh báo, hãy hỏi giới hạn đó đang bảo vệ điều gì, rồi sửa chính điều đó."
+        }
+      },
+      "ref": "Post: Discord: when compaction falls behind (write stall callout); https://github.com/facebook/rocksdb/wiki/Write-Stalls"
+    }
+  ]
+}
