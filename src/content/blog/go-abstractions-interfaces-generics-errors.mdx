@@ -1,0 +1,559 @@
+---
+title: "Writing idiomatic Go: interfaces, typed nil, defer, and errors"
+title_vi: "Viết Go sao cho đúng chất: interface, bẫy nil, defer và xử lý lỗi"
+description: "Stop AI from generating Java-style Go: consumer-side interfaces, the typed nil trap, type embedding hazards, defer timing, and clean error wrapping."
+description_vi: "Đừng để AI viết Go theo kiểu Java: đặt interface ở phía người gọi, né bẫy typed nil làm err != nil sai, cẩn thận lúc embed struct, nắm thời điểm chạy defer và xử lý lỗi cho gọn."
+date: 2026-11-20
+category: "backend"
+tags: ["golang", "architecture", "interfaces", "error-handling", "generics", "100-go-mistakes"]
+cover: "../../assets/blog/go-abstractions-interfaces-generics-errors/babbage-gears.jpg"
+cover_alt: "Interlocking brass and steel bevel gears inside Charles Babbage's Difference Engine mechanism"
+draft: false
+sources:
+  - { title: "100 Go Mistakes and How to Avoid Them", author: "Teiva Harsanyi", chapters: "Ch. 2, 4 (#35), 6, 7", url: "https://100go.co/" }
+  - { title: "Go runtime interface representation (src/runtime/runtime2.go)", author: "The Go Authors", url: "https://github.com/golang/go/blob/074522c96ce70350453c164ecb17904881106b6a/src/runtime/runtime2.go#L175-L205" }
+  - { title: "Gopherfest 2015: Go Proverbs with Rob Pike", author: "Rob Pike", url: "https://www.youtube.com/watch?v=PAAkCSZUG1c&t=318s" }
+  - { title: "Effective Go: Interfaces and other types", author: "The Go Authors", url: "https://go.dev/doc/effective_go#interfaces" }
+  - { title: "Babbage Difference Engine Detail (CC BY 2.0)", author: "Don DeBold", url: "https://commons.wikimedia.org/wiki/File:Babbage_Difference_Engine_Detail_(6224956387).jpg" }
+  - { title: "Bell telephone magazine switchboard jack interface (1950)", author: "AT&T / Internet Archive Book Images", url: "https://commons.wikimedia.org/wiki/File:Bell_telephone_magazine_(1950)_(14755092795).jpg" }
+  - { title: "Version 5 Unix source tree in SIMH PDP-11 emulation (CC0)", author: "Huihermit", url: "https://commons.wikimedia.org/wiki/File:Version_5_Unix_SIMH_PDP11_Emulation.png" }
+---
+
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import En from '../../components/mdx/En.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import GitHubCode from '../../components/mdx/GitHubCode.astro';
+import GoArchCodeTrace from '../../components/mdx/GoArchCodeTrace.astro';
+import GoArchConsumerInterface from '../../components/mdx/GoArchConsumerInterface.astro';
+import GoArchDeferAndInit from '../../components/mdx/GoArchDeferAndInit.astro';
+import GoArchEmbeddingTrap from '../../components/mdx/GoArchEmbeddingTrap.astro';
+import GoArchErrorFlow from '../../components/mdx/GoArchErrorFlow.astro';
+import GoArchInterfaceErrorDemo from '../../components/mdx/GoArchInterfaceErrorDemo.astro';
+import GoArchNilInterface from '../../components/mdx/GoArchNilInterface.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import YouTube from '../../components/mdx/YouTube.astro';
+import heroGears from '../../assets/blog/go-abstractions-interfaces-generics-errors/babbage-gears.jpg';
+import bellSwitch from '../../assets/blog/go-abstractions-interfaces-generics-errors/bell-telephone-interface.jpg';
+import unixTree from '../../assets/blog/go-abstractions-interfaces-generics-errors/unix-v5-source-tree.png';
+
+<En>
+
+<Figure src={heroGears} alt="Interlocking brass and steel bevel gears inside Charles Babbage's Difference Engine mechanism" caption="Clean mechanical interfaces mesh only where two parts meet. Adding extra gears before two parts need to turn together only adds friction." sourceTitle="Wikimedia Commons: Babbage Difference Engine Detail" sourceUrl="https://commons.wikimedia.org/wiki/File:Babbage_Difference_Engine_Detail_(6224956387).jpg" />
+
+> "The bigger the interface, the weaker the abstraction."
+> &mdash; *Rob Pike*, *Go Proverbs (Gopherfest 2015)*
+
+### Why AI writes Java in Go syntax—and where that breaks
+
+Large language models trained heavily on Java, C#, and TypeScript routinely scaffold Go repositories with a `repository.UserInterface` next to every struct, `common/utils` junk-drawer packages, getters and setters on struct fields, and `log.Error(err)` before every `return err`. Everything compiles, yet the codebase becomes rigid to refactor and noisy in production logs.
+
+Beneath those habits sit concrete Go mechanics that differ sharply from classical OOP. This post connects four architectural foundations you need whenever you design or review Go code:
+
+1. **Consumer-side interfaces & Generics**: why abstractions should be discovered by callers rather than declared up front by producers.
+2. **The typed `nil` interface trap**: how Go's two-word `iface` header makes a `nil` concrete pointer evaluate as `err != nil`.
+3. **Code organization, embedding & `defer` timing**: avoiding accidental method promotion, `init()` coupling, variable shadowing, and early `defer` argument capture.
+4. **Clean error pipelines**: choosing `%w` vs. `%v`, `errors.Is` / `errors.As`, handling each error once, and checking `defer Close()` errors.
+
+<Callout type="note" title="TL;DR">
+In Go, accept minimal interfaces on the consumer side and return concrete structs from producers. Never return a typed `nil` pointer when the signature returns an interface like `error`, never embed `sync.Mutex` or `time.Time` merely to save typing, capture `defer` state lazily inside closures when variables change, and handle each error exactly once—wrapping with `%w` only when callers inspect the chain via `errors.Is` or `errors.As`.
+</Callout>
+
+<Concepts>
+
+- **Interface & implicit satisfaction**: in Go, an `interface` is a behavior contract listing method signatures; any type implementing those methods satisfies the interface automatically with zero `implements` keyword.
+- **`error` as a normal return value**: Go avoids hidden `try/catch` exceptions—functions return `error` explicitly as their last return value (`val, err := fn()`), checked immediately with `if err != nil`.
+- **`defer`**: statement scheduling a cleanup call (like closing a file or unlocking a mutex) to execute automatically right when the surrounding function returns, regardless of which branch exits.
+- **Interface pollution**: creating abstractions and mock wrappers prematurely when only one implementation exists and no caller needs decoupling yet.
+- **Type embedding**: declaring a field inside a struct without a field name (Go's composition substitute for `extends` inheritance), promoting the embedded type's methods and fields onto the outer struct.
+
+</Concepts>
+
+---
+
+## 1. Consumer-side interfaces, `any`, and when Generics fit
+
+Unlike Java or C# where a class must declare `implements Foo` up front, a Go **`interface`** is purely a list of method names (`type Reader interface { Read(p []byte) (int, error) }`). Any struct that defines those methods satisfies the interface automatically, and Go also provides **`any`** (an alias for the empty interface `interface{}` matched by every type) alongside **Generics** (`[T any]`, compile-time type parameters for reusable algorithms and containers). Think of a universal wall outlet vs. a custom wiring harness: a lamp does not ask the power company to define a giant `PowerProvider` interface with twenty billing and metering methods; the lamp brings a two-prong plug (its own minimal requirement) and any outlet that fits the two prongs works.
+
+<Figure src={bellSwitch} alt="Telephone switchboard operators plugging patch cords into modular jack interfaces in 1950" caption="Patch-board modularity: each cord specifies only the jack contract it expects, allowing any backend line to plug in without rewriting the caller." sourceTitle="Wikimedia Commons: Bell telephone magazine (1950)" sourceUrl="https://commons.wikimedia.org/wiki/File:Bell_telephone_magazine_(1950)_(14755092795).jpg" />
+
+In Go, **abstractions should be discovered, not created**. Put interfaces on the **consumer side** (inside the package calling the dependency), not beside the concrete implementation on the producer side. When `store.New()` returns `*Store` (a concrete struct) while `billing` defines `type customerGetter interface { Get(id string) (Customer, error) }`, adding a new method to `*Store` never breaks `billing` or its tests.
+
+```go
+// Producer package: return the concrete struct, not an interface
+package store
+func New() *Store { return &Store{} }
+func (s *Store) Get(id string) (Customer, error) { /* ... */ }
+
+// Consumer package: declare only the slice of behavior billing actually uses
+package billing
+type customerGetter interface {
+	Get(id string) (Customer, error)
+}
+```
+
+<GoArchConsumerInterface />
+
+Rob Pike explains this exact inversion—and why small 1–2 method interfaces like `io.Reader` beat sweeping hierarchies—in his Go Proverbs talk:
+
+<YouTube id="PAAkCSZUG1c" title="Go Proverbs with Rob Pike — Interface Design Philosophy" start={318} end={386} caption="Between 5:18 and 6:26, Rob Pike explains why 'the bigger the interface, the weaker the abstraction' and how single-method contracts compose." sourceTitle="The Go Programming Language — Gopherfest 2015" />
+
+Follow three rules for clean type contracts:
+- **Accept interfaces, return structs**: accept `io.Reader` instead of a `filename string` (`#46`) so callers can pass files, HTTP bodies, or `strings.NewReader` in unit tests without touching disk. Returning concrete structs lets callers access all fields and methods directly without forcing premature abstraction (`#7`).
+- **`any` (`interface{}`) says nothing**: reserve `any` strictly for truly arbitrary payloads like `json.Marshal` (`#8`). Every time you reach for `any`, ask whether a 1-method interface or concrete struct expresses the contract at compile time.
+- **Use Generics (type parameters) for behavior-agnostic data structures, not premature polymorphism**: Generics shine on reusable containers (`Set[T]`, `Merge[T any]`), sorting helpers, or channel fan-in utilities (`#9`). Do not replace a clean interface like `io.Writer` with a generic function `[T io.Writer]` when dynamic dispatch adds clarity without hurting hot paths.
+
+<Concepts>
+
+- **Consumer-side interface**: defining an interface inside the package that *uses* a dependency rather than the package that *implements* it.
+- **Type parameter (Generics)**: compile-time parameterization (`func Keys[K comparable, V any](m map[K]V) []K`) that avoids duplicating identical logic across concrete types.
+
+</Concepts>
+
+---
+
+## 2. The typed `nil` interface trap
+
+Go's built-in `error` type is not a special keyword or exception class—it is simply an ordinary two-word **interface** (`type error interface { Error() string }`). One slot (`tab`) records *which concrete type* was stored inside it, and the second slot (`data`) points to the underlying value. That explains one of Go's subtlest bugs: a validation helper returns `error`, initializes `var err *ValidationError`, skips assignment when inputs are valid, and runs `return err`. Looking at the code, `err` is `nil`—yet the caller's `if err != nil` branch still fires.
+
+The mystery vanishes as soon as you inspect Go's internal interface header in `src/runtime/runtime2.go`:
+
+<GitHubCode repo="golang/go" path="src/runtime/runtime2.go" lines="L175-L205" url="https://github.com/golang/go/blob/074522c96ce70350453c164ecb17904881106b6a/src/runtime/runtime2.go#L175-L205" caption="Go runtime representation of iface (non-empty interface) and eface (any) inside runtime2.go.">
+```go
+type iface struct {
+	tab  *itab
+	data unsafe.Pointer
+}
+
+type eface struct {
+	_type *_type
+	data  unsafe.Pointer
+}
+```
+</GitHubCode>
+
+An `error` interface is not a single pointer; it is a **two-word box `(tab, data)`** (`#45`). When you return a typed `nil` pointer `(*ValidationError)(nil)` inside an `error` return type, Go sets `tab = &itab(*ValidationError, error)` and `data = 0x0`. Because `tab` is non-zero, `err == nil` evaluates to `false`.
+
+```go
+// Bug (#45): returns interface box (tab=*ValidationError, data=nil) -> err != nil!
+func validate(age int) error {
+	var vErr *ValidationError // nil concrete pointer
+	if age < 0 {
+		vErr = &ValidationError{Msg: "negative age"}
+	}
+	return vErr // trap: converts typed nil pointer into non-nil error interface
+}
+
+// Fix: return an untyped nil literal directly when there is no error
+```
+
+<GoArchNilInterface />
+
+<GoArchCodeTrace />
+
+Always return an explicit untyped `nil` when nothing failed (`if !ok { return &ValidationError{...} }; return nil`). Let's verify how Go 1.27 prints a returned typed-nil `error` directly:
+
+<TerminalOutput command="go run part2_demo.go" label="Apple M2 · Go 1.27" caption="Even when the concrete pointer inside err is nil, err == nil evaluates to false because iface.tab holds *main.ValidationError.">
+```text
+err == nil: false, type=*main.ValidationError
+defer arg="pending" vs closure="committed"
+%w -> errors.Is=true | %v -> errors.Is=false
+```
+</TerminalOutput>
+
+<GoArchInterfaceErrorDemo />
+
+<Concepts>
+
+- **`iface` vs. `eface`**: Go's runtime layouts for interfaces with methods (`iface`: `tab` + `data`) and empty `any` interfaces (`eface`: `_type` + `data`).
+- **Typed `nil`**: a concrete pointer or slice variable equal to `nil` that still carries a static Go type, making it non-`nil` once boxed into an interface.
+
+</Concepts>
+
+---
+
+## 3. Package structure, embedding, `init()`, and `defer` timing
+
+Because Go has no classes or `extends` inheritance, it lets you compose structs via **type embedding** (putting a field type inside another struct without a field name so its methods get promoted outward) and run package startup hooks via **`init()`** (a special function Go executes automatically on import before `main()`). Combined with local `:=` short declarations and `defer`, clean architecture often trips on small mechanical details: hiding locks through embedding, coupling tests inside `init()`, shadowing `err`, or misreading `defer` timing.
+
+<Figure src={unixTree} alt="Original Version 5 Unix source directories in SIMH PDP-11 terminal showing crisp single-purpose file names" caption="Bell Labs heritage: short, domain-focused file and directory names beat catch-all util/ or common/ dumping grounds." sourceTitle="Wikimedia Commons: Version 5 Unix SIMH PDP-11 Emulation" sourceUrl="https://commons.wikimedia.org/wiki/File:Version_5_Unix_SIMH_PDP11_Emulation.png" />
+
+Keep codebase structure and constructors predictable with four rules:
+
+1. **Ban `util`, `common`, and `shared` packages (`#12`, `#13`, `#14`)**: organize packages by domain responsibility (`auth`, `ledger`, `transport`), avoid package-vs-variable name collisions (`url` variable hiding `net/url`), skip unnecessary Java-style `GetX`/`SetX` wrappers (`#4`), document exported symbols (`#15`), and enforce `golangci-lint` (`#16`) plus `-shadow` checks to catch unintended variable shadowing with `:=` (`#1`).
+2. **Keep the happy path aligned left (`#2`)**: handle error cases with early `return` statements instead of deep `if/else` nesting so readers scan down the left margin for normal execution.
+3. **Never embed types solely for syntax shortcuts (`#10`)**: embedding `sync.Mutex` without a field name silently exports `.Lock()` and `.Unlock()` onto your public API, and embedding `time.Time` causes your struct to inherit `time.Time.MarshalJSON()`, wiping out every other struct field during `json.Marshal` (`#77`). Encapsulate locks as unexported fields (`mu sync.Mutex`) and configure optional constructor arguments with **Functional Options (`WithTimeout(...)`)** instead of bloated `Config` structs (`#11`).
+4. **Replace `init()` side effects with explicit constructors (`#3`)**: `init()` functions run automatically on import, cannot return errors cleanly, and pollute unit tests with global state.
+
+```go
+// Bug (#10): embedding sync.Mutex leaks Lock() and Unlock() onto Cache's public API
+type Cache struct {
+	sync.Mutex
+	items map[string]string
+}
+
+// Fix: keep locking unexported inside the struct
+type SafeCache struct {
+	mu    sync.Mutex
+	items map[string]string
+}
+```
+
+<GoArchEmbeddingTrap />
+
+### When `defer` freezes arguments—and loop traps
+
+Newcomers often treat `defer` as a shortcut that delays an entire line of code until the end of the function. In reality, `defer` runs in two phases: **phase 1** immediately snapshots both the receiver and every argument expression on the exact line `defer` executes; **phase 2** queues the function body to run only when the **enclosing function returns**—*not* at the end of a `for` loop iteration (`#35`) and *not* reading late argument updates (`#47`).
+
+```go
+// Bug (#47): status ("ok") is evaluated immediately when defer runs, not on return
+status := "ok"
+defer logStatus(status) // prints "ok" even after status becomes "fail"
+status = "fail"
+
+// Bug (#35): files stay open across the whole loop until processBatch returns
+for _, p := range paths {
+	f, _ := os.Open(p)
+	defer f.Close() // fix: wrap each iteration in a helper function
+}
+```
+
+<GoArchDeferAndInit />
+
+That creates two frequent bugs:
+- Passing a primitive value (`defer closeMetric(status)`) locks in `"pending"` even if `status` changes to `"committed"` later in the function. Wrap it in a closure (`defer func() { closeMetric(status) }()`) when you want the final value at return time, or pass a pointer receiver when mutating state.
+- Writing `defer file.Close()` inside a `for` loop opening 5,000 files holds all 5,000 file descriptors open until the outer function returns—exhausting OS file descriptors (`EMFILE`). Extract each iteration's open/work/close unit into its own helper function so `defer` fires on every iteration.
+
+<Concepts>
+
+- **Variable shadowing**: declaring `x, err := ...` inside an inner `if` or `for` block creates a brand-new inner `err` variable, leaving the outer `err` untouched (`go vet -shadow`).
+- **Functional Options pattern**: passing variadic `Option` functions (`func(*Server) error`) into `NewServer(addr, opts...)` so callers skip unneeded defaults while keeping constructors cleanly extensible.
+
+</Concepts>
+
+---
+
+## 4. Idiomatic error flow: handle once, wrap intentionally
+
+Go treats errors as ordinary return values instead of thrown exceptions: functions attach human-readable context as failures bubble upward via **error wrapping** (`fmt.Errorf("load order %s: %w", id, err)`), and callers at the boundary unpack the chain with `errors.Is` (to match sentinel error values like `sql.ErrNoRows`) or `errors.As` (to extract custom error structs). That clarity disappears the moment code panics on routine I/O failures, ignores `defer` errors, or logs the same failure at every layer of the stack.
+
+```go
+// Wrap with %w to preserve sentinel errors while shielding internal details from %v
+func loadOrder(id string) error {
+	if err := repo.Fetch(id); err != nil {
+		return fmt.Errorf("fetch order %s: %w", id, err) // don't log here + return
+	}
+	return nil
+}
+
+// Handle and log once at the boundary using errors.Is / errors.As (#50, #51)
+if errors.Is(err, sql.ErrNoRows) {
+	http.Error(w, "not found", http.StatusNotFound)
+}
+```
+
+<GoArchErrorFlow />
+
+Follow these five rules across every error path:
+
+| Situation | Anti-pattern | Idiomatic Go rule |
+|---|---|---|
+| **Unrecoverable vs. expected failure (`#48`)** | Calling `panic(err)` inside HTTP handlers or parsers | Return `error` everywhere; reserve `panic` for programmer bugs or missing startup invariants |
+| **Adding context vs. hiding internals (`#49`)** | Blindly using `%v` everywhere or `%w` across public SDK boundaries | Use `%w` when callers should match underlying causes; use `%v` to mask internal implementation types |
+| **Inspecting wrapped chains (`#50`, `#51`)** | Comparing wrapped errors with `err == sql.ErrNoRows` or type assertions | Use `errors.Is(err, target)` for sentinel values and `errors.As(err, &customErr)` for custom error types |
+| **Duplicate logging (`#52`)** | `log.Error(err)` in Repository, Service, *and* HTTP Handler | **Handle an error once**: either log it and recover, or wrap and return it upward |
+| **Ignoring & `defer` errors (`#53`, `#54`)** | `f.Close()` unchecked or `defer f.Close()` silently discarding write-flush errors | Ignore intentionally with `_ = f.Close()`, or capture `defer` flush errors via named return `(err error)` (`#43`, `#44`) |
+
+<Callout type="warning" title="Why ignoring f.Close() corrupts writes">
+On buffered file systems and network writers, `Write()` often buffers data in user space or kernel page cache, meaning the final flush—and disk-full or I/O errors—only surfaces when `Close()` returns. Check `Close()` errors on writable files (using a named return parameter if inside `defer`).
+</Callout>
+
+<Concepts>
+
+- **Sentinel error**: a package-level exported error value (`var ErrNotFound = errors.New("not found")`) representing an expected domain condition tested via `errors.Is`.
+- **Named result parameter**: naming return values in a signature (`func read() (n int, err error)`)—great for disambiguating same-type returns and catching `defer` cleanup errors, though beware shadowing or accidental bare `return` bugs (`#44`).
+
+</Concepts>
+
+---
+
+## Key takeaways
+
+- **Place interfaces on the consumer side**: have producers return concrete structs (`*Store`) and let each caller declare the tiny 1–2 method interface (`io.Reader`, `getter`) it actually consumes.
+- **Never return a typed `nil` pointer as an `error` or interface**: explicitly `return nil` on success so both words of `runtime.iface` stay zeroed and `err == nil` holds.
+- **Keep type embedding narrow and constructors explicit**: avoid embedding `sync.Mutex` or `time.Time`, configure optional settings with Functional Options, and keep initialization errors out of `init()`.
+- **Watch `defer` evaluation timing**: arguments and receivers bind at the `defer` line rather than at `return`, and `defer` inside loops stays queued until the whole function exits.
+- **Handle every error once**: inspect chains with `errors.Is` / `errors.As`, choose `%w` (transparent chain) vs. `%v` (boundary isolation) deliberately, and check errors returned by `defer f.Close()` on writers.
+
+---
+
+## Review questions
+
+1. Why does defining `type UserRepository interface` inside the `postgres` package couple callers unnecessarily compared to letting each service define its own small interface? *(See Section 1)*
+2. Inside Go's runtime (`iface`), which two pointer fields make `err != nil` evaluate to `true` when a function returns a `nil` `*ValidationError` pointer? *(See Section 2)*
+3. What hidden side effect occurs when a struct embeds `time.Time` anonymously and is then passed to `json.Marshal`? *(See Section 3)*
+4. Why does `for _, path := range paths { f, _ := os.Open(path); defer f.Close() }` risk running out of file descriptors, and how do you fix it? *(See Section 3)*
+5. When wrapping a database error across a gRPC or public library boundary, why might an author deliberately choose `fmt.Errorf("...: %v", err)` instead of `%w`? *(See Section 4)*
+
+</En>
+
+<Vi>
+
+<Figure src={heroGears} alt="Cận cảnh các bánh răng đồng và thép khớp vào nhau bên trong cỗ máy Sai phân của Charles Babbage" caption="Bánh răng chỉ cần khớp đúng chỗ hai bộ phận chạm nhau. Thêm tầng trung gian khi chưa cần thiết chỉ làm hệ thống cồng kềnh thêm." sourceTitle="Wikimedia Commons: Babbage Difference Engine Detail" sourceUrl="https://commons.wikimedia.org/wiki/File:Babbage_Difference_Engine_Detail_(6224956387).jpg" />
+
+> "Interface càng to thì lớp trừu tượng càng yếu."
+> &mdash; *Rob Pike*, *Go Proverbs (Gopherfest 2015)*
+
+### Tại sao AI hay viết Go theo kiểu Java — và tự làm khó mình
+
+Phần lớn model AI được train trên rất nhiều code Java, C# và TypeScript, nên hễ bảo viết Go là chúng hay đẻ sẵn `repository.UserInterface` đứng kề bên mọi struct, thêm thư mục `common/utils`, hàm `Get`/`Set` dài dòng, rồi chỗ nào cũng vừa `log.Error(err)` vừa `return err`. Lúc build vẫn qua hết, nhưng đọc code rất nặng nề và khi chạy thật thì một lỗi bị in ra log lặp lại cả chục chỗ.
+
+Đó là vì cách Go thiết kế interface, con trỏ với thứ tự chạy lệnh khác hẳn OOP truyền thống. Trong bài này mình tóm gọn bốn chuyện hay gặp nhất khi viết hoặc review code Go:
+
+1. **Interface phía người gọi & Generics**: vì sao mình nên tách interface ở chỗ dùng thay vì tạo sẵn ở phía cung cấp.
+2. **Bẫy `typed nil` interface**: vì sao một con trỏ rõ ràng đang `nil` mà đưa qua kiểu `error` lại làm `err != nil` ra `true`.
+3. **Chia package, Type Embedding & thời điểm `defer` chụp biến**: tránh vô tình làm lộ mutex, né `init()`, tránh đè biến và hiểu đúng lúc `defer` lấy giá trị tham số.
+4. **Cách đi luồng Error cho sạch**: khi nào dùng `%w` hay `%v`, dùng `errors.Is` / `errors.As`, xử lý mỗi lỗi đúng một chỗ và bắt lỗi khi `defer Close()`.
+
+<Callout type="note" title="Tóm tắt nhanh (TL;DR)">
+Trong Go, hàm nên nhận vào interface nhỏ ở phía người gọi và trả về struct cụ thể ở phía cung cấp. Đừng bao giờ trả về một biến con trỏ `nil` có kiểu cụ thể khi hàm khai báo trả về `error`, đừng embed `sync.Mutex` hay `time.Time` chỉ cho đỡ gõ, bọc `defer` trong closure nếu muốn lấy giá trị biến lúc return, và mỗi lỗi chỉ xử lý đúng một lần — dùng `%w` khi bên gọi cần kiểm tra lại bằng `errors.Is` hoặc `errors.As`.
+</Callout>
+
+<Concepts title="Mấy khái niệm nhắc tới ở trên">
+
+- **Interface & tự động khớp (implicit satisfaction)**: trong Go, `interface` chỉ là danh sách các chữ ký hàm; struct nào có đủ mấy hàm đó thì tự động khớp với interface đó mà không cần viết `implements`.
+- **`error` là giá trị trả về bình thường**: Go không dùng `try/catch` ném ngoại lệ ngầm — hàm báo lỗi bằng cách trả `error` ở cuối (`val, err := fn()`) để bạn kiểm tra ngay bằng `if err != nil`.
+- **`defer`**: từ khóa hẹn giờ dọn dẹp (như đóng file hay mở khóa mutex), tự động chạy ngay trước khi hàm hiện tại thoát ra ở bất kỳ nhánh `return` nào.
+- **Interface pollution (lạm dụng interface)**: tạo sẵn hàng loạt interface và mock wrapper dù mới có đúng một implementation và chưa có nhu cầu tách rời gì.
+- **Type embedding (nhúng kiểu)**: đặt một kiểu vào trong struct mà không đặt tên field (cách Go dùng thay cho kế thừa `extends`), khiến toàn bộ method và field của kiểu đó lộ thẳng ra ngoài struct bọc.
+
+</Concepts>
+
+---
+
+## 1. Interface phía người gọi, `any` và khi nào mới dùng Generics
+
+Khác với Java hay C# bắt class phải khai báo `implements Foo` ngay lúc tạo, **`interface`** trong Go chỉ là danh sách vài chữ ký hàm (`type Reader interface { Read(p []byte) (int, error) }`): struct nào có đủ đúng từng đó method là tự khớp luôn. Go còn có **`any`** (tên gọi mới của `interface{}` — kiểu trống nhận mọi giá trị) và **Generics** (`[T any]` — tham số kiểu lúc biên dịch để viết hàm/cấu trúc dùng lại cho nhiều kiểu). Bạn cứ hình dung ổ cắm điện trên tường: cây đèn bàn đâu có bắt nhà máy điện phải ký hợp đồng ghi rõ cách phát điện hay đo đếm công suất; cây đèn chỉ cần đúng cái phích hai chấu mà nó dùng, ổ cắm nào khớp hai chấu đó là cắm vào chạy được ngay.
+
+<Figure src={bellSwitch} alt="Các nữ tổng đài viên năm 1950 cắm dây nối vào bảng giắc tổng đài điện thoại" caption="Mỗi đầu cắm chỉ quy định chuẩn giắc tối thiểu nó cần, nhờ vậy phía sau thay đổi đường dây thế nào cũng không làm gãy bên gọi." sourceTitle="Wikimedia Commons: Bell telephone magazine (1950)" sourceUrl="https://commons.wikimedia.org/wiki/File:Bell_telephone_magazine_(1950)_(14755092795).jpg" />
+
+Trong Go, **interface nên được rút ra lúc dùng (discovered), không phải vẽ sẵn từ đầu (created)**. Mình đặt interface ở **phía người gọi (consumer)** thay vì đặt chung với struct cài đặt ở phía cung cấp (producer). Khi `store.New()` trả về con trỏ concrete `*Store`, còn package `billing` tự khai báo `type customerGetter interface { Get(id string) (Customer, error) }`, thì sau này bạn có thêm mười method mới vào `*Store` cũng chẳng ảnh hưởng bài test nào bên `billing`.
+
+```go
+// Phía cung cấp: cứ trả về struct cụ thể, đừng ép định nghĩa interface sớm
+package store
+func New() *Store { return &Store{} }
+func (s *Store) Get(id string) (Customer, error) { /* ... */ }
+
+// Phía sử dụng: tự khai báo đúng những method mình thật sự cần
+package billing
+type customerGetter interface {
+	Get(id string) (Customer, error)
+}
+```
+
+<GoArchConsumerInterface />
+
+Chính Rob Pike cũng từng giải thích kiểu thiết kế ngược này — và lý do mấy interface chỉ có 1–2 method như `io.Reader` lại dễ ghép hơn hẳn mấy cây kế thừa to đùng — trong bài nói Go Proverbs:
+
+<YouTube id="PAAkCSZUG1c" title="Go Proverbs với Rob Pike — Triết lý thiết kế Interface" start={318} end={386} caption="Từ 5:18 đến 6:26, Rob Pike giải thích câu 'the bigger the interface, the weaker the abstraction' và lý do interface nhỏ lại dễ ghép nối." sourceTitle="The Go Programming Language — Gopherfest 2015" />
+
+Khi thiết kế hàm và chọn kiểu dữ liệu, mình hay giữ ba thói quen sau:
+- **Nhận interface, trả về struct**: nhận `io.Reader` thay vì `filename string` (`#46`) để lúc gọi có thể truyền file thật, HTTP body hay `strings.NewReader` trong unit test mà khỏi phải tạo file nháp. Còn giá trị trả về thì cứ trả struct cụ thể để bên gọi dùng thẳng mọi method đang có (`#7`).
+- **`any` (`interface{}`) không cho biết thông tin gì**: chỉ dùng `any` ở chỗ thực sự nhận kiểu bất kỳ như `json.Marshal` (`#8`). Hễ thấy mình chuẩn bị gõ `any`, hãy thử nghĩ xem một interface nhỏ hoặc concrete type có giúp compiler bắt lỗi hộ ngay từ lúc build không.
+- **Dùng Generics vừa tay thôi**: type parameter rất hợp cho cấu trúc dữ liệu dùng chung (`Set[T]`, `Merge[T any]`) hoặc hàm tiện ích xử lý slice/channel (`#9`). Đừng biến một hàm vốn nhận `io.Writer` gọn nhẹ thành `[T io.Writer]` chỉ để khoe cú pháp mới.
+
+<Concepts title="Mấy khái niệm ở mục này">
+
+- **Consumer-side interface**: đặt interface ngay trong package *cần gọi* phụ thuộc, thay vì nhét sẵn vào package *triển khai* phụ thuộc đó.
+- **Type parameter (Generics)**: tham số kiểu lúc biên dịch (`func Keys[K comparable, V any](m map[K]V) []K`) giúp đỡ phải lặp lại cùng một logic cho nhiều kiểu dữ liệu.
+
+</Concepts>
+
+---
+
+## 2. Cái bẫy `typed nil` interface
+
+Kiểu `error` có sẵn của Go thực chất không phải ngoại lệ đặc biệt mà chỉ là một **`interface` thông thường** (`type error interface { Error() string }`). Bên dưới, mọi biến interface luôn là một cặp hai ngăn: một ngăn (`tab`) ghi *kiểu dữ liệu thật*, ngăn còn lại (`data`) trỏ tới *giá trị thật*. Vì vậy có một lỗi rất dễ làm người mới giật mình: trong hàm trả về `error`, bạn khai báo `var err *ValidationError`, chạy suốt hàm không có lỗi nên biến đó vẫn là `nil`, rồi `return err` — nhìn bằng mắt thì `nil` mà ra ngoài `if err != nil` lại nhảy vào nhánh lỗi.
+
+Lý do nằm ngay ở cấu trúc thật của interface bên trong `src/runtime/runtime2.go`:
+
+<GitHubCode repo="golang/go" path="src/runtime/runtime2.go" lines="L175-L205" url="https://github.com/golang/go/blob/074522c96ce70350453c164ecb17904881106b6a/src/runtime/runtime2.go#L175-L205" caption="Cấu trúc runtime của iface (interface có method) và eface (any) trong runtime2.go.">
+```go
+type iface struct {
+	tab  *itab
+	data unsafe.Pointer
+}
+
+type eface struct {
+	_type *_type
+	data  unsafe.Pointer
+}
+```
+</GitHubCode>
+
+Một biến `error` không phải là một con trỏ đơn; bên dưới nó là một **cặp hai trường `(tab, data)`** (`#45`). Khi bạn trả về một con trỏ có kiểu cụ thể nhưng mang giá trị nil `(*ValidationError)(nil)` qua kiểu trả về `error`, Go gán `tab = &itab(*ValidationError, error)` và `data = 0x0`. Vì trường `tab` đã có dữ liệu (khác 0), giá trị `error` lúc này không còn là `nil` nữa, nên `err == nil` cho ra `false`.
+
+```go
+// Lỗi (#45): trả về hộp interface (tab=*ValidationError, data=nil) -> err != nil!
+func validate(age int) error {
+	var vErr *ValidationError // con trỏ kiểu cụ thể đang bằng nil
+	if age < 0 {
+		vErr = &ValidationError{Msg: "tuổi âm"}
+	}
+	return vErr // bẫy: đóng hộp con trỏ nil thành error interface khác nil
+}
+
+// Cách sửa: không có lỗi thì return nil thẳng
+```
+
+<GoArchNilInterface />
+
+<GoArchCodeTrace />
+
+Vì thế, ở nhánh thành công hãy luôn viết thẳng `return nil` thay vì trả về một biến con trỏ đang `nil`. Chạy thử trên Go 1.27 là thấy rõ ngay:
+
+<TerminalOutput command="go run part2_demo.go" label="Apple M2 · Go 1.27" caption="Dù con trỏ bên trong err mang giá trị nil, err == nil vẫn là false vì iface.tab đã giữ kiểu *main.ValidationError.">
+```text
+err == nil: false, type=*main.ValidationError
+defer arg="pending" vs closure="committed"
+%w -> errors.Is=true | %v -> errors.Is=false
+```
+</TerminalOutput>
+
+<GoArchInterfaceErrorDemo />
+
+<Concepts title="Mấy khái niệm ở mục này">
+
+- **`iface` và `eface`**: hai cấu trúc bên trong Go runtime cho interface có method (`iface`: gồm `tab` + `data`) và interface rỗng `any` (`eface`: gồm `_type` + `data`).
+- **Typed `nil`**: con trỏ hoặc slice đang là `nil` nhưng có kiểu tĩnh đi kèm, nên khi gán vào interface thì interface đó không còn là `nil` nữa.
+
+</Concepts>
+
+---
+
+## 3. Chia package, Type Embedding, `init()` và thời điểm chạy `defer`
+
+Vì Go không có class hay `extends` kế thừa, Go dùng **type embedding** (đặt một struct vào trong struct khác mà không đặt tên field để mượn luôn method) và cho phép viết hàm **`init()`** (tự động chạy một lần khi package được import trước cả `main()`). Code kiến trúc rõ ràng vẫn rất dễ vướng mấy chi tiết đó: nhúng thẳng mutex làm lộ ra public API, nhét kết nối DB vào `init()`, vô tình đè biến `err` khi viết `:=`, hoặc quên thời điểm `defer` chụp biến.
+
+<Figure src={unixTree} alt="Màn hình giả lập Unix Version 5 trên PDP-11 cho thấy các thư mục mã nguồn đặt tên ngắn gọn, rõ chức năng" caption="Cách đặt tên ngắn gọn, gắn đúng tên miền nghiệp vụ luôn dễ đọc hơn nhiều so với các thư mục gom chung kiểu util/ hay common/." sourceTitle="Wikimedia Commons: Version 5 Unix SIMH PDP-11 Emulation" sourceUrl="https://commons.wikimedia.org/wiki/File:Version_5_Unix_SIMH_PDP11_Emulation.png" />
+
+Để codebase giữ được sự gọn gàng lâu dài, bạn chỉ cần nhớ bốn điều:
+
+1. **Tránh tạo package `util`, `common`, `shared` (`#12`, `#13`, `#14`)**: tách package theo bài toán nghiệp vụ (`auth`, `ledger`, `transport`), tránh đặt tên biến trùng tên package (`url` sẽ che mất `net/url`), đừng viết hàm `GetX`/`SetX` máy móc (`#4`), viết doc comment cho phần public (`#15`), và bật `golangci-lint` (`#16`) kèm check `-shadow` để bắt lỗi vô tình tạo biến mới bằng `:=` (`#1`).
+2. **Giữ luồng chính thẳng hàng bên lề trái (`#2`)**: gặp lỗi thì `return` sớm thay vì lồng cả đống `if/else` vào nhau, nhìn dọc từ trên xuống dưới là đọc ra ngay luồng chính.
+3. **Đừng lạm dụng Type Embedding chỉ để gõ cho nhanh (`#10`)**: nếu bạn đặt thẳng `sync.Mutex` vào struct mà không đặt tên field, cả `.Lock()` lẫn `.Unlock()` sẽ lộ hết ra API công khai; còn nếu nhúng `time.Time` vào struct, struct đó thừa kế luôn `time.Time.MarshalJSON()`, làm `json.Marshal` bỏ quên sạch các field còn lại (`#77`). Tốt nhất giữ lock thành field riêng (`mu sync.Mutex`) và dùng **Functional Options (`WithTimeout(...)`)** cho các tham số cấu hình tùy chọn (`#11`).
+4. **Thay `init()` bằng hàm khởi tạo gọi trực tiếp (`#3`)**: hàm `init()` tự chạy ngầm lúc import, không trả về `error` tử tế được, và làm mấy file unit test dính luôn phần mở kết nối mạng hoặc đọc đĩa.
+
+```go
+// Lỗi (#10): nhúng ẩn danh sync.Mutex làm lộ luôn Lock() và Unlock() ra ngoài API
+type Cache struct {
+	sync.Mutex
+	items map[string]string
+}
+
+// Cách sửa: đặt tên field viết thường để giữ khóa nội bộ
+type SafeCache struct {
+	mu    sync.Mutex
+	items map[string]string
+}
+```
+
+<GoArchEmbeddingTrap />
+
+### Thời điểm `defer` lấy giá trị tham số — và bẫy đặt trong vòng lặp
+
+Người mới hay tưởng `defer` hoãn cả dòng lệnh tới cuối hàm mới tính. Thực ra `defer` chạy theo hai nhịp rõ ràng: **nhịp 1** chụp ngay giá trị của **toàn bộ tham số và receiver tại đúng dòng đặt `defer`**; **nhịp 2** mới hoãn phần **chạy thân hàm** tới lúc hàm bọc ngoài `return` — chứ không phải cuối mỗi vòng lặp `for` (`#35`) và không dùng giá trị mới sửa phía dưới (`#47`).
+
+```go
+// Lỗi (#47): biến status ("ok") bị chốt giá trị ngay lúc gặp defer, không đợi return
+status := "ok"
+defer logStatus(status) // vẫn in ra "ok" dù dòng sau đổi sang "fail"
+status = "fail"
+
+// Lỗi (#35): file mở ra chưa chịu đóng cho tới khi hàm lớn thoát hẳn
+for _, p := range paths {
+	f, _ := os.Open(p)
+	defer f.Close() // cách sửa: tách mỗi lần xử lý file thành một hàm riêng
+}
+```
+
+<GoArchDeferAndInit />
+
+Vì cơ chế này mà hai lỗi sau rất hay xuất hiện:
+- Viết thẳng `defer closeMetric(status)` sẽ giữ nguyên giá trị `"pending"` lúc mới vào hàm dù đoạn sau bạn gán lại `status = "committed"`. Muốn lấy giá trị cuối cùng lúc thoát hàm, hãy bọc vào closure `defer func() { closeMetric(status) }()`.
+- Viết `defer file.Close()` bên trong vòng lặp mở 5.000 file sẽ giữ cả 5.000 file mở tới tận lúc hàm lớn kết thúc, rất dễ chạm trần file descriptor của hệ điều hành (`EMFILE`). Hãy tách phần mở/đọc/đóng một file ra hàm nhỏ riêng để `defer` dọn sạch sau từng vòng lặp.
+
+<Concepts title="Mấy khái niệm ở mục này">
+
+- **Variable shadowing (che biến)**: viết `x, err := ...` bên trong block `if` hoặc `for` sẽ tạo ra một biến `err` cục bộ mới, giữ nguyên biến `err` bên ngoài không đổi.
+- **Functional Options pattern**: cách truyền danh sách hàm tùy chọn `func(*Server) error` vào hàm tạo `NewServer(addr, opts...)` giúp dùng mặc định rất gọn mà vẫn dễ mở rộng về sau.
+
+</Concepts>
+
+---
+
+## 4. Cách xử lý Error cho sạch: làm đúng một chỗ, wrap có chủ đích
+
+Go coi error là giá trị trả về bình thường chứ không dùng `try/catch`: qua mỗi tầng hàm, bạn đắp thêm ngữ cảnh bằng **error wrapping** (`fmt.Errorf("load order %s: %w", id, err)`), rồi tới tầng biên mới mở chuỗi đó ra kiểm tra bằng `errors.Is` (khớp giá trị lỗi gốc) hoặc `errors.As` (bóc tách kiểu struct lỗi). Cách làm rõ ràng đó dễ bị phá hỏng khi code gọi `panic` tùy tiện, bỏ sót lỗi trong `defer`, hoặc tầng nào cũng vừa `log.Error` vừa `return err` qua cả 3–4 lớp gọi hàm.
+
+```go
+// Gói lỗi bằng %w để giữ chuỗi nguyên nhân (chỉ return, đừng log ở tầng giữa)
+func loadOrder(id string) error {
+	if err := repo.Fetch(id); err != nil {
+		return fmt.Errorf("fetch order %s: %w", id, err)
+	}
+	return nil
+}
+
+// Tới tầng ngoài cùng mới kiểm tra bằng errors.Is / errors.As rồi log đúng 1 lần (#50, #51)
+if errors.Is(err, sql.ErrNoRows) {
+	http.Error(w, "not found", http.StatusNotFound)
+}
+```
+
+<GoArchErrorFlow />
+
+Mình hay kiểm lại năm điểm sau mỗi khi viết hoặc review phần xử lý lỗi:
+
+| Tình huống | Cách làm dễ vấp | Cách viết gọn gàng hơn |
+|---|---|---|
+| **Lỗi xử lý được vs. lỗi không thể chạy tiếp (`#48`)** | Gọi `panic(err)` ngay trong HTTP handler hoặc parser | Luôn trả về `error`; chỉ dùng `panic` khi lỗi lập trình hoặc thiếu cấu hình sống còn lúc mới bật app |
+| **Truyền lỗi gốc vs. giấu chi tiết nội bộ (`#49`)** | Dùng `%v` mọi chỗ hoặc lỡ để lộ `%w` ra API thư viện public | Dùng `%w` nếu bên gọi cần kiểm tra lỗi gốc; dùng `%v` khi muốn đóng gói, giấu kiểu lỗi bên trong |
+| **Kiểm tra lỗi đã bọc (`#50`, `#51`)** | Viết `err == sql.ErrNoRows` hoặc ép kiểu trực tiếp trên error đã wrap | Dùng `errors.Is(err, target)` cho biến sentinel và `errors.As(err, &customErr)` cho kiểu struct lỗi |
+| **Log trùng lặp (`#52`)** | Gọi `log.Error(err)` ở cả Repository, Service lẫn HTTP Handler | **Mỗi lỗi chỉ xử lý đúng một lần**: hoặc log rồi xử lý luôn, hoặc bọc thêm ngữ cảnh rồi return lên trên |
+| **Bỏ qua lỗi & lỗi trong `defer` (`#53`, `#54`)** | Quên kiểm tra `f.Close()` khi ghi file, hoặc bỏ trống nhìn không rõ chủ ý | Nếu cố tình bỏ qua thì viết rõ `_ = f.Close()`; riêng lúc ghi file, bắt lỗi `Close()` qua named return |
+
+<Callout type="warning" title="Vì sao bỏ qua lỗi f.Close() có thể làm mất dữ liệu">
+Với file có buffer, lệnh `Write()` thường mới đẩy byte vào vùng đệm trên RAM; tới khi gọi `Close()` hệ điều hành mới xả thật xuống đĩa và báo nếu đầy ổ hoặc lỗi I/O. Luôn kiểm tra lỗi trả về từ `Close()` khi ghi file (dùng named return `(err error)` nếu đóng bằng `defer`).
+</Callout>
+
+<Concepts title="Mấy khái niệm ở mục này">
+
+- **Sentinel error**: biến lỗi cố định khai báo ở cấp package (`var ErrNotFound = errors.New("not found")`) đại diện cho một trạng thái cụ thể, kiểm tra qua `errors.Is`.
+- **Named result parameter**: đặt tên cho giá trị trả về ngay trong chữ ký hàm (`func read() (n int, err error)`), rất tiện để phân biệt nhiều giá trị cùng kiểu hoặc gán lỗi từ `defer`, chỉ cần cẩn thận lỗi shadowing hoặc `return` trần (`#44`).
+
+</Concepts>
+
+---
+
+## Điểm rút ra (Key takeaways)
+
+- **Đặt interface ở phía người gọi**: để package cung cấp trả về concrete struct (`*Store`), còn bên nào cần dùng thì tự khai báo interface nhỏ 1–2 method (`io.Reader`, `getter`) ngay tại chỗ dùng.
+- **Đừng bao giờ trả về con trỏ `typed nil` qua `error` hoặc interface**: nhánh thành công cứ viết thẳng `return nil` để cả hai trường trong `runtime.iface` đều bằng 0.
+- **Cẩn thận khi dùng Type Embedding và bỏ dần `init()`**: tránh nhúng `sync.Mutex` hay `time.Time`, cấu hình tùy chọn qua Functional Options và trả lỗi bình thường từ hàm `New...`.
+- **Nhớ lúc nào `defer` đánh giá tham số**: tham số được chụp ngay tại dòng gọi `defer`, còn thân hàm trong vòng lặp thì tới lúc hàm lớn thoát ra mới chạy.
+- **Mỗi lỗi chỉ xử lý đúng một chỗ**: kiểm tra chuỗi bọc bằng `errors.Is` / `errors.As`, chọn `%w` hay `%v` có chủ đích và kiểm tra lỗi trả về từ `defer f.Close()` khi ghi file.
+
+---
+
+## Câu hỏi tự kiểm tra
+
+1. Tại sao đặt `type UserRepository interface` trong package `postgres` lại làm các caller dính chặt vào nhau hơn so với việc mỗi service tự khai báo một interface nhỏ cho riêng mình? *(Xem Mục 1)*
+2. Bên trong cấu trúc `iface` của Go runtime, hai trường nào làm `err != nil` trả về `true` ngay cả khi hàm vừa trả về con trỏ `*ValidationError` đang `nil`? *(Xem Mục 2)*
+3. Chuyện gì xảy ra nếu một struct có nhiều field nhưng lại embed ẩn danh `time.Time` rồi đem đi `json.Marshal`? *(Xem Mục 3)*
+4. Vì sao `for _, path := range paths { f, _ := os.Open(path); defer f.Close() }` dễ làm cạn file descriptor của hệ điều hành, và mình sửa gọn lại như thế nào? *(Xem Mục 3)*
+5. Khi trả lỗi từ tầng database qua ranh giới thư viện hoặc public API, vì sao đôi khi người ta cố tình viết `fmt.Errorf("...: %v", err)` thay vì `%w`? *(Xem Mục 4)*
+
+</Vi>

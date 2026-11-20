@@ -1,0 +1,92 @@
+---
+// database/sql pool settings + time.After memory leak & time.Time monotonic clock JSON equality trap.
+const W = 900;
+const H = 310;
+---
+<figure class="gpst">
+  <div class="gpst-scroll">
+    <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Left: database/sql lazy connection pool parameters and rows.Err() check. Right: time.After loop memory leaks until timer expiry and time.Time monotonic clock breaking == comparisons after JSON roundtrip.">
+      {/* Left: SQL Pool */}
+      <rect x="14" y="16" width="426" height="276" rx="10" class="gpst-card" />
+      <text x="30" y="44" class="gpst-h">
+        <tspan data-lang-en>1. database/sql is a connection pool (#78)</tspan>
+        <tspan data-lang-vi>1. database/sql thực chất là connection pool (#78)</tspan>
+      </text>
+
+      <rect x="30" y="62" width="394" height="68" rx="6" class="gpst-box" />
+      <text x="44" y="85" class="gpst-b">sql.Open(...) does NOT dial the DB!</text>
+      <text x="44" y="105" class="gpst-m">
+        <tspan data-lang-en>Call db.PingContext(ctx) on startup to fail fast</tspan>
+        <tspan data-lang-vi>Gọi db.PingContext(ctx) lúc khởi động để kiểm tra kết nối</tspan>
+      </text>
+
+      <rect x="30" y="142" width="394" height="132" rx="6" class="gpst-box is-ok" />
+      <text x="44" y="166" class="gpst-ok">
+        <tspan data-lang-en>Production checklist for every *sql.DB:</tspan>
+        <tspan data-lang-vi>4 chốt chặn bắt buộc cho *sql.DB:</tspan>
+      </text>
+      <text x="44" y="188" class="gpst-m">• SetMaxOpenConns / SetMaxIdleConns (not default 2)</text>
+      <text x="44" y="208" class="gpst-m">• SetConnMaxLifetime / SetConnMaxIdleTime (drop stale)</text>
+      <text x="44" y="228" class="gpst-m">• defer rows.Close() + check rows.Err() after loop</text>
+      <text x="44" y="248" class="gpst-m">• Handle NULL columns with sql.NullString or *string</text>
+
+      {/* Right: Time & JSON traps */}
+      <rect x="460" y="16" width="426" height="276" rx="10" class="gpst-card is-red" />
+      <text x="476" y="44" class="gpst-h-red">
+        <tspan data-lang-en>2. time.After leaks &amp; monotonic clock traps (#75–#77)</tspan>
+        <tspan data-lang-vi>2. Rò rỉ time.After &amp; bẫy đồng hồ monotonic (#75–#77)</tspan>
+      </text>
+
+      <rect x="476" y="62" width="394" height="96" rx="6" class="gpst-box is-red" />
+      <text x="490" y="85" class="gpst-code-red">select {'{'} case &lt;-ch: case &lt;-time.After(time.Hour): {'}'}</text>
+      <text x="490" y="106" class="gpst-m">
+        <tspan data-lang-en>Every loop iteration allocates a new 1h timer on the heap;</tspan>
+        <tspan data-lang-vi>Mỗi vòng lặp cấp phát một timer 1 giờ mới trên heap;</tspan>
+      </text>
+      <text x="490" y="124" class="gpst-m">
+        <tspan data-lang-en>GC keeps timers alive until expiry! Fix: time.NewTimer</tspan>
+        <tspan data-lang-vi>GC giữ tới khi hết hạn! Sửa: tái dùng time.NewTimer</tspan>
+      </text>
+      <text x="490" y="144" class="gpst-sm">(and call timer.Reset(d) inside the loop)</text>
+
+      <rect x="476" y="172" width="394" height="102" rx="6" class="gpst-box" />
+      <text x="490" y="196" class="gpst-b">t1 == t2 fails after json.Unmarshal (#77)</text>
+      <text x="490" y="216" class="gpst-m">
+        <tspan data-lang-en>time.Now() has wall + monotonic; JSON drops monotonic.</tspan>
+        <tspan data-lang-vi>time.Now() gồm wall + monotonic; JSON bỏ phần monotonic.</tspan>
+      </text>
+      <text x="490" y="236" class="gpst-ok">
+        <tspan data-lang-en>Fix: compare instants with t1.Equal(t2), never ==</tspan>
+        <tspan data-lang-vi>Sửa: luôn dùng t1.Equal(t2), tuyệt đối đừng dùng ==</tspan>
+      </text>
+      <text x="490" y="256" class="gpst-sm">JSON → map[string]any decodes ints as float64!</text>
+    </svg>
+  </div>
+  <figcaption>
+    <span data-lang-en>Standard-library defaults favor quick scripts: sql.Open delays dialing and caps idle connections at 2, time.After inside hot loops leaks timers until expiry, and == compares time.Time monotonic fields stripped by JSON.</span>
+    <span data-lang-vi>Mặc định của thư viện chuẩn ưu tiên kịch bản nhỏ: sql.Open không kết nối ngay và giữ tối đa 2 idle conn, time.After trong vòng lặp ghim RAM tới khi hết giờ, còn == so sánh cả monotonic clock vốn bị mất khi qua JSON.</span>
+  </figcaption>
+</figure>
+
+<style>
+  .gpst { margin: 2em 0; width: 100%; }
+  .gpst-scroll { overflow-x: auto; }
+  .gpst svg { display: block; width: 100%; min-width: 640px; height: auto; }
+  .gpst text { font-size: 12px; fill: var(--text-body); font-variant-numeric: tabular-nums; }
+  .gpst-card { fill: var(--bg-alt); stroke: var(--border); stroke-width: 1.5; }
+  .gpst-card.is-red { fill: var(--red-tint-bg); stroke: var(--red); }
+  .gpst-box { fill: var(--bg); stroke: var(--border); stroke-width: 1.2; }
+  .gpst-box.is-red { stroke: var(--red); }
+  .gpst-box.is-ok { stroke: rgb(21, 128, 61); }
+  :global(html[data-theme='dark']) .gpst-box.is-ok { stroke: rgb(74, 222, 128); }
+  .gpst-h { font-size: 14px; font-weight: 700; fill: var(--text); }
+  .gpst-h-red { font-size: 14px; font-weight: 700; fill: var(--red); }
+  .gpst-b { font-weight: 700; fill: var(--text); }
+  .gpst-b-red { font-weight: 700; fill: var(--red); }
+  .gpst-code-red { font-size: 11px; font-weight: 700; fill: var(--red); }
+  .gpst-ok { font-weight: 700; fill: rgb(21, 128, 61); }
+  :global(html[data-theme='dark']) .gpst-ok { fill: rgb(74, 222, 128); }
+  .gpst-m { font-size: 11px; fill: var(--text-body); }
+  .gpst-sm { font-size: 11px; fill: var(--text-muted); }
+  .gpst figcaption { margin-top: 10px; font-size: 14px; color: var(--text-muted); line-height: 1.55; text-align: center; }
+</style>

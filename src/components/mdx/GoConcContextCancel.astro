@@ -1,0 +1,136 @@
+---
+// Timeline: Passing HTTP r.Context() to an async background goroutine cancels it on response vs context.WithoutCancel + bounded shutdown.
+import DiagramIcon from './DiagramIcon.astro';
+
+const W = 900;
+const H = 330;
+---
+<figure class="gccx">
+  <div class="gccx-scroll">
+    <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Sequence showing HTTP handler passing r.Context() to a background Kafka publish goroutine which gets canceled immediately when 200 OK is returned, versus detaching cancellation with context.WithoutCancel and a bounded timeout.">
+      {/* Top: Broken r.Context() propagation */}
+      <text x="20" y="26" class="gccx-h-red">
+        <tspan data-lang-en>1. Passing r.Context() into go publishAudit(r.Context()) kills the background write</tspan>
+        <tspan data-lang-vi>1. Truyền r.Context() vào goroutine chạy nền làm tác vụ chết ngay khi HTTP trả 200 OK</tspan>
+      </text>
+
+      <line x1="16" x2="884" y1="84" y2="84" class="gccx-line" />
+
+      <rect x="16" y="48" width="236" height="68" rx="7" class="gccx-box" />
+      <DiagramIcon name="server" x={28} y={66} size={18} />
+      <text x="54" y="70" class="gccx-b">HTTP Handler</text>
+      <text x="30" y="92" class="gccx-m">go publish(r.Context())</text>
+      <text x="30" y="108" class="gccx-sm">w.WriteHeader(200)</text>
+
+      <rect x="278" y="48" width="268" height="68" rx="7" class="gccx-box is-red" />
+      <DiagramIcon name="warning" x={290} y={66} size={18} />
+      <text x="316" y="70" class="gccx-b-red">net/http server</text>
+      <text x="292" y="92" class="gccx-b-red">
+        <tspan data-lang-en>Handler returns → cancels ctx!</tspan>
+        <tspan data-lang-vi>Handler return → hủy luôn ctx!</tspan>
+      </text>
+      <text x="292" y="108" class="gccx-sm">r.Context().Err() == Canceled</text>
+
+      <rect x="572" y="48" width="312" height="68" rx="7" class="gccx-box is-red" />
+      <DiagramIcon name="fail" x={584} y={66} size={18} />
+      <text x="610" y="70" class="gccx-b-red">Kafka / DB driver</text>
+      <text x="586" y="92" class="gccx-b-red">
+        <tspan data-lang-en>Aborts audit write mid-flight</tspan>
+        <tspan data-lang-vi>Hủy ngang ghi audit giữa chừng</tspan>
+      </text>
+      <text x="586" y="108" class="gccx-sm">
+        <tspan data-lang-en>Or worse: leaks if loop ignores ctx.Done()</tspan>
+        <tspan data-lang-vi>Hoặc treo nếu quên kiểm tra ctx.Done()</tspan>
+      </text>
+
+      <line x1="16" x2={W - 16} y1="146" y2="146" class="gccx-rule" />
+
+      {/* Bottom: Detached context + bounded worker */}
+      <text x="20" y="176" class="gccx-h-ok">
+        <tspan data-lang-en>2. Safe pattern: preserve values with context.WithoutCancel + add own timeout &amp; shutdown hook</tspan>
+        <tspan data-lang-vi>2. Cách chuẩn: giữ trace value qua context.WithoutCancel + gắn timeout và điểm dừng riêng</tspan>
+      </text>
+
+      <line x1="16" x2="884" y1="253" y2="253" class="gccx-line is-ok" />
+
+      <rect x="16" y="200" width="292" height="106" rx="8" class="gccx-box is-ok" />
+      <text x="28" y="224" class="gccx-ok-sm">bg := context.WithoutCancel(r.Context())</text>
+      <text x="28" y="246" class="gccx-code">ctx, cancel := WithTimeout(bg, 3*s)</text>
+      <text x="28" y="268" class="gccx-sm">
+        <tspan data-lang-en>Keeps trace/request IDs from r.Context()</tspan>
+        <tspan data-lang-vi>Giữ nguyên trace ID từ request gốc</tspan>
+      </text>
+      <text x="28" y="288" class="gccx-sm">
+        <tspan data-lang-en>Ignores HTTP response cancellation</tspan>
+        <tspan data-lang-vi>Không bị chết theo HTTP response</tspan>
+      </text>
+
+      <rect x="326" y="200" width="282" height="106" rx="8" class="gccx-box" />
+      <DiagramIcon name="worker" x={338} y={218} size={18} />
+      <text x="364" y="224" class="gccx-b">
+        <tspan data-lang-en>Bounded worker / errgroup</tspan>
+        <tspan data-lang-vi>Worker pool / errgroup</tspan>
+      </text>
+      <text x="338" y="248" class="gccx-m">defer cancel()</text>
+      <text x="338" y="268" class="gccx-sm">
+        <tspan data-lang-en>Every goroutine has an exit path</tspan>
+        <tspan data-lang-vi>Mọi goroutine đều có điểm dừng rõ</tspan>
+      </text>
+      <text x="338" y="288" class="gccx-sm">
+        <tspan data-lang-en>WaitGroup drains on SIGTERM</tspan>
+        <tspan data-lang-vi>WaitGroup đợi xong trước khi tắt</tspan>
+      </text>
+
+      <rect x="626" y="200" width="258" height="106" rx="8" class="gccx-box is-ok" />
+      <DiagramIcon name="ok" x={638} y={218} size={18} />
+      <text x="664" y="224" class="gccx-ok">
+        <tspan data-lang-en>Audit write completes safely</tspan>
+        <tspan data-lang-vi>Ghi audit hoàn tất an toàn</tspan>
+      </text>
+      <text x="638" y="248" class="gccx-m">
+        <tspan data-lang-en>Zero orphaned goroutines</tspan>
+        <tspan data-lang-vi>Không rò rỉ goroutine mồ côi</tspan>
+      </text>
+      <text x="638" y="268" class="gccx-m">
+        <tspan data-lang-en>No lost Kafka events on deploy</tspan>
+        <tspan data-lang-vi>Không mất event khi deploy pod</tspan>
+      </text>
+
+    </svg>
+  </div>
+  <figcaption>
+    <span data-lang-en>Go's net/http server cancels r.Context() as soon as the handler returns. Never hand an HTTP request context to an asynchronous background task unless you want that task aborted when the response finishes.</span>
+    <span data-lang-vi>Server net/http tự động hủy r.Context() ngay khi handler trả kết quả xong. Đừng bao giờ chuyền thẳng context của request vào goroutine chạy nền nếu bạn không muốn tác vụ đó chết giữa chừng.</span>
+  </figcaption>
+</figure>
+
+<style>
+  .gccx { margin: 2em 0; width: 100%; }
+  .gccx-scroll { overflow-x: auto; }
+  .gccx svg { display: block; width: 100%; min-width: 640px; height: auto; }
+  .gccx text { font-size: 12px; fill: var(--text-body); font-variant-numeric: tabular-nums; }
+  .gccx-line { stroke: var(--text-muted); stroke-width: 1.5; }
+  .gccx-line.is-ok { stroke: rgb(21, 128, 61); }
+  :global(html[data-theme='dark']) .gccx-line.is-ok { stroke: rgb(74, 222, 128); }
+  .gccx-rule { stroke: var(--border); }
+  .gccx-box { fill: var(--bg-alt); stroke: var(--border); stroke-width: 1.4; }
+  .gccx-box.is-red { fill: var(--red-tint-bg); stroke: var(--red); }
+  .gccx-box.is-ok { stroke: rgb(21, 128, 61); }
+  :global(html[data-theme='dark']) .gccx-box.is-ok { stroke: rgb(74, 222, 128); }
+  .gccx-h-red { font-size: 14.5px; font-weight: 700; fill: var(--red); }
+  .gccx-h-ok { font-size: 14.5px; font-weight: 700; fill: rgb(21, 128, 61); }
+  :global(html[data-theme='dark']) .gccx-h-ok { fill: rgb(74, 222, 128); }
+  .gccx-b { font-weight: 700; fill: var(--text); }
+  .gccx-b-red { font-weight: 700; fill: var(--red); }
+  .gccx-ok { font-weight: 700; fill: rgb(21, 128, 61); }
+  .gccx-ok-sm { font-size: 11.5px; font-weight: 700; fill: rgb(21, 128, 61); }
+  :global(html[data-theme='dark']) .gccx-ok,
+  :global(html[data-theme='dark']) .gccx-ok-sm { fill: rgb(74, 222, 128); }
+  .gccx-m { font-size: 11.5px; fill: var(--text-body); }
+  .gccx-code { font-size: 11px; fill: var(--text-body); }
+  .gccx-sm { font-size: 11px; fill: var(--text-muted); }
+  .gccx-pulse-red { fill: var(--red); }
+  .gccx-pulse-ok { fill: rgb(21, 128, 61); }
+  :global(html[data-theme='dark']) .gccx-pulse-ok { fill: rgb(74, 222, 128); }
+  .gccx figcaption { margin-top: 10px; font-size: 14px; color: var(--text-muted); line-height: 1.55; text-align: center; }
+</style>

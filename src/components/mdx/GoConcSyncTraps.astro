@@ -1,0 +1,138 @@
+---
+// Real-world etcd deadlock case study: fmt.Sprintf calling String() while holding a Mutex, plus copying sync types.
+import DiagramIcon from './DiagramIcon.astro';
+
+const W = 900;
+const H = 310;
+
+function arrow(x1: number, y1: number, x2: number, y2: number) {
+  const a = Math.atan2(y2 - y1, x2 - x1);
+  const len = 8;
+  const p1 = [x2 - len * Math.cos(a - 0.45), y2 - len * Math.sin(a - 0.45)];
+  const p2 = [x2 - len * Math.cos(a + 0.45), y2 - len * Math.sin(a + 0.45)];
+  return {
+    line: `M ${x1} ${y1} L ${x2 - 6 * Math.cos(a)} ${y2 - 6 * Math.sin(a)}`,
+    head: `${x2},${y2} ${p1[0].toFixed(1)},${p1[1].toFixed(1)} ${p2[0].toFixed(1)},${p2[1].toFixed(1)}`,
+  };
+}
+
+const aStep1 = arrow(220, 111, 260, 111);
+const aStep2 = arrow(488, 111, 528, 111);
+const aLoop = arrow(708, 180, 118, 180);
+---
+<figure class="gcst">
+  <div class="gcst-scroll">
+    <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Real etcd deadlock sequence: holding RWMutex write lock while calling fmt.Errorf('%v', c) implicitly invokes c.String(), which calls c.RLock() and deadlocks permanently because Go mutexes are non-reentrant.">
+      <text x="16" y="26" class="gcst-h-red">
+        <tspan data-lang-en>Real etcd deadlock: fmt.Sprintf("%v", obj) secretly calls .String() while holding a lock</tspan>
+        <tspan data-lang-vi>Sự cố deadlock ở etcd: fmt.Sprintf("%v", obj) gọi ngầm .String() ngay khi đang giữ khóa</tspan>
+      </text>
+
+      <rect x="16" y="54" width="204" height="114" rx="8" class="gcst-box" />
+      <DiagramIcon name="lock" x={28} y={72} size={18} />
+      <text x="54" y="77" class="gcst-b">1. c.mu.Lock()</text>
+      <text x="30" y="100" class="gcst-m">
+        <tspan data-lang-en>UpdateState holds</tspan>
+        <tspan data-lang-vi>Hàm ghi đang giữ</tspan>
+      </text>
+      <text x="30" y="118" class="gcst-m">
+        <tspan data-lang-en>exclusive write lock</tspan>
+        <tspan data-lang-vi>khóa ghi độc quyền</tspan>
+      </text>
+      <text x="30" y="146" class="gcst-sm">Go mutex ≠ reentrant</text>
+
+      <rect x="264" y="54" width="224" height="114" rx="8" class="gcst-box is-warn" />
+      <DiagramIcon name="warning" x={276} y={72} size={18} />
+      <text x="302" y="77" class="gcst-warn">2. fmt.Sprintf("%v", c)</text>
+      <text x="278" y="100" class="gcst-m">
+        <tspan data-lang-en>Logs debug state while</tspan>
+        <tspan data-lang-vi>Format log lỗi trong lúc</tspan>
+      </text>
+      <text x="278" y="118" class="gcst-m">
+        <tspan data-lang-en>still inside critical section</tspan>
+        <tspan data-lang-vi>chưa chạy defer Unlock()</tspan>
+      </text>
+      <text x="278" y="146" class="gcst-sm">
+        <tspan data-lang-en>fmt reflects fmt.Stringer</tspan>
+        <tspan data-lang-vi>fmt gọi c.String() tự động</tspan>
+      </text>
+
+      <rect x="532" y="54" width="352" height="114" rx="8" class="gcst-box is-red" />
+      <DiagramIcon name="fail" x={544} y={72} size={18} />
+      <text x="570" y="77" class="gcst-b-red">3. c.String() → c.mu.RLock()</text>
+      <text x="546" y="100" class="gcst-b-red">
+        <tspan data-lang-en>Same goroutine blocks waiting for itself!</tspan>
+        <tspan data-lang-vi>Chính goroutine đó tự đứng chờ chính mình!</tspan>
+      </text>
+      <text x="546" y="122" class="gcst-m">
+        <tspan data-lang-en>Fix: copy fields before logging, or release</tspan>
+        <tspan data-lang-vi>Sửa: tách dữ liệu thô trước khi format hoặc</tspan>
+      </text>
+      <text x="546" y="140" class="gcst-m">
+        <tspan data-lang-en>lock before calling fmt.Sprintf / log</tspan>
+        <tspan data-lang-vi>mở khóa trước khi gọi fmt.Sprintf / log</tspan>
+      </text>
+
+      <path d={aStep1.line} class="gcst-arrow" /><polygon points={aStep1.head} class="gcst-head" />
+      <path d={aStep2.line} class="gcst-arrow is-red" /><polygon points={aStep2.head} class="gcst-head is-red" />
+      <path d={aLoop.line} class="gcst-arrow is-red" /><polygon points={aLoop.head} class="gcst-head is-red" />
+
+      {/* Bottom: 3 more sync traps */}
+      <rect x="16" y="206" width="276" height="86" rx="8" class="gcst-sub" />
+      <text x="30" y="230" class="gcst-b">Copy sync.Mutex (#74)</text>
+      <text x="30" y="250" class="gcst-m">
+        <tspan data-lang-en>Value receiver copies mutex state</tspan>
+        <tspan data-lang-vi>Value receiver copy khóa theo giá trị</tspan>
+      </text>
+      <text x="30" y="270" class="gcst-sm">Caught by: go vet ./...</text>
+
+      <rect x="312" y="206" width="276" height="86" rx="8" class="gcst-sub" />
+      <text x="326" y="230" class="gcst-b">wg.Add(1) inside go (#71)</text>
+      <text x="326" y="250" class="gcst-m">
+        <tspan data-lang-en>wg.Wait() can return before Add runs</tspan>
+        <tspan data-lang-vi>wg.Wait() dễ thoát trước khi Add chạy</tspan>
+      </text>
+      <text x="326" y="270" class="gcst-sm">Always call wg.Add before go func()</text>
+
+      <rect x="608" y="206" width="276" height="86" rx="8" class="gcst-sub is-ok" />
+      <text x="622" y="230" class="gcst-ok">errgroup.WithContext (#73)</text>
+      <text x="622" y="250" class="gcst-m">
+        <tspan data-lang-en>Aggregates errors + cancels siblings</tspan>
+        <tspan data-lang-vi>Gom lỗi + tự hủy các goroutine còn lại</tspan>
+      </text>
+      <text x="622" y="270" class="gcst-sm">golang.org/x/sync/errgroup</text>
+    </svg>
+  </div>
+  <figcaption>
+    <span data-lang-en>Go mutexes are not reentrant. Calling fmt.Sprintf or logging a struct inside a locked block can recursively invoke String() and deadlock the goroutine, just as passing sync types by value breaks mutual exclusion.</span>
+    <span data-lang-vi>Mutex trong Go không hỗ trợ khóa lồng lại (non-reentrant). Gọi fmt.Sprintf ngay trong vùng khóa có thể kích hoạt ngầm String() gây deadlock, tương tự như việc copy các kiểu sync theo giá trị làm vô hiệu hóa khóa.</span>
+  </figcaption>
+</figure>
+
+<style>
+  .gcst { margin: 2em 0; width: 100%; }
+  .gcst-scroll { overflow-x: auto; }
+  .gcst svg { display: block; width: 100%; min-width: 640px; height: auto; }
+  .gcst text { font-size: 12.5px; fill: var(--text-body); }
+  .gcst-h-red { font-size: 14px; font-weight: 700; fill: var(--red); }
+  .gcst-box { fill: var(--bg-alt); stroke: var(--border); stroke-width: 1.4; }
+  .gcst-box.is-warn { fill: var(--gold-tint-bg); stroke: var(--gold); }
+  .gcst-box.is-red { fill: var(--red-tint-bg); stroke: var(--red); }
+  .gcst-sub { fill: var(--bg-alt); stroke: var(--border); stroke-width: 1.2; }
+  .gcst-sub.is-ok { stroke: rgb(21, 128, 61); }
+  :global(html[data-theme='dark']) .gcst-sub.is-ok { stroke: rgb(74, 222, 128); }
+  .gcst-b { font-weight: 700; fill: var(--text); }
+  .gcst-b-red { font-weight: 700; fill: var(--red); }
+  .gcst-warn { font-weight: 700; fill: var(--gold-icon); }
+  .gcst-ok { font-weight: 700; fill: rgb(21, 128, 61); }
+  :global(html[data-theme='dark']) .gcst-ok { fill: rgb(74, 222, 128); }
+  .gcst-m { font-size: 11.5px; fill: var(--text-body); }
+  .gcst-sm { font-size: 11px; fill: var(--text-muted); }
+  .gcst-arrow { fill: none; stroke: var(--text-muted); stroke-width: 1.6; }
+  .gcst-arrow.is-red { stroke: var(--red); }
+  .gcst-head { fill: var(--text-muted); }
+  .gcst-head.is-red { fill: var(--red); }
+  .gcst-pulse { fill: var(--text-muted); }
+  .gcst-pulse-red { fill: var(--red); }
+  .gcst figcaption { margin-top: 10px; font-size: 14px; color: var(--text-muted); line-height: 1.55; text-align: center; }
+</style>

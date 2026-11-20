@@ -1,0 +1,618 @@
+---
+title: "Go memory: slices, maps, strings, and why RAM doesn't drop"
+title_vi: "Bộ nhớ trong Go: slice, map, string và những chỗ dễ rò RAM"
+description: "How Go's slice headers, non-shrinking maps, range copies, and UTF-8 runes silently corrupt state or leak heap memory, plus how to catch them in code review."
+description_vi: "Slice con ghi đè mảng gốc, map xóa 99% key vẫn giữ nguyên 288 MiB RAM, range copy giá trị và chuỗi tiếng Việt bị cắt lỗi — mấy chỗ cần soi khi đọc code Go."
+date: 2026-11-20
+category: "backend"
+tags: ["golang", "memory", "slices", "maps", "strings", "100-go-mistakes"]
+cover: "../../assets/blog/go-memory-data-types-slices-maps-strings/magnetic-core-memory.jpg"
+cover_alt: "Close-up of a 1970s HP 9101A magnetic core memory matrix woven from copper sense wires and tiny ferrite rings"
+draft: false
+sources:
+  - { title: "100 Go Mistakes and How to Avoid Them", author: "Teiva Harsanyi", chapters: "Ch. 3, 4, 5, 6 (#42)", url: "https://100go.co/" }
+  - { title: "Go Slices: usage and internals", author: "Andrew Gerrand (The Go Blog)", url: "https://go.dev/blog/slices-intro" }
+  - { title: "Go runtime slice header definition (src/runtime/slice.go)", author: "The Go Authors", url: "https://github.com/golang/go/blob/074522c96ce70350453c164ecb17904881106b6a/src/runtime/slice.go#L15-L32" }
+  - { title: "Fixing For Loops in Go 1.22", author: "Russ Cox & David Chase (The Go Blog)", url: "https://go.dev/blog/loopvar-preview" }
+  - { title: "HP 9101A magnetic core memory module (CC BY-SA 4.0)", author: "Mister rf", url: "https://commons.wikimedia.org/wiki/File:HP_9101A_extended_memory_unit.-_magnetic_core_memory_module_-_macro_detail.jpg" }
+  - { title: "UTF-8 Encoding Scheme diagram (CC BY-SA 3.0)", author: "Callidus", url: "https://commons.wikimedia.org/wiki/File:UTF-8_Encoding_Scheme.png" }
+---
+
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import En from '../../components/mdx/En.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import GitHubCode from '../../components/mdx/GitHubCode.astro';
+import GoMemCapacityLeak from '../../components/mdx/GoMemCapacityLeak.astro';
+import GoMemCodeTrace from '../../components/mdx/GoMemCodeTrace.astro';
+import GoMemMapBuckets from '../../components/mdx/GoMemMapBuckets.astro';
+import GoMemNilAndReceivers from '../../components/mdx/GoMemNilAndReceivers.astro';
+import GoMemRangeAndRune from '../../components/mdx/GoMemRangeAndRune.astro';
+import GoMemSliceHeader from '../../components/mdx/GoMemSliceHeader.astro';
+import GoMemSliceMapDemo from '../../components/mdx/GoMemSliceMapDemo.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import heroMemory from '../../assets/blog/go-memory-data-types-slices-maps-strings/magnetic-core-memory.jpg';
+import goSliceStruct from '../../assets/blog/go-memory-data-types-slices-maps-strings/go-blog-slice-struct.png';
+import goSliceReslice from '../../assets/blog/go-memory-data-types-slices-maps-strings/go-blog-slice-reslice.png';
+import utf8Scheme from '../../assets/blog/go-memory-data-types-slices-maps-strings/utf8-encoding-scheme.png';
+
+<En>
+
+<Figure src={heroMemory} alt="Close-up of a 1970s HP 9101A magnetic core memory matrix woven from copper sense wires and tiny ferrite rings" caption="Physical core memory: every bit sits on a shared wire frame. Keeping a handle to one small corner can keep the whole frame wired in place." sourceTitle="Wikimedia Commons: HP 9101A magnetic core memory" sourceUrl="https://commons.wikimedia.org/wiki/File:HP_9101A_extended_memory_unit.-_magnetic_core_memory_module_-_macro_detail.jpg" />
+
+> "Show me your flowchart and conceal your tables, and I shall continue to be mystified. Show me your tables, and I won't usually need your flowchart; it'll be obvious."
+> &mdash; *Fred Brooks*, *The Mythical Man-Month*
+
+### Why code that compiles cleanly still leaks gigabytes and corrupts data
+
+An AI coding tool can generate a Go handler, slice parser, or in-memory cache in two seconds. The compiler accepts it, basic unit tests pass, and nothing panics until production traffic hits — when an HTTP cache stays stuck at 288 MiB after deleting 99% of its keys, a parser overwrites a sibling slice, or truncating a Vietnamese name leaves broken UTF-8 bytes in JSON.
+
+Everything in Go is passed by value, yet Go's core built-in types — slices, maps, and strings — are thin headers wrapping pointers to shared memory underneath. This post walks through the four memory behaviors you must spot during review:
+
+1. **Slice headers and backing arrays**: why `append` overwrites sibling slices and why `nil` differs from empty `[]T{}`.
+2. **Garbage collection traps**: how slicing 5 bytes out of a 64 MiB buffer or deleting from a `map` keeps memory pinned.
+3. **Iteration and UTF-8 text**: why `range` copies values, why `len(s)` miscounts characters, and why `strings.Builder` matters.
+4. **Numeric precision and receivers**: silent integer wrap-around, floating-point drift, and choosing value vs. pointer receivers.
+
+<Callout type="note" title="TL;DR">
+Go slices, maps, and strings look like self-contained values, yet each is a small descriptor pointing at shared heap memory. Uncapped sub-slices let `append` overwrite adjacent slots, tiny substrings pin huge backing arrays, Go maps retain allocated buckets forever after `delete`, `range` copies elements by value, and string indexing reads raw UTF-8 bytes rather than runes. Copy or cap sub-slices, periodically recreate shrinking maps, and pass `copy` / `strings.Clone` / `strings.Builder` at boundaries.
+</Callout>
+
+<Concepts>
+
+- **Pointer (`*T` and `&x`)**: a variable storing the RAM address of another value (`&x` gets the address, `*p` reads/writes through it) so functions share and mutate original data instead of copying it.
+- **Stack vs. Heap**: a goroutine's private fast **stack** cleans up local variables automatically on return, whereas the shared **heap** holds data that outlives the function or gets referenced across goroutines.
+- **Backing array**: the contiguous block of memory allocated on the heap (or stack) that holds the actual elements behind one or more Go slice headers.
+- **Value semantics**: Go's rule that assigning a variable or passing it to a function always copies its value; for a slice or map, Go copies the descriptor header rather than the underlying data.
+- **Garbage collector (GC)**: Go's automatic memory reclaimer that frees heap allocations only when zero live pointers anywhere in the program reference any address inside them.
+- **Rune**: Go's `int32` alias representing a single Unicode code point, which may take anywhere from 1 to 4 bytes in UTF-8 encoding.
+
+</Concepts>
+
+---
+
+## 1. Slice headers and the hidden backing array
+
+In Go, a fixed-size **array** like `[5]int` locks its length at compile time and copies all five integers whenever you pass it around. Because fixed arrays are rigid, Go code almost always uses a **slice** (`[]int`)—a dynamic view into an underlying array. Think of a slice as a three-line shipping label taped onto a warehouse shelf: the warehouse address (`array` pointer `ptr`), how many items you are currently using (`len`), and how many total shelves exist in that underlying array before Go must allocate a larger one (`cap`).
+
+<Figure src={goSliceStruct} alt="Official Go blog diagram showing a slice descriptor with ptr, len, and cap fields" caption="The 24-byte slice header on 64-bit systems: eight bytes each for the backing-array pointer, length, and capacity." sourceTitle="The Go Blog: Go Slices: usage and internals" sourceUrl="https://go.dev/blog/slices-intro" />
+
+Inside the Go runtime itself (`src/runtime/slice.go`), a slice is literally those three fields:
+
+<GitHubCode repo="golang/go" path="src/runtime/slice.go" lines="L15-L32" url="https://github.com/golang/go/blob/074522c96ce70350453c164ecb17904881106b6a/src/runtime/slice.go#L15-L32" caption="Exact runtime representation of a Go slice header in golang/go.">
+```go
+type slice struct {
+	array unsafe.Pointer
+	len   int
+	cap   int
+}
+
+// A notInHeapSlice is a slice backed by internal/runtime/sys.NotInHeap memory.
+type notInHeapSlice struct {
+	array *notInHeap
+	len   int
+	cap   int
+}
+
+func panicmakeslicelen() {
+	panic(errorString("makeslice: len out of range"))
+}
+```
+</GitHubCode>
+
+Because Go passes everything by value, passing `s` to a function copies only those 24 bytes. That copy still shares the exact same `array` pointer.
+
+<Figure src={goSliceReslice} alt="Official Go blog diagram showing a resliced []byte pointing to element 2 of a 5-byte backing array with len 2 and cap 3" caption="Reslicing moves the pointer and lowers length, yet inherits all remaining capacity to the end of the backing array." sourceTitle="The Go Blog: Go Slices: usage and internals" sourceUrl="https://go.dev/blog/slices-intro" />
+
+That shared capacity creates a silent corruption trap. When you create `s2 := s1[1:3]` from a 5-element slice `[10, 20, 30, 40, 50]`, `s2` has `len = 2` and `cap = 4`. Calling `append(s2, 99)` sees two spare slots, so it writes `99` straight into `s1[3]`, replacing `40` without allocating anything.
+
+```go
+s1 := []int{10, 20, 30, 40, 50}
+s2 := s1[1:3]         // len=2, cap=4 — shares s1's backing array
+s2 = append(s2, 99)   // fits in spare capacity: overwrites s1[3] (40 -> 99)!
+
+// Fix: cap the slice expression with s1[low:high:max] so append allocates cleanly
+safe := s1[1:3:3]     // len=2, cap=2
+safe = append(safe, 99)
+```
+
+<GoMemSliceHeader />
+
+<GoMemCodeTrace />
+
+You stop this cross-slice overwrite in two ways:
+- **Pin capacity with a full slice expression**: write `s2 := s1[1:3:3]`, which sets `cap = 3 - 1 = 2`, forcing the next `append` onto a brand-new backing array.
+- **Copy into an independent buffer**: allocate `dst := make([]int, len(src))` and call `copy(dst, src)`. Remember that `copy` transfers `min(len(dst), len(src))` items, so a zero-length `dst` copies zero items.
+
+### Pre-allocation and `nil` vs. empty slices
+
+Initializing a slice with `make([]T, 0)` inside a loop forces Go to repeatedly allocate, double capacity, and copy elements into larger arrays as it grows. Pre-sizing with `make([]T, 0, n)` or `make([]T, n)` when the target length is known cuts both runtime and allocations dramatically:
+
+<TerminalOutput command="go test -bench=BenchmarkSlice -benchmem" label="Apple M2 · Go 1.27" caption="Measured locally for 10,000 appends per iteration: pre-allocating capacity eliminates 18 intermediate reallocations.">
+```text
+BenchmarkSliceAppendNoCap-8      	   45372	     26712 ns/op	  357626 B/op	      19 allocs/op
+BenchmarkSlicePreallocCap-8      	  164107	      7405 ns/op	   81920 B/op	       1 allocs/op
+```
+</TerminalOutput>
+
+Finally, know the difference between a `nil` slice (`var s []string`) and an empty slice (`s := []string{}` or `make([]string, 0)`). Both have `len(s) == 0`, so always check emptiness with `len(s) == 0` rather than `s == nil`. Yet at JSON boundaries, `encoding/json` marshals a `nil` slice to `null` and an empty slice to `[]`, which breaks frontend clients expecting an array.
+
+<GoMemNilAndReceivers />
+
+<Concepts>
+
+- **Full slice expression (`s[low:high:max]`)**: three-index slicing syntax that caps the new slice's capacity to `max - low` so future `append` calls allocate separately instead of mutating parent elements.
+- **Typed `nil` slice vs. empty slice**: a `nil` slice has a zero pointer and zero allocation (`null` in JSON), whereas `[]T{}` points to a shared zero-byte runtime sentinel (`[]` in JSON).
+
+</Concepts>
+
+---
+
+## 2. Memory leaks inside a garbage-collected language
+
+Developers coming from C often expect Go's garbage collector to rescue every forgotten allocation. Because Go's GC works by walking active pointers from running goroutines, it only frees a heap block once **zero live pointers** anywhere point into any slice or byte inside it—so holding a tiny sub-slice of a giant buffer keeps the entire allocation pinned.
+
+Imagine renting a 50-car freight train because you need one envelope sitting in car #1. As long as you hold onto car #1's coupling, the railway company is forbidden from scrapping the other 49 cars.
+
+```go
+// Bug (#26): msgType keeps the entire 1 MB receive buffer pinned on the heap
+func parseTypeLeak(msg []byte) []byte {
+	return msg[:2]
+}
+
+// Fix: copy just the two bytes you need so GC can reclaim the 1 MB buffer
+func parseTypeSafe(msg []byte) []byte {
+	out := make([]byte, 2)
+	copy(out, msg[:2])
+	return out
+}
+```
+
+<GoMemCapacityLeak />
+
+Three common Go patterns pin dead memory on the heap:
+
+1. **Slicing a giant `[]byte` payload**: reading a 64 MiB network packet into `buf` and storing `header := buf[:5]` in a long-lived slice keeps all 64 MiB alive until `header` is collected. Copy those 5 bytes with `copy` (or `bytes.Clone` since Go 1.20) so the 64 MiB buffer can be freed immediately.
+2. **Shrinking a slice of pointers**: slicing `s = s[:2]` on `[]*Order` drops the length from 1,000 to 2, yet indices `2..999` inside the backing array still hold valid `*Order` pointers. Explicitly nil out discarded slots (`clear(s[2:])` in Go 1.21+ or a loop setting `s[i] = nil`) before reslicing.
+3. **Keeping substrings of large logs**: just like slices, a `string` is a two-word `(ptr, len)` header. Extracting `uuid := hugeLogLine[:36]` keeps the entire megabyte log line pinned until you detach it with `strings.Clone(hugeLogLine[:36])`.
+
+### Why Go maps never shrink after `delete`
+
+Go's built-in `map[K]V` (analogous to a HashMap or dictionary in other languages) stores entries inside a heap-allocated array of hash **buckets**, where each bucket holds up to 8 key-value pairs. Yet that hash table behaves like a growing warehouse that builds extra storage rooms during Black Friday and never tears them down in January: calling `delete(m, key)` clears the slot inside its bucket so the key becomes unreachable, while the runtime keeps every allocated bucket on the heap.
+
+Let's measure this directly on Go 1.27 by inserting 1,000,000 `[128]byte` values, forcing a full GC cycle, and then deleting 990,000 keys:
+
+<TerminalOutput command="go run mem_demo.go" label="Apple M2 · Go 1.27" caption="Live measurement after runtime.GC(): deleting 99% of map entries releases 0 MiB of bucket heap memory.">
+```text
+string="Phở" bytes=5 runes=3
+map after 1M inserts:   len=1000000 HeapAlloc=288.2 MiB
+map after 990k deletes: len=10000   HeapAlloc=288.2 MiB
+```
+</TerminalOutput>
+
+<GoMemMapBuckets />
+
+Because `HeapAlloc` stays stuck at 288.2 MiB forever, long-lived caches that survive traffic spikes quietly trend toward OOM crashes. Fix this by pre-sizing maps with `make(map[K]V, expectedLen)` to avoid expensive startup rehashing, and for spiky long-lived maps, periodically copy remaining entries into a fresh map (or store `*Value` pointers if values are large structs).
+
+Try both traps interactively in the memory inspector below:
+
+<GoMemSliceMapDemo />
+
+<Concepts>
+
+- **Leaking capacity**: retaining a short sub-slice or substring whose header points into a much larger backing array, preventing the GC from reclaiming the unused tail.
+- **Bucket retention**: Go map behavior where `delete()` marks slots vacant for reuse while keeping the underlying bucket table at its peak historical size.
+
+</Concepts>
+
+---
+
+## 3. Loop value copies, map iteration order, and UTF-8 runes
+
+Go replaces `while` and `foreach` with a single `for` loop—most commonly `for i, v := range slice`, which yields each index `i` plus a fresh copy `v` of that element—and treats text as raw immutable UTF-8 `byte`s (`uint8`) rather than Unicode characters (`rune`, alias for `int32`, taking 1 to 4 bytes). Those two design choices combined with randomized `map` traversal routinely catch engineers off guard when reading Go code:
+
+```go
+// Bug (#30): acc is a value copy — balances in accounts stay unchanged
+for _, acc := range accounts {
+	acc.Balance += 100
+}
+
+// Fix: index into the slice directly (or loop over []*Account)
+for i := range accounts {
+	accounts[i].Balance += 100
+}
+
+// Bytes vs. runes (#36): UTF-8 multi-byte strings
+s := "hêllo"
+fmt.Println(len(s), utf8.RuneCountInString(s)) // 6 bytes, 5 runes
+```
+
+<GoMemRangeAndRune />
+
+First, **`for _, v := range items` copies each element by value** into a fresh loop variable `v`. Modifying `v.Balance += 50` updates only the temporary copy and discards it on the next step; mutate through `items[i].Balance += 50` or store `[]*Account` instead. Also remember that Go evaluates the expression after `range` **exactly once** before the loop begins: appending to a slice inside a `for range slice` loop will not iterate over newly appended items, though appending inside a classic `for i := 0; i < len(s); i++` creates an infinite loop.
+
+*(Version note: before Go 1.22, taking `&v` inside a `range` loop was an infamous bug because every iteration reused a single memory address for `v`. Go 1.22 changed loop semantics so each iteration gets a fresh variable per iteration, eliminating `&v` pointer capture, though `v` itself is still a value copy for structs!)*
+
+Second, **never assume Go map iteration order**. Go intentionally randomizes the starting bucket when iterating over a `map` so code cannot depend on insertion or sorted order. Worse, inserting a new key into a map *while* ranging over it makes behavior nondeterministic — the new key may or may not appear in the same loop. Copy keys to a slice if you need deterministic ordering or safe mid-loop additions.
+
+Third, **a Go `string` is an immutable slice of UTF-8 bytes, not characters**. Look at the UTF-8 encoding table below: ASCII fits in one byte (`0xxxxxxx`), while accented letters, Vietnamese diacritics, and emoji expand across 2, 3, or 4 bytes.
+
+<Figure src={utf8Scheme} alt="Bit-level layout diagram of UTF-8 encoding across 1-byte to multi-byte sequences" caption="Variable-width UTF-8 encoding: every code point after U+007F spans multiple bytes with continuation prefixes (10xxxxxx)." sourceTitle="Wikimedia Commons: UTF-8 Encoding Scheme" sourceUrl="https://commons.wikimedia.org/wiki/File:UTF-8_Encoding_Scheme.png" />
+
+That variable width causes four frequent string bugs:
+- `len("Phở")` returns `5` (byte count), whereas `utf8.RuneCountInString("Phở")` returns `3`. Slicing `s[:3]` slices mid-rune and produces broken UTF-8 bytes; convert to `[]rune(s)[:n]` when truncating by character count.
+- `for i, r := range s` yields the **byte offset** `i` (`0, 1, 2`) and the decoded `rune` `r`, skipping multi-byte widths automatically, whereas `s[i]` reads a raw `byte`.
+- `strings.TrimRight(s, cutset)` strips **any trailing rune found in the set** (so `TrimRight("oxo123oxo", "ox")` returns `"oxo123"`), whereas `strings.TrimSuffix` removes an exact trailing string once.
+- Building strings inside a loop with `+=` allocates a brand-new immutable string copy on every step. Switching to `strings.Builder` with `Grow` turns quadratic copying into a single linear buffer write — and remember the `bytes` package mirrors almost every `strings` helper so you avoid needless `string([]byte)` conversions during I/O.
+
+<TerminalOutput command="go test -bench=BenchmarkString -benchmem" label="Apple M2 · Go 1.27" caption="Concatenating 500 8-byte strings: strings.Builder runs 52x faster and drops allocations from 499 to 1.">
+```text
+BenchmarkStringConcatPlus-8      	   12025	    101036 ns/op	 1068779 B/op	     499 allocs/op
+BenchmarkStringConcatBuilder-8   	  614251	      1939 ns/op	    4096 B/op	       1 allocs/op
+```
+</TerminalOutput>
+
+<Concepts>
+
+- **UTF-8 code point vs. byte**: a human-readable symbol (`'ở'`) is one rune (`U+1EDF`), encoded as three raw bytes (`0xE1 0xBB 0x9F`) in UTF-8.
+- **`break` inside `select`/`switch`**: in Go, a plain `break` inside a `switch` or `select` exits only that `switch`/`select`, not an enclosing `for` loop — always attach a loop label (`break loop`) when you mean to stop the loop.
+
+</Concepts>
+
+---
+
+## 4. Numbers, equality, and choosing receivers
+
+Even basic scalar types harbor quiet bugs in Go:
+
+| Trap | What goes wrong | Safe Go idiom |
+|---|---|---|
+| **Octal literals** | Writing `010` equals decimal `8`, not `10` | Prefix explicit octals with `0o10` (Go 1.13+) |
+| **Integer overflow** | `math.MaxInt64 + 1` wraps silently to `math.MinInt64` without panic | Guard before adding/multiplying (`a > math.MaxInt - b`) |
+| **Float arithmetic** | IEEE-754 `float64` cannot represent `0.1` or `1.0001` exactly; accumulation drifts | Compare within `delta`, multiply before dividing, use integer cents for money |
+| **Equality (`==`)** | Fails to compile on slices/maps/structs containing them; `reflect.DeepEqual` is slow and treats `nil` slice != `[]T{}` | Use `bytes.Equal`, `slices.Equal`, or custom `.Equal()` methods |
+
+Go has no `class` keyword; instead, you attach functions directly to any struct type using a **receiver** parameter before the function name. You choose between a **value receiver** `func (c Customer) ...` (which operates on an isolated copy of `c`, leaving the caller's struct untouched) and a **pointer receiver** `func (c *Customer) ...` (which receives the struct's memory address `*Customer` so edits mutate the original) using four clear rules:
+1. Must the method mutate the struct? Use a **pointer receiver**.
+2. Does the struct hold a field that must never be copied (like `sync.Mutex` or `sync.WaitGroup`)? Use a **pointer receiver**.
+3. Is the struct large, or does any *other* method on the same type already use a pointer receiver? Stay consistent and use a **pointer receiver**.
+4. Is the type small, immutable, or already a descriptor (`time.Time`, `map`, `chan`, small value struct)? A **value receiver** is cleaner and avoids unnecessary heap escapes.
+
+```go
+type Customer struct {
+	Balance float64
+	mu      sync.Mutex // non-copyable field -> forces pointer receiver
+}
+
+// Pointer receiver: mutates the real receiver and avoids copying sync.Mutex
+func (c *Customer) Add(amount float64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.Balance += amount
+}
+```
+
+<Callout type="tip" title="One quick sanity rule for AI-generated Go">
+Whenever an AI assistant generates a method with a value receiver `(s Store)` on a struct that holds a `sync.Mutex` or slice mutation, flag it immediately: the method silently operates on a shallow copy of the mutex or slice header, turning thread-safe code into a data race.
+</Callout>
+
+<Concepts>
+
+- **Integer wrap-around**: signed and unsigned integer overflow in Go wraps silently modulo 2^N at runtime instead of raising an exception.
+- **Method receiver consistency**: keeping all methods of a type on `*T` (rather than mixing `T` and `*T`) avoids subtle bugs where `T` satisfies an interface only via pointer.
+
+</Concepts>
+
+---
+
+## Key takeaways
+
+- **Treat slice, map, and string variables as 16–24-byte descriptors**, not deep containers: cap sub-slices with `s[low:high:max]` or `copy` whenever downstream callers may `append`.
+- **Detach small slices and substrings from giant buffers** via `copy`, `slices.Clone`, or `strings.Clone`, and nil out removed pointer elements before shortening a slice.
+- **Never rely on `delete()` to shrink a long-lived `map`**: pre-size with `make(map[K]V, n)` and periodically rebuild spiky maps into fresh instances so GC can free old buckets.
+- **Index intentionally in loops and strings**: remember `range` copies values, map iteration order is randomized, `len(s)` counts bytes rather than runes, and `strings.Builder` eliminates O(n^2) concatenation copies.
+- **Stay consistent on receivers and empty checks**: test slice/map emptiness with `len(x) == 0`, distinguish `nil` from `[]T{}` at JSON boundaries, and default to pointer receivers when a struct mutates or embeds locks.
+
+---
+
+## Review questions
+
+1. Why does `s2 := s1[1:3]; s2 = append(s2, 99)` overwrite `s1[3]`, and how does changing the expression to `s1[1:3:3]` prevent it? *(See Section 1)*
+2. You insert 1,000,000 entries into a `map[int][128]byte` during a traffic spike and then delete 990,000 of them. Why does `HeapAlloc` stay pinned near 288 MiB, and what are two ways to reclaim that memory? *(See Section 2)*
+3. Why does `for _, u := range users { u.Active = true }` leave every element in `users` unchanged, even though `users` is a slice? *(See Section 3)*
+4. When truncating a Vietnamese user's display name to 10 characters, what goes wrong with `name[:10]`, and what is the safe alternative? *(See Section 3)*
+5. Why should you avoid adding one `(s *Cache) Put(...)` pointer method alongside a `(s Cache) Get(...)` value method on a struct containing a `sync.RWMutex`? *(See Section 4)*
+
+</En>
+
+<Vi>
+
+<Figure src={heroMemory} alt="Ảnh chụp gần bảng bộ nhớ lõi từ HP 9101A thập niên 1970 đan từ dây đồng và các vòng ferit nhỏ" caption="Bộ nhớ lõi từ ngày xưa: mọi bit nằm chung trên một khung dây. Giữ một góc nhỏ đôi khi kéo theo cả khung dây nằm lì trong bộ nhớ." sourceTitle="Wikimedia Commons: HP 9101A magnetic core memory" sourceUrl="https://commons.wikimedia.org/wiki/File:HP_9101A_extended_memory_unit.-_magnetic_core_memory_module_-_macro_detail.jpg" />
+
+> "Cho mình xem lưu đồ mà giấu bảng dữ liệu đi, mình vẫn chẳng hiểu gì. Cho mình xem bảng dữ liệu, thường thì khỏi cần lưu đồ nữa."
+> &mdash; *Fred Brooks*, *The Mythical Man-Month*
+
+### Code Go chạy vẫn đúng ở máy mình, sao lên server lại ăn RAM?
+
+AI viết hộ một handler Go, hàm cắt log hay bộ cache trong vài giây là xong. Biên dịch qua, mấy bài test cơ bản cũng xanh hết, cho tới khi có tải thật.
+
+Lúc đó mới lòi ra mấy lỗi rất khó chịu: một cái `map` cache xóa 99% key rồi mà RAM vẫn kẹt ở 288 MiB, một hàm xử lý log vô tình ghi đè sang dữ liệu của slice bên cạnh, hay cắt ngắn tên tiếng Việt xong thì JSON bị lỗi font.
+
+Trong Go, mọi phép gán hay truyền tham số đều là **pass-by-value** (truyền theo giá trị). Nhưng mấy kiểu hay dùng nhất như slice, map và string thực chất chỉ là cái vỏ nhỏ cầm con trỏ trỏ xuống vùng nhớ dùng chung bên dưới. Bài này gom lại bốn thứ mình hay soi nhất khi review code Go:
+
+1. **Slice header và mảng nền (backing array)**: vì sao `append` ghi đè sang slice khác, và khi nào `nil` khác `[]T{}`.
+2. **Rò RAM dù Go có GC**: giữ 5 byte từ buffer 64 MiB hoặc xóa key trong `map` khiến heap không giảm ra sao.
+3. **Vòng lặp `range` và chữ tiếng Việt**: vì sao sửa biến trong `range` không ăn vào slice, `len(s)` đếm sai chữ tiếng Việt và vì sao nên dùng `strings.Builder`.
+4. **Số học, so sánh và chọn receiver**: tràn số không báo lỗi, lệch số thực và khi nào dùng pointer receiver.
+
+<Callout type="note" title="Tóm tắt nhanh">
+Slice, map và string nhìn bên ngoài giống giá trị độc lập, nhưng thực ra chỉ là mấy cái header nhỏ trỏ tới vùng nhớ chung trên heap. Cắt sub-slice mà không khóa `cap` khiến `append` ghi đè ô bên cạnh; giữ chuỗi con nhỏ làm cả mảng lớn không được GC dọn; Go map xóa key xong vẫn giữ nguyên bảng bucket; `range` luôn copy phần tử theo giá trị; còn `s[i]` đọc từng byte UTF-8 chứ không phải từng chữ. Hãy khóa `cap` bằng `s[low:high:max]` hoặc `copy`, tạo lại map sau lúc cao điểm và dùng `strings.Clone` / `strings.Builder`.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Pointer (`*T` và `&x`)**: biến lưu địa chỉ ô nhớ của một giá trị khác (`&x` lấy địa chỉ, `*p` đọc/sửa thẳng tại địa chỉ đó), giúp các hàm chia sẻ và sửa dữ liệu gốc thay vì copy ra bản mới.
+- **Stack vs. Heap**: **stack** là ngăn nhớ riêng siêu nhanh của mỗi goroutine, tự dọn biến cục bộ ngay khi hàm `return`; còn **heap** là vùng nhớ dùng chung chứa dữ liệu sống lâu hơn phạm vi hàm hoặc được nhiều goroutine trỏ tới.
+- **Backing array (mảng nền)**: khối bộ nhớ liên tiếp trên heap hoặc stack dùng để chứa dữ liệu thật phía sau một hay nhiều biến slice.
+- **Value semantics (truyền theo giá trị)**: gán hoặc truyền biến vào hàm là Go copy giá trị đó; với slice hay map, Go chỉ copy cái header bên ngoài chứ không copy dữ liệu bên trong.
+- **Garbage collector (GC - bộ dọn rác)**: phần runtime tự thu hồi bộ nhớ của Go, nhưng nó chỉ dọn khi không còn bất kỳ con trỏ nào trỏ vào vùng nhớ đó nữa.
+- **Rune**: tên gọi khác của `int32` trong Go, đại diện cho một ký tự Unicode (code point), có thể tốn từ 1 tới 4 byte trong UTF-8.
+
+</Concepts>
+
+---
+
+## 1. Slice chỉ là cái nhãn 24 byte, còn dữ liệu nằm ở mảng nền
+
+Trong Go, kiểu mảng cố định (**array**) như `[5]int` chốt cứng độ dài lúc biên dịch và hễ truyền qua hàm là Go copy sạch cả 5 số. Vì thế code Go thực tế hầu hết dùng **slice** (`[]int`) — một cửa sổ co giãn nhìn lên mảng nền bên dưới. Bạn cứ hình dung slice giống tờ giấy nhớ 3 dòng dán lên kệ kho: địa chỉ dãy kệ (`array` / `ptr`), số phần tử đang chứa (`len`), và tổng sức chứa tối đa của mảng nền trước khi Go phải xin mảng lớn hơn (`cap`).
+
+<Figure src={goSliceStruct} alt="Sơ đồ trên blog chính thức của Go mô tả slice gồm 3 trường ptr, len và cap" caption="Slice header 24 byte trên máy 64-bit: 8 byte cho con trỏ mảng nền, 8 byte cho len và 8 byte cho cap." sourceTitle="The Go Blog: Go Slices: usage and internals" sourceUrl="https://go.dev/blog/slices-intro" />
+
+Mở thẳng mã nguồn Go runtime (`src/runtime/slice.go`) ra xem thì một slice đúng nghĩa chỉ có ba trường này:
+
+<GitHubCode repo="golang/go" path="src/runtime/slice.go" lines="L15-L32" url="https://github.com/golang/go/blob/074522c96ce70350453c164ecb17904881106b6a/src/runtime/slice.go#L15-L32" caption="Cấu trúc slice header bên trong mã nguồn Go runtime (golang/go).">
+```go
+type slice struct {
+	array unsafe.Pointer
+	len   int
+	cap   int
+}
+
+// A notInHeapSlice is a slice backed by internal/runtime/sys.NotInHeap memory.
+type notInHeapSlice struct {
+	array *notInHeap
+	len   int
+	cap   int
+}
+
+func panicmakeslicelen() {
+	panic(errorString("makeslice: len out of range"))
+}
+```
+</GitHubCode>
+
+Vì Go truyền mọi thứ theo giá trị, lúc bạn truyền biến `s` sang hàm khác, Go chỉ copy đúng 24 byte của tờ giấy nhớ đó. Cả hai hàm vẫn đang trỏ chung vào một dãy kệ `array` duy nhất.
+
+<Figure src={goSliceReslice} alt="Sơ đồ Go blog minh họa cắt sub-slice trỏ từ phần tử thứ 2 của mảng 5 phần tử" caption="Cắt sub-slice chỉ dời con trỏ và giảm len, còn phần sức chứa dư phía sau mảng gốc thì vẫn nguyên xi." sourceTitle="The Go Blog: Go Slices: usage and internals" sourceUrl="https://go.dev/blog/slices-intro" />
+
+Chính phần sức chứa dư này rất hay làm hỏng dữ liệu. Giả sử bạn cắt `s2 := s1[1:3]` từ một slice 5 số `[10, 20, 30, 40, 50]`. Lúc này `s2` có `len = 2` nhưng `cap = 4`. Hễ bạn gọi `append(s2, 99)`, Go thấy còn 2 ô trống nên điền thẳng `99` đè lên chỗ của số `40` trong `s1[3]`, không cần xin mảng mới.
+
+```go
+s1 := []int{10, 20, 30, 40, 50}
+s2 := s1[1:3]         // len=2, cap=4 — vẫn trỏ chung mảng gốc của s1
+s2 = append(s2, 99)   // còn 2 ô trống nên ghi đè thẳng lên s1[3] (40 -> 99)!
+
+// Cách sửa: khóa luôn cap bằng s1[low:high:max] để append tự tách mảng mới
+safe := s1[1:3:3]     // len=2, cap=2
+safe = append(safe, 99)
+```
+
+<GoMemSliceHeader />
+
+<GoMemCodeTrace />
+
+Muốn tránh chuyện slice con đè lên slice cha, mình hay làm một trong hai cách:
+- **Khóa `cap` ngay lúc cắt**: viết `s2 := s1[1:3:3]` để ghim `cap = 3 - 1 = 2`, ép lệnh `append` tiếp theo phải cấp phát mảng mới.
+- **Copy sang slice riêng**: tạo `dst := make([]int, len(src))` rồi gọi `copy(dst, src)`. Nhớ là `copy` chỉ chép `min(len(dst), len(src))` phần tử, nên nếu `dst` đang dài bằng 0 thì nó không chép được gì đâu.
+
+### Cấp phát trước dung lượng và phân biệt `nil` với slice rỗng
+
+Nếu viết `make([]T, 0)` rồi `append` trong vòng lặp, Go cứ đầy là phải xin mảng mới to gấp đôi rồi chép toàn bộ phần tử cũ sang. Lúc biết trước số phần tử cần chứa, đưa thẳng `make([]T, 0, n)` hoặc `make([]T, n)` vào sẽ nhanh hơn hẳn:
+
+<TerminalOutput command="go test -bench=BenchmarkSlice -benchmem" label="Apple M2 · Go 1.27" caption="Chạy thử trên 10.000 lần append mỗi lượt: cấp phát sẵn capacity bỏ được 18 lần cấp phát trung gian.">
+```text
+BenchmarkSliceAppendNoCap-8      	   45372	     26712 ns/op	  357626 B/op	      19 allocs/op
+BenchmarkSlicePreallocCap-8      	  164107	      7405 ns/op	   81920 B/op	       1 allocs/op
+```
+</TerminalOutput>
+
+Thêm một chỗ dễ nhầm nữa là `nil` slice (`var s []string`) với empty slice (`s := []string{}` hay `make([]string, 0)`). Cả hai đều có `len(s) == 0`, nên kiểm tra slice rỗng thì cứ viết `len(s) == 0`, đừng viết `s == nil`. Nhưng khi xuất JSON, `encoding/json` lại biến `nil` slice thành `null` còn empty slice thành `[]` — frontend nhận phải `null` thay vì mảng rỗng là vỡ UI ngay.
+
+<GoMemNilAndReceivers />
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Full slice expression (`s[low:high:max]`)**: cách cắt slice có 3 tham số để giới hạn luôn `cap` của slice mới bằng `max - low`, tránh `append` đè sang mảng cha.
+- **Nil slice vs. empty slice**: `nil` slice có con trỏ bằng 0 và không tốn bộ nhớ (ra `null` trong JSON), còn `[]T{}` trỏ vào biến đánh dấu 0 byte của runtime (ra `[]` trong JSON).
+
+</Concepts>
+
+---
+
+## 2. Có GC rồi nhưng giữ nhầm tham chiếu vẫn rò RAM
+
+Nhiều bạn mới chuyển sang Go hay nghĩ có GC thì cứ yên tâm không bao giờ rò RAM (memory leak). Vì GC của Go hoạt động bằng cách lần theo mọi con trỏ còn sống từ các biến đang chạy, nên chỉ cần còn **một mẩu con trỏ nhỏ** trỏ tới vài byte đầu của một khối nhớ khổng lồ thì GC bị cấm dọn sạch cả khối đó.
+
+Cứ nghĩ đơn giản là bạn giữ một tờ hóa đơn ở toa cuối của đoàn tàu 50 toa. Chừng nào bạn còn nắm sợi dây buộc tờ hóa đơn đó, nhà ga không được phép tháo cả 49 toa trống phía trước.
+
+```go
+// Dính leak (#26): msg[:2] vẫn giữ con trỏ tới buffer 1 MB nên GC không dọn được
+func parseTypeLeak(msg []byte) []byte {
+	return msg[:2]
+}
+
+// Cách sửa: copy đúng 2 byte cần giữ sang slice mới để nhả buffer 1 MB
+func parseTypeSafe(msg []byte) []byte {
+	out := make([]byte, 2)
+	copy(out, msg[:2])
+	return out
+}
+```
+
+<GoMemCapacityLeak />
+
+Ba kiểu code Go mình hay gặp làm ghim RAM trên heap nhất:
+
+1. **Cắt lấy vài byte từ một buffer to**: đọc gói tin 64 MiB vào `buf`, rồi cất `header := buf[:5]` vào biến sống lâu thì toàn bộ 64 MiB bị giữ lại theo. Cứ dùng `copy` (hoặc `bytes.Clone` từ Go 1.20) để tách 5 byte ra là GC dọn sạch 64 MiB kia ngay.
+2. **Thu ngắn slice chứa con trỏ**: rút `s = s[:2]` trên kiểu `[]*Order` chỉ giảm `len` xuống 2, còn các ô từ `2` trở đi trong mảng nền vẫn giữ nguyên con trỏ `*Order`. Trước khi cắt, nhớ gán `nil` cho phần bỏ đi (hoặc gọi `clear(s[2:])` từ Go 1.21+).
+3. **Cắt chuỗi con từ dòng log dài**: giống slice, `string` cũng chỉ giữ con trỏ và độ dài. Cắt `uuid := hugeLogLine[:36]` là giữ nguyên cả dòng log hàng megabyte trên heap nếu bạn không tách bằng `strings.Clone(hugeLogLine[:36])`.
+
+### Vì sao xóa key trong Go map mà RAM không giảm
+
+Kiểu `map[K]V` (tương đương HashMap hay dictionary ở ngôn ngữ khác) lưu dữ liệu trong một mảng các **bucket** trên heap, mỗi bucket chứa tối đa 8 cặp key-value. Nhưng cái bảng băm đó hoạt động giống kho hàng chỉ mở rộng thêm chứ không tự thu hẹp: gọi `delete(m, key)` chỉ làm trống ô trong bucket để không đọc ra nữa thôi, còn toàn bộ bảng bucket đã xin trước đó vẫn nằm nguyên trên heap.
+
+Mình chạy thử ngay trên Go 1.27: nhét 1 triệu phần tử `[128]byte` vào map, ép chạy `runtime.GC()`, rồi xóa sạch 990.000 key. Kết quả đây:
+
+<TerminalOutput command="go run mem_demo.go" label="Apple M2 · Go 1.27" caption="Đo sau runtime.GC(): xóa 99% số key trong map không trả lại dù chỉ 1 MiB bộ nhớ bucket.">
+```text
+string="Phở" bytes=5 runes=3
+map after 1M inserts:   len=1000000 HeapAlloc=288.2 MiB
+map after 990k deletes: len=10000   HeapAlloc=288.2 MiB
+```
+</TerminalOutput>
+
+<GoMemMapBuckets />
+
+`HeapAlloc` đứng im ở 288,2 MiB không nhúc nhích. Với mấy cái cache chạy dài ngày, sau vài đợt cao điểm là pod dễ chạm ngưỡng OOM luôn. Cách giải quyết là ước lượng sẵn kích thước bằng `make(map[K]V, expectedLen)` để đỡ tốn công rehash lúc tăng tải, và với map hay phình to rồi rút nhỏ, thỉnh thoảng copy các key còn sống sang một map mới (hoặc lưu `*Value` nếu struct quá to).
+
+Bạn có thể tự bấm thử cả hai lỗi slice và map ở khung tương tác dưới đây:
+
+<GoMemSliceMapDemo />
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Leaking capacity (rò rỉ sức chứa)**: giữ một sub-slice hoặc chuỗi con nhỏ trỏ vào mảng nền lớn khiến GC không dọn được phần đuôi bỏ đi.
+- **Bucket retention (giữ nguyên bucket)**: cách Go map chỉ đánh dấu trống ô khi `delete()` mà vẫn giữ nguyên kích thước bảng bucket ở mức cao nhất từng đạt tới.
+
+</Concepts>
+
+---
+
+## 3. Vòng lặp `range`, thứ tự của map và chuỗi tiếng Việt
+
+Go bỏ `while`/`foreach` và gom hết vào một từ khóa `for` — phổ biến nhất là `for i, v := range slice` trả về chỉ số `i` kèm bản sao `v` của từng phần tử — đồng thời lưu `string` dưới dạng chuỗi `byte` UTF-8 thô (`uint8`) chứ không chia sẵn thành từng chữ (`rune` = `int32`, tốn 1 đến 4 byte). Cộng thêm tính năng đảo thứ tự duyệt `map`, có ba chỗ nhìn cú pháp tưởng đơn giản nhưng hay làm sai kết quả nhất lúc đọc code Go:
+
+```go
+// Lỗi (#30): acc chỉ là bản sao nên slice gốc accounts không đổi số dư
+for _, acc := range accounts {
+	acc.Balance += 100
+}
+
+// Cách sửa: sửa thẳng qua chỉ số i (hoặc dùng []*Account)
+for i := range accounts {
+	accounts[i].Balance += 100
+}
+
+// Byte khác ký tự (#36): chuỗi UTF-8 tiếng Việt có ký tự nhiều byte
+s := "hêllo"
+fmt.Println(len(s), utf8.RuneCountInString(s)) // 6 byte, 5 ký tự (rune)
+```
+
+<GoMemRangeAndRune />
+
+Đầu tiên, **`for _, v := range items` luôn copy từng phần tử theo giá trị** vào biến `v`. Nếu bạn sửa `v.Balance += 50` thì chỉ sửa bản nháp rồi sang vòng sau là mất; muốn sửa thật thì gọi thẳng `items[i].Balance += 50` hoặc dùng `[]*Account`. Ngoài ra Go chỉ tính biểu thức sau `range` **đúng một lần** trước khi chạy vòng lặp, nên `append` vào chính slice đang `range` không làm lặp vô tận (khác kiểu viết `for i := 0; i < len(s); i++`).
+
+*(Lưu ý thêm: trước Go 1.22, lấy địa chỉ `&v` trong vòng lặp `range` bị lỗi nổi tiếng vì mọi vòng dùng chung một địa chỉ nhớ. Từ Go 1.22 thì mỗi lượt lặp có biến riêng nên `&v` hết lỗi, nhưng với struct thì `v` vẫn là bản copy theo giá trị nhé!)*
+
+Thứ hai, **đừng bao giờ dựa vào thứ tự duyệt `map`**. Go cố tình đảo điểm xuất phát mỗi lần lặp để bạn không phụ thuộc vào thứ tự thêm key. Nếu bạn vừa duyệt vừa chèn thêm key mới vào chính `map` đó, phần tử mới có thể hiện ra hoặc không tùy hứng. Cần thứ tự ổn định thì chép key ra slice rồi sort trước.
+
+Thứ ba, **`string` trong Go là lát cắt các byte UTF-8, không phải mảng ký tự**. Nhìn bảng UTF-8 bên dưới: chữ ASCII mất đúng 1 byte, còn chữ tiếng Việt có dấu hay emoji tốn 2, 3, thậm chí 4 byte.
+
+<Figure src={utf8Scheme} alt="Bảng mã hóa bit UTF-8 cho ký tự 1 byte tới nhiều byte" caption="UTF-8 dùng độ dài thay đổi theo từng ký tự: qua khỏi ngưỡng ASCII là một chữ chiếm 2–4 byte liên tiếp." sourceTitle="Wikimedia Commons: UTF-8 Encoding Scheme" sourceUrl="https://commons.wikimedia.org/wiki/File:UTF-8_Encoding_Scheme.png" />
+
+Chuyện nhiều byte cho một chữ gây ra bốn lỗi rất hay gặp:
+- `len("Phở")` ra `5` (số byte), còn đếm đúng số chữ phải gọi `utf8.RuneCountInString("Phở")` mới ra `3`. Cắt thẳng `s[:3]` là chẻ đôi chữ `'ở'` thành byte lỗi; muốn cắt theo số chữ thì đổi sang `[]rune(s)[:n]`.
+- `for i, r := range s` trả về **vị trí byte bắt đầu** `i` (`0, 1, 2`) cùng ký tự `rune` `r`, còn lấy `s[i]` là đọc một `byte` thô.
+- `strings.TrimRight(s, cutset)` gọt **mọi ký tự ở cuối có mặt trong tập `cutset`** (nên `TrimRight("oxo123oxo", "ox")` ra `"oxo123"`), muốn cắt đúng một chuỗi đuôi cố định phải dùng `strings.TrimSuffix`.
+- Cộng chuỗi bằng `+=` trong vòng lặp cứ mỗi bước lại cấp phát một chuỗi mới. Đổi sang `strings.Builder` có `Grow` trước chạy nhanh hơn cả chục lần — và nhớ package `bytes` có gần đủ mọi hàm giống `strings` để xử lý thẳng `[]byte` từ mạng hay file mà khỏi ép kiểu qua lại.
+
+<TerminalOutput command="go test -bench=BenchmarkString -benchmem" label="Apple M2 · Go 1.27" caption="Nối 500 chuỗi 8 byte: strings.Builder nhanh hơn 52 lần và chỉ cấp phát bộ nhớ đúng 1 lần thay vì 499 lần.">
+```text
+BenchmarkStringConcatPlus-8      	   12025	    101036 ns/op	 1068779 B/op	     499 allocs/op
+BenchmarkStringConcatBuilder-8   	  614251	      1939 ns/op	    4096 B/op	       1 allocs/op
+```
+</TerminalOutput>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Code point và byte UTF-8**: một chữ như `'ở'` là một rune (`U+1EDF`), nhưng lưu xuống RAM bằng UTF-8 mất ba byte (`0xE1 0xBB 0x9F`).
+- **`break` trong `select`/`switch`**: trong Go, gõ `break` bên trong `switch` hay `select` chỉ thoát khỏi khối đó chứ không thoát vòng `for` ngoài — muốn thoát hẳn vòng lặp phải đặt nhãn (`break loop`).
+
+</Concepts>
+
+---
+
+## 4. Số học, so sánh và chọn kiểu Receiver
+
+Ngay mấy phép tính và so sánh cơ bản trong Go cũng có vài chỗ cần để mắt:
+
+| Chỗ hay dính | Chuyện gì xảy ra | Cách viết an toàn |
+|---|---|---|
+| **Số bát phân (octal)** | Viết `010` trong Go có giá trị là `8`, không phải `10` | Viết rõ `0o10` (từ Go 1.13+) |
+| **Tràn số nguyên** | `math.MaxInt64 + 1` quay vòng về `math.MinInt64` không báo lỗi | Kiểm tra ngưỡng trước khi cộng/nhân (`a > math.MaxInt - b`) |
+| **Số thực `float64`** | Không biểu diễn đúng hoàn toàn `0.1`; cộng dồn dễ bị lệch đuôi | So sánh theo sai số `delta`, nhân trước khi chia, tính tiền thì dùng số nguyên |
+| **So sánh `==`** | Không biên dịch được trên slice/map; `reflect.DeepEqual` chậm và coi `nil` slice khác `[]T{}` | Dùng `bytes.Equal`, `slices.Equal`, hoặc tự viết `.Equal()` |
+
+Go không có từ khóa `class`; muốn gắn hàm (method) vào một struct, bạn đặt một **receiver** ngay trước tên hàm. Chọn **value receiver** `(c Customer)` (nhận bản sao của struct, sửa xong ngoài hàm vẫn y nguyên) hay **pointer receiver** `(c *Customer)` (nhận địa chỉ ô nhớ `*Customer`, sửa ăn thẳng vào dữ liệu gốc) cứ dựa theo bốn câu hỏi này:
+1. Method có sửa dữ liệu của struct không? Dùng **pointer receiver**.
+2. Struct có chứa thứ cấm copy như `sync.Mutex` hay `sync.WaitGroup` không? Dùng **pointer receiver**.
+3. Struct to, hoặc đã có method nào khác trên kiểu đó dùng pointer receiver rồi? Chọn luôn **pointer receiver** cho đồng bộ.
+4. Struct nhỏ, không đổi giá trị hoặc bản thân đã là descriptor (`time.Time`, `map`, `chan`)? Dùng **value receiver** cho gọn, đỡ đẩy biến lên heap.
+
+```go
+type Customer struct {
+	Balance float64
+	mu      sync.Mutex // chứa Mutex không được copy -> buộc dùng pointer receiver
+}
+
+// Pointer receiver: cập nhật đúng struct gốc và tránh copy sync.Mutex
+func (c *Customer) Add(amount float64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.Balance += amount
+}
+```
+
+<Callout type="tip" title="Mẹo rà nhanh code Go do AI sinh">
+Hễ thấy AI viết một method dùng value receiver `(s Store)` trên struct có chứa `sync.Mutex` hoặc có thao tác sửa slice, bạn sửa lại thành pointer receiver ngay: để value receiver là nó âm thầm copy cả cái mutex mỗi lần gọi, mất sạch tác dụng khóa luôn.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Integer wrap-around (tràn số quay vòng)**: số nguyên vượt quá mức tối đa thì tự quay vòng về đáy (modulo 2^N) chứ Go không ném lỗi lúc chạy.
+- **Nhất quán receiver**: giữ toàn bộ method của một struct cùng dùng `*T` để tránh chuyện giá trị `T` không thỏa mãn interface trong lúc `*T` thì có.
+
+</Concepts>
+
+---
+
+## Điểm rút ra (Key takeaways)
+
+- **Nhìn slice, map và string như mấy cái header 16–24 byte**, chứ không phải thùng chứa độc lập: khóa `cap` bằng `s[low:high:max]` hoặc `copy` nếu bên nhận có thể gọi `append`.
+- **Tách dữ liệu nhỏ khỏi buffer to** bằng `copy`, `slices.Clone` hay `strings.Clone`, và gán `nil` cho các ô con trỏ bỏ đi trước khi rút ngắn slice.
+- **Đừng chờ `delete()` làm nhỏ `map`**: ước lượng sẵn bằng `make(map[K]V, n)` và thỉnh thoảng tạo map mới chép dữ liệu sống sang nếu map hay tăng giảm thất thường.
+- **Cẩn thận với `range` và tiếng Việt**: `range` luôn copy giá trị, duyệt map không có thứ tự cố định, `len(s)` đếm byte chứ không đếm chữ, và nối chuỗi nhiều thì dùng `strings.Builder`.
+- **Giữ đồng nhất receiver và kiểm tra rỗng bằng `len`**: luôn kiểm tra slice/map rỗng bằng `len(x) == 0`, để ý `nil` với `[]T{}` khi ra JSON, và ưu tiên pointer receiver khi struct có sửa dữ liệu hoặc giữ lock.
+
+---
+
+## Câu hỏi ôn tập (Review questions)
+
+1. Tại sao `s2 := s1[1:3]; s2 = append(s2, 99)` lại đè mất số trong `s1[3]`, và đổi thành `s1[1:3:3]` chặn chuyện đó thế nào? *(Xem Mục 1)*
+2. Bạn nhét 1 triệu phần tử vào `map[int][128]byte` rồi xóa đi 990.000 phần tử. Vì sao `HeapAlloc` vẫn đứng ở 288 MiB và làm sao để thu hồi chỗ RAM đó? *(Xem Mục 2)*
+3. Vì sao vòng lặp `for _, u := range users { u.Active = true }` chạy xong mà dữ liệu trong slice `users` vẫn y nguyên? *(Xem Mục 3)*
+4. Khi cần cắt tên người dùng tiếng Việt còn tối đa 10 ký tự, chuyện gì xảy ra nếu viết `name[:10]`, và phải sửa lại sao cho đúng? *(Xem Mục 3)*
+5. Vì sao không nên viết một hàm `(s *Cache) Put(...)` dùng pointer receiver bên cạnh hàm `(s Cache) Get(...)` dùng value receiver khi trong `Cache` có `sync.RWMutex`? *(Xem Mục 4)*
+
+</Vi>

@@ -6,6 +6,7 @@
 import type { ImageMetadata } from 'astro';
 import draftingSet from '../assets/series/drafting-set.jpg';
 import ramac305 from '../assets/series/ibm-305-ramac.jpg';
+import goGophers from '../assets/series/go-gopher-five-years.jpg';
 
 export interface L10n { en: string; vi: string }
 
@@ -586,7 +587,167 @@ const ddia: Series = {
   ],
 };
 
-export const SERIES: Record<string, Series> = { [refactoringUi.id]: refactoringUi, [ddia.id]: ddia };
+const G = {
+  memory: 'go-memory-data-types-slices-maps-strings',
+  abstractions: 'go-abstractions-interfaces-generics-errors',
+  concurrency: 'go-concurrency-scheduler-channels-context-mutexes',
+  production: 'go-production-stdlib-cpu-cache-gc-kubernetes',
+};
+
+const golang: Series = {
+  id: 'golang',
+  title: {
+    en: 'How Go actually works',
+    vi: 'Hiểu đúng bản chất Golang',
+  },
+  kicker: { en: 'A 4-part series', vi: 'Series 4 bài' },
+  tagline: {
+    en: 'What you still need to know about memory, interfaces, concurrency, and production when AI writes the code.',
+    vi: 'Những thứ về bộ nhớ, interface, concurrency và vận hành mà bạn vẫn phải nắm khi AI đã viết hộ phần code.',
+  },
+  pitch: [
+    {
+      en: 'AI can write a Go service for you in seconds. Still, it regularly lets sub-slices overwrite shared arrays, returns typed nil errors that pass != nil checks, drops goroutines when an HTTP request finishes, and ships http.DefaultClient with no timeout.',
+      vi: 'AI viết hộ bạn một service Go chỉ mất vài giây. Nhưng nó vẫn hay để slice con ghi đè mảng dùng chung, trả về con trỏ nil có kiểu khiến if err != nil chạy sai, làm rớt goroutine chạy nền khi HTTP request vừa xong, và dùng http.DefaultClient không hề có timeout.',
+    },
+    {
+      en: 'Each post focuses on one layer — memory, interfaces and errors, concurrency, and production runtime — with diagrams, real benchmarks, and small simulators so you know what to check when reviewing Go code.',
+      vi: 'Mỗi bài đi gọn vào một tầng — bộ nhớ, thiết kế interface và lỗi, concurrency, rồi tới vận hành production — kèm sơ đồ, số đo thật trên máy và demo bấm thử để bạn biết chỗ nào cần soi khi đọc code Go.',
+    },
+  ],
+  credit: {
+    en: 'Built on 100 Go Mistakes and How to Avoid Them by Teiva Harsanyi, with Go 1.27 benchmarks, runtime source references, and interactive tools.',
+    vi: 'Dựa trên cuốn 100 Go Mistakes and How to Avoid Them của Teiva Harsanyi, kèm số đo chạy thử trên Go 1.27, mã nguồn runtime và công cụ mô phỏng trực tiếp.',
+  },
+  cover: {
+    subtitle: {
+      en: 'Memory · Interfaces · Concurrency · Production',
+      vi: 'Bộ nhớ · Interface · Concurrency · Production',
+    },
+    image: goGophers,
+    alt: 'Three Go gophers gathered around an old reel-to-reel computer by Renee French.',
+    position: '50% 45%',
+    imprint: 'GOLANG',
+    credit: {
+      title: 'Go gopher five years',
+      author: 'Renee French',
+      url: 'https://commons.wikimedia.org/wiki/File:Go_gopher_five_years.jpg',
+      license: 'CC BY 3.0',
+    },
+  },
+  outcomes: [
+    {
+      en: 'Spot shared backing-array writes, substring leaks, and Go maps that hold onto peak RAM.',
+      vi: 'Nhìn ra lỗi slice ghi đè chéo, substring ghim RAM và Go map xóa key xong vẫn không trả bộ nhớ.',
+    },
+    {
+      en: 'Keep interfaces small on the caller side, dodge typed nil errors, and stop logging the same error three times.',
+      vi: 'Đặt interface gọn ở phía người gọi, né lỗi typed nil và hết cảnh log trùng một lỗi ở ba tầng.',
+    },
+    {
+      en: 'Use channels vs. mutexes intentionally and make sure every spawned goroutine knows when to stop.',
+      vi: 'Chọn đúng chỗ dùng mutex hay channel, và đảm bảo goroutine nào mở ra cũng có đường dừng rõ ràng.',
+    },
+    {
+      en: 'Add HTTP/SQL timeouts, align structs to CPU cache lines, and stop Kubernetes from throttling your pods.',
+      vi: 'Cài đủ timeout cho HTTP/SQL, xếp lại trường struct cho nhẹ CPU cache và tránh pod bị bóp CPU trên Kubernetes.',
+    },
+  ],
+  acts: [
+    {
+      id: 'foundations',
+      label: { en: 'Memory & Design', vi: 'Bộ nhớ & Thiết kế' },
+      blurb: { en: 'Slices, maps, interfaces and errors', vi: 'Slice, map, interface và xử lý lỗi' },
+    },
+    {
+      id: 'concurrency',
+      label: { en: 'Concurrency', vi: 'Concurrency' },
+      blurb: { en: 'Scheduler, channels, context and locks', vi: 'Lập lịch, channel, context và khóa' },
+    },
+    {
+      id: 'production',
+      label: { en: 'Production', vi: 'Vận hành' },
+      blurb: { en: 'Stdlib timeouts, CPU cache, GC and K8s', vi: 'Thư viện chuẩn, CPU cache, GC và K8s' },
+    },
+  ],
+  parts: [
+    {
+      slug: G.memory,
+      topic: { en: 'Memory & Types', vi: 'Bộ nhớ & Kiểu' },
+      hook: {
+        en: 'Slice headers, append overwrites, maps that never shrink, range value copies, and UTF-8 runes.',
+        vi: 'Slice header, append ghi đè ngầm, map không tự co, range copy giá trị và chuỗi UTF-8.',
+      },
+      act: 'foundations',
+      builds: [],
+    },
+    {
+      slug: G.abstractions,
+      topic: { en: 'Design & Errors', vi: 'Thiết kế & Lỗi' },
+      hook: {
+        en: 'Consumer interfaces, typed nil traps, type embedding, defer timing, and wrapping errors with %w.',
+        vi: 'Interface phía người gọi, bẫy typed nil, type embedding, thời điểm chạy defer và bọc lỗi %w.',
+      },
+      act: 'foundations',
+      builds: [G.memory],
+    },
+    {
+      slug: G.concurrency,
+      topic: { en: 'Concurrency', vi: 'Concurrency' },
+      hook: {
+        en: 'The GMP scheduler, channels vs. mutexes, context cancellation, nil channels, and reentrant locks.',
+        vi: 'Bộ lập lịch GMP, channel vs. mutex, hủy context, nil channel và lỗi tự khóa chính mình.',
+      },
+      act: 'concurrency',
+      builds: [G.memory, G.abstractions],
+    },
+    {
+      slug: G.production,
+      topic: { en: 'Runtime & Ops', vi: 'Vận hành & CPU' },
+      hook: {
+        en: 'HTTP/SQL timeouts, CPU cache lines, escape analysis, GC, and Kubernetes CFS throttling.',
+        vi: 'Timeout HTTP/SQL, CPU cache line, escape analysis, GC và bóp CPU trên Kubernetes.',
+      },
+      act: 'production',
+      builds: [G.memory, G.concurrency],
+    },
+  ],
+  paths: [
+    {
+      id: 'full',
+      label: { en: 'Read it all', vi: 'Đọc cả 4 bài' },
+      who: {
+        en: 'Start from memory layout and work all the way up to running Go in Kubernetes.',
+        vi: 'Đi từ cách Go xếp dữ liệu trong RAM cho tới lúc chạy service trên Kubernetes.',
+      },
+      order: [G.memory, G.abstractions, G.concurrency, G.production],
+    },
+    {
+      id: 'ai-review',
+      label: { en: 'Reviewing AI-written Go', vi: 'Review code Go do AI viết' },
+      who: {
+        en: 'Catch the slice, interface, and goroutine bugs AI coding tools routinely slip past tests.',
+        vi: 'Bắt mấy lỗi về slice, interface và goroutine mà AI viết rất hay lọt qua test đơn giản.',
+      },
+      order: [G.memory, G.abstractions, G.concurrency],
+    },
+    {
+      id: 'oncall',
+      label: { en: 'Leaks & latency spikes', vi: 'Tìm lỗi ăn RAM & chậm p99' },
+      who: {
+        en: 'Service holding RAM or stalling under load? Focus on memory, concurrency, and runtime.',
+        vi: 'Service tụt hiệu năng hoặc ăn RAM không nhả? Đọc thẳng bộ nhớ, concurrency và vận hành.',
+      },
+      order: [G.memory, G.concurrency, G.production],
+    },
+  ],
+};
+
+export const SERIES: Record<string, Series> = {
+  [refactoringUi.id]: refactoringUi,
+  [ddia.id]: ddia,
+  [golang.id]: golang,
+};
 export const SERIES_IDS = Object.keys(SERIES);
 
 export function seriesOfPost(slug: string) {

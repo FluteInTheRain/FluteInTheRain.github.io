@@ -1,0 +1,567 @@
+---
+title: "Go concurrency: the GMP scheduler, channels, context, and locks"
+title_vi: "Concurrency trong Go: GMP scheduler, channel, context và mutex"
+description: "Understand Go's GMP scheduler, why unbounded goroutines run slower, data races vs race conditions, HTTP r.Context() traps, nil channels, and the etcd deadlock."
+description_vi: "Hiểu bộ lập lịch GMP của Go, tại sao tạo quá nhiều goroutine lại chạy chậm hơn, phân biệt data race với race condition, bẫy r.Context(), nil channel và bug deadlock ở etcd."
+date: 2026-11-20
+category: "backend"
+tags: ["golang", "concurrency", "goroutines", "channels", "context", "100-go-mistakes"]
+cover: "../../assets/blog/go-concurrency-scheduler-channels-context-mutexes/telephone-switchboard.jpg"
+cover_alt: "Telephone switchboard operator patching live trunk lines into parallel sockets"
+draft: false
+sources:
+  - { title: "100 Go Mistakes and How to Avoid Them", author: "Teiva Harsanyi", chapters: "Ch. 8, 9", url: "https://100go.co/" }
+  - { title: "Concurrency is not Parallelism", author: "Rob Pike", url: "https://www.youtube.com/watch?v=oV9rvDllKEg&t=101s" }
+  - { title: "Go runtime scheduler states and mutex layout (src/runtime/runtime2.go)", author: "The Go Authors", url: "https://github.com/golang/go/blob/074522c96ce70350453c164ecb17904881106b6a/src/runtime/runtime2.go#L105-L175" }
+  - { title: "The Go Memory Model", author: "The Go Authors", url: "https://go.dev/ref/mem" }
+  - { title: "Jersey Telecom switchboard and operator (1975)", author: "Joseph A. Carr", url: "https://commons.wikimedia.org/wiki/File:Jersey_Telecom_switchboard_and_operator.jpg" }
+  - { title: "Women working at a Bell System Telephone Switchboard", author: "U.S. National Archives", url: "https://commons.wikimedia.org/wiki/File:Photograph_of_Women_Working_at_a_Bell_System_Telephone_Switchboard_(3660047829).jpg" }
+  - { title: "Great Central Railway signal box Quorn & Woodhouse (CC BY-SA 2.0)", author: "Chris Allen", url: "https://commons.wikimedia.org/wiki/File:Great_Central_Railway_-_signal_box_Quorn_%5E_Woodhouse_-_geograph.org.uk_-_3916232.jpg" }
+---
+
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import En from '../../components/mdx/En.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import GitHubCode from '../../components/mdx/GitHubCode.astro';
+import GoConcCodeTrace from '../../components/mdx/GoConcCodeTrace.astro';
+import GoConcContextCancel from '../../components/mdx/GoConcContextCancel.astro';
+import GoConcGmpScheduler from '../../components/mdx/GoConcGmpScheduler.astro';
+import GoConcNilChannelSelect from '../../components/mdx/GoConcNilChannelSelect.astro';
+import GoConcRaceVsCondition from '../../components/mdx/GoConcRaceVsCondition.astro';
+import GoConcSelectLifecycleDemo from '../../components/mdx/GoConcSelectLifecycleDemo.astro';
+import GoConcSyncTraps from '../../components/mdx/GoConcSyncTraps.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import YouTube from '../../components/mdx/YouTube.astro';
+import heroSwitchboard from '../../assets/blog/go-concurrency-scheduler-channels-context-mutexes/telephone-switchboard.jpg';
+import bellTeam from '../../assets/blog/go-concurrency-scheduler-channels-context-mutexes/bell-switchboard-team.jpg';
+import signalBox from '../../assets/blog/go-concurrency-scheduler-channels-context-mutexes/railway-signal-levers.jpg';
+
+<En>
+
+<Figure src={heroSwitchboard} alt="Telephone switchboard operator patching live trunk lines into parallel sockets" caption="One operator juggling dozens of active lines is concurrency; placing eight operators side by side at eight consoles is parallelism." sourceTitle="Wikimedia Commons: Jersey Telecom switchboard (1975)" sourceUrl="https://commons.wikimedia.org/wiki/File:Jersey_Telecom_switchboard_and_operator.jpg" />
+
+> "Concurrency is about dealing with lots of things at once. Parallelism is about doing lots of things at once."
+> &mdash; *Rob Pike*, *Concurrency is not Parallelism*
+
+### Why `go doWork()` is the easiest bug an AI can write
+
+Prefixing a function call with `go` takes two characters. Because goroutines start at ~2 KiB of stack and spawn in microseconds, developers and AI tools alike sprinkle `go` across handlers, batch loops, and divide-and-conquer helpers assuming free speedups.
+
+Under real traffic, three surprises surface: splitting tiny CPU jobs across goroutines actually runs *orders of magnitude slower*, passing `r.Context()` into a background task kills it the instant the HTTP response goes out, and calling `fmt.Sprintf` while holding a mutex can lock an entire cluster—just as happened in a well-known `etcd` deadlock. This post covers four pillars to make concurrent Go predictable:
+
+1. **Concurrency vs. parallelism & the GMP scheduler**: how Go maps goroutines onto OS threads and why bounded granularity beats naive fan-out.
+2. **Channels vs. mutexes, and data races vs. race conditions**: why passing `go test -race` still leaves ordering bugs wide open.
+3. **Goroutine lifetimes, `context.Context`, and `nil` channels**: ensuring every goroutine has an exit path and disabling closed `select` branches cleanly.
+4. **Hidden `sync` traps**: concurrent `append` races, value-copied locks, `WaitGroup` placement, `errgroup`, and reentrant `String()` deadlocks.
+
+<Callout type="note" title="TL;DR">
+Concurrency structures independent workflows; parallelism executes them simultaneously across `GOMAXPROCS` processors (`P`). Coordinate ownership transfers with channels and protect shared in-memory state with mutexes—never copy any `sync` type by value. Never spawn a goroutine without defining when it stops, detach `r.Context()` with `context.WithoutCancel` for post-response background work, set closed channels to `nil` inside `select` loops, and never call `fmt.Sprintf` on a locked struct whose `String()` method locks again.
+</Callout>
+
+<Concepts>
+
+- **Concurrency vs. parallelism**: concurrency is structuring a program into independently executing tasks (possible on 1 CPU core), while parallelism is executing multiple tasks at the exact same physical instant across multiple cores.
+- **Goroutine (`go fn()`)**: Go's lightweight concurrent execution unit managed by the Go runtime (~2 KiB initial stack vs. ~1–8 MiB for an OS thread). Adding `go` before a function call runs it in the background while the caller moves on immediately.
+- **Channel (`chan T`)**: a typed thread-safe pipe (`make(chan T)`) that lets goroutines pass values (`ch <- v`, `v := <-ch`) or coordinate handoffs without sharing mutable variables directly.
+- **Mutex (`sync.Mutex` / `sync.RWMutex`)**: a mutual-exclusion lock (`mu.Lock()` / `mu.Unlock()`) acting like a single key to a room so only one goroutine modifies shared memory at a time (`RWMutex` also allows multiple concurrent readers via `RLock()`).
+- **`context.Context`**: the standard control object passed as the first function argument (`ctx context.Context`) carrying cancellation signals (`<-ctx.Done()`), deadlines/timeouts, and request metadata across function and goroutine boundaries.
+- **`sync.WaitGroup`**: an atomic counter (`wg.Add(n)`, `wg.Done()`, `wg.Wait()`) that lets a parent goroutine pause until a batch of spawned child goroutines completes.
+- **Data race**: two or more goroutines accessing the same memory address concurrently with at least one write and zero synchronization.
+
+</Concepts>
+
+---
+
+## 1. The GMP scheduler and why concurrency is not always faster
+
+Think of a restaurant kitchen (`#55`). One chef chopping onions while soup simmers and toast browns is **concurrent**: one worker structuring multiple overlapping waits cleanly. Hiring four chefs to chop at four separate cutting boards is **parallel**.
+
+In standard sequential code, calling `doWork()` pauses the caller until `doWork()` returns. Prefixing it with `go doWork()` spawns a **goroutine**—the Go runtime hands `doWork()` off to run independently and moves straight to the next line without waiting. Unlike heavy OS threads allocated in megabytes by the kernel, a goroutine starts with a ~2 KiB stack managed in user space, which is why a single Go server can run tens of thousands of them simultaneously without running out of RAM.
+
+<YouTube id="oV9rvDllKEg" title="Concurrency is not Parallelism by Rob Pike" start={101} end={260} caption="From 1:41 to 4:20, Rob Pike explains how concurrent structure enables parallelism—and why they remain fundamentally distinct concepts." sourceTitle="Rob Pike — Concurrency is not Parallelism" />
+
+Go implements this separation with the **G-M-P scheduler**:
+- **G**: a Goroutine carrying its instruction pointer and dynamic stack (starting around 2 KiB).
+- **M**: an OS kernel Thread managed by the host operating system.
+- **P**: a Logical Processor whose count defaults to `GOMAXPROCS` (matching available CPU cores).
+
+<GoConcGmpScheduler />
+
+Inside `src/runtime/runtime2.go`, Go tracks exact processor and lock states so an `M` blocked on a synchronous disk syscall can detach from its `P` and let another thread pick up runnable goroutines—while network sockets park inside the OS netpoller without holding an OS thread at all:
+
+<GitHubCode repo="golang/go" path="src/runtime/runtime2.go" lines="L105-L175" url="https://github.com/golang/go/blob/074522c96ce70350453c164ecb17904881106b6a/src/runtime/runtime2.go#L105-L175" caption="Logical processor P states and runtime mutex layout inside golang/go.">
+```go
+	_Pidle = iota
+	_Prunning
+	_Psyscall_unused
+	_Pgcstop
+	_Pdead
+)
+
+type mutex struct {
+	lockRankStruct
+	key uintptr
+}
+```
+</GitHubCode>
+
+That cheap creation still carries scheduling, closure allocation, and synchronization costs (`#56`). Even in the short example below, the parent uses a **`sync.WaitGroup`**—calling `wg.Add(1)` before `go func()`, `defer wg.Done()` inside the child, and `wg.Wait()` below—so it does not merge the slice halves before the background sort finishes. Spawning a goroutine for tiny work—such as dividing every recursive step of Merge Sort down to single elements—backfires badly. Let's measure sorting 16,384 integers on Apple M2:
+
+```go
+func parallelMergesort(s []int) {
+	if len(s) <= 2048 { // threshold beats spawning thousands of tiny goroutines
+		sequentialMergesort(s)
+		return
+	}
+	mid := len(s) / 2
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { defer wg.Done(); parallelMergesort(s[:mid]) }()
+	parallelMergesort(s[mid:])
+	wg.Wait()
+	merge(s, mid)
+}
+```
+
+<TerminalOutput command="go test -bench=BenchmarkMergeSort -benchmem" label="Apple M2 · Go 1.27" caption="Unbounded goroutine recursion runs 14x slower than sequential Merge Sort; bounding parallel splits at chunks > 2,048 wins cleanly.">
+```text
+BenchmarkMergeSortSeq-8           	    2798	    422857 ns/op	 1572869 B/op	    4095 allocs/op
+BenchmarkMergeSortUnboundedGo-8   	     198	   5897319 ns/op	 3623778 B/op	   55168 allocs/op
+BenchmarkMergeSortBounded2048-8   	    2974	    384667 ns/op	 1573317 B/op	    4109 allocs/op
+```
+</TerminalOutput>
+
+Size your concurrency according to workload type (`#59`): for **CPU-bound** jobs, bound worker pools near `GOMAXPROCS`; for **I/O-bound** workloads waiting on databases or external APIs, size pools based on downstream capacity and connection limits rather than core count.
+
+<Concepts>
+
+- **Work stealing**: scheduler optimization where an idle logical processor `P` steals half the runnable goroutines from a busy peer's local run queue rather than stalling.
+- **CPU-bound vs. I/O-bound**: work limited by raw processor cycles (sorting, hashing, compression) versus work limited by waiting on network, disk, or downstream services.
+
+</Concepts>
+
+---
+
+## 2. Channels vs. mutexes, and data races vs. race conditions
+
+Once multiple goroutines run concurrently, they need safe ways to share data without stepping on each other (`#57`). Go gives you two core primitives: a **Channel** (`chan T`, created with `make`) works like a typed conveyor belt where one goroutine sends a value (`ch <- x`) and another receives it (`x := <-ch`), passing ownership step by step; a **Mutex** (`sync.Mutex`) works like a lock on a shared notebook—whoever calls `mu.Lock()` gets exclusive access until calling `mu.Unlock()`, forcing other goroutines to wait at the door (`sync.RWMutex` adds `RLock()` so multiple readers can inspect safely in parallel while writers wait). Choosing between them comes down to how goroutines collaborate:
+
+<Figure src={bellTeam} alt="Operators working side by side across a long Bell System switchboard" caption="Passing calls across independent desks maps to channels (orchestration); sharing one shared ledger book between clerks maps to mutexes (synchronization)." sourceTitle="Wikimedia Commons: Bell System Telephone Switchboard" sourceUrl="https://commons.wikimedia.org/wiki/File:Photograph_of_Women_Working_at_a_Bell_System_Telephone_Switchboard_(3660047829).jpg" />
+
+- **Parallel independent workers reading/mutating a shared resource** (caches, counters, state maps): use a **Mutex** (`sync.Mutex` or `sync.RWMutex`).
+- **Concurrent stages transferring data ownership or coordinating steps** (pipelines, worker fan-out, cancellation signals): use **Channels**.
+
+Just as important is separating a **Data Race** from a **Race Condition** (`#58`). A data race breaks memory safety; a race condition breaks program logic even when every shared read and write sits safely behind a mutex!
+
+```go
+// No data race (-race passes!), yet a race condition (#58): final i is 1 or 2
+var mu sync.Mutex
+i := 0
+go func() { mu.Lock(); defer mu.Unlock(); i++ }()
+go func() { mu.Lock(); defer mu.Unlock(); i = 2 }()
+```
+
+<GoConcRaceVsCondition />
+
+Under the **Go Memory Model**, synchronization primitives (`sync.Mutex`, unbuffered/buffered channel send-before-receive, `sync.WaitGroup`) establish formal *happens-before* edges so CPU caches and compiler reorderings remain visible across goroutines. Even with clean mutexes, returning a raw slice or map reference from inside a locked `GetMap()` helper (`#70`) leaks a shared backing pointer to the caller—copy the map or slice *before* calling `mu.Unlock()`.
+
+<Concepts>
+
+- **Happens-before guarantee**: formal memory-ordering rule defining when a write made by one goroutine is guaranteed to be visible to a read in another goroutine.
+- **Race condition**: nondeterministic bug where final program behavior depends on uncontrollable scheduling timing between concurrent operations, even without memory corruption.
+
+</Concepts>
+
+---
+
+## 3. Goroutine lifecycles, `context.Context`, and `nil` channels
+
+Two built-in Go tools control goroutine lifecycles: **`context.Context`** and **`select`**. A `Context` is passed explicitly as the first argument (`ctx context.Context`) down the call chain; when a caller cancels an operation or hits a timeout, Go closes `ctx.Done()`—a read-only channel that broadcasts "stop now" to every goroutine listening on `<-ctx.Done()`. Meanwhile, `select` acts like a `switch` dedicated to channels: it waits until one of its channel branches is ready to send or receive and runs that branch immediately.
+
+Never launch `go fn()` unless you can answer one question first: **when and how will this goroutine exit?** (`#62`). Forgetting a stop signal leaves orphaned goroutines holding memory, sockets, and database connections until the process restarts.
+
+```go
+func watch(ctx context.Context, ch <-chan Event) error {
+	for {
+		select {
+		case ev := <-ch:
+			process(ev)
+		case <-ctx.Done(): // bound the goroutine's lifetime to the caller
+			return ctx.Err()
+		}
+	}
+}
+```
+
+<GoConcContextCancel />
+
+Three rules keep `context.Context` and `select` loops leak-free:
+
+1. **Know when HTTP contexts cancel (`#60`, `#61`)**: `net/http` automatically cancels `r.Context()` the instant your HTTP handler finishes writing its response. Passing `r.Context()` directly into `go publishKafka(r.Context())` aborts the background write in milliseconds. Use `context.WithoutCancel(r.Context())` (Go 1.21+) to keep trace/auth values while decoupling cancellation, then layer a fresh `context.WithTimeout` on top and track completion with a `WaitGroup` on shutdown.
+2. **Use `chan struct{}` for signals (`#65`) and respect `select` randomness (`#64`)**: an empty struct takes zero bytes of allocation, making `chan struct{}` ideal for close-broadcast notifications. When multiple `select` cases are ready simultaneously, Go chooses **randomly** rather than top-to-bottom—do not place a data channel and a `ctx.Done()` channel in the same `select` expecting `ctx.Done()` to always win first without a nested check.
+3. **Set closed channels to `nil` inside `select` (`#66`, `#67`)**: reading from a closed channel returns zero values immediately forever, turning a two-stream `select` loop into a 100% CPU spinner. Reassigning `ch1 = nil` when `ok == false` silently removes that branch from `select` because receiving from or sending to a `nil` channel blocks forever. Also distinguish **unbuffered channels** (`make(chan T)`, guaranteeing sender blocks until receiver arrives) from **buffered channels** (`make(chan T, n)`), never guessing arbitrary large buffer sizes without a proven reason.
+
+```go
+for ch1 != nil || ch2 != nil {
+	select {
+	case v, ok := <-ch1:
+		if !ok {
+			ch1 = nil // nil blocks forever -> disables this select case cleanly
+			continue
+		}
+		out <- v
+	case v, ok := <-ch2:
+		if !ok {
+			ch2 = nil
+			continue
+		}
+		out <- v
+	}
+}
+```
+
+<GoConcNilChannelSelect />
+
+<GoConcCodeTrace />
+
+Walk through these lifecycle interactions step by step in the concurrency trace simulator:
+
+<GoConcSelectLifecycleDemo />
+
+<Concepts>
+
+- **Nil channel**: an uninitialized or reassigned `nil` channel variable whose send and receive operations block permanently, causing `select` to skip that case cleanly.
+- **Unbuffered vs. buffered channel**: unbuffered channels synchronize sender and receiver handoff directly; buffered channels decouple them up to `cap` items before blocking.
+
+</Concepts>
+
+---
+
+## 4. Subtle `sync` traps and the `etcd` deadlock
+
+Go's standard `sync` package gives you low-level coordination building blocks—`sync.Mutex` for exclusive access, `sync.RWMutex` for many-reader/single-writer caches, `sync.WaitGroup` to wait for worker groups, and `golang.org/x/sync/errgroup` to collect errors across subtasks—yet even experienced teams hit subtle deadlocks and data races when using them under subtle edge cases:
+
+<Figure src={signalBox} alt="Mechanical railway signal box overlooking tracks at Quorn and Woodhouse" caption="Mechanical interlocking ensures conflicting track levers cannot lock out of order—just as strict lock ordering prevents goroutines from deadlocking on each other." sourceTitle="Wikimedia Commons: Quorn & Woodhouse signal box" sourceUrl="https://commons.wikimedia.org/wiki/File:Great_Central_Railway_-_signal_box_Quorn_%5E_Woodhouse_-_geograph.org.uk_-_3916232.jpg" />
+
+Watch out for five concrete failure modes during code review:
+
+1. **The `etcd` `fmt.Sprintf` deadlock (`#68`)**: Go mutexes are **not reentrant**. In a real bug surfaced in `etcd`, a method acquired `c.mu.Lock()` and logged an error via `fmt.Errorf("... %v", c)`. Because `c` implemented `fmt.Stringer`, `fmt` implicitly called `c.String()`, which tried to acquire `c.mu.RLock()` on the *same* goroutine—hanging forever. Format scalar values or copy state *before* invoking `fmt`.
+2. **Data races hidden inside `append` (`#69`)**: two goroutines calling `append(sharedPrefix, x)` on slices that share trailing backing-array capacity write simultaneously to the exact same slot (`backing[len]`). Guard with a mutex, `copy`, or full slice expression `s[:len:len]`.
+3. **Never copy `sync` types by value (`#74`)**: `sync.Mutex`, `sync.RWMutex`, `sync.WaitGroup`, and `sync.Cond` embed internal counters and waiter queues. Passing a struct containing a mutex by value copies a *locked* counter into a separate object—leaving both goroutines unprotected. Always use pointer receivers (`*Store`) and verify with `go vet`.
+4. **Call `wg.Add(1)` before `go func()`, never inside (`#71`)**: putting `wg.Add(1)` as the first line inside the spawned goroutine races against `wg.Wait()` in the parent goroutine returning before children ever register.
+5. **Prefer `errgroup` over raw `WaitGroup` for error propagation (`#73`)**: `golang.org/x/sync/errgroup` coordinates parallel subtasks, returns the first non-nil error cleanly, and cancels a shared `ctx` across sibling goroutines automatically; reserve `sync.Cond` (`#72`) for repeated broadcast condition signals that `chan struct{}` cannot easily express.
+
+```go
+// Bug (#74): value receiver copies Counter AND its sync.Mutex -> silent race!
+func (c Counter) Inc(key string) { c.mu.Lock(); defer c.mu.Unlock(); c.m[key]++ }
+
+// Fix (#73): coordinate sibling goroutines cleanly with errgroup
+g, gctx := errgroup.WithContext(ctx)
+for _, id := range ids {
+	g.Go(func() error { return fetchProfile(gctx, id) })
+}
+if err := g.Wait(); err != nil {
+	return err
+}
+```
+
+<GoConcSyncTraps />
+
+<Callout type="tip" title="Always gate CI with -race">
+Run `go test -race ./...` in CI on concurrent packages (`#83`). The race detector instruments memory accesses at runtime and catches concurrent slice `append` overwrites and unsynchronized map writes immediately—remembering only that a clean `-race` run rules out data races, not logical race conditions.
+</Callout>
+
+<Concepts>
+
+- **Non-reentrant mutex**: a lock that cannot be acquired a second time by the same goroutine that already holds it without deadlocking.
+- **`errgroup.Group`**: synchronization helper from `golang.org/x/sync/errgroup` that combines `WaitGroup`, error capture, and `context.Context` cancellation across fan-out subtasks.
+
+</Concepts>
+
+---
+
+## Key takeaways
+
+- **Match concurrency shape to workload**: respect the GMP scheduler (`GOMAXPROCS` for CPU-bound work, bounded pools for I/O-bound work), and avoid spawning goroutines around tiny units of work.
+- **Pick Mutexes for shared state and Channels for orchestration**: never pass `sync` structs by value, and copy slice/map contents before releasing a lock.
+- **Separate data races from race conditions**: `go test -race` catches concurrent unsynchronized memory writes (including shared-backing `append`), while disciplined critical sections prevent ordering bugs.
+- **Define every goroutine's shutdown path upfront**: detach background work from HTTP `r.Context()` with `context.WithoutCancel`, use `chan struct{}` signals, and assign `ch = nil` when closing channels inside `select`.
+- **Keep `fmt.Sprintf` and `wg.Add` in the right places**: avoid formatting locked structs implementing `String()`, call `wg.Add` before `go func()`, and reach for `errgroup.WithContext` for parallel error handling.
+
+---
+
+## Review questions
+
+1. Why did unbounded concurrent Merge Sort run 14x slower than sequential Merge Sort in the benchmark above, and how does thresholding restore a speedup? *(See Section 1)*
+2. How can two goroutines call `append` on seemingly independent local slice variables and still trigger a data race in `go test -race`? *(See Sections 2 & 4)*
+3. What happens to a background database write launched with `go writeLog(r.Context())` the moment the HTTP handler sends `200 OK`, and how does `context.WithoutCancel` solve it? *(See Section 3)*
+4. Inside a `for { select { case v, ok := <-ch1: ... case v, ok := <-ch2: ... } }` loop, why does closing `ch1` without setting `ch1 = nil` spike CPU to 100%? *(See Section 3)*
+5. Why can logging `%v` on a pointer inside a `mu.Lock()` section freeze the goroutine permanently, as occurred in `etcd`? *(See Section 4)*
+
+</En>
+
+<Vi>
+
+<Figure src={heroSwitchboard} alt="Tổng đài viên cắm dây nối các đường dây thuê bao vào bảng giắc song song" caption="Một tổng đài viên điều phối khéo léo hàng chục đường dây gọi tới là concurrency; đặt tám người ngồi tám bàn làm cùng lúc mới là parallelism." sourceTitle="Wikimedia Commons: Jersey Telecom switchboard (1975)" sourceUrl="https://commons.wikimedia.org/wiki/File:Jersey_Telecom_switchboard_and_operator.jpg" />
+
+> "Concurrency là cách tổ chức để xử lý nhiều việc cùng lúc. Parallelism là việc thực thi nhiều việc tại cùng một thời điểm."
+> &mdash; *Rob Pike*, *Concurrency is not Parallelism*
+
+### Vì sao `go doWork()` là dòng code dễ tạo bug nhất mà AI hay viết ra
+
+Gõ từ khóa `go` trước một lời gọi hàm chỉ tốn hai ký tự. Vì mỗi goroutine mới mở chỉ tốn khoảng 2 KiB stack và khởi tạo trong vài micro giây, cả dev lẫn AI rất hay rải `go` vào đủ mọi vòng lặp hay hàm đệ quy với hy vọng code sẽ chạy nhanh hơn.
+
+Tới lúc tải thật đổ vào, ba rắc rối thường xuất hiện ngay: chia việc CPU nhỏ quá qua goroutine làm nó chạy *chậm hơn cả chục lần* so với chạy tuần tự, chuyền thẳng `r.Context()` vào job chạy nền khiến job chết ngay khi HTTP trả response, và gọi `fmt.Sprintf` trong lúc đang giữ `Mutex` làm đứng hình cả cụm như bug từng xảy ra ở `etcd`. Bài này gom lại bốn điểm cốt lõi khi làm concurrency trong Go:
+
+1. **Concurrency vs. Parallelism & GMP Scheduler**: Go xếp hàng chục ngàn goroutine lên OS thread như thế nào và vì sao cần chọn đúng mức chia nhỏ công việc.
+2. **Channel vs. Mutex, Data Race vs. Race Condition**: vì sao `go test -race` báo xanh nhưng logic vẫn có thể ra kết quả sai khi chạy thật.
+3. **Vòng đời Goroutine, `context.Context` và `nil` channel**: mọi goroutine tạo ra phải biết lúc nào dừng, và cách tắt gọn một nhánh `select` đã đóng.
+4. **Mấy bẫy `sync` dễ dính**: data race ẩn khi `append`, copy struct chứa mutex theo giá trị, đặt sai chỗ `wg.Add`, `errgroup` và deadlock trong `String()`.
+
+<Callout type="note" title="Tóm tắt nhanh (TL;DR)">
+Concurrency là cách sắp xếp nhiều luồng việc độc lập; parallelism là chạy cùng lúc trên số `P` tương ứng `GOMAXPROCS`. Dùng channel khi cần truyền dữ liệu hay phối hợp nhịp bước, còn bảo vệ dữ liệu dùng chung thì dùng mutex — nhớ không copy mấy kiểu trong package `sync` theo giá trị. Đừng mở goroutine nếu chưa biết bao giờ nó dừng, tách khỏi HTTP bằng `context.WithoutCancel` cho tác vụ chạy nền, gán `ch = nil` khi channel đóng trong `select`, và tránh format struct đang giữ khóa nếu hàm `String()` lại đi xin khóa tiếp.
+</Callout>
+
+<Concepts title="Mấy khái niệm nhắc tới ở trên">
+
+- **Concurrency vs. Parallelism**: concurrency là cách chia cấu trúc chương trình thành nhiều việc độc lập (chạy tốt ngay trên 1 nhân CPU), còn parallelism là chạy nhiều việc song song tại cùng thời điểm trên nhiều nhân.
+- **Goroutine (`go fn()`)**: đơn vị chạy đồng thời siêu nhẹ do Go runtime tự quản lý (stack khởi đầu chỉ ~2 KiB so với 1–8 MiB của OS thread). Chỉ cần thêm từ khóa `go` trước lời gọi hàm là hàm đó chạy tách riêng, hàm hiện tại đi tiếp luôn không chờ.
+- **Channel (`chan T`)**: ống dẫn dữ liệu có kiểu rõ ràng (`make(chan T)`), giúp các goroutine gửi nhận giá trị (`ch <- v`, `v := <-ch`) hoặc bắt nhịp với nhau mà không chạm thẳng vào biến dùng chung.
+- **Mutex (`sync.Mutex` / `sync.RWMutex`)**: chiếc khóa cửa cho dữ liệu dùng chung (`mu.Lock()` / `mu.Unlock()`), đảm bảo tại một thời điểm chỉ một goroutine được sửa vùng nhớ đó (`RWMutex` cho phép nhiều bên cùng đọc song song qua `RLock()`).
+- **`context.Context`**: tham số điều khiển chuẩn luôn truyền đầu tiên (`ctx context.Context`), dùng để truyền tín hiệu hủy (`<-ctx.Done()`), đặt hạn timeout/deadline và mang theo thông tin request xuyên qua các tầng hàm hoặc goroutine.
+- **`sync.WaitGroup`**: bộ đếm đồng bộ (`wg.Add(n)`, `wg.Done()`, `wg.Wait()`) giúp goroutine cha đứng đợi tới khi cả nhóm goroutine con làm xong việc rồi mới đi tiếp.
+- **Data race**: xảy ra khi hai goroutine cùng truy cập một ô nhớ, ít nhất một bên ghi, mà không có cơ chế đồng bộ hay khóa nào ở giữa.
+
+</Concepts>
+
+---
+
+## 1. GMP Scheduler và vì sao tạo thêm goroutine không phải lúc nào cũng nhanh
+
+Cứ tưởng tượng một căn bếp (`#55`). Một đầu bếp thái hành trong lúc chờ nồi súp sôi và đợi bánh mì nướng là **concurrent**: một người biết xen kẽ các khoảng chờ cho khỏi rảnh tay. Còn thuê hẳn bốn đầu bếp đứng bốn thớt thái hành cùng lúc mới là **parallel**.
+
+Khi bạn gọi hàm bình thường kiểu `doWork()`, chương trình đứng chờ hàm đó chạy xong rồi mới đi tiếp. Thêm chữ `go` thành `go doWork()`, Go lập tức tạo một **goroutine** chạy tách riêng và đi tiếp xuống dòng dưới ngay. Khác với thread của hệ điều hành vốn nặng vài MB RAM và tốn công kernel chuyển ngữ cảnh, mỗi goroutine mới tạo chỉ tốn khoảng 2 KiB stack do chính Go runtime tự sắp lịch — nên một server Go chạy vài chục ngàn goroutine cùng lúc vẫn nhẹ tênh.
+
+<YouTube id="oV9rvDllKEg" title="Concurrency is not Parallelism — Rob Pike" start={101} end={260} caption="Từ 1:41 đến 4:20, Rob Pike phân biệt rõ kiến trúc concurrent giúp mở đường cho parallelism, nhưng hai khái niệm này không phải một." sourceTitle="Rob Pike — Concurrency is not Parallelism" />
+
+Go hiện thực hóa chuyện đó bằng mô hình **G-M-P**:
+- **G**: Goroutine mang con trỏ lệnh và stack co giãn (ban đầu khoảng 2 KiB).
+- **M**: OS Thread thật sự do hệ điều hành cấp.
+- **P**: Logical Processor đóng vai trò điều phối, mặc định bằng `GOMAXPROCS` (số nhân CPU).
+
+<GoConcGmpScheduler />
+
+Trong `src/runtime/runtime2.go`, Go theo dõi trạng thái từng `P` để hễ một `M` bị kẹt vào syscall đọc đĩa, `P` tách ngay khỏi `M` đó và chuyển sang một `M` rảnh khác — riêng I/O mạng đi qua `netpoller` nên hàng chục ngàn kết nối chờ mạng không hề ngốn mất OS thread:
+
+<GitHubCode repo="golang/go" path="src/runtime/runtime2.go" lines="L105-L175" url="https://github.com/golang/go/blob/074522c96ce70350453c164ecb17904881106b6a/src/runtime/runtime2.go#L105-L175" caption="Các trạng thái của bộ xử lý logic P và cấu trúc mutex trong mã nguồn golang/go.">
+```go
+	_Pidle = iota
+	_Prunning
+	_Psyscall_unused
+	_Pgcstop
+	_Pdead
+)
+
+type mutex struct {
+	lockRankStruct
+	key uintptr
+}
+```
+</GitHubCode>
+
+Dù goroutine nhẹ thật, vẫn có chi phí tạo closure, cấp stack và đồng bộ `WaitGroup` (`#56`). Để ý trong đoạn Merge Sort ngay dưới: hàm cha dùng **`sync.WaitGroup`** — gọi `wg.Add(1)` báo trước có 1 việc con, `defer wg.Done()` trong nhánh con để báo xong, và `wg.Wait()` ở dưới để đợi cả hai nửa sort xong mới `merge`. Nếu bạn tách đệ quy thành goroutine tới tận từng phần tử lẻ, chi phí điều phối sẽ ăn sạch phần lợi thế đa nhân. Đo thử sắp xếp 16.384 số nguyên trên Apple M2 là thấy ngay sự khác biệt:
+
+```go
+func parallelMergesort(s []int) {
+	if len(s) <= 2048 { // ngưỡng dưới 2048 phần tử chạy tuần tự nhanh hơn hẳn
+		sequentialMergesort(s)
+		return
+	}
+	mid := len(s) / 2
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() { defer wg.Done(); parallelMergesort(s[:mid]) }()
+	parallelMergesort(s[mid:])
+	wg.Wait()
+	merge(s, mid)
+}
+```
+
+<TerminalOutput command="go test -bench=BenchmarkMergeSort -benchmem" label="Apple M2 · Go 1.27" caption="Tạo goroutine cho mọi nhánh chạy chậm hơn bản tuần tự tới 14 lần; chỉ tách song song khi mảng lớn hơn 2.048 phần tử mới nhanh hơn rõ rệt.">
+```text
+BenchmarkMergeSortSeq-8           	    2798	    422857 ns/op	 1572869 B/op	    4095 allocs/op
+BenchmarkMergeSortUnboundedGo-8   	     198	   5897319 ns/op	 3623778 B/op	   55168 allocs/op
+BenchmarkMergeSortBounded2048-8   	    2974	    384667 ns/op	 1573317 B/op	    4109 allocs/op
+```
+</TerminalOutput>
+
+Hãy chọn số worker đúng với loại công việc (`#59`): việc nặng tính toán (**CPU-bound**) chỉ nên để quanh `GOMAXPROCS`; việc chờ mạng hay DB (**I/O-bound**) có thể mở nhiều worker hơn nhưng nhớ canh theo sức chịu tải của database hoặc service bên kia.
+
+<Concepts title="Mấy khái niệm ở mục này">
+
+- **Work stealing**: cơ chế giúp một `P` đang rảnh tự động lấy bớt một nửa số goroutine trong hàng đợi cục bộ của `P` khác đang quá tải, tránh cảnh nhân CPU ngồi chơi trong khi nhân khác kẹt việc.
+- **CPU-bound vs. I/O-bound**: việc bị giới hạn bởi tốc độ tính của CPU (mã hóa, sort, nén) khác với việc bị giới hạn bởi thời gian chờ mạng, đĩa hoặc API bên ngoài.
+
+</Concepts>
+
+---
+
+## 2. Channel hay Mutex? Data Race khác gì Race Condition?
+
+Khi nhiều goroutine cùng chạy một lúc, làm sao chúng trao đổi hoặc sửa chung dữ liệu mà không giẫm chân nhau (`#57`)? Go đưa ra hai món chính cho người mới làm quen: **Channel** (`chan T`, tạo bằng `make`) hoạt động như cái băng chuyền — bên này đẩy dữ liệu vào (`ch <- x`), bên kia lấy ra (`x := <-ch`) để chuyền tay công việc cho nhau; còn **Mutex** (`sync.Mutex`) giống cái ổ khóa cho quyển sổ ghi chung — ai gọi `mu.Lock()` thì vào ghi một mình tới khi gọi `mu.Unlock()`, ai tới sau phải đứng đợi (`sync.RWMutex` thêm `RLock()` cho phép nhiều người đọc cùng lúc khi không có ai đang ghi). Chọn món nào tùy thuộc vào cách các goroutine phối hợp với nhau:
+
+<Figure src={bellTeam} alt="Các nhân viên tổng đài làm việc dọc theo bảng chuyển mạch Bell System" caption="Chuyển cuộc gọi qua lại giữa các bàn độc lập giống như Channel (điều phối); cùng cập nhật vào một sổ cái dùng chung giống như Mutex (khóa dữ liệu)." sourceTitle="Wikimedia Commons: Bell System Telephone Switchboard" sourceUrl="https://commons.wikimedia.org/wiki/File:Photograph_of_Women_Working_at_a_Bell_System_Telephone_Switchboard_(3660047829).jpg" />
+
+- **Các goroutine cùng đọc/ghi một biến hoặc cấu trúc dùng chung** (cache, bộ đếm, map trạng thái): chọn **Mutex** (`sync.Mutex` hoặc `sync.RWMutex`).
+- **Các goroutine truyền dữ liệu qua lại hoặc chờ nhịp của nhau** (pipeline, fan-out worker, tín hiệu hủy): chọn **Channel**.
+
+Quan trọng không kém là phân biệt **Data Race** với **Race Condition** (`#58`). Data race làm hỏng dữ liệu ở mức ô nhớ; còn race condition hoàn toàn có thể xảy ra ngay cả khi mọi lần đọc ghi đều có Mutex bảo vệ, làm kết quả logic nhảy lung tung tùy lịch chạy của CPU.
+
+```go
+// -race không báo lỗi vì mọi thao tác đều có Mutex, nhưng vẫn là Race Condition (#58)
+var mu sync.Mutex
+i := 0
+go func() { mu.Lock(); defer mu.Unlock(); i++ }()
+go func() { mu.Lock(); defer mu.Unlock(); i = 2 }() // kết quả cuối cùng hên xui: 1 hoặc 2
+```
+
+<GoConcRaceVsCondition />
+
+Theo **Go Memory Model**, mấy điểm đồng bộ (`sync.Mutex`, gửi/nhận trên channel, `sync.WaitGroup`) tạo ra thứ tự *happens-before*, đảm bảo thứ goroutine A vừa ghi trên nhân này sẽ được goroutine B nhìn thấy ở nhân kia. Tuy nhiên, nếu bạn khóa mutex trong hàm `GetMap()` rồi trả thẳng biến `map` hoặc `slice` ra ngoài (`#70`), caller bên ngoài vẫn đang cầm chung dữ liệu đó mà chẳng có lock nào giữ — nên nhớ copy ra bản mới trước khi gọi `mu.Unlock()`.
+
+<Concepts title="Mấy khái niệm ở mục này">
+
+- **Happens-before guarantee**: cam kết trong Go Memory Model rằng ghi dữ liệu ở goroutine A chắc chắn hiện ra với goroutine B nếu nằm sau một điểm đồng bộ hợp lệ.
+- **Race condition**: lỗi logic khi kết quả cuối phụ thuộc vào thứ tự chạy trước-sau bất định của các goroutine, ngay cả khi không hề dính data race nào.
+
+</Concepts>
+
+---
+
+## 3. Vòng đời Goroutine, `context.Context` và `nil` channel
+
+Để điều khiển vòng đời goroutine, Go dùng cặp đôi **`context.Context`** và **`select`**. `Context` là tham số truyền từ trên xuống (`ctx context.Context`); khi người gọi bấm hủy hoặc hết giờ timeout, Go tự đóng kênh `ctx.Done()` để phát tín hiệu "dừng thôi" xuống đồng loạt mọi goroutine đang nghe `<-ctx.Done()`. Còn `select` giống hệt lệnh `switch` nhưng dành riêng cho channel: nó dừng chờ cho tới khi một trong các nhánh channel sẵn sàng nhận/gửi thì chạy nhánh đó.
+
+Đừng vội viết `go fn()` nếu bạn chưa trả lời được đúng một câu: **goroutine này dừng lúc nào và dừng bằng cách nào?** (`#62`). Mở ra mà không có đường thoát nghĩa là cứ có request là thêm goroutine kẹt lại, ngốn dần RAM với socket cho tới khi sập service.
+
+```go
+func watch(ctx context.Context, ch <-chan Event) error {
+	for {
+		select {
+		case ev := <-ch:
+			process(ev)
+		case <-ctx.Done(): // gắn đường thoát theo context của hàm gọi
+			return ctx.Err()
+		}
+	}
+}
+```
+
+<GoConcContextCancel />
+
+Giữ ba thói quen sau để `context.Context` và vòng lặp `select` chạy gọn gàng:
+
+1. **Nhớ rõ lúc nào HTTP context bị hủy (`#60`, `#61`)**: `net/http` tự hủy `r.Context()` ngay khi handler trả response về. Nếu bạn truyền thẳng `r.Context()` vào `go publishKafka(r.Context())`, lệnh ghi Kafka rất dễ đứt ngang sau vài mili giây. Hãy tách phần hủy bằng `context.WithoutCancel(r.Context())` (Go 1.21+) để giữ lại các giá trị trace ID, bọc thêm `context.WithTimeout` riêng rồi quản lý bằng `WaitGroup` lúc shutdown.
+2. **Dùng `chan struct{}` để phát tín hiệu (`#65`) và nhớ `select` chọn ngẫu nhiên (`#64`)**: struct rỗng tốn 0 byte nên rất hợp làm kênh báo hiệu đóng. Khi nhiều `case` trong `select` cùng sẵn sàng một lúc, Go **chọn ngẫu nhiên** chứ không ưu tiên nhánh nằm trên — nên đừng kỳ vọng `case <-ctx.Done()` luôn thắng `case v := <-ch` nếu cả hai đều đang có dữ liệu.
+3. **Gán `ch = nil` ngay khi channel đóng trong `select` (`#66`, `#67`)**: đọc một channel đã đóng luôn trả về ngay zero value `(0, ok=false)` mà không block, khiến vòng `select` quay điên cuồng ăn sạch 100% CPU. Gán `ch1 = nil` khi `!ok` sẽ khiến `select` bỏ qua nhánh đó vì đọc/ghi trên `nil` channel block vĩnh viễn. Ngoài ra hãy phân biệt rõ **unbuffered channel** (bên gửi chờ tới khi bên nhận lấy) với **buffered channel** (chọn sức chứa có lý do rõ ràng, đừng điền bừa con số).
+
+```go
+for ch1 != nil || ch2 != nil {
+	select {
+	case v, ok := <-ch1:
+		if !ok {
+			ch1 = nil // nil channel block vĩnh viễn -> tắt nhánh này khỏi select
+			continue
+		}
+		out <- v
+	case v, ok := <-ch2:
+		if !ok {
+			ch2 = nil
+			continue
+		}
+		out <- v
+	}
+}
+```
+
+<GoConcNilChannelSelect />
+
+<GoConcCodeTrace />
+
+Bạn có thể bấm chạy thử từng bước cả ba tình huống trong phần mô phỏng bên dưới:
+
+<GoConcSelectLifecycleDemo />
+
+<Concepts title="Mấy khái niệm ở mục này">
+
+- **Nil channel**: biến channel đang có giá trị `nil`; mọi thao tác gửi/nhận trên nó đều block luôn, nhờ đó `select` tự vô hiệu hóa nhánh tương ứng.
+- **Unbuffered vs. buffered channel**: unbuffered channel bắt hai đầu gửi-nhận gặp nhau đồng bộ; buffered channel cho gửi trước tối đa `cap` phần tử trước khi phải đợi.
+
+</Concepts>
+
+---
+
+## 4. Mấy bẫy `sync` khó thấy và bug Deadlock của `etcd`
+
+Package `sync` cung cấp sẵn các chốt đồng bộ cơ bản nhất — `sync.Mutex` để khóa độc quyền, `sync.RWMutex` để ưu tiên nhiều luồng đọc song song, `sync.WaitGroup` để đợi cả nhóm goroutine chạy xong, cùng `golang.org/x/sync/errgroup` để gom lỗi — nhưng ngay cả mấy dự án open source lớn cũng từng vướng lỗi khá đau với chúng:
+
+<Figure src={signalBox} alt="Trạm gác ghi đường sắt Quorn & Woodhouse điều khiển cần gạt tránh xung đột đường ray" caption="Khóa cơ khí trên trạm ghi giúp hai cần gạt xung đột không thể kéo sai thứ tự — cũng giống kỷ luật thứ tự khóa mutex để tránh deadlock." sourceTitle="Wikimedia Commons: Quorn & Woodhouse signal box" sourceUrl="https://commons.wikimedia.org/wiki/File:Great_Central_Railway_-_signal_box_Quorn_%5E_Woodhouse_-_geograph.org.uk_-_3916232.jpg" />
+
+Mỗi lần review code Go chạy song song, mình hay rà năm chỗ sau:
+
+1. **Bug deadlock vì `fmt.Sprintf` ở `etcd` (`#68`)**: Mutex của Go **không cho chính goroutine đang giữ khóa xin lại lần nữa (non-reentrant)**. Trong một bug nổi tiếng của `etcd`, có hàm giữ `c.mu.Lock()` rồi gọi `fmt.Errorf("... %v", c)` để log lỗi. Vì `c` có implement `fmt.Stringer`, hàm `fmt` gọi luôn `c.String()`, và bên trong `c.String()` lại gọi `c.mu.RLock()` trên chính goroutine đó — đứng hình vĩnh viễn. Hãy lấy dữ liệu cần log ra biến riêng hoặc nhả khóa rồi mới format chuỗi.
+2. **Data race ẩn bên trong `append` (`#69`)**: hai goroutine cùng gọi `append(sharedPrefix, x)` trên hai slice tách ra từ một mảng nền còn dư `cap` sẽ đua nhau ghi vào đúng cùng một ô `backing[len]`. Luôn bọc Mutex, tự `copy` sang slice mới, hoặc khóa `cap` bằng cú pháp full slice expression `s[:len:len]`.
+3. **Đừng bao giờ copy mấy kiểu trong `sync` theo giá trị (`#74`)**: `sync.Mutex`, `sync.WaitGroup`, `sync.Cond` đều giữ trạng thái nội bộ. Truyền struct chứa mutex qua value receiver sẽ nhân bản thành hai cái khóa tách rời, làm phần khóa mất hết tác dụng. Luôn dùng pointer receiver (`*Store`) và chạy `go vet` để bắt sớm.
+4. **Gọi `wg.Add(1)` trước `go func()`, đừng đặt bên trong (`#71`)**: đặt `wg.Add(1)` ở dòng đầu bên trong goroutine con sẽ tạo cuộc đua với `wg.Wait()` ở goroutine cha — dễ xảy ra cảnh `Wait()` thoát xong xuôi trước khi goroutine con kịp chạy tới dòng `Add`.
+5. **Dùng `errgroup` khi cần gom lỗi và hủy cả nhóm (`#73`)**: `golang.org/x/sync/errgroup` tự chờ cả nhóm chạy xong, trả về lỗi đầu tiên gặp phải và hủy `ctx` cho các nhánh còn lại; chỉ dùng tới `sync.Cond` (`#72`) khi cần phát tín hiệu lặp đi lặp lại mà `chan struct{}` không giải quyết gọn được.
+
+```go
+// Lỗi (#74): value receiver copy cả Counter lẫn sync.Mutex -> mỗi goroutine khóa một bản sao!
+func (c Counter) Inc(key string) { c.mu.Lock(); defer c.mu.Unlock(); c.m[key]++ }
+
+// Cách sửa (#73): dùng errgroup để tự động hủy các nhánh còn lại khi một nhánh lỗi
+g, gctx := errgroup.WithContext(ctx)
+for _, id := range ids {
+	g.Go(func() error { return fetchProfile(gctx, id) })
+}
+if err := g.Wait(); err != nil {
+	return err
+}
+```
+
+<GoConcSyncTraps />
+
+<Callout type="tip" title="Nhớ bật -race trong CI">
+Cho chạy `go test -race ./...` tự động trên CI với mọi package có concurrency (`#83`). Cờ `-race` bắt được ngay mấy lỗi ghi/đọc đụng nhau kể cả kiểu `append` chung backing array — chỉ cần lưu ý `-race` chỉ bắt data race ở tầng bộ nhớ chứ không phát hiện được race condition ở tầng logic.
+</Callout>
+
+<Concepts title="Mấy khái niệm ở mục này">
+
+- **Non-reentrant mutex**: kiểu khóa mà chính goroutine đang giữ cũng không thể lock thêm một lần nữa trước khi unlock, gọi lồng vào là tự treo luôn.
+- **`errgroup.Group`**: helper trong `golang.org/x/sync/errgroup` gộp luôn việc chờ kiểu `WaitGroup`, gom lỗi trả về và hủy dây chuyền qua `context.Context`.
+
+</Concepts>
+
+---
+
+## Điểm rút ra (Key takeaways)
+
+- **Chọn số goroutine khớp với loại việc**: nắm cơ chế GMP (`GOMAXPROCS` cho việc CPU-bound, pool giới hạn cho I/O-bound) và tránh chia việc nhỏ quá qua goroutine.
+- **Mutex giữ trạng thái chung, Channel điều phối luồng**: không copy kiểu `sync` theo giá trị và nhớ copy slice/map ra trước khi mở khóa.
+- **Phân biệt Data Race với Race Condition**: bật `go test -race` để bắt lỗi đụng bộ nhớ (kể cả `append` chung backing array), và giữ khóa bao trọn cả cụm logic kiểm tra-rồi-ghi.
+- **Chốt sẵn đường thoát trước khi gọi `go`**: tách tác vụ nền khỏi HTTP `r.Context()` bằng `context.WithoutCancel`, báo hiệu bằng `chan struct{}` và gán `ch = nil` khi channel đóng trong `select`.
+- **Để ý chỗ đặt `fmt.Sprintf` với `wg.Add`**: tránh format struct có `String()` trong lúc giữ khóa, luôn gọi `wg.Add` trước `go func()`, và dùng `errgroup.WithContext` cho nhóm goroutine cần trả lỗi.
+
+---
+
+## Câu hỏi tự kiểm tra
+
+1. Tại sao bản Merge Sort chia goroutine tới từng phần tử lại chậm hơn bản chạy tuần tự tới 14 lần trong benchmark trên, và đặt ngưỡng kích thước đã giải quyết được điều gì? *(Xem Mục 1)*
+2. Làm sao hai goroutine cùng gọi `append` trên hai biến slice cục bộ riêng mà vẫn dính data race khi chạy `go test -race`? *(Xem Mục 2 & 4)*
+3. Chuyện gì xảy ra với hàm ghi log xuống DB chạy qua `go writeLog(r.Context())` ngay lúc HTTP handler trả về `200 OK`, và `context.WithoutCancel` xử lý chuyện đó ra sao? *(Xem Mục 3)*
+4. Trong vòng lặp `for { select { case v, ok := <-ch1: ... case v, ok := <-ch2: ... } }`, tại sao đóng `ch1` mà không gán `ch1 = nil` lại làm CPU nhảy vọt lên 100%? *(Xem Mục 3)*
+5. Vì sao việc log `%v` lên con trỏ struct trong lúc đang giữ `mu.Lock()` lại có thể làm treo cứng goroutine như bug từng gặp ở `etcd`? *(Xem Mục 4)*
+
+</Vi>

@@ -1,0 +1,128 @@
+---
+// Side-by-side Go code trace vs animated HTTP Keep-Alive TCP socket pooling flow.
+const W = 900;
+const H = 350;
+---
+<figure class="gpct">
+  <div class="gpct-scroll">
+    <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Side-by-side code trace showing bounded http.Client request and io.Copy discard before resp.Body.Close on the left connected to animated TCP Keep-Alive connection reuse on the right.">
+      {/* Left panel: Go code */}
+      <rect x="14" y="16" width="386" height="316" rx="10" class="gpct-panel" />
+      <text x="30" y="42" class="gpct-h">
+        <tspan data-lang-en>Go code (safe HTTP client call)</tspan>
+        <tspan data-lang-vi>Code Go (gọi HTTP client giữ được socket)</tspan>
+      </text>
+
+      <rect x="26" y="56" width="362" height="36" rx="6" class="gpct-line-box" />
+      <text x="36" y="78" class="gpct-num">L1</text>
+      <text x="58" y="78" class="gpct-code">ctx, cancel := WithTimeout(ctx, 3*s)</text>
+
+      <rect x="26" y="98" width="362" height="34" rx="6" class="gpct-line-box" />
+      <text x="36" y="119" class="gpct-num">L2</text>
+      <text x="58" y="119" class="gpct-code">resp, err := prodClient.Do(req)</text>
+
+      <rect x="26" y="138" width="362" height="44" rx="6" class="gpct-line-box is-warn" />
+      <text x="36" y="156" class="gpct-num-warn">L3</text>
+      <text x="58" y="156" class="gpct-code">dec := json.NewDecoder(resp.Body)</text>
+      <text x="58" y="174" class="gpct-sm">reads JSON (trailing bytes may stay unread)</text>
+
+      <rect x="26" y="188" width="362" height="44" rx="6" class="gpct-line-box is-ok" />
+      <text x="36" y="206" class="gpct-num-ok">L4</text>
+      <text x="58" y="206" class="gpct-code-ok">_, _ = io.Copy(io.Discard, resp.Body)</text>
+      <text x="58" y="224" class="gpct-sm">drains leftover trailer / padding bytes</text>
+
+      <rect x="26" y="238" width="362" height="36" rx="6" class="gpct-line-box is-ok" />
+      <text x="36" y="260" class="gpct-num-ok">L5</text>
+      <text x="58" y="260" class="gpct-code-ok">_ = resp.Body.Close()  // socket pooled</text>
+
+      <rect x="26" y="282" width="362" height="36" rx="6" class="gpct-line-box is-red" />
+      <text x="38" y="304" class="gpct-red">
+        <tspan data-lang-en>Skip L4 → Close() drops TCP &amp; forces TLS again</tspan>
+        <tspan data-lang-vi>Bỏ qua L4 → Close() đóng TCP, lần sau TLS lại</tspan>
+      </text>
+
+      {/* Connector wires */}
+      <path d="M 388 115 L 452 92" class="gpct-wire" />
+      <path d="M 388 210 L 452 174" class="gpct-wire is-ok" />
+      <path d="M 388 256 L 452 248" class="gpct-wire is-ok" />
+
+      {/* Right panel: TCP transport flow */}
+      <rect x="454" y="16" width="432" height="316" rx="10" class="gpct-panel" />
+      <text x="470" y="42" class="gpct-h">
+        <tspan data-lang-en>http.Transport TCP Keep-Alive flow</tspan>
+        <tspan data-lang-vi>Luồng tái sử dụng TCP trên http.Transport</tspan>
+      </text>
+
+      <rect x="468" y="60" width="380" height="58" rx="6" class="gpct-step" />
+      <text x="480" y="83" class="gpct-b">① L1–L2: Request uses bounded Transport</text>
+      <text x="480" y="103" class="gpct-sm">
+        <tspan data-lang-en>Dial (1s) + TLS (1s) + Headers (2s) caps wait</tspan>
+        <tspan data-lang-vi>Khóa trần Dial (1s) + TLS (1s) + Header (2s)</tspan>
+      </text>
+
+      <rect x="468" y="132" width="380" height="62" rx="6" class="gpct-step is-ok" />
+      <text x="480" y="155" class="gpct-ok">② L4: io.Copy(io.Discard) empties body</text>
+      <text x="480" y="175" class="gpct-sm">
+        <tspan data-lang-en>Transport reads EOF before pooling conn</tspan>
+        <tspan data-lang-vi>Transport đọc sạch tới EOF để tái dùng TCP</tspan>
+      </text>
+
+      <rect x="468" y="208" width="380" height="62" rx="6" class="gpct-step is-ok" />
+      <text x="480" y="231" class="gpct-ok">③ L5: Close() keeps conn in Keep-Alive pool</text>
+      <text x="480" y="251" class="gpct-sm">
+        <tspan data-lang-en>Next call to host skips TCP + TLS handshake</tspan>
+        <tspan data-lang-vi>Request sau dùng lại ngay socket, bỏ qua TLS</tspan>
+      </text>
+
+      <line x1="864" x2="864" y1="88" y2="255" class="gpct-rail" />
+      <polygon points="864,261 859,252 869,252" class="gpct-dot-ok" />
+
+      <text x="670" y="304" text-anchor="middle" class="gpct-note">
+        <tspan data-lang-en>Tip: tune MaxIdleConnsPerHost (default is only 2!)</tspan>
+        <tspan data-lang-vi>Mẹo: tăng MaxIdleConnsPerHost (mặc định chỉ có 2!)</tspan>
+      </text>
+    </svg>
+  </div>
+  <figcaption>
+    <span data-lang-en>Code-to-network trace: draining resp.Body in L4 allows http.Transport to put the socket back into its Keep-Alive pool at L5 instead of opening a fresh TCP + TLS connection every time.</span>
+    <span data-lang-vi>Đối chiếu code với luồng socket mạng: bước đọc cạn resp.Body ở L4 giúp http.Transport trả lại kết nối TCP vào pool ở L5 thay vì bắt tay TLS lại từ đầu.</span>
+  </figcaption>
+</figure>
+
+<style>
+  .gpct { margin: 2em 0; width: 100%; }
+  .gpct-scroll { overflow-x: auto; }
+  .gpct svg { display: block; width: 100%; min-width: 640px; height: auto; }
+  .gpct text { font-size: 12px; fill: var(--text-body); font-variant-numeric: tabular-nums; }
+  .gpct-panel { fill: var(--bg-alt); stroke: var(--border); stroke-width: 1.4; }
+  .gpct-h { font-size: 14px; font-weight: 700; fill: var(--text); }
+  .gpct-line-box { fill: var(--bg); stroke: var(--border); stroke-width: 1.2; }
+  .gpct-line-box.is-warn { stroke: var(--gold); }
+  .gpct-line-box.is-red { fill: var(--red-tint-bg); stroke: var(--red); }
+  .gpct-line-box.is-ok { stroke: rgb(21, 128, 61); }
+  :global(html[data-theme='dark']) .gpct-line-box.is-ok { stroke: rgb(74, 222, 128); }
+  .gpct-step { fill: var(--bg); stroke: var(--border); stroke-width: 1.2; }
+  .gpct-step.is-ok { stroke: rgb(21, 128, 61); }
+  :global(html[data-theme='dark']) .gpct-step.is-ok { stroke: rgb(74, 222, 128); }
+  .gpct-num, .gpct-num-warn, .gpct-num-ok { font-weight: 800; font-size: 11px; }
+  .gpct-num { fill: var(--text-muted); }
+  .gpct-num-warn { fill: var(--gold-icon); }
+  .gpct-num-ok { fill: rgb(21, 128, 61); }
+  .gpct-code, .gpct-code-ok { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11px; font-weight: 600; fill: var(--text); }
+  .gpct-code-ok, .gpct-ok { fill: rgb(21, 128, 61); font-weight: 700; }
+  :global(html[data-theme='dark']) .gpct-num-ok,
+  :global(html[data-theme='dark']) .gpct-code-ok,
+  :global(html[data-theme='dark']) .gpct-ok { fill: rgb(74, 222, 128); }
+  .gpct-b { font-weight: 700; fill: var(--text); }
+  .gpct-red { font-size: 11px; font-weight: 700; fill: var(--red); }
+  .gpct-sm { font-size: 11px; fill: var(--text-muted); }
+  .gpct-note { font-size: 11px; font-weight: 600; fill: var(--text-muted); }
+  .gpct-wire { fill: none; stroke: var(--text-muted); stroke-width: 1.4; stroke-dasharray: 4 3; }
+  .gpct-wire.is-ok { stroke: rgb(21, 128, 61); }
+  .gpct-rail { stroke: rgb(21, 128, 61); stroke-width: 1.5; stroke-dasharray: 3 3; opacity: 0.45; }
+  .gpct-dot-ok { fill: rgb(21, 128, 61); }
+  :global(html[data-theme='dark']) .gpct-wire.is-ok,
+  :global(html[data-theme='dark']) .gpct-rail { stroke: rgb(74, 222, 128); }
+  :global(html[data-theme='dark']) .gpct-dot-ok { fill: rgb(74, 222, 128); }
+  .gpct figcaption { margin-top: 10px; font-size: 14px; color: var(--text-muted); line-height: 1.55; text-align: center; }
+</style>

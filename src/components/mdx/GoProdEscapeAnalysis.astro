@@ -1,0 +1,125 @@
+---
+// Escape analysis: sharing down keeps values on the stack (free cleanup) vs sharing up moves to heap (GC cost).
+import DiagramIcon from './DiagramIcon.astro';
+
+const W = 900;
+const H = 310;
+
+function arrow(x1: number, y1: number, x2: number, y2: number) {
+  const a = Math.atan2(y2 - y1, x2 - x1);
+  const len = 8;
+  const p1 = [x2 - len * Math.cos(a - 0.45), y2 - len * Math.sin(a - 0.45)];
+  const p2 = [x2 - len * Math.cos(a + 0.45), y2 - len * Math.sin(a + 0.45)];
+  return {
+    line: `M ${x1} ${y1} L ${x2 - 6 * Math.cos(a)} ${y2 - 6 * Math.sin(a)}`,
+    head: `${x2},${y2} ${p1[0].toFixed(1)},${p1[1].toFixed(1)} ${p2[0].toFixed(1)},${p2[1].toFixed(1)}`,
+  };
+}
+
+const downArr = arrow(225, 130, 225, 174);
+const upArr = arrow(675, 174, 675, 130);
+---
+<figure class="gpea">
+  <div class="gpea-scroll">
+    <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Showdown between sharing down a pointer to a callee which stays on the fast self-cleaning goroutine stack versus sharing up a returned pointer which forces Go escape analysis to move the allocation to the heap and trigger GC.">
+      {/* Left: Sharing down (Stack) */}
+      <rect x="14" y="16" width="426" height="276" rx="10" class="gpea-card is-ok" />
+      <DiagramIcon name="ok" x={30} y={36} size={20} />
+      <text x="58" y="42" class="gpea-h-ok">
+        <tspan data-lang-en>1. Sharing down → stays on Stack (0 GC work)</tspan>
+        <tspan data-lang-vi>1. Truyền xuống (sharing down) → nằm trên Stack</tspan>
+      </text>
+
+      <rect x="30" y="64" width="394" height="64" rx="7" class="gpea-frame" />
+      <text x="46" y="88" class="gpea-b">Caller frame: a := 10; shareDown(&amp;a)</text>
+      <text x="46" y="110" class="gpea-ok">
+        <tspan data-lang-en>Compiler: "v does not escape"</tspan>
+        <tspan data-lang-vi>Compiler: "v does not escape"</tspan>
+      </text>
+
+      <rect x="30" y="176" width="394" height="96" rx="7" class="gpea-frame is-ok" />
+      <text x="46" y="200" class="gpea-b">Callee frame: func shareDown(v *int)</text>
+      <text x="46" y="222" class="gpea-m">
+        <tspan data-lang-en>• Stack pointer bumps in 1 CPU instruction</tspan>
+        <tspan data-lang-vi>• Cấp phát chỉ bằng 1 lệnh dịch con trỏ stack</tspan>
+      </text>
+      <text x="46" y="242" class="gpea-m">
+        <tspan data-lang-en>• Frame invalidates automatically on return</tspan>
+        <tspan data-lang-vi>• Tự giải phóng ngay khi hàm return, không phiền GC</tspan>
+      </text>
+      <text x="46" y="262" class="gpea-m">
+        <tspan data-lang-en>• io.Reader.Read(buf []byte) shares buf DOWN</tspan>
+        <tspan data-lang-vi>• Mẫu io.Reader.Read(buf []byte) dùng cách này</tspan>
+      </text>
+
+      <path d={downArr.line} class="gpea-arrow is-ok" /><polygon points={downArr.head} class="gpea-head is-ok" />
+
+      {/* Right: Sharing up (Heap) */}
+      <rect x="460" y="16" width="426" height="276" rx="10" class="gpea-card is-red" />
+      <DiagramIcon name="warning" x={476} y={36} size={20} />
+      <text x="504" y="42" class="gpea-h-red">
+        <tspan data-lang-en>2. Sharing up → escapes to Heap (GC pressure)</tspan>
+        <tspan data-lang-vi>2. Trả lên (sharing up) → trốn lên Heap (tốn GC)</tspan>
+      </text>
+
+      <rect x="476" y="64" width="394" height="64" rx="7" class="gpea-frame is-red" />
+      <text x="492" y="88" class="gpea-b">Heap memory (tracked by Garbage Collector)</text>
+      <text x="492" y="110" class="gpea-b-red">
+        <tspan data-lang-en>Compiler: "moved to heap: x"</tspan>
+        <tspan data-lang-vi>Compiler: "moved to heap: x"</tspan>
+      </text>
+
+      <rect x="476" y="176" width="394" height="96" rx="7" class="gpea-frame" />
+      <text x="492" y="200" class="gpea-b">func shareUp() *int {'{'} x := 42; return &amp;x {'}'}</text>
+      <text x="492" y="222" class="gpea-m">
+        <tspan data-lang-en>• x outlives callee stack frame → moves to heap</tspan>
+        <tspan data-lang-vi>• x sống lâu hơn stack frame nên phải lên heap</tspan>
+      </text>
+      <text x="492" y="242" class="gpea-m">
+        <tspan data-lang-en>• Also triggers on: big slices, interface boxing, closures</tspan>
+        <tspan data-lang-vi>• Cũng xảy ra khi: ép vào interface, closure, slice quá lớn</tspan>
+      </text>
+      <text x="492" y="262" class="gpea-m">
+        <tspan data-lang-en>• Reuse scratch buffers via sync.Pool &amp; GOMEMLIMIT</tspan>
+        <tspan data-lang-vi>• Tái dùng buffer qua sync.Pool &amp; đặt GOMEMLIMIT</tspan>
+      </text>
+
+      <path d={upArr.line} class="gpea-arrow is-red" /><polygon points={upArr.head} class="gpea-head is-red" />
+    </svg>
+  </div>
+  <figcaption>
+    <span data-lang-en>Go's escape analysis decides stack vs. heap at compile time. Passing buffers down into io.Reader.Read(p) keeps memory on the stack or caller-controlled pools, whereas returning newly allocated pointers or boxing into interfaces pushes work onto the garbage collector.</span>
+    <span data-lang-vi>Escape analysis của Go quyết định biến nằm ở Stack hay Heap ngay lúc biên dịch. Truyền buffer xuống hàm con như io.Reader.Read(p) giữ được trên Stack hoặc tái dùng qua sync.Pool, còn trả con trỏ lên trên hay ép vào interface sẽ đẩy gánh nặng cho GC.</span>
+  </figcaption>
+</figure>
+
+<style>
+  .gpea { margin: 2em 0; width: 100%; }
+  .gpea-scroll { overflow-x: auto; }
+  .gpea svg { display: block; width: 100%; min-width: 640px; height: auto; }
+  .gpea text { font-size: 12.5px; fill: var(--text-body); }
+  .gpea-card { fill: var(--bg-alt); stroke: var(--border); stroke-width: 1.5; }
+  .gpea-card.is-ok { stroke: rgb(21, 128, 61); }
+  :global(html[data-theme='dark']) .gpea-card.is-ok { stroke: rgb(74, 222, 128); }
+  .gpea-card.is-red { fill: var(--red-tint-bg); stroke: var(--red); }
+  .gpea-frame { fill: var(--bg); stroke: var(--border); stroke-width: 1.2; }
+  .gpea-frame.is-ok { stroke: rgb(21, 128, 61); }
+  :global(html[data-theme='dark']) .gpea-frame.is-ok { stroke: rgb(74, 222, 128); }
+  .gpea-frame.is-red { stroke: var(--red); }
+  .gpea-h-ok { font-size: 14.5px; font-weight: 700; fill: rgb(21, 128, 61); }
+  :global(html[data-theme='dark']) .gpea-h-ok { fill: rgb(74, 222, 128); }
+  .gpea-h-red { font-size: 14.5px; font-weight: 700; fill: var(--red); }
+  .gpea-b { font-weight: 700; fill: var(--text); }
+  .gpea-b-red { font-weight: 700; fill: var(--red); }
+  .gpea-ok { font-weight: 700; fill: rgb(21, 128, 61); }
+  :global(html[data-theme='dark']) .gpea-ok { fill: rgb(74, 222, 128); }
+  .gpea-m { font-size: 11px; fill: var(--text-muted); }
+  .gpea-arrow { fill: none; stroke-width: 1.8; }
+  .gpea-arrow.is-ok { stroke: rgb(21, 128, 61); }
+  :global(html[data-theme='dark']) .gpea-arrow.is-ok { stroke: rgb(74, 222, 128); }
+  .gpea-arrow.is-red { stroke: var(--red); }
+  .gpea-head.is-ok { fill: rgb(21, 128, 61); }
+  :global(html[data-theme='dark']) .gpea-head.is-ok { fill: rgb(74, 222, 128); }
+  .gpea-head.is-red { fill: var(--red); }
+  .gpea figcaption { margin-top: 10px; font-size: 14px; color: var(--text-muted); line-height: 1.55; text-align: center; }
+</style>

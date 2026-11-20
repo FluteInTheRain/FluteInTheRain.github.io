@@ -1,0 +1,131 @@
+---
+// Side-by-side Go code trace vs animated channel/select execution flow for closing channels safely.
+const W = 900;
+const H = 350;
+---
+<figure class="gcct">
+  <div class="gcct-scroll">
+    <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Side-by-side code trace connecting a select loop setting closed channel ch1 to nil on the left to animated channel routing and clean exit flow on the right.">
+      {/* Left panel: Go code */}
+      <rect x="14" y="16" width="386" height="316" rx="10" class="gcct-panel" />
+      <text x="30" y="42" class="gcct-h">
+        <tspan data-lang-en>Go code (merging ch1 &amp; ch2 with select)</tspan>
+        <tspan data-lang-vi>Code Go (gộp ch1 &amp; ch2 bằng select)</tspan>
+      </text>
+
+      <rect x="26" y="56" width="362" height="34" rx="6" class="gcct-line-box" />
+      <text x="36" y="77" class="gcct-num">L1</text>
+      <text x="60" y="77" class="gcct-code">for ch1 != nil || ch2 != nil {'{'}</text>
+
+      <rect x="26" y="95" width="362" height="32" rx="6" class="gcct-line-box" />
+      <text x="36" y="115" class="gcct-num">L2</text>
+      <text x="60" y="115" class="gcct-code">  select {'{'}</text>
+
+      <rect x="26" y="132" width="362" height="36" rx="6" class="gcct-line-box is-warn" />
+      <text x="36" y="154" class="gcct-num-warn">L3</text>
+      <text x="60" y="154" class="gcct-code">  case v, ok := &lt;-ch1:</text>
+
+      <rect x="26" y="173" width="362" height="44" rx="6" class="gcct-line-box is-ok" />
+      <text x="36" y="191" class="gcct-num-ok">L4</text>
+      <text x="60" y="191" class="gcct-code-ok">    if !ok {'{'} ch1 = nil; continue {'}'}</text>
+      <text x="60" y="209" class="gcct-sm">disables case L3 in next iteration</text>
+
+      <rect x="26" y="222" width="362" height="36" rx="6" class="gcct-line-box is-ok" />
+      <text x="36" y="244" class="gcct-num-ok">L5</text>
+      <text x="60" y="244" class="gcct-code">  case v, ok := &lt;-ch2:  // still live</text>
+
+      <rect x="26" y="268" width="362" height="48" rx="6" class="gcct-line-box is-red" />
+      <text x="38" y="288" class="gcct-red">
+        <tspan data-lang-en>Without L4: closed ch1 returns (0, false) nonstop</tspan>
+        <tspan data-lang-vi>Thiếu L4: ch1 đã đóng trả (0, false) liên tục</tspan>
+      </text>
+      <text x="38" y="306" class="gcct-sm">
+        <tspan data-lang-en>Goroutine spins 100% CPU forever</tspan>
+        <tspan data-lang-vi>Vòng lặp quay rỗng ăn sạch 100% 1 nhân CPU</tspan>
+      </text>
+
+      {/* Connector wires */}
+      <path d="M 388 150 L 452 108" class="gcct-wire is-warn" />
+      <path d="M 388 194 L 452 174" class="gcct-wire is-ok" />
+      <path d="M 388 240 L 452 242" class="gcct-wire is-ok" />
+
+      {/* Right panel: Scheduler & channel flow */}
+      <rect x="454" y="16" width="432" height="316" rx="10" class="gcct-panel" />
+      <text x="470" y="42" class="gcct-h">
+        <tspan data-lang-en>Runtime select flow across iterations</tspan>
+        <tspan data-lang-vi>Luồng chạy của select qua các vòng lặp</tspan>
+      </text>
+
+      <rect x="468" y="58" width="380" height="58" rx="6" class="gcct-step is-warn" />
+      <text x="480" y="81" class="gcct-b">① close(ch1) → L3 reads (0, ok=false)</text>
+      <text x="480" y="101" class="gcct-sm">
+        <tspan data-lang-en>Closed channel never blocks; yields !ok once</tspan>
+        <tspan data-lang-vi>Channel đóng trả ngay không block → ok=false</tspan>
+      </text>
+
+      <rect x="468" y="128" width="380" height="58" rx="6" class="gcct-step is-ok" />
+      <text x="480" y="151" class="gcct-ok">② L4 sets ch1 = nil (parks branch)</text>
+      <text x="480" y="171" class="gcct-sm">
+        <tspan data-lang-en>Runtime skips nil case; G sleeps until ch2 fires</tspan>
+        <tspan data-lang-vi>Runtime bỏ qua nhánh nil, chờ dữ liệu từ ch2</tspan>
+      </text>
+
+      <rect x="468" y="198" width="380" height="58" rx="6" class="gcct-step is-ok" />
+      <text x="480" y="221" class="gcct-ok">③ L5 drains remaining ch2 events safely</text>
+      <text x="480" y="241" class="gcct-sm">
+        <tspan data-lang-en>0% CPU spin · every ch2 item reaches handler</tspan>
+        <tspan data-lang-vi>0% CPU rỗng · không mất message nào từ ch2</tspan>
+      </text>
+
+      <rect x="468" y="268" width="380" height="44" rx="6" class="gcct-step" />
+      <text x="480" y="294" class="gcct-b">④ ch2 closed → ch2 = nil → L1 exits</text>
+
+      <line x1="864" x2="864" y1="86" y2="286" class="gcct-rail" />
+      <polygon points="864,292 859,283 869,283" class="gcct-dot-ok" />
+    </svg>
+  </div>
+  <figcaption>
+    <span data-lang-en>Tracing a multi-channel select loop line by line: assigning nil on close transitions L3 out of active polling so L5 drains ch2 without busy-waiting.</span>
+    <span data-lang-vi>Đối chiếu từng dòng vòng lặp select gộp hai channel: gán ch1 = nil ở L4 giúp tắt hẳn nhánh L3 ngay lượt lặp kế tiếp để L5 nhận nốt ch2 mà không đốt CPU.</span>
+  </figcaption>
+</figure>
+
+<style>
+  .gcct { margin: 2em 0; width: 100%; }
+  .gcct-scroll { overflow-x: auto; }
+  .gcct svg { display: block; width: 100%; min-width: 640px; height: auto; }
+  .gcct text { font-size: 12px; fill: var(--text-body); font-variant-numeric: tabular-nums; }
+  .gcct-panel { fill: var(--bg-alt); stroke: var(--border); stroke-width: 1.4; }
+  .gcct-h { font-size: 14px; font-weight: 700; fill: var(--text); }
+  .gcct-line-box { fill: var(--bg); stroke: var(--border); stroke-width: 1.2; }
+  .gcct-line-box.is-warn { stroke: var(--gold); }
+  .gcct-line-box.is-red { fill: var(--red-tint-bg); stroke: var(--red); }
+  .gcct-line-box.is-ok { stroke: rgb(21, 128, 61); }
+  :global(html[data-theme='dark']) .gcct-line-box.is-ok { stroke: rgb(74, 222, 128); }
+  .gcct-step { fill: var(--bg); stroke: var(--border); stroke-width: 1.2; }
+  .gcct-step.is-warn { fill: var(--gold-tint-bg); stroke: var(--gold); }
+  .gcct-step.is-ok { stroke: rgb(21, 128, 61); }
+  :global(html[data-theme='dark']) .gcct-step.is-ok { stroke: rgb(74, 222, 128); }
+  .gcct-num, .gcct-num-warn, .gcct-num-ok { font-weight: 800; font-size: 11px; }
+  .gcct-num { fill: var(--text-muted); }
+  .gcct-num-warn { fill: var(--gold-icon); }
+  .gcct-num-ok { fill: rgb(21, 128, 61); }
+  .gcct-code, .gcct-code-ok { font-family: var(--font-mono, ui-monospace, monospace); font-size: 11.2px; font-weight: 600; fill: var(--text); }
+  .gcct-code-ok, .gcct-ok { fill: rgb(21, 128, 61); font-weight: 700; }
+  :global(html[data-theme='dark']) .gcct-num-ok,
+  :global(html[data-theme='dark']) .gcct-code-ok,
+  :global(html[data-theme='dark']) .gcct-ok { fill: rgb(74, 222, 128); }
+  .gcct-b { font-weight: 700; fill: var(--text); }
+  .gcct-red { font-size: 11px; font-weight: 700; fill: var(--red); }
+  .gcct-sm { font-size: 11px; fill: var(--text-muted); }
+  .gcct-wire { fill: none; stroke: var(--text-muted); stroke-width: 1.4; stroke-dasharray: 4 3; }
+  .gcct-wire.is-warn { stroke: var(--gold); }
+  .gcct-wire.is-ok { stroke: rgb(21, 128, 61); }
+  .gcct-rail { stroke: rgb(21, 128, 61); stroke-width: 1.5; stroke-dasharray: 3 3; opacity: 0.45; }
+  .gcct-dot-warn { fill: var(--gold-icon); }
+  .gcct-dot-ok { fill: rgb(21, 128, 61); }
+  :global(html[data-theme='dark']) .gcct-wire.is-ok,
+  :global(html[data-theme='dark']) .gcct-rail { stroke: rgb(74, 222, 128); }
+  :global(html[data-theme='dark']) .gcct-dot-ok { fill: rgb(74, 222, 128); }
+  .gcct figcaption { margin-top: 10px; font-size: 14px; color: var(--text-muted); line-height: 1.55; text-align: center; }
+</style>

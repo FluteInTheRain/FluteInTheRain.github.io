@@ -1,0 +1,547 @@
+---
+title: "Running Go in production: timeouts, CPU cache, GC, and Kubernetes"
+title_vi: "Đưa Go lên production: timeout, CPU cache, GC và Kubernetes"
+description: "Production Go survival guide: http.DefaultClient traps, SQL pool tuning, 64-byte CPU cache lines, false sharing, escape analysis, pprof, and Kubernetes CFS throttling."
+description_vi: "Đem Go lên production đỡ vấp: chỉnh timeout cho http.DefaultClient, cấu hình pool database/sql, xếp struct theo cache line, đọc escape analysis, pprof và tránh bị Kubernetes bóp CPU."
+date: 2026-11-20
+category: "backend"
+tags: ["golang", "production", "performance", "kubernetes", "pprof", "100-go-mistakes"]
+cover: "../../assets/blog/go-production-stdlib-cpu-cache-gc-kubernetes/centrifugal-governor.jpg"
+cover_alt: "Watt-type brass and iron centrifugal flyball governor regulating steam flow on a Boulton and Watt engine"
+draft: false
+sources:
+  - { title: "100 Go Mistakes and How to Avoid Them", author: "Teiva Harsanyi", chapters: "Ch. 10, 11, 12", url: "https://100go.co/" }
+  - { title: "net/http DefaultClient definition (src/net/http/client.go)", author: "The Go Authors", url: "https://github.com/golang/go/blob/074522c96ce70350453c164ecb17904881106b6a/src/net/http/client.go#L58-L125" }
+  - { title: "Container-aware GOMAXPROCS (Go 1.25 Release Notes)", author: "The Go Authors", url: "https://go.dev/doc/go1.25" }
+  - { title: "Profiling Go Programs", author: "Russ Cox (The Go Blog)", url: "https://go.dev/blog/pprof" }
+  - { title: "More powerful Go execution traces", author: "Michael Knyszek & Carlos Amedee (The Go Blog)", url: "https://go.dev/blog/execution-traces-2024" }
+  - { title: "Boulton and Watt centrifugal governor (CC BY 3.0)", author: "Dr. Mirko Junge", url: "https://commons.wikimedia.org/wiki/File:Boulton_and_Watt_centrifugal_governor-MJ.jpg" }
+  - { title: "Clocks: Mr. R. Mays detached escapement engraving (CC BY 4.0)", author: "W. Kelsall after J. Clement (Wellcome Collection)", url: "https://commons.wikimedia.org/wiki/File:Clocks;_an_escapement_mechanism._Engraving_by_W._Kelsall_aft_Wellcome_V0023849EL.jpg" }
+---
+
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import En from '../../components/mdx/En.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import GitHubCode from '../../components/mdx/GitHubCode.astro';
+import GoProdCacheAndFalseSharing from '../../components/mdx/GoProdCacheAndFalseSharing.astro';
+import GoProdCodeTrace from '../../components/mdx/GoProdCodeTrace.astro';
+import GoProdEscapeAnalysis from '../../components/mdx/GoProdEscapeAnalysis.astro';
+import GoProdHttpTimeouts from '../../components/mdx/GoProdHttpTimeouts.astro';
+import GoProdK8sCfsThrottle from '../../components/mdx/GoProdK8sCfsThrottle.astro';
+import GoProdSqlAndTime from '../../components/mdx/GoProdSqlAndTime.astro';
+import GoProdStructCacheK8sDemo from '../../components/mdx/GoProdStructCacheK8sDemo.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import heroGovernor from '../../assets/blog/go-production-stdlib-cpu-cache-gc-kubernetes/centrifugal-governor.jpg';
+import clockEscapement from '../../assets/blog/go-production-stdlib-cpu-cache-gc-kubernetes/clock-escapement.jpg';
+import goTraceImg from '../../assets/blog/go-production-stdlib-cpu-cache-gc-kubernetes/go-execution-tracer.png';
+import goPprofImg from '../../assets/blog/go-production-stdlib-cpu-cache-gc-kubernetes/go-pprof-graph.png';
+
+<En>
+
+<Figure src={heroGovernor} alt="Watt-type brass and iron centrifugal flyball governor regulating steam flow on a Boulton and Watt engine" caption="A centrifugal governor pairs engine speed to physical throttle limits. Production services freeze when runtime parallelism ignores container limits." sourceTitle="Wikimedia Commons: Boulton and Watt centrifugal governor" sourceUrl="https://commons.wikimedia.org/wiki/File:Boulton_and_Watt_centrifugal_governor-MJ.jpg" />
+
+> "Premature optimization is the root of all evil—yet overlooking hardware mechanics and default timeouts is the fastest way to page on-call."
+> &mdash; *Production Go corollary after Donald Knuth*
+
+### Why fast local Go services stall in Kubernetes and exhaust sockets
+
+Everything looks instantaneous on localhost. Your AI-scaffolded Go microservice compiles to a tiny static binary, passes unit tests in 40 ms, and handles local `curl` requests in sub-millisecond time.
+
+Then production hits: `http.Get()` hangs forever waiting on a degraded partner API, `resp.Body` leaks sockets until file descriptors run out, a hot analytics struct burns cache bandwidth, and Kubernetes p99 latency spikes 300% despite Grafana reporting 35% average CPU. Four mechanical truths separate toy Go demos from resilient production services:
+
+1. **Standard library defaults**: hardening `net/http`, `database/sql`, `time`, and `encoding/json` before traffic arrives.
+2. **CPU cache lines, false sharing, and struct alignment**: arranging fields and slices so CPU cores stop invalidating each other's L1 caches.
+3. **Stack vs. heap, escape analysis, and GC**: reading `-gcflags="-m"` to cut heap allocations instead of guessing.
+4. **Testing accuracy, diagnostics, and Kubernetes CFS throttling**: avoiding flaky benchmarks, profiling with `pprof`/traces, and matching `GOMAXPROCS` to container quotas.
+
+<Callout type="note" title="TL;DR">
+Never use `http.DefaultClient` or `http.ListenAndServe` without timeouts, drain and close every `resp.Body`, tune `sql.DB` pool bounds, and replace `time.After` inside loops with reusable `time.NewTimer`. Order struct fields largest-to-smallest, separate hot atomic counters onto distinct CPU cache lines, measure allocations with `pprof` and `-gcflags="-m"`, and align `GOMAXPROCS` with Kubernetes CPU limits (native in Go 1.25+, or via `uber-go/automaxprocs` on older runtimes).
+</Callout>
+
+<Concepts>
+
+- **Transient resource & HTTP Keep-Alive**: OS handles (`resp.Body`, `sql.Rows`, `os.File`) hold sockets or file descriptors until closed via `io.Closer`; draining `resp.Body` lets Go reuse the live TCP/TLS connection (**Keep-Alive**) instead of re-handshaking every call.
+- **Connection pool (`sql.DB`)**: Go's `database/sql` handle is not a single database connection—it is a thread-safe pool of reusable connections shared across concurrent goroutines.
+- **CPU Cache line (L1/L2 vs. RAM)**: the fixed 64-byte (x86) or 128-byte (Apple Silicon) chunk of contiguous RAM pulled at once into fast L1/L2 CPU caches (~1 ns vs. ~50–100 ns for main RAM).
+- **Escape analysis (Stack vs. Heap)**: compiler static analysis deciding whether a variable safely dies on a goroutine's fast **stack** when a function returns, or must "escape" onto the GC-scanned **heap**.
+- **CFS throttling & `GOMAXPROCS`**: `GOMAXPROCS` sets how many goroutines Go executes simultaneously (`P`), while Linux **CFS throttling** pauses all container threads for the rest of a 100 ms window if they burn their pod's CPU quota early.
+
+</Concepts>
+
+---
+
+## 1. Standard library time bombs: `net/http`, `database/sql`, and `time`
+
+Look straight at `src/net/http/client.go` inside Go's standard library:
+
+<GitHubCode repo="golang/go" path="src/net/http/client.go" lines="L58-L125" url="https://github.com/golang/go/blob/074522c96ce70350453c164ecb17904881106b6a/src/net/http/client.go#L58-L125" caption="http.DefaultClient in Go's stdlib is simply &Client{} with Timeout equal to zero (meaning infinite wait).">
+```go
+	// A Timeout of zero means no timeout.
+	Timeout time.Duration
+}
+
+// DefaultClient is the default [Client] and is used by [Get], [Head], and [Post].
+var DefaultClient = &Client{}
+```
+</GitHubCode>
+
+Shipping `http.Get(...)`, `http.DefaultClient`, or `http.ListenAndServe(...)` leaves **every network timeout set to infinity** (`#81`). If an upstream server accepts a TCP handshake and hangs silently, your goroutine blocks forever holding sockets and RAM. Configure dedicated `Dialer`, `TLSHandshakeTimeout`, `ResponseHeaderTimeout`, `IdleConnTimeout`, and overall `Client.Timeout` on clients, and `ReadHeaderTimeout` / `ReadTimeout` / `IdleTimeout` on `&http.Server{}`.
+
+```go
+// Never ship http.DefaultClient or http.ListenAndServe in production (#81)
+client := &http.Client{
+	Timeout: 5 * time.Second,
+	Transport: &http.Transport{
+		DialContext:           (&net.Dialer{Timeout: 1 * time.Second}).DialContext,
+		TLSHandshakeTimeout:   1 * time.Second,
+		ResponseHeaderTimeout: 2 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+	},
+}
+
+srv := &http.Server{
+	ReadHeaderTimeout: 2 * time.Second,
+	ReadTimeout:       5 * time.Second,
+	IdleTimeout:       60 * time.Second,
+}
+```
+
+<GoProdHttpTimeouts />
+
+<GoProdCodeTrace />
+
+Pair those timeouts with three everyday stdlib hygiene rules:
+- **Drain and close every `io.Closer` (`#79`, `#80`)**: HTTP Keep-Alive reuses an open TCP/TLS socket across sequential API calls instead of paying a fresh TCP + TLS handshake every time—yet if you close `resp.Body` with unread bytes left inside, Go tears down the socket completely. Always run `_, _ = io.Copy(io.Discard, resp.Body)` before `resp.Body.Close()`. Also remember `http.Error(w, msg, code)` writes headers and body **without stopping your handler**—always write `return` right after it.
+- **Tune `database/sql` as a pool, not one connection (`#78`)**: newcomers often assume `sql.Open()` dials a single database connection; in reality it constructs a lazy thread-safe **connection pool** (`*sql.DB`) without connecting at all. Call `db.PingContext(ctx)` on startup, configure `SetMaxOpenConns`, `SetMaxIdleConns`, `SetConnMaxLifetime`, and `SetConnMaxIdleTime`, use `sql.NullString` or pointers for nullable columns, and always check `rows.Err()` after iterating `rows.Next()`.
+- **Watch `time.Duration`, `time.After`, and `time.Time` equality (`#75`, `#76`, `#77`)**: pass `5 * time.Second` (never bare integer `5`), replace `time.After` inside `for`/`select` loops with a single `time.NewTimer` + `Reset` so heap timers do not accumulate until expiry, and compare timestamps with `t1.Equal(t2)` rather than `==` because `time.Now()` carries an internal **monotonic clock** (a forward-only nanosecond stopwatch unaffected by OS clock adjustments) that `json.Unmarshal` strips away.
+
+<Figure src={clockEscapement} alt="Historic engraving of Mr. R. Mays detached clock escapement mechanism showing paired timing wheels" caption="Two clocks in one struct: Go's time.Time carries both wall-clock calendar time and a monotonic tick counter. JSON round-tripping drops the monotonic half, breaking == equality." sourceTitle="Wikimedia Commons: Mays detached escapement (Wellcome Collection)" sourceUrl="https://commons.wikimedia.org/wiki/File:Clocks;_an_escapement_mechanism._Engraving_by_W._Kelsall_aft_Wellcome_V0023849EL.jpg" />
+
+```go
+// Monotonic clock is stripped during JSON round-trip (#76)
+t1 := time.Now()
+raw, _ := json.Marshal(t1)
+var t2 time.Time
+_ = json.Unmarshal(raw, &t2)
+fmt.Println(t1 == t2, t1.Equal(t2)) // false, true!
+
+// SQL hygiene (#78, #79): bound pools and always inspect rows.Err()
+db.SetMaxOpenConns(25)
+db.SetConnMaxLifetime(5 * time.Minute)
+defer rows.Close()
+for rows.Next() { /* ... */ }
+return rows.Err()
+```
+
+<GoProdSqlAndTime />
+
+<Concepts>
+
+- **Wall clock vs. monotonic clock**: wall clock tracks calendar date/time (subject to NTP jumps), whereas monotonic clock strictly counts elapsed nanoseconds forward since process start for safe duration math.
+- **Connection pool churn**: repeatedly opening and tearing down TLS/TCP connections because `resp.Body` was left unread or `MaxIdleConns` remained at its tiny default of `2`.
+
+</Concepts>
+
+---
+
+## 2. Mechanical sympathy: CPU cache lines, false sharing, and struct alignment
+
+Modern CPUs do not read single bytes directly from main RAM—they fetch blocks through tiny, ultra-fast **L1/L2 caches** right next to the CPU cores (L1 reads in ~1 ns, 50–100x faster than main RAM). Every fetch pulls an entire **cache line** (64 bytes on x86_64, 128 bytes on Apple Silicon) of neighboring memory, so how you lay out structs and slices directly governs throughput (`#91`, `#93`).
+
+Think of pulling books from a library basement: even if you only want page 1 of a book, the librarian carries up an entire shelf box of 8 adjacent books. Grouping fields that are read together (**Struct of Slices** over Slice of Structs for tight loops) lets one cache fetch serve eight values at once.
+
+```go
+// SoA (#91): tight loop reading foo.a loads 8 useful int64 values per 64B cache line
+type Bar struct {
+	a []int64
+	b []int64
+}
+
+// Prevent False Sharing across cores (#92) by separating hot counters by 64 bytes
+type Result struct {
+	sumA int64
+	_    [56]byte // cache-line padding so sumB sits on the next 64B line
+	sumB int64
+}
+```
+
+<GoProdCacheAndFalseSharing />
+
+Two hardware optimizations deliver immediate wins in hot paths:
+
+1. **Prevent False Sharing (`#92`)**: if Goroutine 1 on Core 0 increments `s.a` while Goroutine 2 on Core 1 increments `s.b`, and both `int64` fields sit side by side in the same cache line, both cores continuously invalidate each other's L1 cache. Adding cache-line padding between independent hot counters cuts runtime more than 2x in our local Apple M2 Go 1.27 test:
+
+<TerminalOutput command="go test -bench=Benchmark -benchmem" label="Apple M2 · Go 1.27" caption="Separating two concurrent atomic.Int64 counters across Apple Silicon's 128-byte cache line doubles throughput with zero algorithmic change.">
+```text
+BenchmarkFalseSharing-8      	      52	  22237397 ns/op	     100 B/op	       3 allocs/op
+BenchmarkCacheLinePadded-8   	     100	  10251683 ns/op	      80 B/op	       3 allocs/op
+```
+</TerminalOutput>
+
+2. **Sort struct fields largest-to-smallest (`#94`)**: for hardware efficiency, CPUs expect fields aligned at memory offsets divisible by their byte size (`int64` wants an 8-byte boundary), so the Go compiler automatically inserts hidden empty **padding** bytes between fields when smaller types sit before larger ones. Ordering fields `{ bool, int64, bool }` wastes 14 bytes of padding (24 bytes total), whereas `{ int64, bool, bool }` packs cleanly into 16 bytes—saving 33% RAM across millions of elements!
+
+Test struct byte packing and Kubernetes throttling right in the interactive lab below:
+
+<GoProdStructCacheK8sDemo />
+
+<Concepts>
+
+- **Spatial locality**: storing sequentially accessed fields contiguously in RAM so each fetched CPU cache line delivers maximum useful data.
+- **False sharing**: performance degradation when multiple CPU cores update logically independent variables that happen to reside on the same physical cache line.
+
+</Concepts>
+
+---
+
+## 3. Stack vs. heap, escape analysis, and Garbage Collection
+
+Go splits memory between each goroutine's private **stack** and the process-wide **heap** (`#95`). Think of the stack as a goroutine's disposable scratchpad: allocating variables costs a single pointer bump and vanishes automatically with zero garbage-collection work when a function returns. Values that outlive the function (for instance returned as a pointer) or exceed static stack sizing **escape to the heap**—the shared pool tracked and swept periodically by Go's Garbage Collector (`#99`)—a compiler decision known as **escape analysis**.
+
+```go
+// Sharing DOWN -> stays on stack (0 GC overhead)
+func sumPtr(x, y *int) int {
+	return *x + *y
+}
+
+// Sharing UP -> pointer outlives sum(), so z escapes to heap!
+func sumEscape(x, y int) *int {
+	z := x + y
+	return &z // compiler: "moved to heap: z"
+}
+```
+
+<GoProdEscapeAnalysis />
+
+Run `go build -gcflags="-m"` to see exact compiler decisions rather than guessing:
+
+<TerminalOutput command="go build -gcflags='-m' ./prod.go" label="Apple M2 · Go 1.27" caption="Compiler escape analysis: passing a pointer down to shareDown stays on the stack; returning &x in shareUp moves x to the heap.">
+```text
+./prod.go:9:16: v does not escape
+./prod.go:13:2: moved to heap: x
+```
+</TerminalOutput>
+
+Four levers cut heap pressure (`#96`, `#97`, `#99`):
+- **Share down, avoid sharing up**: write APIs like `io.Reader.Read(buf []byte)` where callers pass reusable buffers downward instead of returning freshly allocated structs upward.
+- **Leverage compiler fast-path inlining**: keep tiny hot helpers below Go's inline cost budget so calls compile away without forcing pointer arguments onto the heap.
+- **Recycle temporary buffers with `sync.Pool`**: ideal for high-churn request scratch buffers (`bytes.Buffer`), resetting them before `Put`.
+- **Understand GC pacing (`GOGC` and `GOMEMLIMIT`)**: `GOGC=100` (default) triggers a GC cycle whenever live heap doubles; setting `GOMEMLIMIT` (Go 1.19+) caps memory softly before container OOM kills while preventing thrashing on spiky traffic.
+
+<Concepts>
+
+- **Escape analysis**: compile-time static pass in the Go compiler determining whether a variable can live safely on a goroutine stack or must be heap-allocated.
+- **`sync.Pool`**: thread-safe per-P temporary object cache that reduces heap allocation churn while allowing the GC to reclaim pooled items under memory pressure.
+
+</Concepts>
+
+---
+
+## 4. Testing accuracy, `pprof`/traces, and Kubernetes CFS throttling
+
+Optimizing blind wastes time; optimizing with brittle tests or misconfigured container limits masks real outages.
+
+First, inspect real bottlenecks instead of guessing using Go's two built-in profilers (`#98`): **`pprof`** periodically samples running programs to build CPU and Heap call graphs pinning down hotspots like `runtime.growslice` or map lookups, whereas **`go tool trace`** records an exact millisecond-by-millisecond timeline showing when individual goroutines run, block on locks, or stall in syscalls across each logical processor `P`.
+
+<Figure src={goPprofImg} alt="Go pprof call graph highlighting time spent inside main.FindLoops, runtime.mapaccess1_fast64, and runtime.growslice" caption="A pprof call graph immediately exposes hidden allocation culprits like growslice or un-presized maps before you guess at micro-optimizations." sourceTitle="The Go Blog: Profiling Go Programs" sourceUrl="https://go.dev/blog/pprof" />
+
+<Figure src={goTraceImg} alt="Go execution tracer timeline showing goroutines G1, G84, and syscall blocks distributed across Proc 0 to Proc 7" caption="While pprof aggregates cumulative CPU or RAM totals, go tool trace reveals exact timeline stalls, lock contention, and idle P windows." sourceTitle="The Go Blog: More powerful Go execution traces" sourceUrl="https://go.dev/blog/execution-traces-2024" />
+
+Keep tests and benchmarks honest (`#82`–`#90`):
+- **Categorize integration tests** with build tags (`//go:build integration`) or `testing.Short()`, use table-driven subtests, run `go test -race -shuffle=on`, and never call `time.Sleep` in tests when a channel or retry loop works deterministically (`#86`, `#87`).
+- **Use `httptest` and `iotest`** (`#88`) for HTTP boundaries and broken-reader fault injection, plus `t.Cleanup` / `TestMain` for deterministic teardown (`#90`).
+- **Prevent benchmark lies (`#89`)**: call `b.ResetTimer()` after setup, assign outputs to package-level sinks (or use `b.Loop()` in Go 1.24+) so the compiler cannot optimize away dead code, and compare runs statistically with `benchstat`.
+
+### The Kubernetes CFS throttling trap (`#100`)
+
+Finally, watch what happens when you deploy Go into Kubernetes with CPU limits (for example `limits.cpu: "4"` on an 8-core or 64-core host node). Recall from GMP scheduling that **`GOMAXPROCS`** controls how many logical processors `P` (concurrent CPU-executing OS threads) Go spins up at once. Meanwhile, Linux's **Completely Fair Scheduler (CFS)** enforces container limits over 100 ms windows—4 CPUs gives your pod a 400 ms CPU budget per 100 ms wall time.
+
+<GoProdK8sCfsThrottle />
+
+Historically, Go set `GOMAXPROCS` from the host machine's core count (`8` or `64`), not the container cgroup limit (`4`). With 8 runnable threads burning CPU concurrently, your pod consumes its entire 400 ms budget in just 50 ms—then Linux CFS freezes every thread for the remaining 50 ms of the window, adding up to a 300% latency spike while average CPU utilization still reads low.
+
+*(Runtime update: Go 1.25 introduced native container-aware `GOMAXPROCS` defaults that respect cgroup CPU limits out of the box. If your services still build on Go 1.24 or earlier, keep importing `_ "go.uber.org/automaxprocs"` in `main.go`!)*
+
+<Concepts>
+
+- **Compiler dead-code elimination**: compiler optimization that deletes computations whose return values are never observed—a classic trap that makes naive benchmarks report 0.2 ns/op falsely.
+- **Container-aware `GOMAXPROCS`**: adjusting Go's active logical processor count to match container cgroup CPU quotas (`uber-go/automaxprocs` or built-in Go 1.25+ defaults) instead of host hardware cores.
+
+</Concepts>
+
+---
+
+## Key takeaways
+
+- **Treat stdlib defaults as local-dev shortcuts**: set explicit HTTP client/server timeouts, drain `resp.Body` before closing, configure `sql.DB` pool bounds, and use `time.NewTimer` instead of `time.After` inside loops.
+- **Align data to CPU cache lines**: sort struct fields from largest to smallest to remove padding waste, pack hot loops into Struct of Slices, and pad independent concurrent counters across cache lines.
+- **Verify escape analysis instead of guessing**: pass buffers downward (`io.Reader`), inspect `-gcflags="-m"`, and reuse temporary scratch buffers with `sync.Pool`.
+- **Measure before tuning and trust `pprof` / traces**: eliminate `time.Sleep` from tests, run `-race -shuffle=on`, guard benchmarks against dead-code elimination, and profile real allocations first.
+- **Match `GOMAXPROCS` to Kubernetes CPU quotas**: run Go 1.25+ (or import `uber-go/automaxprocs` on older versions) to prevent 100 ms CFS throttling stalls.
+
+---
+
+## Review questions
+
+1. Why does closing `resp.Body` without calling `io.Copy(io.Discard, resp.Body)` hurt throughput even when no file descriptors leak? *(See Section 1)*
+2. Why can `t1 == t2` evaluate to `false` on two `time.Time` values representing the exact same instant after one passes through `json.Marshal` and `json.Unmarshal`? *(See Section 1)*
+3. Reordering struct fields from `{ bool, int64, bool }` to `{ int64, bool, bool }` shrinks `unsafe.Sizeof` from 24 bytes to 16 bytes. Where did the 8 saved bytes go? *(See Section 2)*
+4. Why does `shareDown(&a)` stay on the goroutine stack while `func shareUp() *int { x := 42; return &x }` moves `x` to the heap? *(See Section 3)*
+5. How can a Go service inside Kubernetes show only 35% average CPU utilization yet suffer 50–100 ms p99 latency freezes when `GOMAXPROCS` reads host cores instead of pod CPU limits? *(See Section 4)*
+
+</En>
+
+<Vi>
+
+<Figure src={heroGovernor} alt="Bộ điều tốc ly tâm bằng đồng và gang trên động cơ hơi nước Boulton và Watt" caption="Bộ điều tốc ly tâm giữ vòng quay máy khớp với van hơi. Service chạy thật cũng bị khựng giống vậy nếu số thread của Go vượt quá giới hạn CPU cấp cho container." sourceTitle="Wikimedia Commons: Boulton and Watt centrifugal governor" sourceUrl="https://commons.wikimedia.org/wiki/File:Boulton_and_Watt_centrifugal_governor-MJ.jpg" />
+
+> "Tối ưu quá sớm dễ làm rối code — nhưng bỏ mặc mấy thứ mặc định không timeout hay cách phần cứng chạy thì lúc trực prod mệt lắm."
+> &mdash; *Đúc kết vận hành Go theo tinh thần Donald Knuth*
+
+### Vì sao service Go chạy mượt ở máy mình mà lên Kubernetes lại treo socket và nhảy vọt p99?
+
+Ở máy dev lúc nào cũng êm. File binary Go do AI viết chạy unit test mất 40 ms, gọi `curl` trả về chưa tới 1 mili giây.
+
+Tới lúc đẩy lên production, mấy lỗi khó chịu mới bắt đầu lộ ra: `http.Get()` treo luôn khi service bên kia chậm, đóng `resp.Body` mà quên đọc hết khiến không giữ lại được kết nối TCP, một struct xếp field ngược làm tốn thêm 33% RAM, và p99 latency trên Kubernetes vọt gấp 3 dù chart CPU trung bình mới báo 35%. Bài cuối này gom lại bốn phần cần rà trước khi đưa Go chạy thật:
+
+1. **Mấy cái mặc định dễ sập trong Standard Library**: bọc timeout và đóng tài nguyên đúng cách với `net/http`, `database/sql`, `time` và `encoding/json`.
+2. **CPU Cache Line, False Sharing & Struct Alignment**: xếp bộ nhớ cho thuận cách CPU đọc dữ liệu để mấy nhân khỏi giẫm cache của nhau.
+3. **Stack vs. Heap, Escape Analysis & GC**: chạy `-gcflags="-m"` xem trình biên dịch cấp phát ở đâu thay vì đoán mò.
+4. **Viết test/benchmark cho đúng, dùng `pprof`/Trace và bẫy CFS Throttling trên Kubernetes**: đừng để benchmark ảo đánh lừa, đo đúng chỗ nghẽn thật và giữ `GOMAXPROCS` khớp giới hạn CPU của container.
+
+<Callout type="note" title="Tóm tắt nhanh (TL;DR)">
+Đừng bao giờ dùng thẳng `http.DefaultClient` hay `http.ListenAndServe` mà không gắn timeout, nhớ đọc cạn `resp.Body` trước khi đóng, cấu hình đủ thông số pool cho `sql.DB`, và thay `time.After` trong vòng lặp bằng `time.NewTimer`. Xếp field trong struct từ lớn xuống nhỏ, tách các biến atomic hay ghi sang hai cache line riêng, soi allocation bằng `pprof` và `-gcflags="-m"`, rồi kiểm tra `GOMAXPROCS` cho khớp giới hạn CPU của Kubernetes (có sẵn từ Go 1.25+, bản cũ hơn thì gắn `uber-go/automaxprocs`).
+</Callout>
+
+<Concepts title="Mấy khái niệm nhắc tới ở trên">
+
+- **Transient resource & HTTP Keep-Alive**: tài nguyên mượn từ hệ điều hành (`resp.Body`, `sql.Rows`, `os.File`) còn giữ socket hoặc file descriptor tới khi đóng bằng `io.Closer`; đọc cạn `resp.Body` giúp Go giữ lại kết nối TCP/TLS cũ (**Keep-Alive**) dùng tiếp thay vì bắt tay lại từ đầu.
+- **Connection pool (`sql.DB`)**: biến `*sql.DB` không phải một kết nối đơn lẻ — nó là một bể (pool) chứa sẵn nhiều kết nối DB dùng chung và tái sử dụng an toàn giữa các goroutine.
+- **CPU Cache line (L1/L2 vs. RAM)**: từng khối nhớ 64 byte (x86) hoặc 128 byte (Apple Silicon) mà CPU bốc nguyên tảng từ RAM chính (~50–100 ns) lên bộ nhớ đệm L1/L2 (~1 ns) ngay cạnh nhân.
+- **Escape analysis (Stack vs. Heap)**: bước kiểm tra của trình biên dịch xem biến có sống gọn được trên **stack** riêng của goroutine để tự xóa khi hàm thoát không, hay bị "thoát" (**escape**) lên **heap** cho GC đi dọn.
+- **CFS throttling & `GOMAXPROCS`**: `GOMAXPROCS` chỉnh số goroutine Go chạy song song cùng lúc, còn **CFS throttling** là việc Linux kernel cho dừng hết thread trong container tới hết chu kỳ 100 ms khi container xài lố hạn mức CPU.
+
+</Concepts>
+
+---
+
+## 1. Mấy bẫy mặc định trong Standard Library: `net/http`, `database/sql` và `time`
+
+Bạn nhìn thử thẳng vào `src/net/http/client.go` trong thư viện chuẩn Go:
+
+<GitHubCode repo="golang/go" path="src/net/http/client.go" lines="L58-L125" url="https://github.com/golang/go/blob/074522c96ce70350453c164ecb17904881106b6a/src/net/http/client.go#L58-L125" caption="http.DefaultClient thực chất chỉ là &Client{} với Timeout bằng 0 (chờ vô thời hạn).">
+```go
+	// A Timeout of zero means no timeout.
+	Timeout time.Duration
+}
+
+// DefaultClient is the default [Client] and is used by [Get], [Head], and [Post].
+var DefaultClient = &Client{}
+```
+</GitHubCode>
+
+Dùng thẳng `http.Get(...)`, `http.DefaultClient` hay `http.ListenAndServe(...)` đồng nghĩa với việc để **mọi mốc timeout bằng 0 — tức là chờ vô thời hạn** (`#81`). Chỉ cần một dịch vụ bên kia nhận kết nối TCP xong rồi im re không trả lời, goroutine bên mình sẽ treo ở đó mãi. Lúc tạo client nhớ gắn riêng `Dialer`, `TLSHandshakeTimeout`, `ResponseHeaderTimeout`, `IdleConnTimeout` và `Client.Timeout`; bên server thì tự dựng `&http.Server{}` có `ReadHeaderTimeout`, `ReadTimeout` và `IdleTimeout`.
+
+```go
+// Không dùng http.DefaultClient hay http.ListenAndServe trên production (#81)
+client := &http.Client{
+	Timeout: 5 * time.Second,
+	Transport: &http.Transport{
+		DialContext:           (&net.Dialer{Timeout: 1 * time.Second}).DialContext,
+		TLSHandshakeTimeout:   1 * time.Second,
+		ResponseHeaderTimeout: 2 * time.Second,
+		IdleConnTimeout:       90 * time.Second,
+	},
+}
+
+srv := &http.Server{
+	ReadHeaderTimeout: 2 * time.Second,
+	ReadTimeout:       5 * time.Second,
+	IdleTimeout:       60 * time.Second,
+}
+```
+
+<GoProdHttpTimeouts />
+
+<GoProdCodeTrace />
+
+Cộng thêm ba lưu ý quen tay khi dùng thư viện chuẩn:
+- **Đọc cạn rồi mới đóng mọi `io.Closer` (`#79`, `#80`)**: cơ chế HTTP Keep-Alive cho phép client dùng lại đường ống TCP/TLS đang mở cho các request sau thay vì bắt tay mạng lại từ đầu — nhưng nếu gọi `resp.Body.Close()` khi trong body vẫn còn byte chưa đọc, Go phải đập bỏ luôn kết nối TCP đó. Nhớ gọi `_, _ = io.Copy(io.Discard, resp.Body)` trước khi `Close()`. Ngoài ra, gọi `http.Error(w, msg, code)` xong hàm không tự dừng đâu — phải viết `return` ngay sau đó.
+- **Chỉnh `database/sql` đúng kiểu connection pool (`#78`)**: nhiều bạn mới cứ tưởng `sql.Open()` là mở sẵn một kết nối tới DB; thực ra `*sql.DB` là một **bể kết nối (connection pool)** mở lười biếng và chưa hề nối mạng ngay lúc gọi. Nhớ gọi `db.PingContext(ctx)` lúc khởi động để kiểm tra sớm, đặt `SetMaxOpenConns`, `SetMaxIdleConns`, `SetConnMaxLifetime`, `SetConnMaxIdleTime`, map cột NULL qua `sql.NullString` hoặc con trỏ, và luôn kiểm tra `rows.Err()` sau vòng lặp `rows.Next()`.
+- **Cẩn thận với `time.Duration`, `time.After` và phép so sánh `time.Time` (`#75`, `#76`, `#77`)**: luôn nhân rõ với đơn vị như `5 * time.Second`, thay `time.After` trong vòng `for`/`select` bằng một biến `time.NewTimer` dùng `Reset` để khỏi tạo hàng loạt timer rác trên heap, và so sánh thời gian bằng `t1.Equal(t2)` thay vì `==` vì `time.Now()` gắn thêm **monotonic clock** (đồng hồ bấm giờ chỉ tiến lên, không bị đồng hồ hệ thống làm nhảy ngược) nhưng lại rớt mất khi đi qua `json.Unmarshal`.
+
+<Figure src={clockEscapement} alt="Bản khắc cơ cấu hồi thoát đồng hồ cơ cổ điển với hai bánh răng đồng bộ" caption="Giống như có hai đồng hồ chạy chung một vỏ: time.Time của Go giữ cả giờ lịch wall-clock lẫn bộ đếm monotonic. Qua JSON, phần monotonic mất đi khiến == ra sai." sourceTitle="Wikimedia Commons: Mays detached escapement (Wellcome Collection)" sourceUrl="https://commons.wikimedia.org/wiki/File:Clocks;_an_escapement_mechanism._Engraving_by_W._Kelsall_aft_Wellcome_V0023849EL.jpg" />
+
+```go
+// Qua JSON là rụng phần đồng hồ monotonic -> so == bị false (#76)
+t1 := time.Now()
+raw, _ := json.Marshal(t1)
+var t2 time.Time
+_ = json.Unmarshal(raw, &t2)
+fmt.Println(t1 == t2, t1.Equal(t2)) // false, true!
+
+// Kỷ luật sql.DB (#78, #79): giới hạn pool và luôn kiểm tra rows.Err()
+db.SetMaxOpenConns(25)
+db.SetConnMaxLifetime(5 * time.Minute)
+defer rows.Close()
+for rows.Next() { /* ... */ }
+return rows.Err()
+```
+
+<GoProdSqlAndTime />
+
+<Concepts title="Mấy khái niệm ở mục này">
+
+- **Wall clock vs. monotonic clock**: wall clock theo dõi giờ lịch (có thể nhảy ngược lúc máy đồng bộ NTP), còn monotonic clock chỉ đếm nano giây tiến lên từ lúc bật app để đo khoảng thời gian cho chuẩn.
+- **Connection pool churn**: tình trạng đóng mở lại kết nối TCP/TLS liên tục do quên đọc cạn `resp.Body` hoặc để `MaxIdleConns` ở mặc định quá bé là `2`.
+
+</Concepts>
+
+---
+
+## 2. Xếp bộ nhớ hợp phần cứng: CPU Cache Line, False Sharing và Struct Alignment
+
+CPU không bốc từng byte lẻ trực tiếp từ RAM chính mà kéo qua bộ nhớ đệm siêu nhanh **L1/L2 cache** nằm sát ngay nhân xử lý (đọc L1 mất ~1 ns, nhanh hơn RAM chính 50–100 lần). Mỗi lần đọc như vậy CPU kéo nguyên một khúc bộ nhớ gọi là **cache line** (64 byte trên x86_64, 128 byte trên Apple Silicon), nên cách bạn sắp thứ tự field trong struct và slice ảnh hưởng thẳng tới tốc độ chạy (`#91`, `#93`).
+
+Cứ hình dung bạn xuống kho lấy sách: dù chỉ cần đọc trang đầu của một cuốn, thủ thư vẫn bưng lên cả một chồng 8 cuốn nằm chung kệ. Gom mấy field hay đọc cùng nhau về dạng **Struct of Slices** thay vì Slice of Structs giúp mỗi lần nạp cache mang theo toàn bộ phần dữ liệu cần dùng.
+
+```go
+// Struct of Slices (#91): đọc Bar.a nạp gọn 8 số int64 trên một dòng cache 64B
+type Bar struct {
+	a []int64
+	b []int64
+}
+
+// Chống False Sharing (#92): đệm 56 byte để sumA và sumB nằm khác cache line
+type Result struct {
+	sumA int64
+	_    [56]byte
+	sumB int64
+}
+```
+
+<GoProdCacheAndFalseSharing />
+
+Có hai mẹo nhỏ ở tầng bố cục bộ nhớ cho kết quả thấy ngay:
+
+1. **Né False Sharing (`#92`)**: nếu Goroutine 1 trên Core 0 liên tục tăng `s.a` còn Goroutine 2 trên Core 1 liên tục tăng `s.b`, mà cả hai biến `int64` lại nằm chung một cache line, hai nhân CPU sẽ liên tục làm mất cache L1 của nhau. Chèn thêm phần padding ngăn hai biến ra hai cache line riêng giúp benchmark trên Apple M2 Go 1.27 chạy nhanh hơn gấp đôi ngay:
+
+<TerminalOutput command="go test -bench=Benchmark -benchmem" label="Apple M2 · Go 1.27" caption="Đưa hai biến atomic.Int64 sang hai cache line 128 byte riêng trên Apple Silicon tăng gấp đôi tốc độ dù thuật toán y hệt.">
+```text
+BenchmarkFalseSharing-8      	      52	  22237397 ns/op	     100 B/op	       3 allocs/op
+BenchmarkCacheLinePadded-8   	     100	  10251683 ns/op	      80 B/op	       3 allocs/op
+```
+</TerminalOutput>
+
+2. **Xếp field trong struct từ lớn xuống nhỏ (`#94`)**: để CPU đọc một phát ăn ngay, Go căn địa chỉ từng field tại bội số kích thước kiểu của nó (`int64` cần địa chỉ chia hết cho 8) nên tự động chèn các byte **padding** trống nếu kiểu nhỏ đứng trước kiểu lớn. Để `{ bool, int64, bool }` khiến compiler độn thêm 14 byte trống (tổng 24 byte), trong khi xếp `{ int64, bool, bool }` chỉ tốn 16 byte — tiết kiệm ngay 33% RAM cho slice mấy triệu phần tử.
+
+Bạn có thể thử đổi thứ tự field trong struct và bấm xem hiệu ứng bóp CPU trên Kubernetes trong phần mô phỏng bên dưới:
+
+<GoProdStructCacheK8sDemo />
+
+<Concepts title="Mấy khái niệm ở mục này">
+
+- **Spatial locality**: xếp dữ liệu hay đọc liền nhau nằm cạnh nhau trong RAM để một lần đọc cache line kéo lên được nhiều phần tử hữu ích nhất.
+- **False sharing**: hiện tượng chậm đi rõ rệt khi nhiều nhân CPU ghi vào các biến độc lập nhưng tụi nó lại vô tình nằm chung một cache line vật lý.
+
+</Concepts>
+
+---
+
+## 3. Stack vs. Heap, Escape Analysis và Garbage Collector
+
+Bộ nhớ lúc chạy của Go chia làm hai vùng: **stack** và **heap** (`#95`). Mỗi goroutine giữ riêng một **stack** siêu nhanh như quyển giấy nháp cá nhân — cấp phát biến chỉ là nhích con trỏ rồi tự giải phóng sạch lúc hàm `return` mà GC không phải đụng tay. Nhưng biến nào sống lâu hơn phạm vi hàm (ví dụ trả con trỏ ra ngoài) hoặc quá khổ sẽ bị đẩy ra vùng nhớ chung **heap** (*escape to heap*) để Garbage Collector dọn dẹp (`#99`); bước trình biên dịch quyết định đặt biến ở đâu chính là **escape analysis**.
+
+```go
+// Truyền XUỐNG -> nằm gọn trên stack (0 áp lực lên GC)
+func sumPtr(x, y *int) int {
+	return *x + *y
+}
+
+// Trả LÊN -> con trỏ sống lâu hơn hàm, buộc phải đẩy z lên heap!
+func sumEscape(x, y int) *int {
+	z := x + y
+	return &z // compiler báo: "moved to heap: z"
+}
+```
+
+<GoProdEscapeAnalysis />
+
+Bạn chạy `go build -gcflags="-m"` để coi thẳng quyết định của trình biên dịch thay vì đoán mò:
+
+<TerminalOutput command="go build -gcflags='-m' ./prod.go" label="Apple M2 · Go 1.27" caption="Output thật từ escape analysis: truyền con trỏ xuống shareDown thì biến nằm lại stack; trả &x lên trong shareUp thì x bị đẩy lên heap.">
+```text
+./prod.go:9:16: v does not escape
+./prod.go:13:2: moved to heap: x
+```
+</TerminalOutput>
+
+Bốn cách giúp giảm gánh nặng cho GC (`#96`, `#97`, `#99`):
+- **Truyền buffer xuống (share down), hạn chế cấp mới trả lên (share up)**: thiết kế API kiểu `io.Reader.Read(buf []byte)` nhận buffer từ bên gọi truyền xuống thay vì lần nào gọi cũng tạo slice mới trả về.
+- **Giữ hàm hot-path gọn để được inline**: hàm nhỏ chạy nhiều được compiler chèn thẳng vào chỗ gọi, vừa bớt overhead gọi hàm vừa tránh làm biến bị escape qua tham số.
+- **Dùng lại buffer qua `sync.Pool`**: rất hiệu quả cho buffer tạm (`bytes.Buffer`) tạo mới theo từng request, nhớ `.Reset()` sạch trước khi `Put` lại vào pool.
+- **Nắm nhịp chạy GC (`GOGC` và `GOMEMLIMIT`)**: mặc định `GOGC=100` bật GC mỗi khi heap sống tăng gấp đôi; từ Go 1.19+ bạn gắn thêm `GOMEMLIMIT` để giữ trần RAM sát mức OOM của container mà không ép GC chạy liên tục.
+
+<Concepts title="Mấy khái niệm ở mục này">
+
+- **Escape analysis**: bước phân tích tĩnh lúc biên dịch giúp Go quyết định biến đó nằm gọn trên stack của goroutine hay phải đưa lên heap.
+- **`sync.Pool`**: bộ nhớ đệm đối tượng tạm có phân vùng theo từng `P`, giúp tái sử dụng vùng nhớ cho đỡ tốn GC nhưng vẫn cho phép GC thu hồi bớt nếu thiếu RAM.
+
+</Concepts>
+
+---
+
+## 4. Viết test/benchmark cho chuẩn, dùng `pprof`/Trace và bẫy CPU Throttling trên Kubernetes
+
+Tối ưu mò rất mất thời gian, còn test sơ sài hay cấu hình container lệch sẽ giấu bệnh tới tận lúc chạy thật.
+
+Trước khi đụng tay sửa code tối ưu, hãy đo bằng hai đồ nghề sẵn có trong Go (`#98`): **`pprof`** lấy mẫu để vẽ biểu đồ hàm nào đang đốt nhiều CPU hoặc xin nhiều RAM nhất (kiểu `runtime.growslice` hay tra map), còn **`go tool trace`** ghi lại dòng thời gian từng mili giây cho thấy tận mắt goroutine nào bị khựng, đợi khóa mutex hay kẹt syscall trên từng bộ xử lý `P`.
+
+<Figure src={goPprofImg} alt="Biểu đồ lời gọi hàm từ go tool pprof chỉ ra điểm nghẽn trong runtime.mapaccess1_fast64 và runtime.growslice" caption="Đồ thị pprof chỉ rõ chỗ nào đang cấp phát tốn RAM như growslice trước khi bạn tốn công sửa mò." sourceTitle="The Go Blog: Profiling Go Programs" sourceUrl="https://go.dev/blog/pprof" />
+
+<Figure src={goTraceImg} alt="Dòng thời gian của Go execution tracer hiển thị các goroutine G1, G84 và syscall chạy trên Proc 0 đến Proc 7" caption="Trong khi pprof cộng dồn tổng CPU/RAM, go tool trace cho thấy tận mắt lúc nào goroutine bị khựng, đợi lock hay Proc bị bỏ trống." sourceTitle="The Go Blog: More powerful Go execution traces" sourceUrl="https://go.dev/blog/execution-traces-2024" />
+
+Để bộ test với benchmark đo không bị sai số (`#82`–`#90`):
+- **Tách loại test bằng build tag** (`//go:build integration`) hoặc `testing.Short()`, viết subtest theo bảng (table-driven), luôn bật `go test -race -shuffle=on`, và tránh dùng `time.Sleep` trong test khi có thể đồng bộ bằng channel hoặc retry (`#86`, `#87`).
+- **Tận dụng `httptest` và `iotest`** (`#88`) để giả server HTTP với giả lập `io.Reader` bị lỗi giữa chừng, kết hợp `t.Cleanup` / `TestMain` để dọn dữ liệu (`#90`).
+- **Tránh benchmark ra số ảo (`#89`)**: gọi `b.ResetTimer()` sau đoạn chuẩn bị dữ liệu, gán kết quả tính ra biến package (hoặc dùng `b.Loop()` trên Go 1.24+) để compiler không xóa mất đoạn code đang đo, rồi so sánh hai lần chạy bằng `benchstat`.
+
+### Cái bẫy CFS Throttling trên Kubernetes (`#100`)
+
+Cuối cùng, nhớ để ý chuyện này khi deploy Go lên Kubernetes có đặt CPU limit (chẳng hạn `limits.cpu: "4"` trên node vật lý 8 hoặc 64 nhân). Trong mô hình GMP, biến **`GOMAXPROCS`** quy định Go được mở tối đa bao nhiêu thread CPU chạy song song cùng lúc (`P`). Trong khi đó, bộ lập lịch **Completely Fair Scheduler (CFS)** của Linux cấp CPU theo từng cửa sổ 100 ms — giới hạn 4 CPU tức là pod có tối đa 400 ms thời gian chạy CPU trong mỗi chu kỳ 100 ms thực tế.
+
+<GoProdK8sCfsThrottle />
+
+Ở các bản Go cũ, `GOMAXPROCS` mặc định lấy theo số nhân của cả máy chủ vật lý (`8` hay `64`) chứ không nhìn theo cgroup limit của container (`4`). Khi 8 thread cùng bung chạy, pod xài cạn sạch 400 ms hạn mức chỉ trong 50 ms đầu — thế là Linux CFS cho đứng hình cả process suốt 50 ms còn lại của chu kỳ, làm p99 latency vọt gấp 3 dù biểu đồ CPU trung bình nhìn vẫn rất nhàn.
+
+*(Lưu ý phiên bản Go: Từ Go 1.25 trở đi, Go runtime đã tự đọc giới hạn CPU từ cgroup để chỉnh `GOMAXPROCS` mặc định. Nếu service bạn vẫn đang chạy Go 1.24 trở về trước thì nhớ import thêm `_ "go.uber.org/automaxprocs"` trong `main.go` nhé!)*
+
+<Concepts title="Mấy khái niệm ở mục này">
+
+- **Compiler dead-code elimination**: tối ưu của compiler tự bỏ các phép tính không ai dùng kết quả — lý do hay làm benchmark hiện 0,2 ns/op ảo.
+- **Container-aware `GOMAXPROCS`**: chỉnh số `P` của Go khớp với hạn mức CPU cgroup trong container (`uber-go/automaxprocs` hoặc mặc định từ Go 1.25+) thay vì số nhân của máy chủ vật lý.
+
+</Concepts>
+
+---
+
+## Điểm rút ra (Key takeaways)
+
+- **Đừng tin mặc định của Standard Library khi lên production**: luôn gắn timeout cho HTTP client/server, đọc cạn `resp.Body` trước khi `Close()`, chỉnh giới hạn cho pool `sql.DB` và dùng `time.NewTimer` thay `time.After` trong vòng lặp.
+- **Xếp bộ nhớ thuận theo CPU cache line**: đặt field struct từ lớn tới nhỏ cho đỡ tốn padding, gom dữ liệu lặp dày sang Struct of Slices và chèn đệm cách ly các biến atomic hay ghi cùng lúc.
+- **Đọc kết quả escape analysis thay vì đoán**: truyền buffer từ trên xuống (`io.Reader`), soi bằng `-gcflags="-m"`, và dùng lại buffer tạm qua `sync.Pool`.
+- **Đo bằng `pprof` và `go tool trace` trước khi tối ưu**: dẹp `time.Sleep` khỏi test, chạy `-race -shuffle=on`, và chặn compiler xóa code lúc đo benchmark.
+- **Giữ `GOMAXPROCS` khớp CPU limit trên Kubernetes**: dùng Go 1.25+ hoặc gắn `uber-go/automaxprocs` trên bản cũ để tránh bị CFS cho đứng hình theo nhịp 100 ms.
+
+---
+
+## Câu hỏi tự kiểm tra
+
+1. Vì sao chỉ gọi `resp.Body.Close()` mà không chạy `io.Copy(io.Discard, resp.Body)` trước lại làm giảm thông lượng mạng dù không hề rò file descriptor? *(Xem Mục 1)*
+2. Tại sao `t1 == t2` có thể trả về `false` trên hai biến `time.Time` chỉ cùng một thời điểm nếu một biến vừa đi qua `json.Marshal` rồi `json.Unmarshal`? *(Xem Mục 1)*
+3. Đổi thứ tự field từ `{ bool, int64, bool }` thành `{ int64, bool, bool }` giúp `unsafe.Sizeof` giảm từ 24 byte xuống 16 byte. 8 byte dư ra trước đó nằm ở đâu? *(Xem Mục 2)*
+4. Vì sao truyền con trỏ xuống `shareDown(&a)` vẫn giữ biến ở lại stack của goroutine, còn `func shareUp() *int { x := 42; return &x }` lại bắt `x` phải lên heap? *(Xem Mục 3)*
+5. Vì sao một service Go trên Kubernetes báo mức CPU trung bình chỉ 35% mà p99 latency vẫn thỉnh thoảng khựng 50–100 ms khi `GOMAXPROCS` lấy theo số nhân máy chủ vật lý? *(Xem Mục 4)*
+
+</Vi>
