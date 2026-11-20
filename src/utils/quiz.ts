@@ -106,6 +106,13 @@ export function validateSet(set: QuizSet, postAnchors: Set<string>): string[] {
     }
     if (q.type === 'code-output' && blank(q.verifiedBy)) add(`${w}: a code-output question needs verifiedBy`);
 
+    // the longest option should not be the right one by a visible margin: readers learn to pick it
+    if (!isMulti) {
+      const len = (id: string) => q.options.find((o) => o.id === id)?.text?.en?.length ?? 0;
+      const longestOther = Math.max(0, ...q.options.filter((o) => o.id !== q.answer[0]).map((o) => o.text?.en?.length ?? 0));
+      if (len(q.answer[0]) - longestOther > 10) add(`${w}: the correct option is ${len(q.answer[0]) - longestOther} characters longer than every other option; shorten it or lengthen the others`);
+    }
+
     const pos = q.options.findIndex((o) => o.id === q.answer[0]);
     if (pos >= 0) answerPositions.push(pos);
   });
@@ -205,41 +212,40 @@ export function saveProgress(store: Store | null, key: string, p: Record<string,
 
 // ---- post headings
 
-/** English heading slugs of a post file: the ##/### lines before the first `</En>` */
-export function englishAnchors(mdx: string): Set<string> {
-  const lines = mdx.split('\n');
-  const end = lines.findIndex((l) => l.startsWith('</En>'));
+/**
+ * Heading slugs of a post file, split by language. A post holds <En> ... </En> and <Vi> ... </Vi> blocks, one
+ * pair or many pairs alternating; a line starting with `<En>` or `<Vi>` switches language until the matching
+ * closing line. Text before the first block counts as English (that is how a post with one big English block
+ * reads), and a heading outside any block belongs to both languages. One slugger runs over the whole file in
+ * order, the way the site's heading ids are made, so repeated headings get the same `-1` suffixes.
+ */
+function headingSlugs(mdx: string): { en: string[]; vi: string[] } {
   const slugger = new Slugger();
-  const out = new Set<string>();
-  for (const l of lines.slice(0, end === -1 ? lines.length : end)) {
+  const en: string[] = [];
+  const vi: string[] = [];
+  let lang: 'en' | 'vi' | 'both' = 'en';
+  for (const l of mdx.split('\n')) {
+    if (l.startsWith('<En>')) lang = 'en';
+    else if (l.startsWith('<Vi>')) lang = 'vi';
+    else if (l.startsWith('</En>') || l.startsWith('</Vi>')) lang = 'both';
     const m = l.match(/^#{2,3} (.*)/);
-    if (m) out.add(slugger.slug(m[1].replace(/<[^>]+>/g, '').trim()));
+    if (!m) continue;
+    const slug = slugger.slug(m[1].replace(/<[^>]+>/g, '').trim());
+    if (lang !== 'vi') en.push(slug);
+    if (lang !== 'en') vi.push(slug);
   }
-  return out;
+  return { en, vi };
 }
 
-/**
- * English heading slug -> Vietnamese heading slug for one post file. The post holds an English block
- * (`</En>` ends it) and a Vietnamese block (`<Vi>` ... `</Vi>`) with the headings in the same order, so
- * the n-th English heading pairs with the n-th Vietnamese one.
- */
+/** English heading slugs of a post file */
+export function englishAnchors(mdx: string): Set<string> {
+  return new Set(headingSlugs(mdx).en);
+}
+
+/** English heading slug -> Vietnamese heading slug: the n-th English heading pairs with the n-th Vietnamese one */
 export function headingSlugPairs(mdx: string): Record<string, string> {
-  const lines = mdx.split('\n');
-  const enEnd = lines.findIndex((l) => l.startsWith('</En>'));
-  const viStart = lines.findIndex((l) => l.startsWith('<Vi>'));
-  const viEnd = lines.findIndex((l) => l.startsWith('</Vi>'));
-  const take = (from: number, to: number) => {
-    const slugger = new Slugger();
-    const slugs: string[] = [];
-    for (const l of lines.slice(from, to)) {
-      const m = l.match(/^#{2,3} (.*)/);
-      if (m) slugs.push(slugger.slug(m[1].replace(/<[^>]+>/g, '').trim()));
-    }
-    return slugs;
-  };
-  const en = take(0, enEnd === -1 ? lines.length : enEnd);
-  const vi = take(viStart === -1 ? lines.length : viStart, viEnd === -1 ? lines.length : viEnd);
+  const { en, vi } = headingSlugs(mdx);
   const out: Record<string, string> = {};
-  en.forEach((s, i) => { if (vi[i]) out[s] = vi[i]; });
+  en.forEach((slug, i) => { if (vi[i]) out[slug] = vi[i]; });
   return out;
 }
