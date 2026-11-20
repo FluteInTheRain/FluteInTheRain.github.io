@@ -23,6 +23,7 @@ import Concepts from '../../components/mdx/Concepts.astro';
 import En from '../../components/mdx/En.astro';
 import Figure from '../../components/mdx/Figure.astro';
 import GitHubCode from '../../components/mdx/GitHubCode.astro';
+import GoMapBucketRetentionDemo from '../../components/mdx/GoMapBucketRetentionDemo.astro';
 import GoMemCapacityLeak from '../../components/mdx/GoMemCapacityLeak.astro';
 import GoMemCodeTrace from '../../components/mdx/GoMemCodeTrace.astro';
 import GoMemMapBuckets from '../../components/mdx/GoMemMapBuckets.astro';
@@ -30,6 +31,7 @@ import GoMemNilAndReceivers from '../../components/mdx/GoMemNilAndReceivers.astr
 import GoMemRangeAndRune from '../../components/mdx/GoMemRangeAndRune.astro';
 import GoMemSliceHeader from '../../components/mdx/GoMemSliceHeader.astro';
 import GoMemSliceMapDemo from '../../components/mdx/GoMemSliceMapDemo.astro';
+import QuoteCard from '../../components/mdx/QuoteCard.astro';
 import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
 import Vi from '../../components/mdx/Vi.astro';
 import heroMemory from '../../assets/blog/go-memory-data-types-slices-maps-strings/magnetic-core-memory.jpg';
@@ -48,7 +50,7 @@ import utf8Scheme from '../../assets/blog/go-memory-data-types-slices-maps-strin
 
 An AI coding tool can generate a Go handler, slice parser, or in-memory cache in two seconds. The compiler accepts it, basic unit tests pass, and nothing panics until production traffic hits — when an HTTP cache stays stuck at 288 MiB after deleting 99% of its keys, a parser overwrites a sibling slice, or truncating a Vietnamese name leaves broken UTF-8 bytes in JSON.
 
-Everything in Go is passed by value, yet Go's core built-in types — slices, maps, and strings — are thin headers wrapping pointers to shared memory underneath. This post walks through the four memory behaviors you must spot during review:
+Everything in Go is passed by value—a rule we traced across primitives and pointers earlier. Yet Go's core composite types (slices, maps, and strings) are thin headers wrapping pointers to shared memory underneath, setting up subtle review traps. This post opens up `runtime/slice.go` and `runtime/map.go` across four memory behaviors you must spot during review:
 
 1. **Slice headers and backing arrays**: why `append` overwrites sibling slices and why `nil` differs from empty `[]T{}`.
 2. **Garbage collection traps**: how slicing 5 bytes out of a 64 MiB buffer or deleting from a `map` keeps memory pinned.
@@ -138,6 +140,14 @@ BenchmarkSlicePreallocCap-8      	  164107	      7405 ns/op	   81920 B/op	      
 
 Finally, know the difference between a `nil` slice (`var s []string`) and an empty slice (`s := []string{}` or `make([]string, 0)`). Both have `len(s) == 0`, so always check emptiness with `len(s) == 0` rather than `s == nil`. Yet at JSON boundaries, `encoding/json` marshals a `nil` slice to `null` and an empty slice to `[]`, which breaks frontend clients expecting an array.
 
+| Slice Expression | Pointer `array` | JSON Output | Subsequent `append()` Mutates Original? | Review Guidance |
+| :--- | :--- | :--- | :--- | :--- |
+| `var s []int` (`nil`) | `0x0` | `null` | N/A | Great internal default; check `len(s) == 0` |
+| `s := []int{}` (empty) | `zerobase` sentinel | `[]` | Allocates on first append | Prefer for API response DTO structs |
+| `sub := s[1:3]` | `&s[1]` (`cap = cap(s)-1`) | array | **Yes!** Overwrites `s[3]` | Read-only view only; never pass to `append` |
+| `sub := s[1:3:3]` | `&s[1]` (`cap = 2`) | array | **No** (forces clean copy) | Safe cap-pinned slicing pattern |
+| `slices.Clone(s)` | Fresh heap array | array | **No** (`nil` in -> `nil` out) | Safest copy when sending async or caching |
+
 <GoMemNilAndReceivers />
 
 <Concepts>
@@ -193,9 +203,13 @@ map after 990k deletes: len=10000   HeapAlloc=288.2 MiB
 
 <GoMemMapBuckets />
 
-Because `HeapAlloc` stays stuck at 288.2 MiB forever, long-lived caches that survive traffic spikes quietly trend toward OOM crashes. Fix this by pre-sizing maps with `make(map[K]V, expectedLen)` to avoid expensive startup rehashing, and for spiky long-lived maps, periodically copy remaining entries into a fresh map (or store `*Value` pointers if values are large structs).
+Because `HeapAlloc` stays stuck at 288.2 MiB forever, long-lived caches that survive traffic spikes quietly trend toward OOM crashes. Notice why storing large structs (`[128]byte` or larger) by value amplifies this retention: Go 1.24's SwissTable groups and pre-1.24 `hmap` buckets never deallocate historical table capacity when `delete` runs. Fix this by pre-sizing maps with `make(map[K]V, expectedLen)`, storing pointers `*[128]byte` when payloads are large so `delete` releases payload objects cleanly to GC, and periodically copying surviving keys into a fresh map during spiky workloads.
 
-Try both traps interactively in the memory inspector below:
+Step through why `delete(m, k)` holds 288 MiB pinned and test both fixes interactively right here:
+
+<GoMapBucketRetentionDemo />
+
+Try both slice capacity pinning and map lookup traps in our combined memory inspector:
 
 <GoMemSliceMapDemo />
 
@@ -233,6 +247,10 @@ fmt.Println(len(s), utf8.RuneCountInString(s)) // 6 bytes, 5 runes
 First, **`for _, v := range items` copies each element by value** into a fresh loop variable `v`. Modifying `v.Balance += 50` updates only the temporary copy and discards it on the next step; mutate through `items[i].Balance += 50` or store `[]*Account` instead. Also remember that Go evaluates the expression after `range` **exactly once** before the loop begins: appending to a slice inside a `for range slice` loop will not iterate over newly appended items, though appending inside a classic `for i := 0; i < len(s); i++` creates an infinite loop.
 
 *(Version note: before Go 1.22, taking `&v` inside a `range` loop was an infamous bug because every iteration reused a single memory address for `v`. Go 1.22 changed loop semantics so each iteration gets a fresh variable per iteration, eliminating `&v` pointer capture, though `v` itself is still a value copy for structs!)*
+
+<QuoteCard author="Russ Cox & David Chase" role="Go Compiler Team" sourceTitle="Fixing For Loops in Go 1.22" sourceUrl="https://go.dev/blog/loopvar-preview">
+In Go 1.22, variables declared by a for loop are created once per iteration instead of once per loop, eliminating one of Go's most common production gotchas when goroutines or closures capture loop variables.
+</QuoteCard>
 
 Second, **never assume Go map iteration order**. Go intentionally randomizes the starting bucket when iterating over a `map` so code cannot depend on insertion or sorted order. Worse, inserting a new key into a map *while* ranging over it makes behavior nondeterministic — the new key may or may not appear in the same loop. Copy keys to a slice if you need deterministic ordering or safe mid-loop additions.
 
@@ -339,7 +357,7 @@ AI viết hộ một handler Go, hàm cắt log hay bộ cache trong vài giây 
 
 Lúc đó mới lòi ra mấy lỗi rất khó chịu: một cái `map` cache xóa 99% key rồi mà RAM vẫn kẹt ở 288 MiB, một hàm xử lý log vô tình ghi đè sang dữ liệu của slice bên cạnh, hay cắt ngắn tên tiếng Việt xong thì JSON bị lỗi font.
 
-Trong Go, mọi phép gán hay truyền tham số đều là **pass-by-value** (truyền theo giá trị). Nhưng mấy kiểu hay dùng nhất như slice, map và string thực chất chỉ là cái vỏ nhỏ cầm con trỏ trỏ xuống vùng nhớ dùng chung bên dưới. Bài này gom lại bốn thứ mình hay soi nhất khi review code Go:
+Ở chặng nền tảng trước, ta đã thấy mọi phép gán hay truyền tham số trong Go đều là **pass-by-value**. Bước sang phần giải phẫu lõi runtime này, hãy soi kỹ bên dưới lớp vỏ mỏng của slice, map và string — bốn điểm mình hay soi nhất khi review code Go thực chiến:
 
 1. **Slice header và mảng nền (backing array)**: vì sao `append` ghi đè sang slice khác, và khi nào `nil` khác `[]T{}`.
 2. **Rò RAM dù Go có GC**: giữ 5 byte từ buffer 64 MiB hoặc xóa key trong `map` khiến heap không giảm ra sao.
@@ -429,6 +447,14 @@ BenchmarkSlicePreallocCap-8      	  164107	      7405 ns/op	   81920 B/op	      
 
 Thêm một chỗ dễ nhầm nữa là `nil` slice (`var s []string`) với empty slice (`s := []string{}` hay `make([]string, 0)`). Cả hai đều có `len(s) == 0`, nên kiểm tra slice rỗng thì cứ viết `len(s) == 0`, đừng viết `s == nil`. Nhưng khi xuất JSON, `encoding/json` lại biến `nil` slice thành `null` còn empty slice thành `[]` — frontend nhận phải `null` thay vì mảng rỗng là vỡ UI ngay.
 
+| Biểu thức Slice | Con trỏ `array` | Xuất JSON | Gọi `append()` sửa mảng gốc? | Quy tắc review code |
+| :--- | :--- | :--- | :--- | :--- |
+| `var s []int` (`nil`) | `0x0` | `null` | — | Mặc định nội bộ đẹp; kiểm tra bằng `len(s) == 0` |
+| `s := []int{}` (rỗng) | `zerobase` sentinel | `[]` | Cấp phát khi `append` | Ưu tiên cho trường mảng trong JSON DTO trả API |
+| `sub := s[1:3]` | `&s[1]` (`cap = cap(s)-1`) | mảng | **Có!** Ghi đè `s[3]` | Chỉ đọc; tuyệt đối không `append` tiếp |
+| `sub := s[1:3:3]` | `&s[1]` (`cap = 2`) | mảng | **Không** (ép xin mảng mới) | Cú pháp khóa trần `cap` an toàn |
+| `slices.Clone(s)` | Vùng nhớ mới tách riêng | mảng | **Không** (`nil` -> `nil`) | Chọn ngay khi truyền async hoặc bỏ vào cache |
+
 <GoMemNilAndReceivers />
 
 <Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
@@ -484,9 +510,13 @@ map after 990k deletes: len=10000   HeapAlloc=288.2 MiB
 
 <GoMemMapBuckets />
 
-`HeapAlloc` đứng im ở 288,2 MiB không nhúc nhích. Với mấy cái cache chạy dài ngày, sau vài đợt cao điểm là pod dễ chạm ngưỡng OOM luôn. Cách giải quyết là ước lượng sẵn kích thước bằng `make(map[K]V, expectedLen)` để đỡ tốn công rehash lúc tăng tải, và với map hay phình to rồi rút nhỏ, thỉnh thoảng copy các key còn sống sang một map mới (hoặc lưu `*Value` nếu struct quá to).
+`HeapAlloc` đứng im ở 288,2 MiB không nhúc nhích. Cần nhớ là cả SwissTable (từ Go 1.24+) lẫn bảng bucket cũ đều không tự thu nhỏ dung lượng mảng đã cấp sau lệnh `delete`: với mấy cái cache chạy dài ngày, sau vài đợt cao điểm là pod dễ chạm ngưỡng OOM luôn. Hãy ước lượng sẵn kích thước bằng `make(map[K]V, expectedLen)`, lưu con trỏ `*[128]byte` cho các struct lớn để `delete` giải phóng được payload ngay, và định kỳ copy các key còn sống sang một map mới.
 
-Bạn có thể tự bấm thử cả hai lỗi slice và map ở khung tương tác dưới đây:
+Bấm từng bước xem tận mắt tại sao xóa 99% key vẫn giữ nguyên 288 MiB và thử hai cách sửa trong trình mô phỏng này:
+
+<GoMapBucketRetentionDemo />
+
+Bạn có thể tự bấm thử cả hai lỗi slice và map ở khung tương tác tổng hợp dưới đây:
 
 <GoMemSliceMapDemo />
 
@@ -524,6 +554,10 @@ fmt.Println(len(s), utf8.RuneCountInString(s)) // 6 byte, 5 ký tự (rune)
 Đầu tiên, **`for _, v := range items` luôn copy từng phần tử theo giá trị** vào biến `v`. Nếu bạn sửa `v.Balance += 50` thì chỉ sửa bản nháp rồi sang vòng sau là mất; muốn sửa thật thì gọi thẳng `items[i].Balance += 50` hoặc dùng `[]*Account`. Ngoài ra Go chỉ tính biểu thức sau `range` **đúng một lần** trước khi chạy vòng lặp, nên `append` vào chính slice đang `range` không làm lặp vô tận (khác kiểu viết `for i := 0; i < len(s); i++`).
 
 *(Lưu ý thêm: trước Go 1.22, lấy địa chỉ `&v` trong vòng lặp `range` bị lỗi nổi tiếng vì mọi vòng dùng chung một địa chỉ nhớ. Từ Go 1.22 thì mỗi lượt lặp có biến riêng nên `&v` hết lỗi, nhưng với struct thì `v` vẫn là bản copy theo giá trị nhé!)*
+
+<QuoteCard author="Russ Cox & David Chase" role="Nhóm Trình Biên Dịch Go" sourceTitle="Fixing For Loops in Go 1.22" sourceUrl="https://go.dev/blog/loopvar-preview">
+Từ Go 1.22, biến khai báo trong vòng lặp for được tạo mới ở từng lượt lặp thay vì dùng chung cho cả vòng, chấm dứt vĩnh viễn một trong những cái bẫy phổ biến nhất khi goroutine hoặc closure bắt biến lặp.
+</QuoteCard>
 
 Thứ hai, **đừng bao giờ dựa vào thứ tự duyệt `map`**. Go cố tình đảo điểm xuất phát mỗi lần lặp để bạn không phụ thuộc vào thứ tự thêm key. Nếu bạn vừa duyệt vừa chèn thêm key mới vào chính `map` đó, phần tử mới có thể hiện ra hoặc không tùy hứng. Cần thứ tự ổn định thì chép key ra slice rồi sort trước.
 

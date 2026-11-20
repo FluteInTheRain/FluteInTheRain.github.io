@@ -24,6 +24,7 @@ import Concepts from '../../components/mdx/Concepts.astro';
 import En from '../../components/mdx/En.astro';
 import Figure from '../../components/mdx/Figure.astro';
 import GitHubCode from '../../components/mdx/GitHubCode.astro';
+import GoHttpPoolLeakDemo from '../../components/mdx/GoHttpPoolLeakDemo.astro';
 import GoProdCacheAndFalseSharing from '../../components/mdx/GoProdCacheAndFalseSharing.astro';
 import GoProdCodeTrace from '../../components/mdx/GoProdCodeTrace.astro';
 import GoProdEscapeAnalysis from '../../components/mdx/GoProdEscapeAnalysis.astro';
@@ -31,6 +32,7 @@ import GoProdHttpTimeouts from '../../components/mdx/GoProdHttpTimeouts.astro';
 import GoProdK8sCfsThrottle from '../../components/mdx/GoProdK8sCfsThrottle.astro';
 import GoProdSqlAndTime from '../../components/mdx/GoProdSqlAndTime.astro';
 import GoProdStructCacheK8sDemo from '../../components/mdx/GoProdStructCacheK8sDemo.astro';
+import QuoteCard from '../../components/mdx/QuoteCard.astro';
 import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
 import Vi from '../../components/mdx/Vi.astro';
 import heroGovernor from '../../assets/blog/go-production-stdlib-cpu-cache-gc-kubernetes/centrifugal-governor.jpg';
@@ -49,7 +51,7 @@ import goPprofImg from '../../assets/blog/go-production-stdlib-cpu-cache-gc-kube
 
 Everything looks instantaneous on localhost. Your AI-scaffolded Go microservice compiles to a tiny static binary, passes unit tests in 40 ms, and handles local `curl` requests in sub-millisecond time.
 
-Then production hits: `http.Get()` hangs forever waiting on a degraded partner API, `resp.Body` leaks sockets until file descriptors run out, a hot analytics struct burns cache bandwidth, and Kubernetes p99 latency spikes 300% despite Grafana reporting 35% average CPU. Four mechanical truths separate toy Go demos from resilient production services:
+With memory, interfaces, and concurrency pitfalls clear, we bridge into the last runtime realities before systematic performance optimization: hardening standard library defaults, avoiding false sharing across CPU cache lines, and taming Kubernetes CFS throttling across four checks:
 
 1. **Standard library defaults**: hardening `net/http`, `database/sql`, `time`, and `encoding/json` before traffic arrives.
 2. **CPU cache lines, false sharing, and struct alignment**: arranging fields and slices so CPU cores stop invalidating each other's L1 caches.
@@ -109,6 +111,22 @@ srv := &http.Server{
 ```
 
 <GoProdHttpTimeouts />
+
+| Standard Library Default | Unsafe Local-Dev Value | Production Failure Mode | Safe Explicit Setting |
+| :--- | :--- | :--- | :--- |
+| **`http.DefaultClient.Timeout`** | `0` (infinite wait) | Silent upstream hangs pin goroutines forever | `&http.Client{Timeout: 5 * time.Second}` + Dial/TLS timeouts |
+| **`http.Transport.MaxIdleConnsPerHost`** | `2` idle sockets | High RPS traffic churns TCP/TLS handshakes endlessly | `MaxIdleConnsPerHost: 100`, drain body before `Close()` |
+| **`http.Server.ReadHeaderTimeout`** | `0` (infinite wait) | Vulnerable to Slowloris header-trickle attacks | `ReadHeaderTimeout: 2 * time.Second`, `IdleTimeout: 60s` |
+| **`sql.DB.ConnMaxLifetime`** | `0` (never expires) | Load balancers drop idle DB sockets quietly | `SetConnMaxLifetime(5 * time.Minute)`, bounded `MaxOpenConns` |
+| **`GOMAXPROCS` (pre-Go 1.25)** | Host CPU count (`64`) | Kubernetes `limits.cpu: "4"` suffers 100 ms CFS freezes | Upgrade to Go 1.25+ or `_ "go.uber.org/automaxprocs"` |
+
+<QuoteCard author="Dave Cheney" role="Go Production Educator" sourceTitle="The complete guide to Go net/http timeouts" sourceUrl="https://blog.cloudflare.com/the-complete-guide-to-golang-net-http-timeouts/">
+Never expose net/http servers or clients to the untrusted internet using zero default timeouts—every phase from TCP dial to TLS handshake, request headers, and response body read needs explicit bounds.
+</QuoteCard>
+
+Step interactively through what breaks HTTP Keep-Alive pooling when `resp.Body.Close()` runs without draining, plus proper timeout wiring below:
+
+<GoHttpPoolLeakDemo />
 
 <GoProdCodeTrace />
 
@@ -303,7 +321,7 @@ Historically, Go set `GOMAXPROCS` from the host machine's core count (`8` or `64
 
 Ở máy dev lúc nào cũng êm. File binary Go do AI viết chạy unit test mất 40 ms, gọi `curl` trả về chưa tới 1 mili giây.
 
-Tới lúc đẩy lên production, mấy lỗi khó chịu mới bắt đầu lộ ra: `http.Get()` treo luôn khi service bên kia chậm, đóng `resp.Body` mà quên đọc hết khiến không giữ lại được kết nối TCP, một struct xếp field ngược làm tốn thêm 33% RAM, và p99 latency trên Kubernetes vọt gấp 3 dù chart CPU trung bình mới báo 35%. Bài cuối này gom lại bốn phần cần rà trước khi đưa Go chạy thật:
+Sau khi nắm chắc bẫy bộ nhớ, interface và goroutine, bài chốt lại phần vận hành thực tế này — ngay trước khi bước sang chuỗi bài tối ưu hiệu năng có đo đạc — tổng hợp bốn hạng mục sống còn cần rà kỹ trước lúc chạy prod:
 
 1. **Mấy cái mặc định dễ sập trong Standard Library**: bọc timeout và đóng tài nguyên đúng cách với `net/http`, `database/sql`, `time` và `encoding/json`.
 2. **CPU Cache Line, False Sharing & Struct Alignment**: xếp bộ nhớ cho thuận cách CPU đọc dữ liệu để mấy nhân khỏi giẫm cache của nhau.
@@ -363,6 +381,22 @@ srv := &http.Server{
 ```
 
 <GoProdHttpTimeouts />
+
+| Cấu hình Thư viện chuẩn | Giá trị mặc định nguy hiểm | Tai họa lúc chạy Production | Giá trị chuẩn nên đặt |
+| :--- | :--- | :--- | :--- |
+| **`http.DefaultClient.Timeout`** | `0` (chờ vô tận) | Đối tác im lặng làm treo vĩnh viễn goroutine | `&http.Client{Timeout: 5 * time.Second}` + Dial/TLS timeout |
+| **`http.Transport.MaxIdleConnsPerHost`** | Chỉ `2` kết nối rảnh | Tải cao đóng/mở bắt tay TLS liên tục gây nghẽn | Nâng `MaxIdleConnsPerHost: 100`, đọc cạn body trước `Close()` |
+| **`http.Server.ReadHeaderTimeout`** | `0` (chờ vô tận) | Dễ dính tấn công Slowloris ngâm header | `ReadHeaderTimeout: 2 * time.Second`, `IdleTimeout: 60s` |
+| **`sql.DB.ConnMaxLifetime`** | `0` (không hết hạn) | Firewall/LB âm thầm ngắt kết nối DB nhàn rỗi | `SetConnMaxLifetime(5 * time.Minute)` + trần `MaxOpenConns` |
+| **`GOMAXPROCS` (trước Go 1.25)** | Số core máy chủ (`64`) | Pod có `limits.cpu: "4"` bị CFS bóp khựng mỗi 100 ms | Lên Go 1.25+ hoặc nhúng `_ "go.uber.org/automaxprocs"` |
+
+<QuoteCard author="Dave Cheney" role="Tác giả Bài hướng dẫn net/http" sourceTitle="The complete guide to Go net/http timeouts" sourceUrl="https://blog.cloudflare.com/the-complete-guide-to-golang-net-http-timeouts/">
+Đừng bao giờ mở server hay client net/http ra internet bằng bộ timeout bằng 0 mặc định — từng khâu từ mở TCP dial, bắt tay TLS, đọc header tới đọc body đều phải được đặt trần thời gian tường minh.
+</QuoteCard>
+
+Bấm tương tác bên dưới xem việc đóng sớm `resp.Body.Close()` phá hỏng Keep-Alive pool ra sao và cách bọc đọc cạn `io.Discard` + cấu hình Transport chuẩn:
+
+<GoHttpPoolLeakDemo />
 
 <GoProdCodeTrace />
 

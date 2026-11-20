@@ -1,0 +1,657 @@
+---
+title: "Go types and structs"
+title_vi: "Kiểu dữ liệu và struct trong Go"
+description: "How Go stores 24-byte slice headers, SwissTable maps in Go 1.24+, contiguous embedded structs, pointer vs value method sets, and 16-byte iface dispatch."
+description_vi: "Giải phẫu cấu trúc bên dưới Go: header 24 byte của Slice, SwissTable Map từ Go 1.24, nhúng Struct liền khối, luật Method Set và bẫy typed-nil trong Interface."
+date: 2026-11-20
+category: "backend"
+tags: ["golang", "fundamentals", "slices", "maps", "structs", "interfaces", "generics"]
+cover: "../../assets/blog/go-fundamentals-composite-types-structs-methods-interfaces/analog-patch-panel.jpg"
+cover_alt: "Analog computer patch panel showing color-coded cables plugging cleanly into standardized sockets"
+draft: true
+sources:
+  - { title: "Effective Go: Data, Methods & Interfaces", author: "The Go Authors", url: "https://go.dev/doc/effective_go#data" }
+  - { title: "Go Slices: usage and internals", author: "Andrew Gerrand (The Go Blog)", url: "https://go.dev/blog/slices-intro" }
+  - { title: "Faster Go maps with Swiss Tables (Go 1.24)", author: "Michael Pratt (The Go Blog)", url: "https://go.dev/blog/swisstable" }
+  - { title: "Go runtime source: runtime/slice.go & runtime/runtime2.go", author: "The Go Authors", url: "https://github.com/golang/go/blob/master/src/runtime/slice.go" }
+  - { title: "Practical Go: Real world advice for writing maintainable Go programs", author: "Dave Cheney", url: "https://dave.cheney.net/practical-go/presentations/qcon-china.html" }
+  - { title: "Analog Computer patch panel (CC BY 2.0)", author: "Don DeBold", url: "https://commons.wikimedia.org/wiki/File:Analog_Computer_patch_panel_(5900042053).jpg" }
+  - { title: "Card catalog drawers Schlagwortkatalog (CC BY-SA 3.0)", author: "Dr. Marcus Gossler", url: "https://commons.wikimedia.org/wiki/File:Schlagwortkatalog.jpg" }
+  - { title: "Interlocking brass clock cogs (CC BY 3.0)", author: "SomeDriftwood", url: "https://commons.wikimedia.org/wiki/File:Clock_Cogs.jpg" }
+---
+
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import En from '../../components/mdx/En.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import GitHubCode from '../../components/mdx/GitHubCode.astro';
+import GoFund2ArraySliceGrowth from '../../components/mdx/GoFund2ArraySliceGrowth.astro';
+import GoFund2ImplicitInterfaces from '../../components/mdx/GoFund2ImplicitInterfaces.astro';
+import GoFund2MapCommaOk from '../../components/mdx/GoFund2MapCommaOk.astro';
+import GoFund2StructComposition from '../../components/mdx/GoFund2StructComposition.astro';
+import GoFundEmbeddingLayout from '../../components/mdx/GoFundEmbeddingLayout.astro';
+import GoFundInterfaceDispatchDemo from '../../components/mdx/GoFundInterfaceDispatchDemo.astro';
+import GoFundSliceAppendTrace from '../../components/mdx/GoFundSliceAppendTrace.astro';
+import GoMethodDispatchDemo from '../../components/mdx/GoMethodDispatchDemo.astro';
+import QuoteCard from '../../components/mdx/QuoteCard.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import heroPatch from '../../assets/blog/go-fundamentals-composite-types-structs-methods-interfaces/analog-patch-panel.jpg';
+import catalogImg from '../../assets/blog/go-fundamentals-composite-types-structs-methods-interfaces/card-catalog-drawers.jpg';
+import cogsImg from '../../assets/blog/go-fundamentals-composite-types-structs-methods-interfaces/clock-cogs.jpg';
+
+<En>
+
+<Figure src={heroPatch} alt="Analog computer patch panel showing color-coded cables plugging cleanly into standardized sockets" caption="Any plug matching the socket dimensions connects cleanly—just how Go's implicit interfaces let structs satisfy contracts without declaring inheritance." sourceTitle="Wikimedia Commons: Analog Computer patch panel" sourceUrl="https://commons.wikimedia.org/wiki/File:Analog_Computer_patch_panel_(5900042053).jpg" />
+
+> "Data dominates. If you've chosen the right data structures and organized things well, the algorithms will almost always be self-evident."
+> &mdash; *Rob Pike*, *Notes on Programming in C*
+
+### How Go's container types trip up newcomers in real systems
+
+Once you move beyond single `int` and `string` variables, almost every data structure bug in Go stems from misunderstanding what lives *inside* the container value versus what lives behind an internal pointer. Teams commonly hit three subtle failures when first shipping Go services:
+
+- **Silent slice overwrites across handlers.** Taking a slice `sub := buf[:2]` shares the caller's spare capacity (`cap`). Calling `append(sub, item)` quietly mutates sibling slices referencing the exact same backing array bytes—creating phantom corruption under concurrency.
+- **Copying a locked mutex by value.** Passing a struct containing a `sync.Mutex` into a value-receiver helper copies the locked state bits into a fresh stack frame, deadlocking background tasks mysteriously while leaving the original unlocked.
+- **False outages from typed `nil` errors.** Returning `var err *MyCustomError = nil` from a function whose signature returns `error` boxes a non-nil type descriptor (`iface.tab`) alongside a `nil` data pointer—causing `if err != nil` checks upstream to evaluate `true` on every clean request!
+
+Let's examine each composite building block from raw memory layout upward:
+
+1. **Arrays vs. slices**: the 24-byte `runtime.slice` header, growth math, and why `a[:2:2]` prevents backing-array aliasing.
+2. **Maps as open-addressed SwissTables (Go 1.24+)**: comma-ok reads, why `&m[k]` refuses to compile, and deterministic key sorting.
+3. **Struct embedding without inheritance**: contiguous byte flattening vs. OOP parent pointers, plus lock encapsulation rules.
+4. **Value vs. pointer receivers and compiler method sets**: why `Account{}` fails pointer-receiver interfaces while `&Account{}` builds a 16-byte dispatch header.
+5. **Implicit interfaces, `iface` vs. `eface`, generics `[T any]`, and typed-nil defense**: small consumer-side contracts and generic reuse.
+
+<Callout type="note" title="TL;DR">
+Slices are 24-byte descriptors (`array ptr, len, cap`)—use `make([]T, 0, cap)` to avoid resize copies and pin capacity (`s[:n:n]`) or `slices.Clone` before sharing. Initialize maps via `make()`, check `v, ok := m[k]`, and remember Go 1.24+ uses SwissTable hash tables. Lay out embedded structs as contiguous bytes (`mu sync.Mutex` named privately, not embedded), keep receiver types uniform (`*T` for mutators), and never return a typed `nil` pointer as an `error` interface.
+</Callout>
+
+<Concepts>
+
+- **Composite type**: a data structure built by combining primitive values (arrays, slices, maps, structs, and interface descriptors).
+- **Backing array aliasing**: two slices pointing to overlapping slots of the same heap/stack array so modifying one silently alters the other.
+- **Method set**: the rule determining which methods belong to value `T` (only value receivers) vs. pointer `*T` (both value and pointer receivers).
+- **Empty interface (`any` / `eface`) vs. behavior interface (`iface`)**: `any` wraps `{_type, data}` with no method table; behavioral interfaces wrap `{tab, data}` with fast indexed dispatch pointers.
+
+</Concepts>
+
+---
+
+## 1. Arrays vs. slices: the 24-byte header and backing array sharing
+
+A Go array (`[4]int`) bakes its exact element count permanently into its type signature: `[4]int` cannot pass into a function accepting `[5]int`, and every function call copies all `N` elements onto the stack. Think of an array like a rigid 4-egg carton glued to that size forever. A **slice (`[]T`)**, by contrast, is a **24-byte magnifying glass** sliding over a section of an underlying array—only 3 machine words (`8B pointer + 8B len + 8B cap`) copy whenever you pass `s` around!
+
+<GitHubCode repo="golang/go" path="src/runtime/slice.go" lines="L15-L19" url="https://github.com/golang/go/blob/master/src/runtime/slice.go#L15-L19" caption="Inside Go's runtime, a slice is always a 3-word struct: pointer to backing array, logical length, and allocated capacity.">
+```go
+type slice struct {
+	array unsafe.Pointer
+	len   int
+	cap   int
+}
+```
+</GitHubCode>
+
+That 3-word separation between `len` (used elements) and `cap` (total slots allocated before relocation) explains both Go's blistering `append()` performance and its #1 slice trap:
+
+```go
+// Trap 1: Unbounded growth triggers repeated allocate + copy (cap: 1 -> 2 -> 4 -> 8 -> 16)
+var s []int
+for i := 0; i < 10; i++ {
+	s = append(s, i)
+}
+
+// Trap 2: Sharing spare capacity across two appends!
+a := make([]int, 2, 3) // [1, 2, _]  -> len=2, cap=3
+a[0], a[1] = 1, 2
+b := append(a, 10)      // writes 10 at index [2]
+c := append(a, 20)      // OVERWRITES b[2] in the same backing array -> b is now [1, 2, 20]!
+
+// Fix: pin capacity with full-slice expression a[low:high:max]
+d := append(a[:2:2], 99) // forces alloc at new address; b stays untouched!
+```
+
+<GoFund2ArraySliceGrowth />
+
+Look directly at memory addresses measured in Go 1.27 below, alongside a side-by-side step trace of why `b` and `c` collided at `&b[2] == &c[2]`:
+
+Wait—what happens inside `runtime.growslice` once capacity runs out, and why does `append()` stop doubling unconditionally? Up to `256` elements, Go doubles capacity (`2x`) so small slices skip frequent allocations; beyond `256`, Go smoothly tapers down toward `1.25x` (`oldCap + (oldCap+3*256)/4`) instead of allocating an extra 800 MB just to append one item to a 500 MB slice! And remember the flip side of shared backing arrays: if a parser loads a 10 MB request buffer (`raw`) and stores only `token := raw[100:108]` into a long-lived cache, those **8 bytes keep the entire 10 MB array alive** until you copy explicitly via `slices.Clone(token)` or `string(raw[100:108])`.
+
+<TerminalOutput command="go test -v -run TestDeepFund2 ." label="Apple M2 · Go 1.27" caption="Verified in Go 1.27: sibling appends share 0x..60a0 until a[:2:2] forces clean allocation at 0x..c080; typed nil makes err==nil false.">
+```text
+=== RUN   TestDeepFund2
+    deep_check_test.go:40: shared backing array: b=[1 2 20] c=[1 2 20] &b[2]=0x749fbc2260a0 &c[2]=0x749fbc2260a0
+    deep_check_test.go:43: full-slice a[:2:2]: b=[1 2 20] d=[1 2 99] &b[0]=0x749fbc226090 &d[0]=0x749fbc25c080
+    deep_check_test.go:47: sizeof User=24 Account=40 mutex=8
+    deep_check_test.go:51: typed-nil: pathErr==nil:true err==nil:false (wraps nil *os.PathError)
+--- PASS: TestDeepFund2 (0.00s)
+```
+</TerminalOutput>
+
+<GoFundSliceAppendTrace />
+
+| Slice Operation | Header Size Copied | Allocates New Backing Array? | Mutating Element `s[0]` Affects Caller? | Safe Default Pattern |
+| :--- | :--- | :--- | :--- | :--- |
+| `make([]int, 0, n)` | 24 bytes | Once (`n * sizeof(T)`) | N/A | Preallocate known batch sizes (`len=0`) |
+| `make([]int, n)` | 24 bytes | Once (zeroes `n` items!) | N/A | Only when writing directly via `s[i] = ...` |
+| `sub := s[i:j]` | 24 bytes | **No** (shares `array` + `cap`) | **Yes!** Overlaps parent memory | Pass read-only or pin cap `s[i:j:j]` |
+| `slices.Clone(s)` | 24 bytes | Yes (always independent) | No | Isolate slices saved asynchronously |
+
+<Concepts>
+
+- **Full-slice expression (`s[low:high:max]`)**: sets `cap = max - low` on the new sub-slice so any subsequent `append()` allocates a fresh backing array instead of writing past `high` into parent elements.
+- **Preallocation (`make([]T, 0, n)`)**: reserving buffer capacity up front (`len=0, cap=n`) so `append()` writes sequentially without intermediate reallocation copies.
+- **`nil` slice vs. empty slice `[]T{}`**: `var s []T` (`nil`, zero allocation) behaves identically to `[]T{}` for `len`, `append`, and `range`, though `encoding/json` marshals `nil` slices as `null` rather than `[]`.
+
+</Concepts>
+
+---
+
+## 2. Maps as open-addressed SwissTables in Go 1.24+
+
+Think of a Go `map[K]V` like labeled pigeonholes in a post office sorting room. Instead of searching every envelope linearly, Go computes a fast randomized hash of `key` and jumps straight to the target slot in **O(1) average time**—provided `K` is comparable with `==` (integers, strings, pointers, structs without slices/maps/funcs).
+
+Prior to Go 1.24, maps stored 8-entry overflow bucket chains (`hmap` + `bmap`), paying extra pointer hops when tables grew sparse or collided. **Starting in Go 1.24**, Go switched its runtime hash table to **Swiss Tables** (inspired by Google's C++ Abseil `flat_hash_map`): slots group into 8-slot chunks paired with 8 compact 1-byte **control metadata bytes** (`h2` 7-bit hashes + empty/deleted bitflags). Using fast SIMD-friendly bitwise comparisons across an entire 8-slot control word checks up to **8 candidate keys simultaneously in nanoseconds** with far better CPU cache locality!
+
+Two ironclad map semantics still govern daily Go code regardless of internal hashing layout:
+
+1. **Zero-value `nil` map traps:** reading from `var m map[string]int` cleanly returns `0` (`ok == false`), whereas **writing `m["alice"] = 1` triggers an unrecoverable `assignment to entry in nil map` panic**. Always initialize via `m := make(map[string]int, hint)`.
+2. **Map elements are not addressable (`&m[k]` won't compile):** because SwissTable resizing and split rehashing move entries dynamically in RAM whenever load factor exceeds ~87.5%, holding a raw memory address `&m["alice"]` would turn into a dangling pointer on the next insert. Therefore, Go forbids taking `&m[k]`; read the value, update fields, and write back `m[k] = updated` (or store `*User` pointers).
+
+```go
+scores := make(map[string]int, 8) // allocates SwissTable table header; zero writes to nil!
+scores["alice"] = 0
+
+vAlice, okAlice := scores["alice"] // (0, true)  -> present with 0 points
+vBob, okBob := scores["bob"]       // (0, false) -> never inserted
+delete(scores, "bob")              // safe no-op; note buckets shrink only by recreating map
+
+// Deterministic output (since map range deliberately seeds randomness):
+keys := slices.Sorted(maps.Keys(scores))
+for _, k := range keys {
+	fmt.Println(k, scores[k])
+}
+```
+
+<GoFund2MapCommaOk />
+
+<Figure src={catalogImg} alt="Wooden library card catalog drawers sorted cleanly by labeled key ranges" caption="Just as card drawers group keys by prefix hashes into labeled bins, Go maps jump to buckets in O(1)—while randomly permuting range order so tests never freeze internal hash order." sourceTitle="Wikimedia Commons: Schlagwortkatalog" sourceUrl="https://commons.wikimedia.org/wiki/File:Schlagwortkatalog.jpg" />
+
+Watch how Swiss Tables actually locate `"alice"` in nanoseconds without chasing linked lists. Each hash splits into a **57-bit upper prefix (`h1`)** locating an 8-slot group and a **7-bit fingerprint (`h2`)** tucked into an 8-byte control register. On `scores["alice"]`, the CPU tests `"alice"`'s `h2` byte against all 8 slots inside that group in a single parallel register instruction, checks full key equality *only* on slots whose `h2` byte matches (~1 in 128 chance of false hit), and halts immediately when any slot carries the `empty` control byte!
+
+Also beware storing large multi-kilobyte value structs directly (`map[string][4096]byte`) versus pointers (`map[string]*[4096]byte`). Go sets a small inline threshold (`128 bytes` for keys and values): exceeding 128 bytes silently converts every map slot into a heap-allocated pointer under the hood, adding GC scanning pressure on every write unless your struct contains zero pointers (`noscan`).
+
+Watch one production memory pitfall carefully before leaving maps: deleting keys via `delete(m, k)` resets control bytes to tombstone/empty **without freeing backing bucket RAM**! If a cache burst fills 5 million keys and later drops to 500 keys, the giant table stays pinned in memory unless you copy survivors into a fresh `make(map[K]V, len(m))`. (We trace bucket retention interactively in the memory pitfalls guide next!)
+
+<Concepts>
+
+- **Comma-ok lookup (`v, ok := m[k]`)**: separating legitimate zero values (`0`, `""`, `false`) stored in a map from absent keys (`ok == false`).
+- **SwissTable (Go 1.24+)**: open-addressed hash table organizing keys into 8-slot groups with compact 1-byte control headers so parallel bitmasks probe 8 slots at once.
+- **Unaddressable map element**: `&m[k]` is disallowed by the compiler because hash map growth moves keys to new addresses in memory.
+- **Randomized map iteration**: Go injects a random hash seed and starting cursor on every `for k, v := range m` loop to catch accidental order assumptions during testing.
+
+</Concepts>
+
+---
+
+## 3. Struct layout, composition by embedding, and field promotion
+
+Where OOP languages ask you to build brittle inheritance trees (`Animal -> Mammal -> Account -> VIPAccount`) filled with invisible vtable object headers, Go eliminates subclasses entirely. Go programs combine flat **structs** using **anonymous struct embedding** ("has-a" composition with convenient method forwarding).
+
+Think of an embedded struct like mounting a standardized digital thermometer flush inside a smart oven's steel panel: you don't claim the oven "is a" thermometer in a class tree, nor store a pointer chasing off to another box—the thermometer wires sit at offset 0 inside the exact same aluminum housing, and pressing `oven.ReadTemp()` simply forwards cleanly to `oven.Thermometer.ReadTemp()`.
+
+Look directly at the byte offsets inside Go memory when `Account` embeds helpers versus OOP inheritance pointers:
+
+<GoFundEmbeddingLayout />
+
+Notice three concrete rules demonstrated in `<GoFundEmbeddingLayout />`:
+
+1. **Zero extra allocations or parent pointers.** All embedded fields lay flat end-to-end inside one contiguous struct (`Account`). Calling `a.Info("ok")` compiles with zero indirection straight down to `a.Logger.Info("ok")`.
+2. **Selector collision ambiguity stops silently bugs.** If `Account` embeds both `Reader` and `Metrics` and both define a `Reset()` method, calling `acct.Reset()` fails at compile time (`ambiguous selector acct.Reset`) rather than guessing method resolution order dynamically. You disambiguate explicitly (`acct.Reader.Reset()` or `acct.Metrics.Reset()`).
+3. **No subclass polymorphism inside embedded methods.** Inside `Logger.Info()`, the receiver stays strictly `Logger`—`Logger` knows nothing about the outer `Account` wrapper and cannot override an `Account` method like Java's `super` / `this` virtual dispatch.
+4. **Never embed `sync.Mutex` anonymously in exported structs.** Doing `type Account struct { sync.Mutex; Balance int }` accidentally exposes `acct.Lock()` and `acct.Unlock()` as public methods callers might misuse or copy! Declare locks as named private fields: `mu sync.Mutex`.
+5. **Watch Go 1.24's `omitzero` vs. classic `omitempty` JSON tags.** Historically `json:",omitempty"` skipped empty numbers (`0`), booleans (`false`), and empty slices—*but completely ignored nested empty structs like `time.Time{}`*, shipping `"created_at":"0001-01-01T00:00:00Z"` across APIs. Go 1.24 introduced `,omitzero`, honoring custom `IsZero() bool` methods cleanly across timestamps and composite structs.
+
+```go
+type Logger struct{}
+func (Logger) Info(msg string) { fmt.Println("INFO:", msg) }
+
+type Account struct {
+	Logger            // promoted cleanly: acct.Info("deposit")
+	mu        sync.Mutex
+	ID        int64     `json:"id"`
+	Balance   int64     `json:"balance"`
+	ClosedAt  time.Time `json:"closed_at,omitzero"` // Go 1.24+: omitted when IsZero() is true
+}
+
+func (a *Account) Deposit(amount int64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.Balance += amount
+}
+```
+
+<Figure src={cogsImg} alt="Interlocking brass clockwork gears transferring motion smoothly" caption="Instead of multi-level inheritance chains, Go composes small focused structs side-by-side—like brass gears meshing cleanly along shared borders." sourceTitle="Wikimedia Commons: Clock Cogs" sourceUrl="https://commons.wikimedia.org/wiki/File:Clock_Cogs.jpg" />
+
+<GoFund2StructComposition />
+
+<Concepts>
+
+- **Struct embedding**: declaring an inner struct type without a field name inside an outer struct so its fields and methods promote to the outer selector (`a.Info()`).
+- **Struct tags (`` `json:"id"` ``)**: compile-time string metadata inspected via `reflect` by serializers, validators, and SQL scanners without adding runtime field bytes.
+- **Lock encapsulation**: keeping `mu sync.Mutex` as an unexported named field so mutex state cannot leak or be copied accidentally outside package boundaries.
+
+</Concepts>
+
+---
+
+## 4. Value vs. pointer receivers and compiler method sets
+
+Why does Go let you write both `func (a Account) Read()` and `func (a *Account) Deposit(n int64)`—and why does mixing them inconsistently trigger cryptic compile errors the moment you pass an `Account{}` into an `interface`?
+
+Remember the pass-by-value rule from earlier: **receivers are just ordinary first arguments to functions!** A value receiver `(a Account)` receives a full bitwise copy of all 40 bytes on every call (`Balance += n` edits the temporary copy and vanishes at `return`!), whereas `(a *Account)` passes an 8-byte pointer straight back to the caller's struct.
+
+- Even more revealing is the compiler's **method set** rule—tested live in our step-by-step simulator below:
+- Calling `acct.Deposit(50)` on a local variable `acct` works even when `Deposit` wants `*Account` because `acct` is an **addressable stack variable** (`cmd/compile` transparently emits `(&acct).Deposit(50)`).
+- Putting a plain value `Account{}` into an interface `var d Depositer = Account{}` **refuses to compile**! Why? Once wrapped inside an `iface`, the copied `Account{}` holds no addressable memory variable to pass to `*Account`; even if allowed, mutating a concealed temporary copy and throwing it away would almost certainly be a bug.
+- Similarly, almost **never write a pointer to an interface (`*io.Reader`)** in function signatures! Because `io.Reader` is already a two-word `{tab, data}` descriptor holding a pointer to the concrete value, adding another `*` star prevents callers from passing `*os.File` or `*bytes.Buffer` cleanly. Always accept the interface value itself (`io.Reader`, `context.Context`, `error`) and let concrete types pass pointers when needed (`*os.File`).
+
+Step through all four receiver & interface behaviors line by line right here (clicking scenarios across the top and `Next` on the right):
+
+<GoMethodDispatchDemo />
+
+<QuoteCard author="Dave Cheney" role="Go Contributor & Educator" sourceTitle="Practical Go: Real world advice" sourceUrl="https://dave.cheney.net/practical-go/presentations/qcon-china.html">
+If any method of a type requires a pointer receiver—because it mutates state, embeds a synchronization primitive like sync.Mutex, or wraps a non-trivial struct—make all methods on that type take pointer receivers consistently.
+</QuoteCard>
+
+| Guideline | Choose Value Receiver `(t T)` | Choose Pointer Receiver `(t *T)` |
+| :--- | :--- | :--- |
+| **Mutating struct fields?** | Never (mutations apply to copy only) | **Always** |
+| **Struct contains `sync.Mutex` / `atomic`?** | Forbidden! (`go vet` flags lock copy) | **Always** |
+| **Small immutable value (`time.Time`, `netip.Addr`)?** | **Yes** (copy-safe, concurrent-safe) | Unnecessary heap escape risk |
+| **Mixed across methods on one type?** | Avoid unless strictly uniform & lock-free | Keep uniform (`*T`) across entire type |
+
+<Concepts>
+
+- **Addressability**: the compiler property of variables having a stable assignable memory location (`&x`); constants, map elements, and copies stored inside interfaces are non-addressable.
+- **Consistent receiver rule**: keeping all methods on a struct either uniformly `*T` or uniformly `T` so value/pointer interface assignments never surprise callers.
+- **`go vet` copylocks check**: static analyzer catching accidental pass-by-value copies of `sync.Mutex`, `sync.WaitGroup`, or `sync.Once`.
+
+</Concepts>
+
+---
+
+## 5. Implicit interfaces, 16-byte `iface` headers, generics, and the typed-`nil` trap
+
+In Java or C#, types declare `class File implements Reader` up front, coupling domain libraries permanently to framework contracts. In Go, **interfaces are satisfied implicitly** (`structural duck typing checked at compile time`): if `Account` implements `Deposit(int64)`, it satisfies `Depositer` anywhere—even if `Depositer` lives inside a third-party caller package written five years later.
+
+Look directly inside Go's `runtime/runtime2.go` to see why interfaces weigh just **16 bytes** and how the notorious typed-`nil` production bug happens:
+
+<GitHubCode repo="golang/go" path="src/runtime/runtime2.go" lines="L184-L192" url="https://github.com/golang/go/blob/master/src/runtime/runtime2.go#L184-L192" caption="Runtime layout of non-empty interfaces (iface) and empty any interfaces (eface). Both are 2 machine words: a type/method descriptor plus a data pointer.">
+```go
+type iface struct {
+	tab  *itab          // points to concrete type + cached method function pointers
+	data unsafe.Pointer // points to copied value or pointer
+}
+
+type eface struct {
+	_type *_type         // concrete type metadata only (used by `any` / `interface{}`)
+	data  unsafe.Pointer
+}
+```
+</GitHubCode>
+
+Look closely at what `iface{tab, data}` tells you immediately:
+
+1. **Dynamic dispatch takes one cheap pointer jump (`tab.fun[0]`)—no hash lookup at runtime.** The compiler & linker cache `(InterfaceType, ConcreteType) -> *itab` descriptors statically. Test all dispatch mechanics in our interactive interface tracer right below!
+2. **Why returning `var p *os.PathError = nil` as `error` breaks `if err != nil`:** assigning `p` to an `error` interface populates **`tab = *itab(error, *os.PathError)`** (non-nil!) and `data = nil`. Because Go defines `(err == nil)` as **`tab == nil && data == nil`**, checking `if err != nil` returns **`true`** even though the underlying pointer was `nil`! Always return untyped `nil` explicitly (`if fail { return p }; return nil`).
+3. **Interfaces vs. Generics (`[T cmp.Ordered]`):** reach for tiny **consumer-side interfaces** (1–2 methods like `io.Reader`) when *behavior varies* across concrete implementations (`PostgresStore` vs `MockStore`). Reach for **generics** (`func Max[T cmp.Ordered](a, b T) T` or `slices.Sort`) when *identical algorithms* operate over multiple data types without boxing everything into `any` heap allocations. Remember that passing concrete values like `int` or non-pointer structs into `any` (`eface`) often forces Go to allocate a fresh heap copy of that value so `eface.data` has a stable pointer—whereas generics specialize machine code directly over the raw value types via GCShape stenciling.
+4. **Keep interfaces small (`1–2 methods`), accept interfaces, return structs.** Returning a concrete `*Service` instead of a broad interface lets callers consume concrete fields and inspect concrete methods freely, while functions taking tiny behavioral interfaces stay decoupled from callers' storage implementations.
+
+```go
+type Store interface { // Consumer-side tiny contract: easy to mock cleanly
+	FindUser(ctx context.Context, id int64) (*User, error)
+}
+
+func Max[T cmp.Ordered](a, b T) T { // Zero runtime interface boxing!
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// Safe extraction with comma-ok (never unguarded v := x.(T)):
+if f, ok := reader.(*os.File); ok {
+	_ = f.Name()
+}
+```
+
+<GoFund2ImplicitInterfaces />
+
+<GoFundInterfaceDispatchDemo />
+
+### Self-check questions before moving to errors, concurrency, and testing
+
+1. Why does taking `sub := s[:2]` from `s := make([]int, 2, 4)` risk mutating `s` later—and how does `s[:2:2]` prevent it? *(See Section 1)*
+2. What algorithmic change did Go 1.24 introduce to map internals (`Swiss Tables`), and why does the Go compiler forbid `&m["key"]`? *(See Section 2)*
+3. Why does embedding a `sync.Mutex` anonymously inside an exported struct leak dangerous locking methods—and how should mutex fields be declared instead? *(See Section 3)*
+4. Why does `acct.Deposit(50)` compile when `Deposit` takes `*Account`, whereas `var d Depositer = Account{}` fails at compile time? *(See Section 4)*
+5. Using the 16-byte `iface{tab, data}` memory struct, explain why returning a `nil` `*os.PathError` pointer from a function returning `error` makes `if err != nil` evaluate `true`! *(See Section 5)*
+
+<Concepts>
+
+- **`itab` descriptor**: Go's cached runtime table linking a concrete type (`*Account`) with an interface (`Depositer`) plus direct function pointers `fun[]` for each method.
+- **Typed-`nil` interface**: an interface holding a non-nil `tab` type tag paired with a `nil` `data` pointer, causing `err != nil` to evaluate true even when the wrapped pointer is nil.
+- **Consumer-side interface**: defining interfaces inside the calling package specifying strictly what it consumes (1–2 methods) rather than fat producer interfaces.
+- **`cmp.Ordered`**: standard-library generic constraint covering built-in ordered primitives (`int`, `float64`, `string`) without reflection or `any` boxing.
+
+</Concepts>
+
+</En>
+
+<Vi>
+
+<Figure src={heroPatch} alt="Bảng cắm dây máy tính tương tự nơi các đầu giắc khớp vừa khít theo chuẩn lỗ cắm" caption="Bất kỳ đầu dây nào đúng kích thước giắc là cắm chạy luôn — hệt như Interface ngầm định trong Go, chẳng cần khai báo implements rườm rà." sourceTitle="Wikimedia Commons: Analog Computer patch panel" sourceUrl="https://commons.wikimedia.org/wiki/File:Analog_Computer_patch_panel_(5900042053).jpg" />
+
+> "Dữ liệu là phần quyết định. Nếu bạn chọn đúng cấu trúc dữ liệu và sắp xếp chúng gọn ghẽ, phần thuật toán gần như sẽ tự hiển hiện rõ ràng."
+> &mdash; *Rob Pike*, *Ghi chép về lập trình C*
+
+### Những lỗi sản xuất kinh điển bắt nguồn từ kiểu dữ liệu phức hợp trong Go
+
+Khi bước qua những biến `int` hay `string` rời rạc để ghép thành service thực thụ, hầu hết bug khó tìm của người mới đều xuất phát từ việc hiểu nhầm giữa *thứ nằm ngay trên Stack* và *thứ trỏ ngầm qua con trỏ bên trong*:
+
+- **Ghi đè chéo ngầm khi cắt slice.** Bạn tách một lát cắt `sub := buf[:2]` từ buffer lớn và quên khóa sức chứa `cap`. Lệnh `append(sub, item)` ngay lập tức đè lên phần tử thứ ba của mảng dùng chung — tạo bug sai dữ liệu ma quái khi nhiều goroutine đọc song song.
+- **Copy nguyên một `sync.Mutex` đang bị khóa.** Truyền struct chứa `sync.Mutex` qua value receiver sẽ copy nguyên trạng bit đang khóa sang stack frame mới, khiến goroutine con bị treo deadlock vĩnh viễn dù struct gốc đã nhả khóa.
+- **Báo lỗi giả từ biến con trỏ `nil` nhét vào `error`.** Hàm khai báo trả về `error` nhưng lỡ viết `var p *os.PathError = nil; return p`: Go đóng gói cặp `{tab: *PathError, data: nil}` khiến biểu thức `if err != nil` phía caller bật `true` trên mọi request chạy thành công!
+
+Mục tiêu bài viết này là nhìn xuyên thẳng xuống bố cục từng byte của năm cấu trúc trụ cột:
+
+1. **Array tĩnh vs. Slice động**: header 24-byte `runtime.slice`, bước nhảy mở rộng và biểu thức khóa trần `a[:2:2]`.
+2. **Map kiểu SwissTable từ Go 1.24+**: đọc 2 vế comma-ok, lý do compiler cấm lấy địa chỉ `&m[k]` và xáo trộn thứ tự duyệt.
+3. **Nhúng Struct (Embedding) không đa kế thừa**: bố cục RAM liền khối vs con trỏ cha của OOP, kèm nguyên tắc giấu Mutex.
+4. **Value vs. Pointer Receiver và luật Method Set**: lý do `Account{}` bị compiler chặn khi gán interface đòi con trỏ, còn `&Account{}` thì khớp ngay.
+5. **Interface ngầm định `iface`/`eface`, Generics `[T any]` và bẫy typed-`nil`**: thiết kế hợp đồng gọn nhẹ ở phía người gọi.
+
+<Callout type="note" title="Tóm tắt nhanh (TL;DR)">
+Slice chỉ là một header 24 byte (`ptr, len, cap`) — luôn đặt trước sức chứa bằng `make([]T, 0, cap)` và chốt cap (`s[:n:n]`) hoặc `slices.Clone` trước khi dùng riêng. Map bắt buộc `make()` trước khi ghi, tra cứu qua `v, ok := m[k]`, và từ Go 1.24 chạy trên nền SwissTable cực nhanh. Embedding đặt mọi trường nằm phẳng kề nhau trong RAM (`mu sync.Mutex` phải đặt tên riêng, không nhúng ẩn), giữ receiver đồng nhất `*T` khi cần sửa state, và tuyệt đối không trả thẳng con trỏ `nil` có kiểu làm giá trị `error`.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ nền tảng">
+
+- **Kiểu dữ liệu phức hợp (Composite type)**: các cấu trúc ghép từ nhiều biến gốc — Array, Slice, Map, Struct và Interface.
+- **Dùng chung mảng nền (Backing array aliasing)**: hiện tượng hai Slice trỏ cùng vào một đoạn mảng trong RAM nên sửa đầu này lại vô tình làm biến dạng đầu kia.
+- **Method set (Tập method hợp lệ)**: quy tắc compiler quy định giá trị `T` chỉ gọi được value receiver, còn con trỏ `*T` gọi được cả hai loại.
+- **`eface` (`any`) vs `iface` (Interface có method)**: `any` chỉ mang 2 từ `{_type, data}` không có bảng hàm; interface thường mang `{tab, data}` kèm con trỏ hàm dựng sẵn.
+
+</Concepts>
+
+---
+
+## 1. Array tĩnh vs. Slice động: giải phẫu header 24 byte & bẫy ghi đè mảng chung
+
+Trong Go, mảng tĩnh `[4]int` gắn chết kích thước vào ngay tên kiểu (`[4]int` không gán được cho `[5]int`) và mỗi lần đưa vào hàm là copy toàn bộ từng phần tử. Bạn có thể xem Array giống khay đựng cố định đúng 4 quả trứng. Trái lại, **Slice (`[]T`)** giống một **khung kính lúp 24 byte** đặt lên một phần của mảng nền — dù mảng chứa 10 triệu phần tử, truyền `s` qua hàm chỉ copy đúng **3 từ máy 8 byte (`ptr, len, cap`)**!
+
+<GitHubCode repo="golang/go" path="src/runtime/slice.go" lines="L15-L19" url="https://github.com/golang/go/blob/master/src/runtime/slice.go#L15-L19" caption="Định nghĩa kiểu slice bên trong runtime Go: luôn đúng 24 byte trên máy 64-bit (con trỏ mảng gốc, độ dài len và sức chứa cap).">
+```go
+type slice struct {
+	array unsafe.Pointer
+	len   int
+	cap   int
+}
+```
+</GitHubCode>
+
+Sự tách biệt giữa `len` (số ô đang dùng) và `cap` (số ô tối đa của mảng gốc trước khi phải cấp phát mới) giải thích cả tốc độ cực nhanh của `append()` lẫn bẫy kinh điển hay gặp nhất ở người mới:
+
+```go
+// Bẫy 1: Không đặt sẵn cap làm append() phải xin lại mảng & copy liên tục (1 -> 2 -> 4 -> 8 -> 16)
+var s []int
+for i := 0; i < 10; i++ {
+	s = append(s, i)
+}
+
+// Bẫy 2: Dùng chung phần cap dư giữa 2 lệnh append!
+a := make([]int, 2, 3) // [1, 2, _]  -> len=2, cap=3
+a[0], a[1] = 1, 2
+b := append(a, 10)      // ghi 10 vào ô [2]
+c := append(a, 20)      // GHI ĐÈ thẳng vào b[2] trên cùng mảng nền -> b thành [1, 2, 20]!
+
+// Cách fix chuẩn: chốt trần cap bằng full-slice a[low:high:max]
+d := append(a[:2:2], 99) // ép cap=2 -> buộc xin mảng mới riêng ở địa chỉ mới!
+```
+
+<GoFund2ArraySliceGrowth />
+
+Nhìn kết quả đo địa chỉ RAM thật trên Go 1.27 kèm sơ đồ từng bước minh họa lý do `b` và `c` đè trúng địa chỉ `0x..60a0`:
+
+Nhân tiện hãy biết nốt công thức mở rộng của `runtime.growslice`: dưới ngưỡng `256` phần tử, Go nhân đôi dung lượng (`2x`) để slice nhỏ ít bị cấp phát lặp lại; qua `256`, hệ số giảm mượt về `1.25x` (`oldCap + (oldCap+3*256)/4`) nhằm tránh cảnh đang giữ mảng 500 MB mà thêm 1 item lại phải xin dư tới 1 GB! Ngoài ra cũng đừng giữ nhầm slice con `token := raw[100:108]` từ một payload 10 MB vào cache sống lâu — **8 byte cắt ra sẽ giữ nguyên cả mảng gốc 10 MB không cho GC thu hồi**, cho tới khi bạn sao tách riêng bằng `slices.Clone(token)` hoặc `string(raw[100:108])`.
+
+<TerminalOutput command="go test -v -run TestDeepFund2 ." label="Apple M2 · Go 1.27" caption="Đo thật trên Go 1.27: &b[2] và &c[2] trùng khít 0x..60a0 cho tới khi a[:2:2] tách sang vùng mới 0x..c080; typed-nil khiến err==nil thành false.">
+```text
+=== RUN   TestDeepFund2
+    deep_check_test.go:40: shared backing array: b=[1 2 20] c=[1 2 20] &b[2]=0x749fbc2260a0 &c[2]=0x749fbc2260a0
+    deep_check_test.go:43: full-slice a[:2:2]: b=[1 2 20] d=[1 2 99] &b[0]=0x749fbc226090 &d[0]=0x749fbc25c080
+    deep_check_test.go:47: sizeof User=24 Account=40 mutex=8
+    deep_check_test.go:51: typed-nil: pathErr==nil:true err==nil:false (wraps nil *os.PathError)
+--- PASS: TestDeepFund2 (0.00s)
+```
+</TerminalOutput>
+
+<GoFundSliceAppendTrace />
+
+| Thao tác Slice | Copy bao nhiêu? | Tạo mảng mới trong RAM? | Sửa `s[0]` ảnh hưởng bản gốc? | Thói quen an toàn |
+| :--- | :--- | :--- | :--- | :--- |
+| `make([]int, 0, n)` | Header 24 byte | 1 lần đủ `n * sizeof(T)` | — | Cấp phát trước khi biết kích thước lô |
+| `make([]int, n)` | Header 24 byte | 1 lần (điền sẵn `n` số `0`!) | — | Chỉ dùng khi gán thẳng qua index `s[i]` |
+| `sub := s[i:j]` | Header 24 byte | **Không** (chia sẻ `array` & `cap`) | **Có!** Đè thẳng mảng gốc | Khóa trần `s[i:j:j]` nếu chuẩn bị `append` |
+| `slices.Clone(s)` | Header 24 byte | Luôn tạo bản sao tách biệt | Không | Tách dữ liệu trước khi đẩy qua goroutine |
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Biểu thức Full-slice (`s[low:high:max]`)**: giới hạn trần `cap = max - low` để lệnh `append()` sau đó buộc phải cấp phát mảng mới thay vì ăn lẹm sang phần tử phía sau của slice gốc.
+- **Preallocation (`make([]T, 0, n)`)**: đặt trước dung lượng trống (`len=0, cap=n`) giúp vòng lặp `append()` ghi liên tiếp vào một khối RAM duy nhất không phải dời nhà.
+- **Slice `nil` vs. Slice rỗng `[]T{}`**: `var s []T` có `ptr=nil` (0 byte cấp phát) vẫn chạy `len`, `append`, `for range` hệt slice rỗng, chỉ khác là `encoding/json` xuất thành `null` thay vì `[]`.
+
+</Concepts>
+
+---
+
+## 2. Map kiểu SwissTable từ Go 1.24+: tốc độ O(1) và những ranh giới an toàn
+
+Hãy hình dung `map[K]V` giống giá chia thư đánh số sẵn ở bưu điện. Thay vì dò từng lá thư từ đầu phòng tới cuối phòng, Go băm giá trị khóa `K` thành mã số và nhảy thẳng tới ngăn chứa trong **thời gian trung bình O(1)** — miễn là kiểu khóa hỗ trợ so sánh bằng `==` (số, chuỗi, con trỏ hoặc struct chỉ chứa trường so sánh được).
+
+Trước Go 1.24, Map dùng mô hình mảng bucket dây chuyền 8 phần tử (`hmap` + `bmap`), dễ tốn nhảy con trỏ khi bảng thưa hoặc va chạm hash. **Từ phiên bản Go 1.24 trở đi**, runtime chuyển hẳn sang **Swiss Tables** (ý tưởng từ `flat_hash_map` của C++ Abseil): các ô nằm kề nhau theo nhóm 8 slot kèm đúng **8 byte điều khiển (`h2` hash 7-bit + cờ trống/đã xóa)**, cho phép CPU đối chiếu song song 8 khóa cùng lúc bằng phép toán bit nhanh như chớp và tối ưu cache L1 rõ rệt!
+
+Dù cấu trúc bên dưới thay đổi, hai quy tắc sinh tử của Go Map vẫn giữ nguyên:
+
+1. **Cấm ghi vào `nil map`:** Đọc một `var m map[string]int` luôn trả về `0` an toàn (`ok == false`), nhưng **gán `m["alice"] = 1` sẽ crash ngay (`assignment to entry in nil map`)**. Hãy khởi tạo bằng `m := make(map[string]int, sức_chứa)`.
+2. **Không được lấy địa chỉ `&m[k]`:** Khi map đầy trên ~87.5%, thao tác bành trướng (rehash) có thể dời key-value sang ô nhớ khác hoàn toàn. Vì thế Go khóa luôn cú pháp `&m["alice"]` ngay lúc biên dịch để ngăn con trỏ lơ lửng: hãy đọc struct ra sửa rồi gán ngược `m[k] = updated`, hoặc lưu `map[string]*User`.
+
+```go
+scores := make(map[string]int, 8) // cấp phát sẵn bảng SwissTable tránh nil panic
+scores["alice"] = 0
+
+vAlice, okAlice := scores["alice"] // (0, true)  -> Alice ĐÚNG LÀ 0 điểm!
+vBob, okBob := scores["bob"]       // (0, false) -> Bob CHƯA từng nằm trong map!
+delete(scores, "bob")              // xóa an toàn kể cả khi không có khóa này
+
+// Khi cần xuất log/JSON ổn định: sort key rõ ràng vì Go xáo thứ tự range
+keys := slices.Sorted(maps.Keys(scores))
+for _, k := range keys {
+	fmt.Println(k, scores[k])
+}
+```
+
+<GoFund2MapCommaOk />
+
+<Figure src={catalogImg} alt="Tủ thẻ thư viện chia theo ngăn chữ cái" caption="Giống hệ thống ngăn tủ băm khóa để tra cứu tức thì O(1), Go map còn xáo ngầm thứ tự mỗi lượt for range để lập trình viên không dựa dẫm vào vị trí bucket nội bộ." sourceTitle="Wikimedia Commons: Schlagwortkatalog" sourceUrl="https://commons.wikimedia.org/wiki/File:Schlagwortkatalog.jpg" />
+
+Cơ chế tìm khóa `"alice"` của Swiss Table dưới tầng máy cũng rất đáng nể: mã băm 64-bit tách làm **57 bit cao (`h1`)** trỏ vào nhóm 8 slot và **7 bit thấp (`h2`)** cất trong thanh ghi điều khiển 8 byte. Lúc tra `scores["alice"]`, CPU đối chiếu cùng lúc `h2` với cả 8 slot chỉ trong một lệnh bit thanh ghi, chỉ giải mã khóa đầy đủ nếu 7-bit `h2` tình cờ trùng (~1/128 xác suất giả), và dừng ngay khi gặp cờ `empty`. Và lưu ý ngưỡng **128 byte** cho key/value: nếu nhét struct to hơn 128 byte làm giá trị map, runtime tự đổi sang lưu con trỏ trên Heap ngầm dưới nắp ca-pô.
+
+Lưu ý một điểm tốn RAM ngầm khi lên production: hàm `delete(m, k)` chỉ đánh dấu lại byte điều khiển thành ô đã xóa chứ **không bao giờ thu nhỏ lại dung lượng bảng đã cấp**! Nếu có đợt spike đẩy 5 triệu key rồi xóa còn 500 key, khối RAM khổng lồ vẫn bám trụ đến hết vòng đời biến map cho tới khi bạn copy 500 key còn lại sang một `make(map[K]V)` mới.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Cặp `v, ok := m[k]` (Comma-ok)**: cách đọc 2 vế phân biệt chính xác giá trị zero hợp lệ (`0`, `""`, `false`) với trường hợp khóa chưa tồn tại (`ok == false`).
+- **SwissTable (Go 1.24+)**: bảng băm địa chỉ mở xếp 8 ô liền nhau kèm bảng byte điều khiển siêu gọn, giúp rà cùng lúc 8 slot ứng viên ngay trong thanh ghi CPU.
+- **Unaddressable (Không lấy được địa chỉ)**: lệnh `&m[k]` bị compiler chặn vì map có thể tự dời vị trí các ô nhớ khi tự nới kích thước (rehash).
+- **Xáo thứ tự `range`**: Go cố tình chọn hạt giống ngẫu nhiên ở mỗi lần `for k, v := range m` để test bắt chết mọi code lệ thuộc vào thứ tự map.
+
+</Concepts>
+
+---
+
+## 3. Bố cục Struct liền khối, Embedding thay cho kế thừa và cách giữ Lock an toàn
+
+Ở nhiều ngôn ngữ hướng đối tượng, chỉ để chia sẻ vài dòng helper mà codebase đẻ ra cây kế thừa năm sáu tầng (`BaseEntity -> AuditedModel -> Account -> VIPAccount`) kèm đống con trỏ `vtable` giấu trong đầu mỗi object. Go vứt bỏ toàn bộ khái niệm `class` lẫn thừa kế, chỉ dùng **Struct** cộng **nhúng ẩn danh (Embedding)**.
+
+Hãy tưởng tượng nhúng struct như việc gắn phẳng một chiếc đồng hồ đo nhiệt vào mặt trước cánh cửa lò nướng: không ai gọi cái lò nướng "kế thừa" hay "là một" nhiệt kế cả, cũng không đặt nhiệt kế ở phòng bên rồi kéo dây nối dài — mọi linh kiện đều bắt vít phẳng trên cùng một tấm khung thép ở độ lệch `offset 0`, và khi nhấn `loNuong.DoNhietDo()`, bảng mạch nối thẳng vào `loNuong.NhietKe.DoNhietDo()`.
+
+Nhìn thẳng bố cục từng byte trong RAM khi `Account` nhúng các helper so với con trỏ kế thừa OOP:
+
+<GoFundEmbeddingLayout />
+
+Ba quy tắc thực chiến rút gọn thẳng từ sơ đồ trên:
+
+1. **Không tốn con trỏ lớp cha hay cấp phát rời.** Mọi trường được nhúng xếp nối đuôi thành **một khối bộ nhớ liên tục** (`24 byte` cho `Account`). Gọi `a.Info("ok")` chỉ là phép đổi tên gọn ở bước biên dịch sang `a.Logger.Info("ok")`.
+2. **Trùng tên hàm khi nhúng sẽ dừng lúc biên dịch chứ không đoán mò.** Nếu `Account` nhúng cả `Reader` lẫn `Metrics` và cả hai cùng có hàm `Reset()`, lệnh `acct.Reset()` báo lỗi `ambiguous selector` ngay lúc compile — bắt bạn viết rõ `acct.Reader.Reset()` hoặc `acct.Metrics.Reset()` thay vì tự chọn thứ tự ẩn.
+3. **Không có đa hình ghi đè kiểu `this` ở lớp cha.** Khi đã bước vào thân `Logger.Info()`, biến receiver vẫn chỉ thấy đúng `Logger`, tuyệt đối không biết hay tự đổi hành vi của struct `Account` bao ngoài.
+4. **Tuyệt đối không nhúng ẩn `sync.Mutex` trong struct công khai!** Viết `type Account struct { sync.Mutex; Balance int }` vô tình phơi bày luôn hàm `acct.Lock()` và `acct.Unlock()` ra ngoài package để bất kỳ ai cũng gọi hoặc copy mất an toàn. Luôn đặt tên trường thường riêng tư: `mu sync.Mutex`.
+5. **Tag `,omitzero` từ Go 1.24 thay thế điểm mù của `,omitempty`:** Trước đây `json:",omitempty"` chỉ bỏ qua số `0` hoặc chuỗi rỗng, nhưng vẫn in nguyên `"closed_at":"0001-01-01T00:00:00Z"` với struct như `time.Time{}`! Tag `,omitzero` mới trong Go 1.24 gọi thẳng phương thức `IsZero() bool` giúp ẩn trọn vẹn các struct chưa gán giá trị.
+
+```go
+type Logger struct{}
+func (Logger) Info(msg string) { fmt.Println("INFO:", msg) }
+
+type Account struct {
+	Logger            // nhúng hợp lệ: gọi thẳng acct.Info("deposit")
+	mu        sync.Mutex
+	ID        int64     `json:"id"`
+	Balance   int64     `json:"balance"`
+	ClosedAt  time.Time `json:"closed_at,omitzero"` // Go 1.24+: tự ẩn khi chưa đóng tài khoản
+}
+
+func (a *Account) Deposit(amount int64) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.Balance += amount
+}
+```
+
+<Figure src={cogsImg} alt="Các bánh răng đồng hồ bằng đồng ăn khớp nhau" caption="Go chọn ghép từng khối struct nhỏ qua Embedding thay vì cây kế thừa OOP — giống những bánh răng ăn khớp sạch sẽ qua đường biên hẹp." sourceTitle="Wikimedia Commons: Clock Cogs" sourceUrl="https://commons.wikimedia.org/wiki/File:Clock_Cogs.jpg" />
+
+<GoFund2StructComposition />
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Struct embedding (Nhúng struct)**: đặt tên kiểu struct con mà không ghi tên trường để Go tự đẩy field và method của nó ra mặt tiền struct cha (`a.Info()`).
+- **Struct tag (`` `json:"id"` ``)**: chuỗi chú thích metadata đọc qua `reflect` bởi trình decode JSON/SQL, không tốn bất kỳ byte RAM nào trên struct thực tế.
+- **Đóng gói khóa (Lock encapsulation)**: đặt `mu sync.Mutex` thành biến viết thường nội bộ để vừa giữ API sạch vừa tránh lỡ copy khóa giữa các struct.
+
+</Concepts>
+
+---
+
+## 4. Value Receiver vs. Pointer Receiver & quy tắc Method Set của compiler
+
+Tại sao cùng một struct `Account` mà Go lại tách ra **value receiver `(a Account)`** với **pointer receiver `(a *Account)`**, và vì sao lúc trộn cả hai rất dễ vấp lỗi *"Account does not implement interface (Deposit method has pointer receiver)"*?
+
+Cứ nhớ lại bản chất hàm ở bài trước: **receiver chẳng qua là tham số đầu tiên truyền vào hàm!** Receiver giá trị `(a Account)` nhận một bản **copy nguyên si toàn bộ 40 byte** lên Stack (sửa `a.Balance` xong vứt bỏ lúc thoát hàm!), còn receiver con trỏ `(a *Account)` chỉ copy đúng địa chỉ 8 byte để sửa thẳng ô nhớ gốc.
+
+Thú vị nhất là logic đằng sau quy tắc **Method Set** của trình biên dịch — bạn có thể bấm kiểm chứng ngay dưới đây:
+- Gọi trực tiếp `acct.Deposit(50)` trên biến `acct` vẫn chạy ngon kể cả khi `Deposit` đòi `*Account`, bởi `acct` là biến thật **lấy được địa chỉ `&acct`** nên compiler tự bọc giúp bạn.
+- Nhưng đem giá trị `Account{}` nhét vào interface `var d Depositer = Account{}` thì **cấm tiệt lúc biên dịch**! Vì một khi đã copy bản giá trị vào bên trong interface, giá trị ấy không còn địa chỉ biến gốc để lấy `&`; ngay cả khi compiler cố cho chạy sửa bản nháp bên trong rồi bỏ đi thì đó chắc chắn là một bug âm thầm mất dữ liệu.
+- Tương tự, **đừng bao giờ nhận con trỏ tới interface (`*io.Reader`)** làm tham số! Bản thân `io.Reader` đã là header `{tab, data}` mang sẵn con trỏ trỏ xuống struct thật rồi — thêm dấu `*` nữa sẽ chặn caller truyền thẳng `*os.File` hay `*bytes.Buffer` vào hàm.
+
+Tự tay bấm qua 4 kịch bản cốt lõi trong trình mô phỏng dưới đây — theo dõi dòng code đang chạy song song với trạng thái từng ô nhớ trên Stack và cặp `iface{tab, data}`:
+
+<GoMethodDispatchDemo />
+
+<QuoteCard author="Dave Cheney" role="Thành viên cốt lõi cộng đồng Go" sourceTitle="Practical Go: Real world advice" sourceUrl="https://dave.cheney.net/practical-go/presentations/qcon-china.html">
+Nếu dù chỉ một method trên kiểu dữ liệu cần pointer receiver — vì có sửa trạng thái, có chứa khóa đồng bộ như sync.Mutex hoặc struct nặng — hãy dùng nhất quán pointer receiver cho toàn bộ mọi method còn lại của kiểu đó.
+</QuoteCard>
+
+| Tiêu chí thiết kế | Chọn Value Receiver `(t T)` | Chọn Pointer Receiver `(t *T)` |
+| :--- | :--- | :--- |
+| **Có sửa field bên trong?** | Tuyệt đối không (chỉ sửa bản sao) | **Luôn chọn** |
+| **Có chứa `sync.Mutex` / `atomic`?** | Cấm! (`go vet` báo lỗi `copylocks`) | **Luôn chọn** |
+| **Kiểu giá trị nhỏ bất biến (`time.Time`)?** | **Nên chọn** (an toàn đa luồng, nhẹ) | Dễ làm biến thoát lên Heap vô ích |
+| **Có nên pha trộn cả `T` và `*T`?** | Tránh pha trộn nếu struct có trạng thái | Giữ đồng nhất hoàn toàn `*T` cho cả struct |
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Addressable (Có thể lấy địa chỉ `&x`)**: thuộc tính của biến thật đang đứng trên stack/heap; ngược lại hằng số, phần tử map và giá trị bọc trong interface là không thể lấy địa chỉ.
+- **Tính đồng nhất receiver**: nguyên tắc giữ tất cả method của một struct cùng dùng `*T` hoặc cùng `T` để không vỡ luật thỏa mãn Interface.
+- **Cảnh báo `copylocks` của `go vet`**: công cụ kiểm tra tĩnh tích hợp sẵn trong `go vet`, chuyên bắt lỗi truyền copy nhầm `sync.Mutex` hay `sync.WaitGroup`.
+
+</Concepts>
+
+---
+
+## 5. Interface ngầm định `iface`/`eface`, Generics `[T any]` và bẫy typed-`nil`
+
+Trong Java hay C#, bạn buộc phải ghi `implements Writer` ngay tại nơi định nghĩa class — trói chặt module dữ liệu vào khung thư viện. Go đi theo hướng **Interface ngầm định**: chỉ cần struct của bạn có đúng chữ ký hàm `Write(p []byte) (int, error)`, nó lập tức thỏa mãn `io.Writer` ở bất cứ đâu, kể cả với interface được tạo ra ở một repo khác nhiều năm sau.
+
+Mở thẳng file mã nguồn `runtime/runtime2.go` của Go 1.27 để xem Interface tốn đúng **16 byte** như thế nào — và giải thích dứt điểm vì sao con bọ kinh điển "typed-`nil` error" lại làm điên đầu nhiều đội production:
+
+<GitHubCode repo="golang/go" path="src/runtime/runtime2.go" lines="L184-L192" url="https://github.com/golang/go/blob/master/src/runtime/runtime2.go#L184-L192" caption="Cấu trúc iface (interface có method) và eface (any / interface rỗng) trong Go runtime: cả hai đều là đúng 2 con trỏ 8 byte.">
+```go
+type iface struct {
+	tab  *itab          // trỏ tới mô tả kiểu thật + mảng con trỏ hàm của interface
+	data unsafe.Pointer // trỏ tới vùng dữ liệu hoặc giá trị được copy vào
+}
+
+type eface struct {
+	_type *_type         // chỉ lưu loại kiểu (dùng cho `any` / `interface{}`)
+	data  unsafe.Pointer
+}
+```
+</GitHubCode>
+
+Ba bài học giá trị rút thẳng từ 8 dòng struct `iface` ở trên:
+
+1. **Gọi hàm qua interface cực nhanh (`tab.fun[0]`) — không dò bảng băm lúc chạy.** Go tính sẵn bảng ánh xạ `(Interface, ConcreteType) -> *itab` và cache lại nên chỉ mất một bước nhảy con trỏ (thử tương tác với bảng điều phối bên dưới!).
+2. **Vì sao trả `var p *os.PathError = nil` dưới kiểu `error` làm `if err != nil` bật `true`:** khi gán `p` vào giá trị trả về `error`, runtime điền **`tab = *itab(error, *os.PathError)`** (KHÁC NIL!) và `data = nil`. Vì trong Go một interface chỉ bằng `nil` khi **CẢ `tab` VÀ `data` cùng bằng `nil`**, kiểm tra `if err != nil` nhận định sai thành `true` ngay trên luồng chạy không hề có lỗi! Cách phòng: luôn trả tường minh chữ `nil` thuần (`return nil`).
+3. **Khi nào chọn Interface, khi nào chọn Generics `[T cmp.Ordered]`:** chọn **Interface siêu nhỏ (1–2 hàm)** khai báo ngay tại package người gọi khi *hành vi xử lý thay đổi* theo từng bản cài (`PostgresStore` vs `MockStore`). Chọn **Generics** khi *thuật toán giống hệt nhau* chạy trên nhiều kiểu (`Max`, `slices.Sort`) mà không muốn đóng hộp tốn Heap vào `any` — vì truyền giá trị thường vào `any` (`eface`) thường ép runtime cấp phát bản sao trên Heap để `eface.data` giữ được con trỏ ổn định.
+4. **Nhận Interface, trả về Struct cụ thể ("Accept interfaces, return structs").** Trả ra `*Account` cụ thể thay vì bọc sẵn Interface giúp caller linh hoạt đọc trường dữ liệu và phối hợp nhiều Interface nhỏ tự định nghĩa bên phía họ.
+
+```go
+type Store interface { // Interface nhỏ gọn đặt tại phía gọi -> mock test cực nhẹ
+	FindUser(ctx context.Context, id int64) (*User, error)
+}
+
+func Max[T cmp.Ordered](a, b T) T { // Sinh mã chuyên biệt theo kiểu, 0 đóng hộp `any`!
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// Luôn kiểm tra ép kiểu với cặp comma-ok để tránh panic đột ngột:
+if f, ok := reader.(*os.File); ok {
+	_ = f.Name()
+}
+```
+
+<GoFund2ImplicitInterfaces />
+
+<GoFundInterfaceDispatchDemo />
+
+### Câu hỏi tự kiểm tra trước khi sang Xử lý lỗi, Concurrency & Test
+
+1. Vì sao cắt `sub := s[:2]` từ `s := make([]int, 2, 4)` rồi `append` vào `sub` có nguy cơ ghi đè dữ liệu của `s` — và `s[:2:2]` ngăn chặn chuyện đó ra sao? *(Xem Mục 1)*
+2. Từ Go 1.24, thuật toán **Swiss Tables** nâng cấp gì cho Map, và vì sao trình biên dịch chặn đứng câu lệnh `&m["key"]`? *(Xem Mục 2)*
+3. Tại sao nhúng ẩn `sync.Mutex` bên trong struct export lại dễ lộ hàm khóa ra API ngoài — cách khai báo chuẩn là gì? *(Xem Mục 3)*
+4. Giải thích lý do `acct.Deposit(50)` biên dịch ngon lành dù `Deposit` nhận `*Account`, nhưng gán `var d Depositer = Account{}` lại báo lỗi compiler? *(Xem Mục 4)*
+5. Nhìn vào hai trường 8-byte của `iface{tab, data}`, hãy lý giải vì sao hàm khai báo trả `error` mà lỡ `return (*os.PathError)(nil)` lại khiến `if err != nil` nhảy vào nhánh lỗi! *(Xem Mục 5)*
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Bảng `itab`**: bảng tra cứu runtime được cache sẵn nối giữa một Interface (`Depositer`) với một kiểu thật (`*Account`) kèm danh sách địa chỉ hàm để gọi trực tiếp.
+- **Typed-`nil` interface**: biến interface đang chứa kiểu cụ thể trong `tab` dù phần dữ liệu `data == nil`, làm `err != nil` trả về đúng một cách oan uổng.
+- **Consumer-side interface**: thiết kế Interface đặt ngay tại bên sử dụng với đúng 1–2 hàm tối thiểu nó cần, giúp giảm phụ thuộc chéo và dễ mock test.
+- **`cmp.Ordered`**: ràng buộc Generic có sẵn trong thư viện chuẩn đại diện cho các kiểu so sánh `< >` được (`int`, `float64`, `string`) mà không cần reflection.
+
+</Concepts>
+
+</Vi>
