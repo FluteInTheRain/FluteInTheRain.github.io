@@ -123,8 +123,10 @@ Instead of quoting theoretical numbers, run a quick local reproduction script (N
    - For video references, run `youtube_helper.py search "<topic>"` and `youtube_helper.py transcript <id>` to inspect speaker explanations and pick exact timestamps.
 
 3. **Download / clip and visually verify (Mandatory):**
-   - Download 1–3 top image candidates to `src/assets/blog/<post-slug>/<name>.png`.
-   - **Open every downloaded PNG (and any generated `-poster.jpg`) with `Read`** to inspect it yourself. If an image is blurry, cropped badly, unreadable in a 760px column, or looks like marketing fluff, delete it (`rm`) and pick another.
+   - Aim for **3–5 verified real-world visuals per post** (4–5 for visual-first topics like `ui-ux` / `frontend`), balancing: (1) 1 striking Hero Visual Metaphor, (2) live production UI/docs screenshots (`fetch_real_image.py screenshot` / `extract`), and (3) real-world physical analogies/metaphors (hardware, architecture, print/editorial craft from Wikimedia Commons).
+   - Pair real-world visuals with **4–6 on-page Astro SVG before/after figures** and **1–2 interactive React playgrounds** (`2` for `ui-ux` / `frontend`) so readers can see and toggle each concept live.
+   - Download top image candidates to `src/assets/blog/<post-slug>/<name>.png` (or `.jpg`).
+   - **Open every downloaded image (and any generated `-poster.jpg`) with `Read`** to inspect it yourself. If an image is blurry, cropped badly, unreadable in a 760px column, or looks like marketing fluff, delete it (`rm`) and pick another.
 
 4. **Embed and attribute (always on one line per tag):**
    - **Image (`<Figure />`):**
@@ -172,13 +174,13 @@ Instead of quoting theoretical numbers, run a quick local reproduction script (N
      </TerminalOutput>
      ```
    - **Interactive React Mini-Playground (`<DemoFrame />`):**
-     When a concept is best understood by clicking through states or comparing two modes (like out-of-order event merging or pagination drift), build a lightweight React component under `src/components/demos/<Name>Demo.tsx` reusing the `.sd`, `.sd-controls`, `.sd-group`, `.sd-btn`, `.sd-stats`, `.sd-stat` classes in `src/styles/style.css`, and embed it with `client:only="react"`:
+     When a concept is best understood by clicking through states, sliding a parameter, or comparing before/after modes (like color-blindness simulation, light vs. dark elevation, user-upload cropping, or out-of-order event merging), build a lightweight React component under `src/components/demos/<Name>Demo.tsx` reusing the `.sd`, `.sd-controls`, `.sd-group`, `.sd-btn`, `.sd-stats`, `.sd-stat` classes in `src/styles/style.css`, keep the initial render deterministic (to avoid hydration mismatch), and embed it with `client:visible`:
      ```mdx
      import DemoFrame from '../../components/mdx/DemoFrame.astro';
      import MyTopicDemo from '../../components/demos/MyTopicDemo.tsx';
 
      <DemoFrame title="Short title of what the reader is testing">
-       <MyTopicDemo client:only="react" />
+       <MyTopicDemo client:visible />
      </DemoFrame>
      ```
    - Keep `<Figure />`, `<YouTube />`, `<Video />`, `<LinkCard />`, and the opening/closing tags of `<En>`, `<Vi>`, `<GitHubCode>`, `<QuoteCard>`, `<TerminalOutput>`, and `<DemoFrame>` on **their own single lines** (so `humanizer` and build checks preserve them cleanly).

@@ -44,7 +44,11 @@ Do the 8 steps in order. Steps 3 and 4 wait for Khang. Do not skip ahead.
    python3 .claude/skills/enrich-post/scripts/youtube_helper.py transcript "<video-id>" --query "<keyword>"
    python3 .claude/skills/enrich-post/scripts/artifact_helper.py hn-search "<topic>" --limit 5
    ```
-   Or search web/Wikimedia images (`fetch_real_image.py search`), fetch real open-source examples (`artifact_helper.py github-snippet`), or run a local micro-benchmark for `<TerminalOutput />`. Note 1–2 strong real-world visuals, talk segments, or authentic artifacts (with `sourceTitle` and `sourceUrl`) to propose in Step 4 alongside Excalidraw diagrams.
+   Or search web/Wikimedia images (`fetch_real_image.py search`), fetch real open-source examples (`artifact_helper.py github-snippet`), or run a local micro-benchmark for `<TerminalOutput />`. Aim for **3–5 strong real-world visuals** (4–5 for visual-first topics like `ui-ux` or `frontend`), mixing:
+   - 1 striking **Hero Visual Metaphor** (physical-world analogy or historical artifact);
+   - 1–2 **live production screenshots** (official docs, real product UIs, benchmarks, or design systems via `fetch_real_image.py screenshot` / `extract`);
+   - 1–2 **real-world photos / analogies** (hardware, architecture, print/editorial craft, Wikimedia Commons) that make abstract concepts click immediately by eye.
+   Note them (with `sourceTitle` and `sourceUrl`) to propose in Step 4 alongside on-page diagrams and interactive playgrounds.
 4. Paraphrase prose only. Never copy sentences.
 5. Keep a list of the articles you actually use: title and `url` (and author when clear). Every one of them goes into `sources`; articles you read but did not use do not.
 6. Where an article disagrees with the book or shows the book is dated, note it for Step 4.
@@ -150,9 +154,13 @@ Pick the tool:
 
 1. **Charts, numbers, distributions, formulas, timelines → static Astro SVG component** (default). Compute the data in the frontmatter (seeded PRNG so every build is identical); never hard-code a picture of numbers.
 2. **Architecture / data-flow diagrams → static Astro SVG component, or `<AnimatedFlow />`** when the point is the order of steps or where it gets congested. Give every component a **colour icon**, not a monochrome line icon: the real product logo when the node is a real product (Redis, PostgreSQL, Kafka, NGINX, AWS S3/Lambda/EC2...), a flat colour pictogram otherwise (people, phone, star, gear...). Icons are SVG files in `public/icons/flow/<key>.svg`, rendered with `<image href>`; `public/icons/flow/README.md` lists each file's source. To add one, take it from the Iconify JSON packages `@iconify-json/logos` (CC0), `@iconify-json/fluent-emoji-flat` (MIT) or `@iconify-json/flat-color-icons` (MIT), write `<svg viewBox="left top width height">body</svg>`, add a row to the README and the key to `NODE_ICONS` in `AnimatedFlow.tsx`. Check dark mode: a black logo needs the light disc behind it (`.flow-node-icon-bg`).
-3. **"Try it" explanations → React island** (`client:visible`) when moving a parameter teaches more than a still picture. First render must be deterministic (seeded) to avoid hydration mismatch.
-4. **Hand-drawn mental models → Excalidraw** (`excalidraw-diagram` skill, site colors from `style-guide.md`), rendered to PNG and embedded with `<Figure />`. Use sparingly.
-5. **Cloud infrastructure with vendor icons → `mingrammer/diagrams` (Python)** PNG via `<Figure />`, only when official AWS/GCP/K8s icons are the point.
+3. **"Try it" explanations → React island** (`client:visible`, inside `<DemoFrame>`) when moving a slider, toggling a mode, or comparing before/after teaches more than a still picture. First render must be deterministic (seeded) to avoid hydration mismatch. Target **2 interactive playgrounds per post** for visual-first topics (`ui-ux`, `frontend`) and **at least 1** for system/backend topics.
+4. **Visual density target per post** (applied symmetrically in both `<En>` and `<Vi>`):
+   - **Real-world visuals (`<Figure />` with `sourceTitle`/`sourceUrl`)**: 3–5 per post (4–5 for `ui-ux` / `frontend` — 1 hero metaphor + real production UI/docs screenshots + physical-world analogies).
+   - **On-page Astro SVG figures**: 4–6 per post (5–6 for `ui-ux`, emphasizing concrete UI before/after showdowns so readers understand by eye without relying on prose alone).
+   - **Interactive React demos (`<DemoFrame>`)**: 1–2 per post (2 for `ui-ux` / `frontend`).
+5. **Hand-drawn mental models → Excalidraw** (`excalidraw-diagram` skill, site colors from `style-guide.md`), rendered to PNG and embedded with `<Figure />`. Use sparingly.
+6. **Cloud infrastructure with vendor icons → `mingrammer/diagrams` (Python)** PNG via `<Figure />`, only when official AWS/GCP/K8s icons are the point.
 
 Rules for every on-page figure:
 
