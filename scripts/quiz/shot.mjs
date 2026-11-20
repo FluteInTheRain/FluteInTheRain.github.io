@@ -67,7 +67,7 @@ await sleep(3000);
 
 const hasSet = await ev(`Boolean(document.querySelector('[data-set="${setId}"]'))`);
 if (!hasSet) { console.error(`no such set on the page: ${setId}`); done(1); }
-await ev(`(() => { const s = document.createElement('style'); s.textContent = 'astro-dev-toolbar{display:none !important} header.nav, .nav{position:static !important}'; document.head.append(s); })()`);
+await ev(`(() => { const s = document.createElement('style'); s.textContent = 'astro-dev-toolbar{display:none !important} header.nav, .nav{position:static !important} .quiz-context{max-height:none !important;overflow:visible !important;position:static !important}'; document.head.append(s); })()`);
 await ev(`document.querySelector('[data-goto-set="${setId}"]').click()`);
 await sleep(600);
 const SET = `[data-set="${setId}"]`;
