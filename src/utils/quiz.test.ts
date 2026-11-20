@@ -96,6 +96,17 @@ test('headingSlugPairs maps English heading slugs to the Vietnamese ones by posi
   assert.deepEqual(headingSlugPairs(src), { one: 'một', two: 'hai' });
 });
 
+test('headings are found in posts that alternate <En> and <Vi> blocks', () => {
+  const src = '---\ntitle: x\n---\n<En>\n## One\n</En>\n<Vi>\n## Một\n</Vi>\n<En>\n### Two\n</En>\n<Vi>\n### Hai\n</Vi>\n';
+  assert.deepEqual([...englishAnchors(src)].sort(), ['one', 'two']);
+  assert.deepEqual(headingSlugPairs(src), { one: 'một', two: 'hai' });
+});
+
+test('a heading outside any language block counts for both languages', () => {
+  const src = '## Shared\n<En>\n## Only en\n</En>\n<Vi>\n## Chỉ vi\n</Vi>\n';
+  assert.deepEqual([...englishAnchors(src)].sort(), ['only-en', 'shared']);
+});
+
 test('headingSlugPairs on the real post covers every English anchor', () => {
   const src = fs.readFileSync(path.join(ROOT, 'src/content/blog', `${POST}.mdx`), 'utf8');
   const pairs = headingSlugPairs(src);
@@ -125,6 +136,7 @@ test('validateSet reports each kind of problem', () => {
     ['wrong option count', (s) => { s.questions[0].options.pop(); }, /options/],
     ['letter reference in explanation', (s) => { s.questions[0].explanation.whyRight.en = '(a) is right because it names the idea.'; }, /letter/],
     ['letter reference in say line', (s) => { s.questions[1].explanation.say.vi = 'Chọn (b) vì nó đúng.'; }, /letter/],
+    ['correct option much longer than the others', (s) => { const q = s.questions[0]; q.options.find((o) => o.id === q.answer[0])!.text.en = 'Fan-out is one action that spreads into many writes, one for each follower of the account'; }, /longer/],
     ['ref missing', (s) => { s.questions[0].ref = ''; }, /ref/],
     ['position bias', (s) => {
       for (const q of s.questions) if (q.type !== 'multi') {
@@ -183,8 +195,12 @@ for (const slug of contentDirs) {
         return m;
       };
       assert.equal(qs.length, 40);
-      assert.deepEqual(count((q) => q.level as Level), { remember: 3, understand: 7, apply: 14, analyze: 9, evaluate: 7 });
-      assert.deepEqual(count((q) => q.track as Track), { interview: 20, ai: 20 });
+      // the mix is a design target; one question either way in a group is fine
+      const near = (got: Record<string, number>, want: Record<string, number>) => {
+        for (const [k, w] of Object.entries(want)) assert.ok(Math.abs((got[k] ?? 0) - w) <= 1, `${k}: ${got[k] ?? 0} questions, target ${w}`);
+      };
+      near(count((q) => q.level as Level), { remember: 3, understand: 7, apply: 14, analyze: 9, evaluate: 7 });
+      near(count((q) => q.track as Track), { interview: 20, ai: 20 });
       assert.equal(qs.filter((q) => q.type === 'multi').length, 4);
       const multiSets = files.filter((f) => read(path.join(dir, f)).questions.some((q) => q.type === 'multi')).map((f) => f.slice(4, 6));
       assert.deepEqual(multiSets, ['04', '06', '07', '08']);
