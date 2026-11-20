@@ -15,10 +15,8 @@ if (root) {
   const sets = [...root.querySelectorAll<HTMLElement>('.quiz-set')];
   const questions = [...root.querySelectorAll<HTMLElement>('.quiz-q')];
   const summary = root.querySelector<HTMLElement>('[data-summary]')!;
-  const progressBox = root.querySelector<HTMLElement>('[data-progress]')!;
-  const progressBar = root.querySelector<HTMLElement>('[data-progress-bar]')!;
-  const progressDone = root.querySelector<HTMLElement>('[data-progress-done]')!;
-  const setsNav = root.querySelector<HTMLElement>('[data-sets-nav]')!;
+  const progressBox = root.querySelector<HTMLElement>('[data-bar]')!;
+    const progressDone = root.querySelector<HTMLElement>('[data-progress-done]')!;
   const chips = [...root.querySelectorAll<HTMLButtonElement>('[data-goto-set]')];
 
   const qChips = [...root.querySelectorAll<HTMLButtonElement>('[data-goto-q]')];
@@ -98,7 +96,6 @@ if (root) {
   function updateProgress() {
     const done = questions.filter(isAnswered).length;
     progressDone.textContent = String(done);
-    progressBar.style.width = `${(done / questions.length) * 100}%`;
     chips.forEach((chip) => {
       const set = sets.find((s) => s.dataset.set === chip.dataset.gotoSet);
       const qs = set ? [...set.querySelectorAll<HTMLElement>('.quiz-q')] : [];
@@ -116,6 +113,7 @@ if (root) {
     summary.hidden = true;
     questions.forEach((q, k) => q.classList.toggle('is-current', k === i));
     qChips.forEach((chip) => chip.classList.toggle('is-current', chip.dataset.gotoQ === questions[i].dataset.q));
+    root.querySelectorAll('[data-q-now]').forEach((el) => { el.textContent = String(i + 1); });
     const set = setOf(questions[i]);
     sets.forEach((s) => s.classList.toggle('is-current', s === set));
     chips.forEach((chip) => chip.classList.toggle('is-current', chip.dataset.gotoSet === set.dataset.set));
@@ -231,7 +229,6 @@ if (root) {
   // ---- start
   root.classList.add('js-quiz');
   progressBox.hidden = false;
-  setsNav.hidden = false;
   qNavs.forEach((n) => { n.hidden = false; });
   questions.forEach((q) => {
     resetQuestion(q);
