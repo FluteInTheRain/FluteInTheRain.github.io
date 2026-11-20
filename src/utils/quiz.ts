@@ -92,6 +92,15 @@ export function validateSet(set: QuizSet, postAnchors: Set<string>): string[] {
     const anchor = q.explanation?.reread?.anchor;
     if (!anchor || !postAnchors.has(anchor)) add(`${w}: reread anchor "${anchor}" is not a heading of the post`);
 
+    // options are shuffled on the page, so "(a)" in an explanation would point at the wrong option
+    const prose = [q.explanation?.whyRight, q.explanation?.say, ...Object.values(q.explanation?.whyWrong ?? {})];
+    for (const t of prose) {
+      if (/\((?:[a-e])\)|\boption [a-e]\b/i.test(`${t?.en ?? ''} ${t?.vi ?? ''}`)) {
+        add(`${w}: an explanation refers to an option by letter; quote the option text instead`);
+        break;
+      }
+    }
+
     if (/interviewer/i.test(q.stem?.en ?? '') || /người phỏng vấn/i.test(q.stem?.vi ?? '')) {
       add(`${w}: stem uses interviewer framing; ask the question directly`);
     }

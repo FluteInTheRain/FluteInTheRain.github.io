@@ -135,6 +135,8 @@ test('validateSet reports each kind of problem', () => {
     ['unknown anchor', (s) => { s.questions[0].explanation.reread.anchor = 'no-such-heading'; }, /anchor/],
     ['bad question id', (s) => { s.questions[1].id = 's00q9'; }, /id/],
     ['wrong option count', (s) => { s.questions[0].options.pop(); }, /options/],
+    ['letter reference in explanation', (s) => { s.questions[0].explanation.whyRight.en = '(a) is right because it names the idea.'; }, /letter/],
+    ['letter reference in say line', (s) => { s.questions[1].explanation.say.vi = 'Chọn (b) vì nó đúng.'; }, /letter/],
     ['ref missing', (s) => { s.questions[0].ref = ''; }, /ref/],
     ['position bias', (s) => {
       for (const q of s.questions) if (q.type !== 'multi') {
