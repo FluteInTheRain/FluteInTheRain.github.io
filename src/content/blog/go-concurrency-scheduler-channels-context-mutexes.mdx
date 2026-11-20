@@ -31,6 +31,8 @@ import GoConcNilChannelSelect from '../../components/mdx/GoConcNilChannelSelect.
 import GoConcRaceVsCondition from '../../components/mdx/GoConcRaceVsCondition.astro';
 import GoConcSelectLifecycleDemo from '../../components/mdx/GoConcSelectLifecycleDemo.astro';
 import GoConcSyncTraps from '../../components/mdx/GoConcSyncTraps.astro';
+import GoContextCancelDemo from '../../components/mdx/GoContextCancelDemo.astro';
+import QuoteCard from '../../components/mdx/QuoteCard.astro';
 import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
 import Vi from '../../components/mdx/Vi.astro';
 import YouTube from '../../components/mdx/YouTube.astro';
@@ -49,7 +51,7 @@ import signalBox from '../../assets/blog/go-concurrency-scheduler-channels-conte
 
 Prefixing a function call with `go` takes two characters. Because goroutines start at ~2 KiB of stack and spawn in microseconds, developers and AI tools alike sprinkle `go` across handlers, batch loops, and divide-and-conquer helpers assuming free speedups.
 
-Under real traffic, three surprises surface: splitting tiny CPU jobs across goroutines actually runs *orders of magnitude slower*, passing `r.Context()` into a background task kills it the instant the HTTP response goes out, and calling `fmt.Sprintf` while holding a mutex can lock an entire cluster—just as happened in a well-known `etcd` deadlock. This post covers four pillars to make concurrent Go predictable:
+Now that we know how goroutines, `sync.WaitGroup`, channels, `select`, and `context.Context` work at the syntax level, let's step inside Go's **GMP scheduler** to prevent the four hidden production traps that break concurrent Go under real traffic:
 
 1. **Concurrency vs. parallelism & the GMP scheduler**: how Go maps goroutines onto OS threads and why bounded granularity beats naive fan-out.
 2. **Channels vs. mutexes, and data races vs. race conditions**: why passing `go test -race` still leaves ordering bugs wide open.
@@ -88,6 +90,14 @@ Go implements this separation with the **G-M-P scheduler**:
 - **P**: a Logical Processor whose count defaults to `GOMAXPROCS` (matching available CPU cores).
 
 <GoConcGmpScheduler />
+
+Tracing what happens inside GMP across two distinct I/O situations clears up most newcomer confusion about Go threads:
+
+| Event inside Running Goroutine `G1` (on `P1` + OS Thread `M1`) | What Happens to OS Thread `M1` | What Happens to Logical `P1` | Where `G1` Waits Until Ready Again |
+| :--- | :--- | :--- | :--- |
+| **Non-blocking network read** (`net.Conn.Read` hits `EAGAIN`) | **`M1` stays free** and immediately switches to runnable `G2` from `P1`'s `[256]G` local ring queue | **`P1` stays wired to `M1`** with zero kernel thread spawn | Parked cleanly on OS **`netpoller`** (`epoll` / `kqueue`) consuming 0 OS threads |
+| **Blocking disk syscall** (`os.ReadFile` / CGO blocking call) | **`M1` sleeps inside the OS kernel** waiting for disk blocks | **Syscall handoff**: sysmon/runtime detaches `P1` (`handoffp`) onto an idle/new **`M2`** so CPU keeps busy | `G1` stays paused attached to `M1`, then queues back via runqueue once syscall completes |
+| **`P1`'s local `[256]G` ring hits empty** | Checks global runqueue first (every 61 scheduler ticks to prevent starvation), then netpoller | **`P2` work stealing**: steals half of another busy `P`'s local queue rather than parking idle | Newly stolen `G` executes immediately on `P1` across cores |
 
 Inside `src/runtime/runtime2.go`, Go tracks exact processor and lock states so an `M` blocked on a synchronous disk syscall can detach from its `P` and let another thread pick up runnable goroutines—while network sockets park inside the OS netpoller without holding an OS thread at all:
 
@@ -269,6 +279,22 @@ if err := g.Wait(); err != nil {
 
 <GoConcSyncTraps />
 
+| Sync Primitive | Best Fits When | Internal Cost / Contention | Hidden Deadlock or Leak Risk |
+| :--- | :--- | :--- | :--- |
+| **`sync.Mutex`** | Writes ~20%+ of calls or small fast critical blocks | ~15 ns uncontended atomic CAS | Copying by value or recursive `fmt.Sprintf` `String()` |
+| **`sync.RWMutex`** | Read-heavy config/maps (95%+ reads, tiny reads) | Atomic reader counter + writer gate | Recursive `RLock -> Lock -> RLock` starves/deadlocks |
+| **`sync.Map`** | Append-mostly caches or disjoint per-key counters | Amortized lock-free fast path reads | Slower than `Mutex + map` on heavy multi-key writes |
+| **`sync/atomic`** | Monotonic counters, health flags, pointer swap | ~2–5 ns single CPU lock-free ops | Non-atomic across *two* separate fields |
+| **`errgroup.Group`** | Bounded fan-out returning first error (`SetLimit`) | Shares cancellation context cleanly | Unbounded spawning if `SetLimit` omitted |
+
+<QuoteCard author="The Go Memory Model" role="Go Team Reference" sourceTitle="The Go Memory Model" sourceUrl="https://go.dev/ref/mem">
+If you must read the rest of the document to understand the behavior of your program, you are being too clever. Don't be clever. Synchronize shared memory cleanly with explicit locks, channels, or atomics.
+</QuoteCard>
+
+Step through `r.Context()` background aborts, `context.WithoutCancel(ctx)`, and `RWMutex` recursive deadlock interactively below:
+
+<GoContextCancelDemo />
+
 <Callout type="tip" title="Always gate CI with -race">
 Run `go test -race ./...` in CI on concurrent packages (`#83`). The race detector instruments memory accesses at runtime and catches concurrent slice `append` overwrites and unsynchronized map writes immediately—remembering only that a clean `-race` run rules out data races, not logical race conditions.
 </Callout>
@@ -313,7 +339,7 @@ Run `go test -race ./...` in CI on concurrent packages (`#83`). The race detecto
 
 Gõ từ khóa `go` trước một lời gọi hàm chỉ tốn hai ký tự. Vì mỗi goroutine mới mở chỉ tốn khoảng 2 KiB stack và khởi tạo trong vài micro giây, cả dev lẫn AI rất hay rải `go` vào đủ mọi vòng lặp hay hàm đệ quy với hy vọng code sẽ chạy nhanh hơn.
 
-Tới lúc tải thật đổ vào, ba rắc rối thường xuất hiện ngay: chia việc CPU nhỏ quá qua goroutine làm nó chạy *chậm hơn cả chục lần* so với chạy tuần tự, chuyền thẳng `r.Context()` vào job chạy nền khiến job chết ngay khi HTTP trả response, và gọi `fmt.Sprintf` trong lúc đang giữ `Mutex` làm đứng hình cả cụm như bug từng xảy ra ở `etcd`. Bài này gom lại bốn điểm cốt lõi khi làm concurrency trong Go:
+Từ nền tảng goroutine, channel, `select` và `context.Context` ở bài trước, bước xuống tầng điều phối thật sẽ thấy ngay ba cái bẫy khi tải đổ vào: chia việc quá vụn chạy *chậm hơn cả chục lần*, giữ nguyên `r.Context()` cho tác vụ nền làm nó chết ngay lúc HTTP trả response, hay gọi `fmt.Sprintf` trong lúc giữ `Mutex` gây deadlock cả cụm như lỗi `etcd`. Bài này gom bốn điểm cốt lõi về concurrency trong Go:
 
 1. **Concurrency vs. Parallelism & GMP Scheduler**: Go xếp hàng chục ngàn goroutine lên OS thread như thế nào và vì sao cần chọn đúng mức chia nhỏ công việc.
 2. **Channel vs. Mutex, Data Race vs. Race Condition**: vì sao `go test -race` báo xanh nhưng logic vẫn có thể ra kết quả sai khi chạy thật.
@@ -352,6 +378,14 @@ Go hiện thực hóa chuyện đó bằng mô hình **G-M-P**:
 - **P**: Logical Processor đóng vai trò điều phối, mặc định bằng `GOMAXPROCS` (số nhân CPU).
 
 <GoConcGmpScheduler />
+
+Theo dõi sát điều gì xảy ra với **`G1`**, **`M1`** và **`P1`** trong hai tình huống chờ I/O khác nhau sẽ giải đáp câu hỏi kinh điển của người mới — *"tại sao Go mở 50.000 HTTP connection mà không nổ ngàn OS thread?"*:
+
+| Sự kiện bên trong Goroutine `G1` (đang chạy trên `P1` + Thread `M1`) | Số phận OS Thread `M1` | Số phận Logical Processor `P1` | `G1` nằm chờ ở đâu tới lúc chạy tiếp? |
+| :--- | :--- | :--- | :--- |
+| **Đọc socket mạng** (`net.Conn.Read` gặp `EAGAIN`) | **`M1` được giải phóng tức thì** và bốc ngay `G2` trong hàng đợi cục bộ `[256]G` của `P1` | **`P1` giữ nguyên trên `M1`**, không cần đẻ OS thread mới | Nằm gọn trong hàng đợi **`netpoller`** (`epoll`/`kqueue`), ngốn `0` OS thread |
+| **Syscall đọc đĩa / Cgo chặn đồng bộ** (`os.ReadFile`) | **`M1` ngủ thật trong kernel OS** đợi ổ cứng trả dữ liệu | **Cơ chế tách cặp (`handoffp`)**: runtime tách `P1` sang thread `M2` rảnh khác để nhân CPU không ngồi chơi | `G1` kẹt kèm `M1`; xong syscall lại xếp về hàng đợi cục bộ / toàn cục |
+| **Hàng đợi cục bộ `[256]G` của `P1` cạn sạch** | Kiểm tra hàng đợi toàn cục (cứ mỗi 61 nhịp lịch để tránh bỏ đói `G` cũ), rồi hỏi netpoller | **Work stealing**: `P1` thò sang hàng đợi của một `P` khác đang bận và kéo một nửa số `G` về chạy | Các `G` vừa trộm sang lập tức chạy trên nhân CPU của `P1` |
 
 Trong `src/runtime/runtime2.go`, Go theo dõi trạng thái từng `P` để hễ một `M` bị kẹt vào syscall đọc đĩa, `P` tách ngay khỏi `M` đó và chuyển sang một `M` rảnh khác — riêng I/O mạng đi qua `netpoller` nên hàng chục ngàn kết nối chờ mạng không hề ngốn mất OS thread:
 
@@ -532,6 +566,22 @@ if err := g.Wait(); err != nil {
 ```
 
 <GoConcSyncTraps />
+
+| Công cụ Đồng bộ | Phù hợp nhất cho | Chi phí / Độ tranh chấp | Rủi ro Deadlock hoặc Rò rỉ ẩn |
+| :--- | :--- | :--- | :--- |
+| **`sync.Mutex`** | Tỉ lệ ghi >= 20% hoặc đoạn critical ngắn | ~15 ns atomic CAS khi ít đụng | Copy struct theo giá trị hoặc gọi `fmt.Sprintf` lồng khóa |
+| **`sync.RWMutex`** | Bảng cấu hình/cache đọc cực nhiều (>95% đọc) | Đếm reader bằng atomic + chặn writer | Gọi `RLock` lồng nhau khi có writer chờ gây Deadlock |
+| **`sync.Map`** | Cache ít đổi key hoặc từng core ghi key rời | Đọc lock-free nhanh trên đường nóng | Chậm hơn `Mutex + map` khi cập nhật ghi liên tục |
+| **`sync/atomic`** | Bộ đếm đơn, cờ healthcheck, tráo con trỏ | ~2–5 ns 1 lệnh CPU không cần lock | Tách rời *hai* biến atomic dễ mất tính nhất quán |
+| **`errgroup.Group`** | Fan-out có giới hạn worker (`SetLimit`) | Tự hủy anh em qua `ctx` khi lỗi đầu nổ | Quên đặt `SetLimit` vẫn gây nổ goroutine |
+
+<QuoteCard author="The Go Memory Model" role="Tài liệu Chuẩn Nhóm Go" sourceTitle="The Go Memory Model" sourceUrl="https://go.dev/ref/mem">
+Nếu bạn phải đọc hết toàn bộ tài liệu mô hình bộ nhớ cấp thấp mới hiểu nổi chương trình mình viết chạy thế nào thì tức là code đang quá lắt léo rồi. Đừng viết lắt léo — hãy đồng bộ bộ nhớ tường minh bằng khóa, channel hoặc atomic chuẩn chỉnh.
+</QuoteCard>
+
+Bấm xem trực tiếp kịch bản `r.Context()` hủy ngang job nền, `context.WithoutCancel(ctx)` và chuỗi deadlock của `RWMutex` bên dưới:
+
+<GoContextCancelDemo />
 
 <Callout type="tip" title="Nhớ bật -race trong CI">
 Cho chạy `go test -race ./...` tự động trên CI với mọi package có concurrency (`#83`). Cờ `-race` bắt được ngay mấy lỗi ghi/đọc đụng nhau kể cả kiểu `append` chung backing array — chỉ cần lưu ý `-race` chỉ bắt data race ở tầng bộ nhớ chứ không phát hiện được race condition ở tầng logic.

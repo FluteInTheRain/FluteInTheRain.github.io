@@ -588,10 +588,18 @@ const ddia: Series = {
 };
 
 const G = {
+  fundBasics: 'go-fundamentals-toolchain-modules-packages-types',
+  fundComposite: 'go-fundamentals-composite-types-structs-methods-interfaces',
+  fundConcurrency: 'go-fundamentals-errors-concurrency-goroutines-channels-testing',
   memory: 'go-memory-data-types-slices-maps-strings',
   abstractions: 'go-abstractions-interfaces-generics-errors',
   concurrency: 'go-concurrency-scheduler-channels-context-mutexes',
   production: 'go-production-stdlib-cpu-cache-gc-kubernetes',
+  workflow: 'go-efficiency-workflow-raer-tfbo-hardware-memory',
+  hardware: 'go-hardware-cpu-caches-virtual-memory-gc-allocator',
+  benchmarking: 'go-observability-metrics-microbenchmarks-benchstat',
+  profiling: 'go-profiling-pprof-flamegraphs-off-cpu-continuous',
+  patterns: 'go-three-rs-optimization-patterns-streaming-pooling',
 };
 
 const golang: Series = {
@@ -600,29 +608,29 @@ const golang: Series = {
     en: 'How Go actually works',
     vi: 'Hiểu đúng bản chất Golang',
   },
-  kicker: { en: 'A 4-part series', vi: 'Series 4 bài' },
+  kicker: { en: 'A 12-part series', vi: 'Series 12 bài' },
   tagline: {
-    en: 'What you still need to know about memory, interfaces, concurrency, and production when AI writes the code.',
-    vi: 'Những thứ về bộ nhớ, interface, concurrency và vận hành mà bạn vẫn phải nắm khi AI đã viết hộ phần code.',
+    en: 'A step-by-step path from Go basics to runtime traps and data-driven performance optimization.',
+    vi: 'Đi trọn lộ trình từ Go cơ bản qua các bẫy ngầm runtime tới đo đạc và tối ưu hiệu năng có cơ sở.',
   },
   pitch: [
     {
-      en: 'AI can write a Go service for you in seconds. Still, it regularly lets sub-slices overwrite shared arrays, returns typed nil errors that pass != nil checks, drops goroutines when an HTTP request finishes, and ships http.DefaultClient with no timeout.',
-      vi: 'AI viết hộ bạn một service Go chỉ mất vài giây. Nhưng nó vẫn hay để slice con ghi đè mảng dùng chung, trả về con trỏ nil có kiểu khiến if err != nil chạy sai, làm rớt goroutine chạy nền khi HTTP request vừa xong, và dùng http.DefaultClient không hề có timeout.',
+      en: 'Learning Go is fast, yet jumping straight from syntax to production leaves dangerous blind spots: sub-slices overwriting shared arrays, typed nil errors passing != nil checks, dropped goroutines on HTTP timeouts, and megabytes of hidden heap garbage.',
+      vi: 'Học cú pháp Go chỉ mất vài ngày, nhưng nhảy thẳng ra làm dự án hay viết cùng AI rất dễ vướng bẫy: slice con ghi đè mảng gốc, lỗi typed nil vượt qua check err != nil, rò goroutine khi request tắt và đống rác heap làm GC khựng lại.',
     },
     {
-      en: 'Each post focuses on one layer — memory, interfaces and errors, concurrency, and production runtime — with diagrams, real benchmarks, and small simulators so you know what to check when reviewing Go code.',
-      vi: 'Mỗi bài đi gọn vào một tầng — bộ nhớ, thiết kế interface và lỗi, concurrency, rồi tới vận hành production — kèm sơ đồ, số đo thật trên máy và demo bấm thử để bạn biết chỗ nào cần soi khi đọc code Go.',
+      en: 'Parts 1–3 build Go fundamentals from zero (modules, types, pointers, interfaces, goroutines, tests); Parts 4–7 uncover subtle runtime mistakes; Parts 8–12 master data-driven optimization (RAER, TFBO, CPU caches/GC, benchstat, pprof/fgprof, and Three Rs streaming).',
+      vi: 'Phần 1–3 đi từ nền tảng Go cơ bản (module, con trỏ, slice, interface, goroutine, test); Phần 4–7 mổ xẻ các bẫy ngầm theo sách 100 Go Mistakes; Phần 8–12 khép trọn quy trình tối ưu theo Efficient Go (RAER, TFBO, phần cứng/GC, benchstat, pprof/fgprof và Three Rs).',
     },
   ],
   credit: {
-    en: 'Built on 100 Go Mistakes and How to Avoid Them by Teiva Harsanyi, with Go 1.27 benchmarks, runtime source references, and interactive tools.',
-    vi: 'Dựa trên cuốn 100 Go Mistakes and How to Avoid Them của Teiva Harsanyi, kèm số đo chạy thử trên Go 1.27, mã nguồn runtime và công cụ mô phỏng trực tiếp.',
+    en: 'Parts 1–3 draw on official Go docs (Effective Go, The Go Blog, Tour of Go); Parts 4–7 distill 100 Go Mistakes (Teiva Harsanyi); Parts 8–12 synthesize Efficient Go (Bartłomiej Płotka), verified with Apple M2 Go 1.27 benchmarks and interactive tools.',
+    vi: 'Phần 1–3 tổng hợp từ tài liệu chuẩn Go (Effective Go, The Go Blog); Phần 4–7 đúc kết từ 100 Go Mistakes (Teiva Harsanyi); Phần 8–12 dựa trên Efficient Go (Bartłomiej Płotka), chạy kiểm chứng trực tiếp trên Go 1.27 kèm mô phỏng tương tác.',
   },
   cover: {
     subtitle: {
-      en: 'Memory · Interfaces · Concurrency · Production',
-      vi: 'Bộ nhớ · Interface · Concurrency · Production',
+      en: 'Fundamentals · Internals · Benchmarking · Optimization',
+      vi: 'Cơ bản · Bản chất Runtime · Đo đạc · Tối ưu Go',
     },
     image: goGophers,
     alt: 'Three Go gophers gathered around an old reel-to-reel computer by Renee French.',
@@ -637,108 +645,206 @@ const golang: Series = {
   },
   outcomes: [
     {
-      en: 'Spot shared backing-array writes, substring leaks, and Go maps that hold onto peak RAM.',
-      vi: 'Nhìn ra lỗi slice ghi đè chéo, substring ghim RAM và Go map xóa key xong vẫn không trả bộ nhớ.',
+      en: 'Write idiomatic Go modules, slices, maps, interfaces, error wrapping, goroutines, and race-free table tests.',
+      vi: 'Viết chuẩn Go ngay từ đầu: module, slice, map, interface ngầm định, bọc lỗi %w, goroutine và unit test -race.',
     },
     {
-      en: 'Keep interfaces small on the caller side, dodge typed nil errors, and stop logging the same error three times.',
-      vi: 'Đặt interface gọn ở phía người gọi, né lỗi typed nil và hết cảnh log trùng một lỗi ở ba tầng.',
+      en: 'Catch shared slice mutations, typed nil errors, goroutine leaks, and missing HTTP/SQL timeouts cleanly.',
+      vi: 'Bắt ngay các lỗi slice đè chéo, typed nil, map không tự co, rò goroutine và thiếu timeout trên production.',
     },
     {
-      en: 'Use channels vs. mutexes intentionally and make sure every spawned goroutine knows when to stop.',
-      vi: 'Chọn đúng chỗ dùng mutex hay channel, và đảm bảo goroutine nào mở ra cũng có đường dừng rõ ràng.',
+      en: 'Reason about CPU L1 cache lines, compiler inlining/BCE, VSS vs RSS memory, and GOMEMLIMIT pacing.',
+      vi: 'Hiểu cơ chế phần cứng (L1 cache, trình biên dịch BCE/escape), bộ nhớ ảo VSS/RSS và nhịp dọn rác GC.',
     },
     {
-      en: 'Add HTTP/SQL timeouts, align structs to CPU cache lines, and stop Kubernetes from throttling your pods.',
-      vi: 'Cài đủ timeout cho HTTP/SQL, xếp lại trường struct cho nhẹ CPU cache và tránh pod bị bóp CPU trên Kubernetes.',
+      en: 'Prove speedups with benchstat, find bottlenecks via pprof/fgprof, and stream multi-GB files in 8 KB Heap.',
+      vi: 'Chứng minh hiệu năng bằng benchstat, soi đúng hàm nghẽn với pprof/fgprof và tối ưu streaming O(1) RAM.',
     },
   ],
   acts: [
     {
-      id: 'foundations',
-      label: { en: 'Memory & Design', vi: 'Bộ nhớ & Thiết kế' },
-      blurb: { en: 'Slices, maps, interfaces and errors', vi: 'Slice, map, interface và xử lý lỗi' },
+      id: 'basics',
+      label: { en: 'Core Syntax', vi: 'Go cơ bản' },
+      blurb: { en: 'Types, slices, errors & tests', vi: 'Cú pháp, kiểu, lỗi & test' },
     },
     {
-      id: 'concurrency',
-      label: { en: 'Concurrency', vi: 'Concurrency' },
-      blurb: { en: 'Scheduler, channels, context and locks', vi: 'Lập lịch, channel, context và khóa' },
+      id: 'internals',
+      label: { en: 'Internals & Bugs', vi: 'Lõi & Bẫy' },
+      blurb: { en: 'Slices, ifaces, GMP & K8s', vi: 'Slice, iface, GMP & K8s' },
     },
     {
-      id: 'production',
-      label: { en: 'Production', vi: 'Vận hành' },
-      blurb: { en: 'Stdlib timeouts, CPU cache, GC and K8s', vi: 'Thư viện chuẩn, CPU cache, GC và K8s' },
+      id: 'measurement',
+      label: { en: 'Measure First', vi: 'Đo & Phần cứng' },
+      blurb: { en: 'RAER, CPU/GC & benchstat', vi: 'RAER, CPU/GC & benchstat' },
+    },
+    {
+      id: 'optimization',
+      label: { en: 'Profile & Tune', vi: 'Soi & Tối ưu' },
+      blurb: { en: 'pprof, fgprof & Three Rs', vi: 'pprof, fgprof & Three Rs' },
     },
   ],
   parts: [
     {
+      slug: G.fundBasics,
+      topic: { en: 'Syntax & Types', vi: 'Cú pháp & Kiểu' },
+      hook: {
+        en: 'Design philosophy, modules & internal/, zero values, pass-by-value pointers, and LIFO defer.',
+        vi: 'Triết lý thiết kế, module/internal/, zero value sạch, con trỏ truyền tham trị và ngăn xếp defer.',
+      },
+      act: 'basics',
+      builds: [],
+    },
+    {
+      slug: G.fundComposite,
+      topic: { en: 'Structs & Map', vi: 'Struct & Slice' },
+      hook: {
+        en: 'Fixed arrays vs dynamic slices, preallocation, comma-ok maps, struct embedding, and implicit interfaces.',
+        vi: 'Phân biệt array với slice, cấp phát trước make(), tra map comma-ok, embedding và interface ngầm định.',
+      },
+      act: 'basics',
+      builds: [G.fundBasics],
+    },
+    {
+      slug: G.fundConcurrency,
+      topic: { en: 'Errors & Tests', vi: 'Lỗi & Goroutine' },
+      hook: {
+        en: 'Wrapping errors with %w, goroutines & WaitGroup, channels, select, context timeouts, and go test -race.',
+        vi: 'Bọc lỗi %w với errors.Is, goroutine, WaitGroup, channel/select, context timeout và test -race.',
+      },
+      act: 'basics',
+      builds: [G.fundBasics, G.fundComposite],
+    },
+    {
       slug: G.memory,
-      topic: { en: 'Memory & Types', vi: 'Bộ nhớ & Kiểu' },
+      topic: { en: 'Slice & Map', vi: 'Bộ nhớ & Map' },
       hook: {
         en: 'Slice headers, append overwrites, maps that never shrink, range value copies, and UTF-8 runes.',
         vi: 'Slice header, append ghi đè ngầm, map không tự co, range copy giá trị và chuỗi UTF-8.',
       },
-      act: 'foundations',
-      builds: [],
+      act: 'internals',
+      builds: [G.fundComposite],
     },
     {
       slug: G.abstractions,
-      topic: { en: 'Design & Errors', vi: 'Thiết kế & Lỗi' },
+      topic: { en: 'Design & Error', vi: 'Thiết kế & Lỗi' },
       hook: {
         en: 'Consumer interfaces, typed nil traps, type embedding, defer timing, and wrapping errors with %w.',
         vi: 'Interface phía người gọi, bẫy typed nil, type embedding, thời điểm chạy defer và bọc lỗi %w.',
       },
-      act: 'foundations',
-      builds: [G.memory],
+      act: 'internals',
+      builds: [G.fundComposite, G.fundConcurrency],
     },
     {
       slug: G.concurrency,
-      topic: { en: 'Concurrency', vi: 'Concurrency' },
+      topic: { en: 'GMP & Locks', vi: 'GMP & Locks' },
       hook: {
         en: 'The GMP scheduler, channels vs. mutexes, context cancellation, nil channels, and reentrant locks.',
         vi: 'Bộ lập lịch GMP, channel vs. mutex, hủy context, nil channel và lỗi tự khóa chính mình.',
       },
-      act: 'concurrency',
-      builds: [G.memory, G.abstractions],
+      act: 'internals',
+      builds: [G.fundConcurrency],
     },
     {
       slug: G.production,
-      topic: { en: 'Runtime & Ops', vi: 'Vận hành & CPU' },
+      topic: { en: 'Prod & K8s', vi: 'Prod & K8s' },
       hook: {
         en: 'HTTP/SQL timeouts, CPU cache lines, escape analysis, GC, and Kubernetes CFS throttling.',
         vi: 'Timeout HTTP/SQL, CPU cache line, escape analysis, GC và bóp CPU trên Kubernetes.',
       },
-      act: 'production',
+      act: 'internals',
       builds: [G.memory, G.concurrency],
+    },
+    {
+      slug: G.workflow,
+      topic: { en: 'RAER & TFBO', vi: 'RAER & TFBO' },
+      hook: {
+        en: 'Why scaling pods fails tail latency, written RAER budgets, 5 Optimization Design Levels, and TFBO.',
+        vi: 'Mở thêm pod không cứu được p99, đặt hợp đồng RAER, 5 Tầng thiết kế và quy trình TFBO 9 bước.',
+      },
+      act: 'measurement',
+      builds: [G.production],
+    },
+    {
+      slug: G.hardware,
+      topic: { en: 'CPU & GC RAM', vi: 'CPU & GC RAM' },
+      hook: {
+        en: 'L1 cache lines, Inlining & BCE flags, napkin math, Linux VSS vs RSS page faults, and GOMEMLIMIT.',
+        vi: 'Cache CPU 64B, cờ compiler Inlining/BCE, bộ nhớ ảo VSS/RSS, mcache và nhịp chạy GOGC/GOMEMLIMIT.',
+      },
+      act: 'measurement',
+      builds: [G.memory, G.workflow],
+    },
+    {
+      slug: G.benchmarking,
+      topic: { en: 'Benchstat', vi: 'Đo & Benchstat' },
+      hook: {
+        en: 'Prometheus RED/USE histograms, HeapInuse vs RSS, dead-code elimination lies, and benchstat p-values.',
+        vi: 'Prometheus RED/USE Histogram, HeapInuse vs RSS, bẫy compiler xóa code và đọc benchstat.',
+      },
+      act: 'measurement',
+      builds: [G.workflow, G.hardware],
+    },
+    {
+      slug: G.profiling,
+      topic: { en: 'pprof & fgprof', vi: 'pprof & fgprof' },
+      hook: {
+        en: 'Safe /debug/pprof ports, Flat vs Cum in Flame Graphs, alloc_space vs inuse_space, fgprof & Parca diffs.',
+        vi: 'Cổng /debug/pprof an toàn, đọc Flat/Cum trên Flame Graph, fgprof Off-CPU và Parca -diff_base.',
+      },
+      act: 'optimization',
+      builds: [G.benchmarking],
+    },
+    {
+      slug: G.patterns,
+      topic: { en: 'Three Rs & I/O', vi: 'Three Rs & I/O' },
+      hook: {
+        en: 'Cutting bytes.Split and strconv waste, 8 KB streaming, sharded SectionReaders, and sync.Pool cautions.',
+        vi: 'Bỏ bytes.Split & strconv chậm, streaming 8 KB cố định, chia khúc SectionReader và bẫy sync.Pool.',
+      },
+      act: 'optimization',
+      builds: [G.hardware, G.profiling],
     },
   ],
   paths: [
     {
       id: 'full',
-      label: { en: 'Read it all', vi: 'Đọc cả 4 bài' },
+      label: { en: 'Read it all (12 parts)', vi: 'Đọc trọn bộ 12 bài' },
       who: {
-        en: 'Start from memory layout and work all the way up to running Go in Kubernetes.',
-        vi: 'Đi từ cách Go xếp dữ liệu trong RAM cho tới lúc chạy service trên Kubernetes.',
+        en: 'Go from scratch all the way through internals, benchmarks, profiling, and Three Rs optimization.',
+        vi: 'Đi trọn lộ trình từ Go căn bản qua các bẫy ngầm tới đo đạc và tối ưu hiệu năng thực chiến.',
       },
-      order: [G.memory, G.abstractions, G.concurrency, G.production],
+      order: [
+        G.fundBasics, G.fundComposite, G.fundConcurrency,
+        G.memory, G.abstractions, G.concurrency, G.production,
+        G.workflow, G.hardware, G.benchmarking, G.profiling, G.patterns,
+      ],
     },
     {
-      id: 'ai-review',
-      label: { en: 'Reviewing AI-written Go', vi: 'Review code Go do AI viết' },
+      id: 'beginners',
+      label: { en: 'New to Go & Code Review (1–7)', vi: 'Người mới & Review AI (Bài 1–7)' },
       who: {
-        en: 'Catch the slice, interface, and goroutine bugs AI coding tools routinely slip past tests.',
-        vi: 'Bắt mấy lỗi về slice, interface và goroutine mà AI viết rất hay lọt qua test đơn giản.',
+        en: 'Master Go syntax, types, concurrency, and catch the bugs AI coding tools routinely slip in.',
+        vi: 'Nắm vững cú pháp, thiết kế kiểu, concurrency và bắt đúng lỗi mà AI rất hay viết lọt qua test.',
       },
-      order: [G.memory, G.abstractions, G.concurrency],
+      order: [G.fundBasics, G.fundComposite, G.fundConcurrency, G.memory, G.abstractions, G.concurrency, G.production],
+    },
+    {
+      id: 'efficient-go',
+      label: { en: 'Make slow Go fast (8–12)', vi: 'Tối ưu Go theo số đo (Bài 8–12)' },
+      who: {
+        en: 'Focus purely on Efficient Go: RAER, TFBO, CPU/GC hardware, benchstat, pprof/fgprof, and Three Rs.',
+        vi: 'Đi thẳng vào 5 bài Efficient Go: RAER, phần cứng/GC, benchstat, soi pprof và mẫu Three Rs.',
+      },
+      order: [G.workflow, G.hardware, G.benchmarking, G.profiling, G.patterns],
     },
     {
       id: 'oncall',
-      label: { en: 'Leaks & latency spikes', vi: 'Tìm lỗi ăn RAM & chậm p99' },
+      label: { en: 'Leaks & latency spikes', vi: 'Săn lỗi ăn RAM & chậm p99' },
       who: {
-        en: 'Service holding RAM or stalling under load? Focus on memory, concurrency, and runtime.',
-        vi: 'Service tụt hiệu năng hoặc ăn RAM không nhả? Đọc thẳng bộ nhớ, concurrency và vận hành.',
+        en: 'Service holding RAM or stalling under load? Inspect memory traps, K8s ops, profiles, and streaming.',
+        vi: 'Service tụt hiệu năng hoặc ăn RAM không nhả? Đọc thẳng bẫy RAM, K8s, phần cứng GC, pprof và streaming.',
       },
-      order: [G.memory, G.concurrency, G.production],
+      order: [G.memory, G.production, G.hardware, G.profiling, G.patterns],
     },
   ],
 };

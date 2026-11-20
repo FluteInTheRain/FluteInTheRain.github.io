@@ -1,0 +1,94 @@
+---
+// Line-by-line slice append aliasing bug vs full-slice expression a[:2:2] isolation.
+const W = 900;
+const H = 304;
+---
+<figure class="gfsa">
+  <div class="gfsa-scroll">
+    <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Diagram comparing slice append sharing the same backing array slot between b and c versus full slice expression a[:2:2] forcing clean allocation.">
+      {/* Left panel: Buggy shared backing array */}
+      <rect x="14" y="14" width="430" height="276" rx="10" class="gfsa-card" />
+      <text x="30" y="42" class="gfsa-h">
+        <tspan data-lang-en>1. Silent overwrite when spare cap remains</tspan>
+        <tspan data-lang-vi>1. Ghi đè chéo ngầm khi còn cap dự phòng</tspan>
+      </text>
+
+      <rect x="30" y="58" width="398" height="72" rx="6" class="gfsa-box" />
+      <text x="44" y="78" class="gfsa-code">a := make([]int, 2, 3)  // [1, 2, _]  len=2 cap=3</text>
+      <text x="44" y="98" class="gfsa-code">b := append(a, 10)      // writes 10 into index [2]</text>
+      <text x="44" y="118" class="gfsa-b-red">c := append(a, 20)      // OVERWRITES b[2] = 20!</text>
+
+      <text x="30" y="152" class="gfsa-m">
+        <tspan data-lang-en>Shared backing array at 0x..6090 (both b and c point here!):</tspan>
+        <tspan data-lang-vi>Mảng gốc dùng chung tại 0x..6090 (cả b và c cùng trỏ vào!):</tspan>
+      </text>
+      <rect x="30" y="164" width="120" height="44" rx="6" class="gfsa-box" />
+      <text x="90" y="191" text-anchor="middle" class="gfsa-b">[0] = 1</text>
+      <rect x="160" y="164" width="120" height="44" rx="6" class="gfsa-box" />
+      <text x="220" y="191" text-anchor="middle" class="gfsa-b">[1] = 2</text>
+      <rect x="290" y="164" width="138" height="44" rx="6" class="gfsa-box is-red" />
+      <text x="359" y="191" text-anchor="middle" class="gfsa-b-red">[2] = 20 (was 10!)</text>
+
+      <rect x="30" y="222" width="398" height="52" rx="6" class="gfsa-box is-red" />
+      <text x="44" y="244" class="gfsa-b-red">Result: b == [1 2 20]  &amp;&amp;  c == [1 2 20]</text>
+      <text x="44" y="263" class="gfsa-m">
+        <tspan data-lang-en>Mutating c silently corrupted sibling slice b (and races concurrently).</tspan>
+        <tspan data-lang-vi>Lệnh append vào c âm thầm đè mất số 10 của b vì còn cap dư.</tspan>
+      </text>
+
+      {/* Right panel: Safe isolation with full-slice expression */}
+      <rect x="462" y="14" width="424" height="276" rx="10" class="gfsa-card" />
+      <text x="478" y="42" class="gfsa-h">
+        <tspan data-lang-en>2. Safe isolation: full-slice expression a[:2:2]</tspan>
+        <tspan data-lang-vi>2. Tách mảng an toàn: biểu thức chốt cap a[:2:2]</tspan>
+      </text>
+
+      <rect x="478" y="58" width="392" height="72" rx="6" class="gfsa-box is-ok" />
+      <text x="492" y="78" class="gfsa-code">d := append(a[:2:2], 99) // cap=2 -> new array!</text>
+      <text x="492" y="98" class="gfsa-code">slices.Clone(a)          // also allocates fresh slice</text>
+      <text x="492" y="118" class="gfsa-b-ok">d moves to new heap array 0x..c080; b stays intact</text>
+
+      <text x="478" y="152" class="gfsa-m">
+        <tspan data-lang-en>Isolated backing array at 0x..c080 (zero sharing with b):</tspan>
+        <tspan data-lang-vi>Mảng mới hoàn toàn tại 0x..c080 (tách rời hẳn với mảng b):</tspan>
+      </text>
+      <rect x="478" y="164" width="120" height="44" rx="6" class="gfsa-box is-ok" />
+      <text x="538" y="191" text-anchor="middle" class="gfsa-b">[0] = 1</text>
+      <rect x="608" y="164" width="120" height="44" rx="6" class="gfsa-box is-ok" />
+      <text x="668" y="191" text-anchor="middle" class="gfsa-b">[1] = 2</text>
+      <rect x="738" y="164" width="132" height="44" rx="6" class="gfsa-box is-ok" />
+      <text x="804" y="191" text-anchor="middle" class="gfsa-b-ok">[2] = 99 (safe)</text>
+
+      <rect x="478" y="222" width="392" height="52" rx="6" class="gfsa-box is-ok" />
+      <text x="492" y="244" class="gfsa-b-ok">Result: b == [1 2 20]  &amp;&amp;  d == [1 2 99]</text>
+      <text x="492" y="263" class="gfsa-m">
+        <tspan data-lang-en>Measured Go 1.27: &amp;b[0]=0x..6090 vs &amp;d[0]=0x..c080.</tspan>
+        <tspan data-lang-vi>Đo thực tế Go 1.27: &amp;b[0]=0x..6090 khác hẳn &amp;d[0]=0x..c080.</tspan>
+      </text>
+    </svg>
+  </div>
+  <figcaption>
+    <span data-lang-en>Because append() writes straight into spare capacity whenever len &lt; cap, sub-slicing without pinning cap (:max) lets later appends overwrite sibling slices—and triggers subtle data races.</span>
+    <span data-lang-vi>Vì append() tận dụng ngay ô trống khi len &lt; cap, cắt sub-slice mà không khóa trần cap (:max) sẽ khiến lệnh append ở chỗ này ghi đè dữ liệu của slice anh em.</span>
+  </figcaption>
+</figure>
+
+<style>
+  .gfsa { margin: 2em 0; width: 100%; }
+  .gfsa-scroll { overflow-x: auto; }
+  .gfsa svg { display: block; width: 100%; min-width: 680px; height: auto; }
+  .gfsa text { font-size: 12px; fill: var(--text-body); font-variant-numeric: tabular-nums; }
+  .gfsa-card { fill: var(--bg-alt); stroke: var(--border); stroke-width: 1.5; }
+  .gfsa-box { fill: var(--bg); stroke: var(--border); stroke-width: 1.2; }
+  .gfsa-box.is-red { stroke: var(--red); fill: var(--red-tint-bg); }
+  .gfsa-box.is-ok { stroke: rgb(21, 128, 61); }
+  :global(html[data-theme='dark']) .gfsa-box.is-ok { stroke: rgb(74, 222, 128); }
+  .gfsa-h { font-size: 14px; font-weight: 700; fill: var(--text); }
+  .gfsa-b { font-weight: 700; fill: var(--text); }
+  .gfsa-b-red { font-weight: 700; fill: var(--red); }
+  .gfsa-b-ok { font-weight: 700; fill: rgb(21, 128, 61); }
+  :global(html[data-theme='dark']) .gfsa-b-ok { fill: rgb(74, 222, 128); }
+  .gfsa-code { font-family: var(--font-mono, ui-monospace, monospace); font-size: 10.5px; fill: var(--text); }
+  .gfsa-m { fill: var(--text-muted); font-size: 11px; }
+  .gfsa figcaption { margin-top: 10px; font-size: 14px; color: var(--text-muted); line-height: 1.55; text-align: center; }
+</style>

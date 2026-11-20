@@ -1,0 +1,90 @@
+---
+// Pointer-chasing linked-list DRAM stalls (~100 ns/hop) vs contiguous slice / SoA prefetching (~1 ns/step).
+const W = 900;
+const H = 282;
+---
+<figure class="ghps">
+  <div class="ghps-scroll">
+    <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="CPU pipeline execution trace comparing pointer-chasing stalls waiting ~100 ns per node on DRAM against contiguous slice scanning hitting sequential L1 cache lines.">
+      {/* Left panel: Pointer chasing stalls */}
+      <rect x="14" y="14" width="430" height="254" rx="10" class="ghps-card is-red" />
+      <text x="30" y="42" class="ghps-b-red">
+        <tspan data-lang-en>1. Pointer chasing ([]*Node or linked list) stalls CPU pipeline</tspan>
+        <tspan data-lang-vi>1. Nhảy con trỏ ([]*Node / Linked List) làm nghẽn ống dẫn CPU</tspan>
+      </text>
+
+      <rect x="30" y="60" width="398" height="62" rx="6" class="ghps-box" />
+      <text x="44" y="81" class="ghps-code">for n := head; n != nil; n = n.Next {'{'} sum += n.Val {'}'}</text>
+      <text x="44" y="102" class="ghps-m">
+        <tspan data-lang-en>Next address depends on DRAM returning n.Next first.</tspan>
+        <tspan data-lang-vi>Không đoán được địa chỉ kế tiếp -&gt; đứng chờ DRAM ~100ns.</tspan>
+      </text>
+
+      <rect x="30" y="136" width="120" height="46" rx="6" class="ghps-box" />
+      <text x="90" y="163" text-anchor="middle" class="ghps-b">Node @ 0x10a0</text>
+      <line x1="150" y1="159" x2="184" y2="159" class="ghps-bad-edge" />
+      <rect x="184" y="136" width="114" height="46" rx="6" class="ghps-box is-red" />
+      <text x="241" y="163" text-anchor="middle" class="ghps-b-red">~100 ns STALL</text>
+      <line x1="298" y1="159" x2="332" y2="159" class="ghps-bad-edge" />
+      <rect x="332" y="136" width="96" height="46" rx="6" class="ghps-box" />
+      <text x="380" y="163" text-anchor="middle" class="ghps-b">0x98c0</text>
+
+      <rect x="30" y="198" width="398" height="54" rx="6" class="ghps-box" />
+      <text x="44" y="219" class="ghps-b-red">Impact: 4 CPU execution pipelines idle 95% of cycles!</text>
+      <text x="44" y="238" class="ghps-m">
+        <tspan data-lang-en>Plus every pointer forces GC scanning across structs.</tspan>
+        <tspan data-lang-vi>Cộng thêm mỗi con trỏ đều ép GC phải quét qua lúc Mark.</tspan>
+      </text>
+
+      {/* Right panel: Contiguous slice / SoA prefetch */}
+      <rect x="460" y="14" width="426" height="254" rx="10" class="ghps-card" />
+      <text x="476" y="42" class="ghps-h">
+        <tspan data-lang-en>2. Contiguous []int64 or SoA rides hardware prefetcher + CSEL</tspan>
+        <tspan data-lang-vi>2. Slice []int64 liền kề chạy tối đa bộ nạp trước L1 &amp; CSEL</tspan>
+      </text>
+
+      <rect x="476" y="60" width="394" height="62" rx="6" class="ghps-box is-ok" />
+      <text x="490" y="81" class="ghps-code">for _, v := range vals {'{'} sum += v {'}'} // 8 ints/line</text>
+      <text x="490" y="102" class="ghps-m">
+        <tspan data-lang-en>HW prefetcher streams cache line N+1 ahead of loop reads.</tspan>
+        <tspan data-lang-vi>Bộ nạp phần cứng kéo sẵn line N+1 trước khi CPU chạm tới.</tspan>
+      </text>
+
+      <rect x="476" y="136" width="394" height="46" rx="6" class="ghps-box is-ok" />
+      <text x="673" y="163" text-anchor="middle" class="ghps-b-ok">One 64B Cache Line: [ v0 | v1 | v2 | v3 | v4 | v5 | v6 | v7 ]</text>
+
+      <rect x="476" y="198" width="394" height="54" rx="6" class="ghps-box is-ok" />
+      <text x="490" y="219" class="ghps-b-ok">Bonus: noscan mspan! (Zero GC pointer scans)</text>
+      <text x="490" y="238" class="ghps-m">
+        <tspan data-lang-en>Apple M2 matrix: row-major 123 us vs col-major 210 us.</tspan>
+        <tspan data-lang-vi>Đo Apple M2: duyệt liền kề nhanh gần gấp đôi nhảy bước!</tspan>
+      </text>
+    </svg>
+  </div>
+  <figcaption>
+    <span data-lang-en>Out-of-order superscalar CPUs hide math latency effortlessly—but stall helplessly on dependent pointer loads (n.Next). Contiguous []T slices activate hardware cache prefetching and skip GC pointer scanning.</span>
+    <span data-lang-vi>CPU siêu vô hướng dễ dàng ẩn độ trễ tính toán, nhưng bất lực đứng chờ khi gặp chuỗi con trỏ phụ thuộc (n.Next). Gom dữ liệu vào slice liền kề []T đánh thức bộ nạp trước cache và bỏ qua quét GC.</span>
+  </figcaption>
+</figure>
+
+<style>
+  .ghps { margin: 2em 0; width: 100%; }
+  .ghps-scroll { overflow-x: auto; }
+  .ghps svg { display: block; width: 100%; min-width: 660px; height: auto; }
+  .ghps text { font-size: 12px; fill: var(--text-body); font-variant-numeric: tabular-nums; }
+  .ghps-card { fill: var(--bg-alt); stroke: var(--border); stroke-width: 1.5; }
+  .ghps-card.is-red { stroke: var(--red); fill: var(--red-tint-bg); }
+  .ghps-box { fill: var(--bg); stroke: var(--border); stroke-width: 1.2; }
+  .ghps-box.is-red { stroke: var(--red); fill: var(--red-tint-bg); }
+  .ghps-box.is-ok { stroke: rgb(21, 128, 61); }
+  :global(html[data-theme='dark']) .ghps-box.is-ok { stroke: rgb(74, 222, 128); }
+  .ghps-bad-edge { stroke: var(--red); stroke-width: 1.5; stroke-dasharray: 4 3; }
+  .ghps-h { font-size: 14px; font-weight: 700; fill: var(--text); }
+  .ghps-b { font-weight: 700; fill: var(--text); }
+  .ghps-b-red { font-weight: 700; fill: var(--red); }
+  .ghps-b-ok { font-weight: 700; fill: rgb(21, 128, 61); }
+  :global(html[data-theme='dark']) .ghps-b-ok { fill: rgb(74, 222, 128); }
+  .ghps-code { font-family: var(--font-mono, ui-monospace, monospace); font-size: 10.5px; fill: var(--text); }
+  .ghps-m { fill: var(--text-muted); font-size: 10.5px; }
+  .ghps figcaption { margin-top: 10px; font-size: 14px; color: var(--text-muted); line-height: 1.55; text-align: center; }
+</style>

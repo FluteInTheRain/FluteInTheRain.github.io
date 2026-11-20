@@ -1,0 +1,101 @@
+---
+// Channel-fed workers (chansend lock bottleneck) vs coordination-free sharded SectionReader + sync.Pool caution.
+const W = 900;
+const H = 286;
+---
+<figure class="ge8d">
+  <div class="ge8d-scroll">
+    <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Comparing naive channel worker pools that stall on mutex locking inside runtime.chansend versus coordination-free byte-range sharding using io.NewSectionReader, plus macrobenchmark proof that sync.Pool can raise peak heap size.">
+      {/* Left: Channel contention trap */}
+      <rect x="14" y="14" width="426" height="258" rx="10" class="ge8d-card is-red" />
+      <text x="30" y="42" class="ge8d-h-red">
+        <tspan data-lang-en>1. Naive channel workers (14x SLOWER on Apple M2!)</tspan>
+        <tspan data-lang-vi>1. Bơm từng dòng qua Channel (chậm hơn 14 lần!)</tspan>
+      </text>
+
+      <rect x="30" y="60" width="394" height="58" rx="6" class="ge8d-box" />
+      <text x="44" y="80" class="ge8d-b">Reader → ch &lt;- copy(line) → [chan []byte lock] → Workers</text>
+      <text x="44" y="100" class="ge8d-m">
+        <tspan data-lang-en>runtime.chansend + chanrecv acquire mutex per item</tspan>
+        <tspan data-lang-vi>Mỗi lần gửi/nhận đều đụng lock bên trong channel</tspan>
+      </text>
+
+      <rect x="30" y="130" width="394" height="72" rx="6" class="ge8d-box is-red" />
+      <text x="44" y="152" class="ge8d-b-red">41.35 ms · 1.6 MB · 200,018 allocs/op</text>
+      <text x="44" y="172" class="ge8d-m">
+        <tspan data-lang-en>Communication lock overhead dwarfs the tiny ~5 ns int parse!</tspan>
+        <tspan data-lang-vi>Chi phí điều phối + xin []byte đè bẹp thời gian tính tổng!</tspan>
+      </text>
+      <text x="44" y="190" class="ge8d-m">
+        <tspan data-lang-en>Fix: send batches of lines, OR shard file boundaries up front.</tspan>
+        <tspan data-lang-vi>Giải pháp: gửi theo lô (batch) hoặc chia khúc file ngay từ đầu.</tspan>
+      </text>
+
+      <text x="30" y="232" class="ge8d-b">When NOT to optimize with Concurrency:</text>
+      <text x="30" y="250" class="ge8d-m">
+        <tspan data-lang-en>If work per message &lt;&lt; ~50–100 ns channel cost, batch or shard.</tspan>
+        <tspan data-lang-vi>Mỗi item làm quá nhanh mà qua channel sẽ tốn công điều phối vô ích.</tspan>
+      </text>
+
+      {/* Right: Sharded SectionReader + sync.Pool note */}
+      <rect x="458" y="14" width="428" height="258" rx="10" class="ge8d-card is-ok" />
+      <text x="474" y="42" class="ge8d-h-ok">
+        <tspan data-lang-en>2. Coordination-free Shard Workers (io.SectionReader)</tspan>
+        <tspan data-lang-vi>2. Chia khúc không điều phối (io.NewSectionReader)</tspan>
+      </text>
+
+      <rect x="474" y="60" width="396" height="58" rx="6" class="ge8d-box" />
+      <text x="488" y="80" class="ge8d-b">Worker i reads independent [begin_i .. end_i] bytes</text>
+      <text x="488" y="100" class="ge8d-m">
+        <tspan data-lang-en>Parallel Reads (fgprof-visible) + 8 KB buf → 1 final send</tspan>
+        <tspan data-lang-vi>Tự Read song song bằng buf 8 KB → chỉ gửi 1 kết quả cuối</tspan>
+      </text>
+
+      <rect x="474" y="130" width="396" height="54" rx="6" class="ge8d-box is-ok" />
+      <text x="488" y="152" class="ge8d-b-ok">0.73 ms · 33.7 KB · 21 allocs/op (4x faster vs seq!)</text>
+      <text x="488" y="172" class="ge8d-m">
+        <tspan data-lang-en>Zero lock contention during loop + O(workers) memory</tspan>
+        <tspan data-lang-vi>Không tranh chấp lock giữa các luồng và RAM vẫn cực thấp</tspan>
+      </text>
+
+      <rect x="474" y="196" width="396" height="62" rx="6" class="ge8d-box" />
+      <text x="488" y="216" class="ge8d-b-red">sync.Pool Warning from k6 Macrobenchmark:</text>
+      <text x="488" y="234" class="ge8d-m">
+        <tspan data-lang-en>In 5m load tests, pooling cut alloc_space (0.5 vs 3.3 GB)</tspan>
+        <tspan data-lang-vi>Thử tải k6 5 phút: sync.Pool giảm rác nhưng lại khiến</tspan>
+      </text>
+      <text x="488" y="248" class="ge8d-m">
+        <tspan data-lang-en>yet raised peak HeapInuse over static buffers. Verify!</tspan>
+        <tspan data-lang-vi>đỉnh HeapInuse cao hơn dùng buffer cục bộ. Luôn đo thật!</tspan>
+      </text>
+    </svg>
+  </div>
+  <figcaption>
+    <span data-lang-en>Streaming each file line through a Go channel stalls goroutines on runtime.chansend locks; sharding byte ranges across SectionReaders scales 4x faster on Apple M2 with minimal allocations.</span>
+    <span data-lang-vi>Bơm từng dòng qua Go channel làm goroutine nghẽn hết ở khóa channel; chia sẵn đoạn byte bằng io.NewSectionReader để mỗi worker tự chạy tăng tốc gấp 4 lần với chỉ 21 lần cấp phát.</span>
+  </figcaption>
+</figure>
+
+<style>
+  .ge8d { margin: 2em 0; width: 100%; }
+  .ge8d-scroll { overflow-x: auto; }
+  .ge8d svg { display: block; width: 100%; min-width: 640px; height: auto; }
+  .ge8d text { font-size: 12px; fill: var(--text-body); font-variant-numeric: tabular-nums; }
+  .ge8d-card { fill: var(--bg-alt); stroke: var(--border); stroke-width: 1.5; }
+  .ge8d-card.is-red { fill: var(--red-tint-bg); stroke: var(--red); }
+  .ge8d-card.is-ok { stroke: rgb(21, 128, 61); }
+  :global(html[data-theme='dark']) .ge8d-card.is-ok { stroke: rgb(74, 222, 128); }
+  .ge8d-box { fill: var(--bg); stroke: var(--border); stroke-width: 1.1; }
+  .ge8d-box.is-red { stroke: var(--red); }
+  .ge8d-box.is-ok { stroke: rgb(21, 128, 61); }
+  :global(html[data-theme='dark']) .ge8d-box.is-ok { stroke: rgb(74, 222, 128); }
+  .ge8d-h-red { font-size: 13px; font-weight: 700; fill: var(--red); }
+  .ge8d-h-ok { font-size: 13px; font-weight: 700; fill: rgb(21, 128, 61); }
+  :global(html[data-theme='dark']) .ge8d-h-ok { fill: rgb(74, 222, 128); }
+  .ge8d-b { font-weight: 700; fill: var(--text); }
+  .ge8d-b-red { font-weight: 700; fill: var(--red); }
+  .ge8d-b-ok { font-weight: 700; fill: rgb(21, 128, 61); }
+  :global(html[data-theme='dark']) .ge8d-b-ok { fill: rgb(74, 222, 128); }
+  .ge8d-m { fill: var(--text-muted); font-size: 11px; }
+  .ge8d figcaption { margin-top: 10px; font-size: 14px; color: var(--text-muted); line-height: 1.55; text-align: center; }
+</style>

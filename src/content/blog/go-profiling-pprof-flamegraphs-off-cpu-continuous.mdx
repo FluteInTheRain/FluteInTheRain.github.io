@@ -1,0 +1,592 @@
+---
+title: "Go profiling"
+title_vi: "Profiling trong Go"
+description: "Pinpoint exact bottlenecks instead of guessing: master pprof Top/Flame Graph Flat vs Cum metrics, Heap alloc_space vs inuse_space, fgprof Off-CPU waits, and Parca diffs."
+description_vi: "Tìm đúng hàm ngốn CPU hay rò RAM thay vì đoán mò: cách đọc Flat vs Cum trong pprof & Flame Graph, phân biệt alloc_space với inuse_space, bắt thời gian chờ với fgprof và so chênh lệch bằng -diff_base."
+date: 2026-11-20
+category: "backend"
+tags: ["golang", "efficient-go", "pprof", "flamegraph", "profiling", "parca"]
+cover: "../../assets/blog/go-profiling-pprof-flamegraphs-off-cpu-continuous/thermal-pcb-scan.jpg"
+cover_alt: "Infrared thermography camera highlighting an 87.6C hotspot on a wireless router circuit board"
+draft: true
+sources:
+  - { title: "Efficient Go: Data-Driven Performance Optimization", author: "Bartłomiej Płotka", chapters: "Ch. 9 & 10", url: "https://www.efficientgo.dev/" }
+  - { title: "CPU & Off-CPU Profiling Demo (efficientgo/examples)", author: "Bartłomiej Płotka", url: "https://github.com/efficientgo/examples/blob/3b473a0075bdab7ce11c4d284a9031ef5fcf4341/pkg/sum/sum_test.go#L1-L55" }
+  - { title: "Flame Graphs Overview", author: "Brendan Gregg", url: "https://www.brendangregg.com/flamegraphs.html" }
+  - { title: "Parca Continuous Profiling & Flame Graphs", author: "Grafana Labs / Parca Authors", url: "https://grafana.com/docs/grafana/latest/datasources/parca/" }
+  - { title: "Infrared thermography of router PCB (Public Domain)", author: "Pieter Kuiper", url: "https://commons.wikimedia.org/wiki/File:Thermography_of_electronics.JPG" }
+  - { title: "Analog oscilloscope trace of paired signals (CC0)", author: "Xato", url: "https://commons.wikimedia.org/wiki/File:Triangular_wave_and_square_wave_on_oscilloscope_screen_(cropped).jpg" }
+---
+
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import En from '../../components/mdx/En.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import GitHubCode from '../../components/mdx/GitHubCode.astro';
+import GoEffContinuousProfilingDiff from '../../components/mdx/GoEffContinuousProfilingDiff.astro';
+import GoEffFlamegraphGuide from '../../components/mdx/GoEffFlamegraphGuide.astro';
+import GoEffOnCpuVsOffCpu from '../../components/mdx/GoEffOnCpuVsOffCpu.astro';
+import GoEffPprofAnatomy from '../../components/mdx/GoEffPprofAnatomy.astro';
+import GoEffProfileExplorerDemo from '../../components/mdx/GoEffProfileExplorerDemo.astro';
+import GoOffCpuTimelineDemo from '../../components/mdx/GoOffCpuTimelineDemo.astro';
+import GoProfAllocSpaceVsInuse from '../../components/mdx/GoProfAllocSpaceVsInuse.astro';
+import GoProfFlatVsCumTrace from '../../components/mdx/GoProfFlatVsCumTrace.astro';
+import QuoteCard from '../../components/mdx/QuoteCard.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import heroThermal from '../../assets/blog/go-profiling-pprof-flamegraphs-off-cpu-continuous/thermal-pcb-scan.jpg';
+import greggFlame from '../../assets/blog/go-profiling-pprof-flamegraphs-off-cpu-continuous/brendan-gregg-flamegraph.png';
+import scopeTrace from '../../assets/blog/go-profiling-pprof-flamegraphs-off-cpu-continuous/oscilloscope-trace.jpg';
+import parcaFlame from '../../assets/blog/go-profiling-pprof-flamegraphs-off-cpu-continuous/parca-flamegraph.png';
+
+<En>
+
+<Figure src={heroThermal} alt="Infrared thermography camera highlighting an 87.6C hotspot on a wireless router circuit board" caption="An infrared thermal camera finds the single overheating regulator on a crowded PCB in one frame—just how Go's pprof points straight to the exact hot function instead of guessing." sourceTitle="Wikimedia Commons: Thermography of electronics (Pieter Kuiper)" sourceUrl="https://commons.wikimedia.org/wiki/File:Thermography_of_electronics.JPG" />
+
+> "Profile first, ask questions later."
+> &mdash; *Bartłomiej Płotka*, *Efficient Go*
+
+### From reliable benchmarks to pinpointing exact hot call stacks
+
+Now that we can trust our `benchstat` deltas and observability histograms, the next question hits immediately whenever p99 spikes: *which exact lines inside the binary burned those CPU cycles or allocated gigabytes?* Even seasoned Go developers routinely guess wrong. You rewrite a slick loop you *assume* is hot, only to discover later that 70% of allocation bytes came from a helper inside `bytes.Split`, or half of request wall time evaporated waiting on a disk `Read` syscall invisible to standard CPU profiles.
+
+**Profiling (`pprof`)** replaces intuition with stack-attributed evidence. Go ships sampling profilers straight in its standard runtime so you can capture CPU, Heap, Goroutine, Block, Mutex, and even custom Off-CPU timelines with minimal overhead. This guide breaks down four profiling essentials:
+
+1. **Inside a `pprof` file &amp; safe endpoints**: how sampling works under the hood and why `/debug/pprof` belongs strictly on internal admin ports.
+2. **Reading Top tables &amp; Flame Graphs**: distinguishing `Flat` vs. `Cum` numbers and spotting wide rooftops without falling for depth illusions.
+3. **Choosing the right profile signal**: `alloc_space` (GC churn) vs. `inuse_space` (memory leaks), plus catching hidden I/O waits with **`fgprof`**.
+4. **Continuous Profiling &amp; differential proofs**: recording pre-OOM evidence continuously with Parca / Pyroscope and verifying fixes via `pprof -diff_base`.
+
+<Callout type="note" title="TL;DR">
+Capture profiles during benchmarks (`-cpuprofile`, `-memprofile`) or safely in production over an **internal-only** admin port (`:6060`), never blindly on public `:8080`. Always check **both `Flat` and `Cum`** in `pprof`, remember **Flame Graph width equals total sample % (not wall time)**, inspect **`inuse_space`** for live leaks vs. **`alloc_space`** for GC pressure, add **`fgprof`** whenever disk/mutex/network wait matters, and run **continuous profiling + `-diff_base`** so crashes never erase your forensic snapshot.
+</Callout>
+
+<Concepts>
+
+- **Profiling (`pprof`)**: statistical runtime sampling (~100 Hz for CPU, 1 sample per 512 KB allocated for Heap) recording full function call stacks alongside measured resource weights.
+- **Sampling vs. Instrumentation**: instead of injecting slow timers on every function entry/exit, sampling pauses or checks stacks periodically so overhead stays small enough (~&lt;5%) for live production pods.
+- **`Flat` vs. `Cum` (Cumulative)**: `Flat` counts work executed directly inside a function itself; `Cum` sums direct work plus everything called inside its child callees.
+- **On-CPU vs. Off-CPU time**: standard CPU profiling samples only goroutines actively burning cores (**On-CPU**), missing time spent sleeping on mutexes, channels, disk reads, or HTTP upstream calls (**Off-CPU**).
+
+</Concepts>
+
+---
+
+## 1. How `pprof` stores samples—and safe production wiring
+
+What actually sits inside a `.pprof` file? It is simply a gzipped Protocol Buffers binary schema containing three core arrays: **`Sample`** records (stack location IDs, numeric measurements, optional key-value `Label` tags), **`Location` / `Function`** metadata mapping machine PC pointers back to source `file:line`, and a deduplicated **`StringTable`** so repeated package paths store compactly once.
+
+You capture those files either automatically from `go test` (`-cpuprofile cpu.pprof -memprofile mem.pprof`, matching Bartłomiej's exact harness in `efficientgo/examples/pkg/sum/sum_test.go`), programmatically via `runtime/pprof`, or live over HTTP via `net/http/pprof`:
+
+<GitHubCode repo="efficientgo/examples" path="pkg/sum/sum_test.go" lines="L36-L55" url="https://github.com/efficientgo/examples/blob/3b473a0075bdab7ce11c4d284a9031ef5fcf4341/pkg/sum/sum_test.go#L36-L55" caption="Capturing CPU and memory profiles alongside reproducible multi-count benchmarks in efficientgo/examples.">
+```go
+// Recommended run options:
+/*
+export ver=v1 && go test \
+    -run '^$' -bench '^BenchmarkSum$' \
+    -benchtime 10s -count 6 -cpu 4 -benchmem \
+    -memprofile=${ver}.mem.pprof -cpuprofile=${ver}.cpu.pprof \
+  | tee ${ver}.txt
+*/
+// Read more in "Efficient Go"; Example 8-1, 8-2, 8-10, 8-12
+func BenchmarkSum(b *testing.B) {
+	fn := lazyCreateTestInput(b, 2e6)
+
+	b.ResetTimer()
+```
+</GitHubCode>
+
+One critical security rule in production: never register `_ "net/http/pprof"` blindly on your public API `http.DefaultServeMux`, because anonymous internet traffic hitting `/debug/pprof/profile?seconds=60` triggers expensive captures or leaks internal symbols. Instead, register explicit handlers on an isolated internal admin mux bound to VPC localhost/private ports, and wrap workers with `pprof.Do` labels when separating noisy tenants or handlers:
+
+```go
+// Expose pprof strictly on an isolated admin port + tag workloads cleanly
+adminMux := http.NewServeMux()
+adminMux.HandleFunc("/debug/pprof/", pprof.Index)
+adminMux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+adminMux.Handle("/debug/fgprof", fgprof.Handler()) // Off-CPU + On-CPU capture
+
+go func() { _ = (&http.Server{Addr: "127.0.0.1:6060", Handler: adminMux}).ListenAndServe() }()
+
+// Tag stack samples cleanly with Go profiler labels:
+runtimepprof.Do(ctx, runtimepprof.Labels("endpoint", "/checkout"), func(ctx context.Context) {
+	handleCheckout(ctx)
+})
+```
+
+<GoEffPprofAnatomy />
+
+Look straight into Go's runtime profiler builder (`src/runtime/pprof/proto.go`) to verify how lightweight `.pprof` encoding deduplicates package names and instruction addresses into compact indexed protobuf arrays before gzipping:
+
+<GitHubCode repo="golang/go" path="src/runtime/pprof/proto.go" lines="L27-L42" url="https://github.com/golang/go/blob/master/src/runtime/pprof/proto.go#L27-L42" caption="Go's pprof protobuf encoder keeps production profile overhead tiny by interning repeated function/string names once inside StringTable and mapping raw PC addresses lazily.">
+```go
+type profileBuilder struct {
+	start      time.Time
+	end        time.Time
+	havePeriod bool
+	period     int64
+	m          profMap
+	w          io.Writer
+	zw         *gzip.Writer
+	pb         protobuf
+	strings    []string
+	stringMap  map[string]int
+	locs       map[uintptr]locInfo
+	funcs      map[string]int
+	mem        []memMap
+}
+```
+</GitHubCode>
+
+| `/debug/pprof/` Endpoint | Sampling Cadence / Overhead | Primary Bug / Bottleneck Caught |
+| :--- | :--- | :--- |
+| `/debug/pprof/profile` (`CPU`) | 100 Hz `SIGPROF` signals (< 2% CPU) | Hot loops, crypto/regex/JSON parsing burning active cores |
+| `/debug/pprof/heap` (`Memory`) | Every 512 KB allocated (always active!) | Leak detection (`-inuse_space`) & GC churn (`-alloc_space`) |
+| `/debug/pprof/goroutine` | Instant snapshot (~0.5–2 ms STW) | Goroutine leaks (`?debug=2` prints full stack dumps) |
+| `/debug/pprof/mutex` | Contended unlock events (enable via fraction) | Heavy lock contention stalling concurrent HTTP handlers |
+| `/debug/pprof/block` | Channel/sync waits (disabled by default) | Bounded channel bottlenecks & unbuffered synchronization stalls |
+| `/debug/pprof/trace` | Explicit event tracing (higher overhead) | Exact microsecond scheduling gaps & GC mark assist timelines |
+
+<Concepts>
+
+- **`pprof.Do` profiler labels**: lightweight metadata tags attached directly to captured stack samples on the active goroutine, letting you filter Flame Graphs by route, tenant, or job type.
+- **Goroutine &amp; Block/Mutex profiles**: additional `/debug/pprof/` endpoints tracking live blocked goroutines (great for detecting leaks) and lock wait duration (`runtime.SetMutexProfileFraction`).
+
+</Concepts>
+
+---
+
+## 2. Reading Top tables &amp; Flame Graphs: `Flat` vs. `Cum`
+
+Let's inspect a real CPU profile generated right now on Apple M2 Go 1.27 from the baseline `BenchmarkSum1_BytesSplit` function:
+
+<TerminalOutput command="go tool pprof -top -cum -nodecount=12 cpu1.pprof" label="Apple M2 · Go 1.27" caption="Real pprof Top report on Sum1: testing.* parents show 0% Flat and 94% Cum, while ParseUint (39.5% Flat) and bytes.Split (16.4% Cum) expose real leaf work.">
+```text
+Duration: 3.22s, Total samples = 2860ms (88.76%)
+      flat  flat%   sum%        cum   cum%
+         0     0%     0%     2700ms 94.41%  effgobench.BenchmarkSum1_BytesSplit
+         0     0%     0%     2700ms 94.41%  testing.(*B).runN
+      90ms  3.15%  3.15%     2690ms 94.06%  effgobench.Sum1_BytesSplit
+         0     0%  3.15%     2690ms 94.06%  testing.(*B).launch
+      70ms  2.45%  5.59%     1440ms 50.35%  strconv.ParseInt
+     240ms  8.39% 13.99%     1370ms 47.90%  internal/strconv.ParseInt
+    1130ms 39.51% 53.50%     1130ms 39.51%  internal/strconv.ParseUint
+         0     0% 53.50%      470ms 16.43%  bytes.Split (inline)
+      70ms  2.45% 55.94%      470ms 16.43%  bytes.genSplit
+```
+</TerminalOutput>
+
+Look at how quickly **`Flat` vs. `Cum`** separates wrappers from bottlenecks: `Sum1_BytesSplit` shows `3.15%` Flat yet `94.06%` Cum—meaning its own loop does almost nothing, while passing work down into `strconv.ParseInt` (`50.35%` Cum, `39.51%` Flat inside `ParseUint`) and `bytes.genSplit` (`16.43%` Cum). Note `Sum%` adds Flat contributions down the list so the top few rows quickly highlight Pareto's critical `80%`.
+
+Now pair that mental model with Brendan Gregg's **Flame Graph** visualization inside `go tool pprof -http=:8081 cpu.pprof`:
+
+<Figure src={greggFlame} alt="Original Brendan Gregg CPU Flame Graph highlighting wide exposed horizontal plateau frames over stacked stack bars" caption="Reading a Flame Graph: stack depth grows vertically, horizontal frames sort alphabetically rather than over chronological time, and wide flat rooftops reveal direct Flat hotspots." sourceTitle="Brendan Gregg — Flame Graphs" sourceUrl="https://www.brendangregg.com/flamegraphs.html" />
+
+Remember two visual rules when opening a Flame Graph:
+1. **Horizontal order is alphabetical, NOT chronological time**: if Bar A sits left of Bar B, A did *not* run before B—width strictly represents `% Cum` share across all captured samples.
+2. **Hunt wide exposed rooftops (plateaus), not tall narrow spires**: an outer frame spanning 80% width whose children cover 79% is just a coordinator; the wide empty plateau peeking out at top-most children (`Flat` cost) is where optimization deletes real CPU cycles.
+
+```go
+// Comparing wrapper Cum% vs leaf Flat% cost cleanly:
+func ParsePayload(b []byte) (int64, error) {
+	lines := bytes.Split(b, []byte("\n")) // high Flat malloc + scan (leaf hotspot!)
+	return sumParsed(lines)                // high Cum caller delegating down
+}
+```
+
+<GoEffFlamegraphGuide />
+
+<GoProfFlatVsCumTrace />
+
+<QuoteCard author="Brendan Gregg" role="Inventor of Flame Graphs" sourceTitle="Flame Graphs Overview" sourceUrl="https://www.brendangregg.com/flamegraphs.html">
+The horizontal x-axis spans the population of samples, sorted alphabetically—not the passage of time. Wide plateaus on top represent functions directly on CPU, exposing hot execution bottlenecks at a glance.
+</QuoteCard>
+
+<Concepts>
+
+- **`Sum%` column**: running cumulative sum of `Flat%` rows top-to-bottom in `pprof -top`, confirming where 80%+ of resource cost originates.
+- **Flame Graph plateau**: wide flat exposed portion of a stack bar (not covered by child calls above/below), marking direct `Flat` self-execution cost.
+
+</Concepts>
+
+---
+
+## 3. Heap `alloc_space` vs. `inuse_space` &amp; Off-CPU `fgprof`
+
+Opening the right profile tool is only half the battle—you also have to pick the **right sample signal**, because Go's standard CPU and Heap tools can hide huge bottlenecks:
+
+<Figure src={scopeTrace} alt="Analog oscilloscope screen comparing triangular and square voltage waveforms side by side across dual channels" caption="Just like comparing two oscilloscope channels exposes invisible phase delays, pairing On-CPU pprof with Off-CPU fgprof reveals when goroutines spend half their life blocked rather than computing." sourceTitle="Wikimedia Commons: Dual waveform oscilloscope screen" sourceUrl="https://commons.wikimedia.org/wiki/File:Triangular_wave_and_square_wave_on_oscilloscope_screen_(cropped).jpg" />
+
+Watch out for two classic profiling blind spots:
+
+1. **Standard CPU `pprof` ignores sleeping / I/O-blocked goroutines**: Go's `SIGPROF` profiler only samples goroutines **actively scheduled on OS CPU threads (`On-CPU`)**. If your request takes 100 ms—15 ms parsing JSON (`On-CPU`) and 85 ms waiting on mutex locks, Postgres queries, or unbuffered file reads (`Off-CPU`)—standard CPU `pprof` shows a 100% chart completely hiding the 85 ms stall! Installing Felix Geisendörfer's lightweight **`github.com/felixge/fgprof`** polls goroutine states (`Running` + `Blocked`) uniformly so full wall-clock stalls surface immediately (the exact technique behind Bartłomiej's disk sharding fix!).
+2. **`alloc_space` vs. `inuse_space` inside Heap profiles**: `pprof` heap dumps store four metrics. Use **`alloc_space` / `alloc_objects`** (cumulative allocations since boot, sampled every 512 KB by default) when high allocation churn triggers heavy GC pauses even if total RAM looks flat. Use **`inuse_space` / `inuse_objects`** (live uncollected memory at capture instant) when RAM climbs slowly toward Kubernetes OOM crashes! Setting `runtime.MemProfileRate = 1` temporarily during local microbenchmarks captures *every* allocation without sampling gaps, useful for verifying constant 8.3 KB heap usage.
+
+```go
+// Inspecting total churn vs. retained leak OR capturing Off-CPU wall latency:
+// go tool pprof -alloc_space -top mem.pprof   // hunts GC pressure (every alloc)
+// go tool pprof -inuse_space -top mem.pprof   // hunts live leaks (unfreed objects)
+stopFg := fgprof.Start(f, fgprof.FormatPprof)   // captures On-CPU + blocked I/O/Mutex!
+defer stopFg()
+```
+
+<GoEffOnCpuVsOffCpu />
+
+<GoProfAllocSpaceVsInuse />
+
+<GoOffCpuTimelineDemo />
+
+<QuoteCard author="Felix Geisendörfer" role="Creator of fgprof & Continuous Profiling Lead" sourceTitle="fgprof Documentation" sourceUrl="https://github.com/felixge/fgprof">
+Go's built-in CPU profiler only profiles CPU-bound work and misses goroutines blocked on I/O, channels, or sleeps. Profiling wall-clock time across all active and waiting goroutines reveals why requests actually take so long.
+</QuoteCard>
+
+<Concepts>
+
+- **`fgprof` (Full Goroutine Profiler)**: drop-in Go profiler sampling every goroutine (active on CPU *and* parked on I/O, channels, or mutexes) to measure true wall-clock latency contributors.
+- **`MemProfileRate`**: runtime setting (default `524288` = 512 KB) controlling Go's heap sampling cadence; temporarily lowering to `1` in benchmarks catches tiny allocations accurately at higher CPU cost.
+
+</Concepts>
+
+---
+
+## 4. Continuous Profiling (Parca) &amp; differential proofs (`-diff_base`)
+
+Manual on-demand profiling (`curl :6060/debug/pprof/heap`) shares one fatal flaw: **you almost always arrive after the pod already died**. When a sudden customer query or traffic burst OOM-kills a container at 02:14 AM, Kubernetes restarts a fresh process with an empty heap—leaving zero forensic clues behind.
+
+**Continuous Profiling** (pioneered in Google-Wide Profiling and accessible via open-source Go projects like **Parca**, **Pyroscope**, or eBPF agents) solves this cleanly by scraping light profile snapshots every 15–60 seconds into columnar storage (`&lt; 5%` single-process overhead, or run across one canary replica). Instead of catching lightning manually, you scrub backward to `02:13 AM` and inspect the live `inuse_space` Flame Graph moments before the crash:
+
+<Figure src={parcaFlame} alt="Parca continuous profiling UI showing Go runtime.scanobject and runtime.gcDrain Top table beside an interactive Flame Graph" caption="Continuous profiling UI (Parca / Grafana): inspect historical Go runtime GC scan hotspots and download exact point-in-time pprof snapshots before a crash occurs." sourceTitle="Grafana Documentation — Parca Continuous Profiling" sourceUrl="https://grafana.com/docs/grafana/latest/datasources/parca/" />
+
+Here is a quick incident-response walkthrough when Kubernetes restarts a Go pod with **`OOMKilled (exit code 137)`** at 02:14 AM:
+1. Reaching for `curl :6060/debug/pprof/heap` hits an empty brand-new container (`HeapAlloc = 18 MB`) because the doomed PID was terminated before you woke up.
+2. Opening Parca / Pyroscope at `02:13:45`—15 seconds *before* `137`—shows the exact frozen `inuse_space` call tree (`ParseExport -> bytes.Buffer.Grow` holding `480 MB` across `80` uncancelled goroutines), so you replay that single 10-second `.pb.gz` artifact locally without reproducing a production outage.
+
+Once downloaded (or captured live), keep these six interactive `go tool pprof` CLI commands memorized for pinpoint terminal forensics:
+
+| `pprof` Subcommand | What It Reveals | When to Reach for It in Production |
+| :--- | :--- | :--- |
+| **`top 20 -cum`** | Top functions ranked by **Cumulative** subtree cost | Find high-level orchestrators fanning into slow dependencies |
+| **`list HandleBatch`** | Annotated **Go source lines** with per-line CPU / alloc numbers | Spot the exact `fmt.Sprintf` or slice conversion burning RAM |
+| **`peek Unmarshal`** | Immediate **callers and callees** around one target node | Verify who retains leaked heap objects in `inuse_space` |
+| **`weblist HotLoop`** | Line-by-line Go source interleaved with compiled **assembly** | Catch hidden bounds checks, interface calls, or lock stalls |
+| **`traces -alloc_objects`** | Individual stack traces sorted by object count | Track millions of tiny `16 B` heap objects hitting GC scan rate |
+| **`-diff_base=v1.pb.gz v2.pb.gz`** | Signed net `+` / `-` delta tree between two snapshots | Prove an optimization cut allocations without sneaking bloat elsewhere |
+
+Even better, `pprof`'s additive format lets you **compare and subtract** profiles directly (`-diff_base` to verify net `+`/`-` deltas between `v1` and `v2`, or `-base` to subtract background baseline load and isolate a single new endpoint):
+
+```go
+// Compare PR impact visually in pprof browser UI or compute isolated delta:
+// go tool pprof -http=:8082 -diff_base=v1.cpu.pprof v2.cpu.pprof
+// Subtract shared baseline load from Feature-A run:
+// go tool pprof -base=baseline.mem.pprof featureA.mem.pprof
+```
+
+<GoEffContinuousProfilingDiff />
+
+Click across all four profiling modes and click individual Flame Graph bars inside this interactive explorer:
+
+<GoEffProfileExplorerDemo />
+
+<Concepts>
+
+- **Continuous Profiling (Parca / Pyroscope / eBPF)**: always-on collection storing historical stack profiles every ~15–60 seconds at low overhead so pre-OOM incidents stay inspectable after pod restarts.
+- **Differential Flame Graph (`-diff_base` / `-base`)**: comparing two `.pprof` snapshots by computing per-stack deltas so you prove visually whether an optimization shrunk target paths without regressing elsewhere.
+
+</Concepts>
+
+---
+
+## Key takeaways
+
+- **Never debug performance blind**: capture `pprof` data (`-cpuprofile`, `-memprofile`) before rewriting hot loops—your intuition misses `bytes.Split` and stdlib allocations repeatedly.
+- **Keep `/debug/pprof` off public routes**: bind handlers to an internal admin listener (`127.0.0.1:6060`) and isolate workloads with `pprof.Do` labels.
+- **Read Flame Graphs by Flat vs. Cum and width**: X-axis order is alphabetical (not timeline time); look for wide flat exposed plateaus rather than tall call chains.
+- **Pick the right profile signal**: use `fgprof` when I/O or mutex stalls hide off-CPU, `alloc_space` to relieve GC work, and `inuse_space` to track live leaks.
+- **Automate evidence with Continuous Profiling + `-diff_base`**: scrape profiles continuously so pre-crash spikes survive restarts, and diff profiles before/after every optimization PR.
+
+---
+
+## Review questions
+
+1. In a `go tool pprof -top` report, `HandleRequest` shows `0% Flat` and `94% Cum`, while `internal/strconv.ParseUint` shows `39.5% Flat`. Which function directly burns CPU cycles, and which merely wraps child calls? *(See Section 2)*
+2. When staring at a Flame Graph, if Function A spans wider on the left edge than Function B on the right, why does that *not* mean Function A executed earlier in time? *(See Section 2)*
+3. Suppose an endpoint takes 100 ms wall time: 15 ms parsing JSON in memory and 85 ms waiting on PostgreSQL lock contention. Why can standard `go tool pprof cpu.pprof` still label JSON parsing as nearly 100%, and how does `fgprof` fix this? *(See Section 3)*
+4. Compare `go tool pprof -alloc_space` vs. `-inuse_space`: which view catches temporary GC garbage churn (`bytes.Split`), and which view exposes retained memory pinning before OOM? *(See Section 3)*
+5. Why is on-demand `curl :6060/debug/pprof/heap` helpless after an unexpected Kubernetes OOMKill restart, and how do continuous profiling + `pprof -diff_base` prevent blind spots? *(See Section 4)*
+
+</En>
+
+<Vi>
+
+<Figure src={heroThermal} alt="Camera ảnh nhiệt hồng ngoại soi trực tiếp bo mạch router phát hiện một chip nóng bất thường tới 87,6 độ C" caption="Máy đo nhiệt hồng ngoại chỉ ra ngay đúng con chip nóng 87,6 °C trên cả bảng mạch chằng chịt linh kiện — y hệt cách pprof chỉ thẳng hàm đang ngốn CPU hay RAM thay vì ngồi đoán mò." sourceTitle="Wikimedia Commons: Thermography of electronics (Pieter Kuiper)" sourceUrl="https://commons.wikimedia.org/wiki/File:Thermography_of_electronics.JPG" />
+
+> "Chụp profile trước đã, hỏi tại sao sau."
+> &mdash; *Bartłomiej Płotka*, *Efficient Go*
+
+### Tại sao đọc code Go bằng mắt thường hay đoán nhầm chỗ gây chậm?
+
+Có số đo chuẩn từ Prometheus Histogram và `benchstat` ở bài trước rồi, câu hỏi kế tiếp khi p99 vọt cao là: *chính xác dòng code nào đang đốt CPU hay găm RAM?* Ngay cả dev nhiều kinh nghiệm cũng rất hay đoán trật chỗ tốn tài nguyên nhất. Bạn cặm cụi viết lại một vòng `for` tưởng là nóng bỏng tay, xong tới lúc đo thật mới ngã ngửa 78% bộ nhớ Heap lại bay ra từ lệnh `bytes.Split`, hoặc một nửa độ trễ nằm ở khâu chờ ổ đĩa `os.Read` mà CPU profile mặc định hoàn toàn không thèm ghi nhận.
+
+**Profiling (`pprof`)** giúp thay thế phỏng đoán bằng số liệu gắn tận tên hàm và số dòng. Go cài sẵn bộ lấy mẫu ngay trong runtime chuẩn với chi phí đủ nhẹ để chạy cả lúc benchmark lẫn trên server thật. Bài này gom lại bốn kỹ năng cốt lõi:
+
+1. **Bên trong file `.pprof` &amp; cách bật HTTP an toàn**: Go gom stack trace ra sao và tại sao `/debug/pprof` chỉ được mở ở cổng nội bộ.
+2. **Đọc bảng `Top` &amp; Flame Graph chuẩn**: phân biệt **`Flat` vs. `Cum`**, tìm đỉnh phẳng rộng (plateau) và không nhìn nhầm trục ngang thành thời gian.
+3. **Chọn đúng loại profile cho đúng bệnh**: `alloc_space` (rác làm GC mệt) vs. `inuse_space` (rò RAM sống), cộng thêm **`fgprof`** bắt thời gian ngủ chờ Off-CPU.
+4. **Continuous Profiling (Parca) &amp; so sánh `-diff_base`**: giữ lại ảnh hiện trường trước khi pod sập OOMKill và chứng minh mức giảm sau khi tối ưu.
+
+<Callout type="note" title="Tóm tắt nhanh (TL;DR)">
+Chụp profile ngay lúc chạy benchmark (`-cpuprofile`, `-memprofile`) hoặc mở HTTP trên **cổng nội bộ riêng** (`127.0.0.1:6060`), tuyệt đối đừng mở khơi khơi ra cổng public `:8080`. Luôn đối chiếu **cả `Flat` và `Cum`**, nhớ **chiều ngang Flame Graph là % tỷ lệ (không phải thời gian trước-sau)**, chọn **`inuse_space`** để bắt rò RAM sống vs. **`alloc_space`** để giảm tải GC, gắn thêm **`fgprof`** khi code chờ đĩa/mạng/Mutex nhiều, và bật **Continuous Profiling + `-diff_base`** để lúc sập pod vẫn còn bằng chứng đối chiếu.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ cho người mới">
+
+- **Profiling (`pprof`)**: kỹ thuật lấy mẫu thống kê (~100 lần/giây cho CPU, 1 mẫu mỗi 512 KB xin mới cho Heap) để ghi lại toàn bộ chuỗi hàm đang gọi (call stack) kèm số liệu CPU/RAM tương ứng.
+- **Sampling vs. Instrumentation**: thay vì gắn đồng hồ đo vào từng lần gọi hàm (làm chậm app khủng khiếp), sampling chỉ ngắt nhẹ kiểm tra định kỳ nên chi phí thấp (~&lt;5% CPU), chạy được ngay trên prod.
+- **`Flat` vs. `Cum` (Cumulative)**: **`Flat`** là chi phí do *tự thân* dòng code trong hàm đó tiêu tốn; **`Cum`** là tổng chi phí *gồm cả các hàm con* mà nó gọi xuống dưới.
+- **On-CPU vs. Off-CPU time**: CPU profile mặc định chỉ đếm lúc goroutine đang chạy trên nhân CPU (**On-CPU**), bỏ qua sạch lúc goroutine ngủ chờ khóa Mutex, chờ channel, đọc ổ cứng hay gọi DB (**Off-CPU**).
+
+</Concepts>
+
+---
+
+## 1. Cấu trúc bên trong `.pprof` &amp; cách mở endpoint an toàn
+
+Thực chất file `.pprof` chỉ là một file Protobuf nén gzip chứa ba danh sách rất gọn: mảng **`Sample`** (gồm ID vị trí trên call stack, giá trị đo như ms CPU hay byte RAM, kèm cặp nhãn `Label` tùy chọn), mảng **`Location` / `Function`** ánh xạ địa chỉ về đúng tên file:dòng, và bảng **`StringTable`** giúp mọi chuỗi tên hàm dài chỉ phải lưu đúng 1 lần theo ID số nguyên.
+
+Bạn lấy được file này qua cờ `go test -cpuprofile cpu.pprof -memprofile mem.pprof` (y hệt mẫu trong repo `efficientgo/examples/pkg/sum/sum_test.go`), gọi `runtime/pprof` trong code, hoặc tải trực tiếp qua HTTP:
+
+<GitHubCode repo="efficientgo/examples" path="pkg/sum/sum_test.go" lines="L36-L55" url="https://github.com/efficientgo/examples/blob/3b473a0075bdab7ce11c4d284a9031ef5fcf4341/pkg/sum/sum_test.go#L36-L55" caption="Cách repo efficientgo/examples chạy benchmark nhiều lượt kèm xuất luôn cpu.pprof và mem.pprof.">
+```go
+// Recommended run options:
+/*
+export ver=v1 && go test \
+    -run '^$' -bench '^BenchmarkSum$' \
+    -benchtime 10s -count 6 -cpu 4 -benchmem \
+    -memprofile=${ver}.mem.pprof -cpuprofile=${ver}.cpu.pprof \
+  | tee ${ver}.txt
+*/
+// Read more in "Efficient Go"; Example 8-1, 8-2, 8-10, 8-12
+func BenchmarkSum(b *testing.B) {
+	fn := lazyCreateTestInput(b, 2e6)
+
+	b.ResetTimer()
+```
+</GitHubCode>
+
+Lưu ý bảo mật cực quan trọng khi triển khai production: đừng bao giờ import `_ "net/http/pprof"` bừa vào cổng HTTP public của người dùng cuối — chỉ cần ai đó spam `?seconds=60` là app khựng hoặc lộ tên hàm nội bộ. Hãy tách hẳn `adminMux` riêng chạy trên cổng nội bộ `:6060`, và gắn nhãn `pprof.Do` khi cần tách riêng số liệu theo từng API hoặc job:
+
+```go
+// Mở /debug/pprof trên cổng admin nội bộ riêng + gắn nhãn lọc workload
+adminMux := http.NewServeMux()
+adminMux.HandleFunc("/debug/pprof/", pprof.Index)
+adminMux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+adminMux.Handle("/debug/fgprof", fgprof.Handler()) // Hỗ trợ đo cả Off-CPU
+
+go func() { _ = (&http.Server{Addr: "127.0.0.1:6060", Handler: adminMux}).ListenAndServe() }()
+
+// Gắn nhãn để tách riêng Flame Graph cho từng endpoint:
+runtimepprof.Do(ctx, runtimepprof.Labels("endpoint", "/checkout"), func(ctx context.Context) {
+	handleCheckout(ctx)
+})
+```
+
+<GoEffPprofAnatomy />
+
+Ngó qua struct xây dựng file trong thư viện chuẩn Go (`src/runtime/pprof/proto.go`) để hiểu vì sao bộ thu thập `.pprof` nhẹ tênh khi chạy production: tên hàm và chuỗi lặp đi lặp lại được đánh chỉ mục vào `StringTable` một lần rồi nén gzip gọn nhẹ:
+
+<GitHubCode repo="golang/go" path="src/runtime/pprof/proto.go" lines="L27-L42" url="https://github.com/golang/go/blob/master/src/runtime/pprof/proto.go#L27-L42" caption="Bộ tạo protobuf profileBuilder của Go chỉ lưu chuỗi tên hàm đúng một lần vào StringTable giúp giảm tối đa dung lượng file profile.">
+```go
+type profileBuilder struct {
+	start      time.Time
+	end        time.Time
+	havePeriod bool
+	period     int64
+	m          profMap
+	w          io.Writer
+	zw         *gzip.Writer
+	pb         protobuf
+	strings    []string
+	stringMap  map[string]int
+	locs       map[uintptr]locInfo
+	funcs      map[string]int
+	mem        []memMap
+}
+```
+</GitHubCode>
+
+| Đường dẫn `/debug/pprof/` | Nhịp lấy mẫu / Chi phí | Bệnh lý chuyên trị |
+| :--- | :--- | :--- |
+| `/debug/pprof/profile` (`CPU`) | Tín hiệu `SIGPROF` 100 Hz (< 2% CPU) | Hàm tính toán nặng: parse JSON, regex, giải nén đốt nhân CPU |
+| `/debug/pprof/heap` (`Memory`) | 1 mẫu mỗi 512 KB cấp phát (bật sẵn) | Săn rò RAM (`-inuse_space`) & săn xả rác GC (`-alloc_space`) |
+| `/debug/pprof/goroutine` | Chụp tức thời (~0,5–2 ms STW) | Săn rò rỉ goroutine (`?debug=2` in trọn stack từng luồng) |
+| `/debug/pprof/mutex` | Ghi lại các lần mở khóa bị kẹt chờ | Tìm Mutex gây nghẽn hàng loạt giữa các HTTP handler |
+| `/debug/pprof/block` | Ghi nhận thời gian treo channel/lock | Phát hiện hàng đợi channel bị tắc hoặc đồng bộ sai |
+| `/debug/pprof/trace` | Ghi vết sự kiện chi tiết (nặng hơn) | Soi từng micro-giây scheduler rảnh và pha Mark Assist của GC |
+
+<Concepts title="Mấy khái niệm ở mục này">
+
+- **Nhãn `pprof.Do`**: đính thẻ key-value (như `endpoint=/checkout`, `tenant=vip`) trực tiếp vào goroutine hiện tại để lọc Flame Graph riêng cho từng luồng việc.
+- **Goroutine &amp; Block/Mutex profile**: các đường dẫn phụ trong `/debug/pprof/` dùng để đếm goroutine kẹt không thoát hoặc tìm mutex đang làm nhiều luồng xếp hàng chờ.
+
+</Concepts>
+
+---
+
+## 2. Cách đọc bảng `Top` và Flame Graph: `Flat` khác gì `Cum`?
+
+Cùng soi thẳng output CPU profile thật chạy trên Apple M2 Go 1.27 cho hàm `Sum1_BytesSplit`:
+
+<TerminalOutput command="go tool pprof -top -cum -nodecount=12 cpu1.pprof" label="Apple M2 · Go 1.27" caption="Output pprof Top thật từ Sum1: các hàm bọc testing.* có Flat=0% nhưng Cum=94%, còn ParseUint (39,5% Flat) và bytes.genSplit (16,4% Cum) mới là chỗ tự đốt CPU.">
+```text
+Duration: 3.22s, Total samples = 2860ms (88.76%)
+      flat  flat%   sum%        cum   cum%
+         0     0%     0%     2700ms 94.41%  effgobench.BenchmarkSum1_BytesSplit
+         0     0%     0%     2700ms 94.41%  testing.(*B).runN
+      90ms  3.15%  3.15%     2690ms 94.06%  effgobench.Sum1_BytesSplit
+         0     0%  3.15%     2690ms 94.06%  testing.(*B).launch
+      70ms  2.45%  5.59%     1440ms 50.35%  strconv.ParseInt
+     240ms  8.39% 13.99%     1370ms 47.90%  internal/strconv.ParseInt
+    1130ms 39.51% 53.50%     1130ms 39.51%  internal/strconv.ParseUint
+         0     0% 53.50%      470ms 16.43%  bytes.Split (inline)
+      70ms  2.45% 55.94%      470ms 16.43%  bytes.genSplit
+```
+</TerminalOutput>
+
+Nhìn cặp cột **`Flat` vs. `Cum`** là thấy ngay ai làm việc gì: `Sum1_BytesSplit` có `Flat` chỉ `3,15%` nhưng `Cum` tận `94,06%` — chứng tỏ bản thân vòng lặp không tốn mấy, gần hết CPU bị đẩy xuống `strconv.ParseInt` (`50,35%` Cum, trong đó `ParseUint` tự ăn `39,51%` Flat) và `bytes.genSplit` (`16,43%` Cum). Cột `Sum%` cộng dồn từ trên xuống giúp bạn khoanh vùng nhanh 80% thủ phạm chính theo quy luật Pareto.
+
+Còn khi bật giao diện web `go tool pprof -http=:8081 cpu.pprof` để xem **Flame Graph** (biểu đồ ngọn lửa do Brendan Gregg phát minh):
+
+<Figure src={greggFlame} alt="Biểu đồ CPU Flame Graph gốc của Brendan Gregg minh họa các thanh nằm ngang rộng nhô ra trên các tầng call stack" caption="Cách đọc Flame Graph: chiều dọc là độ sâu hàm gọi nhau, chiều ngang sắp theo thứ tự chữ cái (không phải thời gian!), và phần đỉnh phẳng rộng lộ ra ngoài chính là Flat bottleneck." sourceTitle="Brendan Gregg — Flame Graphs" sourceUrl="https://www.brendangregg.com/flamegraphs.html" />
+
+Nhớ hai quy tắc vàng khi đọc Flame Graph:
+1. **Trục ngang xếp theo bảng chữ cái A–Z, KHÔNG phải thời gian chạy trước hay sau**: thanh nằm bên trái không hề chạy trước thanh bên phải; độ rộng đơn thuần là % tổng số mẫu (`Cum%`).
+2. **Tìm những mái bằng rộng (plateau), đừng sợ tháp nhọn cao**: hàm cha nằm dưới rộng 80% nhưng bị hàm con che hết 79% tức là nó chỉ gọi giùm; phần đỉnh bằng rộng nhô trống ra ngoài mới là nơi code tự đốt CPU trực tiếp (`Flat`).
+
+```go
+// Phân biệt rõ chi phí Cum của hàm gọi với chi phí Flat ngay tại hàm lá:
+func ParsePayload(b []byte) (int64, error) {
+	lines := bytes.Split(b, []byte("\n")) // Flat cao vì tự xin [][]byte & duyệt 2 lượt
+	return sumParsed(lines)                // Cum cao vì cộng dồn thời gian xử lý bên dưới
+}
+```
+
+<GoEffFlamegraphGuide />
+
+<GoProfFlatVsCumTrace />
+
+<QuoteCard author="Brendan Gregg" role="Tác giả phát minh Flame Graph" sourceTitle="Flame Graphs Overview" sourceUrl="https://www.brendangregg.com/flamegraphs.html">
+Trục hoành (X) trải rộng theo tập mẫu và xếp theo bảng chữ cái chứ không phải chiều trôi của thời gian. Những đỉnh phẳng rộng phía trên chính là các hàm đang trực tiếp tiêu tốn CPU ngay lúc lấy mẫu.
+</QuoteCard>
+
+<Concepts title="Mấy khái niệm ở mục này">
+
+- **Cột `Sum%`**: tổng cộng dồn các dòng `Flat%` từ trên xuống dưới trong báo cáo `Top`, cho biết chỉ 3–5 hàm đầu tiên đã gánh tới bao nhiêu % toàn bộ chi phí.
+- **Mái bằng Flame Graph (plateau)**: phần bề mặt rộng không bị thanh hàm con nào che phủ phía trên/dưới, đánh dấu phần `Flat` tốn trực tiếp tại chính hàm đó.
+
+</Concepts>
+
+---
+
+## 3. Phân biệt `alloc_space` với `inuse_space` &amp; bắt Off-CPU bằng `fgprof`
+
+Biết mở Flame Graph mới là một nửa câu chuyện — nửa còn lại dễ sai hơn nhiều là **chọn nhầm loại profile**, khiến bạn sửa lệch hoàn toàn chỗ đang nghẽn:
+
+<Figure src={scopeTrace} alt="Màn hình máy hiện sóng (oscilloscope) hiển thị song song hai dạng sóng tam giác và sóng vuông trên cùng trục thời gian" caption="Giống như soi cùng lúc hai kênh trên máy hiện sóng để bắt độ lệch pha, ghép thêm fgprof vào pprof giúp nhìn rõ lúc goroutine đứng chờ đĩa/lock mà CPU profile bỏ sót." sourceTitle="Wikimedia Commons: Dual waveform oscilloscope screen" sourceUrl="https://commons.wikimedia.org/wiki/File:Triangular_wave_and_square_wave_on_oscilloscope_screen_(cropped).jpg" />
+
+Hai điểm mù phổ biến nhất khi dùng `pprof` mặc định:
+
+1. **CPU `pprof` chuẩn mù hoàn toàn với thời gian ngủ chờ (`Off-CPU`)**: bộ lấy mẫu `SIGPROF` của Go chỉ ghi nhận mẫu khi goroutine **đang chạy trên nhân CPU (`On-CPU`)**. Nếu request chậm 100 ms vì mất 15 ms parse JSON (`On-CPU`) còn tới 85 ms ngủ chờ query PostgreSQL, chờ khóa Mutex hay đọc ổ đĩa (`Off-CPU`), biểu đồ CPU `pprof` vẫn báo JSON ngốn gần 100% thời gian! Cài thêm thư viện nhẹ **`github.com/felixge/fgprof`** sẽ quét đồng đều cả goroutine đang chạy lẫn đang chờ (chính `fgprof` đã lôi ra sự thật `os.ReadFile` tốn gần 50% tổng thời gian chạy!).
+2. **Nhầm giữa `alloc_space` với `inuse_space` trên Heap profile**: chọn **`alloc_space`** (tổng mọi byte từng xin cấp phát từ lúc bật app, lấy mẫu mặc định mỗi 512 KB) khi muốn săn chỗ đẻ quá nhiều rác tạm làm GC tốn CPU. Chọn **`inuse_space`** (những object *còn sống ngay lúc chụp*) khi RAM container cứ bò lên dần tới ngưỡng OOMKill! Lúc chạy benchmark trên máy để kiểm tra chặt xem hàm có rò 1 byte nào không, có thể tạm bật `runtime.MemProfileRate = 1` như khi kiểm chứng `Sum6`.
+
+```go
+// Chọn đúng cờ xem Heap hoặc bật fgprof khi nghi ngờ kẹt I/O / Mutex:
+// go tool pprof -alloc_space -top mem.pprof   // Săn chỗ đẻ rác tạm làm nặng GC
+// go tool pprof -inuse_space -top mem.pprof   // Săn chỗ giữ RAM sống gây OOM
+stopFg := fgprof.Start(f, fgprof.FormatPprof)   // Ghi cả On-CPU lẫn lúc chờ I/O/Lock
+defer stopFg()
+```
+
+<GoEffOnCpuVsOffCpu />
+
+<GoProfAllocSpaceVsInuse />
+
+<GoOffCpuTimelineDemo />
+
+<QuoteCard author="Felix Geisendörfer" role="Tác giả thư viện fgprof" sourceTitle="fgprof Documentation" sourceUrl="https://github.com/felixge/fgprof">
+Bộ CPU profiler mặc định của Go chỉ nhìn thấy tác vụ nặng CPU và hoàn toàn bỏ qua những goroutine đang đứng chờ I/O, channel hay sleep. Đo theo thời gian đồng hồ thực (wall-clock) trên toàn bộ goroutine sẽ vạch trần nguyên nhân thật khiến request bị chậm.
+</QuoteCard>
+
+<Concepts title="Mấy khái niệm ở mục này">
+
+- **`fgprof` (Full Goroutine Profiler)**: công cụ bổ sung cho Go quét tất cả goroutine bất kể đang chạy trên nhân hay đang ngủ chờ I/O/Mutex, phản ánh đúng độ trễ đồng hồ thật.
+- **`MemProfileRate`**: ngưỡng lấy mẫu cấp phát heap của Go (mặc định `524288` = 512 KB/mẫu); tạm hạ về `1` trong benchmark cục bộ giúp soi không sót 1 allocation nhỏ nào.
+
+</Concepts>
+
+---
+
+## 4. Continuous Profiling (Parca) &amp; chứng minh chênh lệch bằng `-diff_base`
+
+Cách chụp profile thủ công (`curl :6060/debug/pprof/heap`) dính đúng một điểm yếu chí mạng: **gần như lúc nào bạn cũng tới sau khi pod đã chết**. Lúc một đợt query lạ làm pod bị OOMKill vào 02:14 sáng, Kubernetes lập tức khởi động container mới tinh với Heap trống rỗng — toàn bộ dấu vết biến mất sạch sẽ.
+
+**Continuous Profiling** (với các dự án mã nguồn mở Go như **Parca**, **Pyroscope** hoặc agent eBPF) khắc phục dứt điểm bằng cách tự động thu thập mẫu nhẹ định kỳ mỗi 15–60 giây (`&lt; 5%` CPU, hoặc chỉ gắn trên vài replica mẫu) rồi lưu thành chuỗi thời gian. Có sự cố lúc 02:14 sáng? Bạn chỉ việc tua lại khung `02:13` ngay trên giao diện và xem trọn vẹn Flame Graph `inuse_space` trước lúc crash:
+
+<Figure src={parcaFlame} alt="Giao diện Parca Continuous Profiling hiển thị bảng Top với runtime.scanobject và Flame Graph tương tác của chương trình Go" caption="Giao diện Continuous Profiling (Parca / Grafana): mở lại đúng khoảnh khắc bất kỳ trong quá khứ để thấy hàm Go nào đang làm GC hoặc Heap vọt cao trước lúc pod khởi động lại." sourceTitle="Grafana Documentation — Parca Continuous Profiling" sourceUrl="https://grafana.com/docs/grafana/latest/datasources/parca/" />
+
+Nhìn một kịch bản điều tra thực chiến khi Kubernetes báo pod chết **`OOMKilled (exit code 137)`** lúc 02:14 sáng:
+1. Gõ `curl :6060/debug/pprof/heap` lúc sáng dậy chỉ lấy được thông số của container vừa khởi động lại (`HeapAlloc = 18 MB`) vì process cũ đã bị kernel giết sạch.
+2. Mở giao diện Parca / Pyroscope kéo lùi đúng khung `02:13:45` — chỉ 15 giây trước cú `137` — bạn nhìn thấy nguyên cây gọi `inuse_space` lúc cận tử (`ParseExport -> bytes.Buffer.Grow` giữ chặt `480 MB` qua `80` goroutine bị treo) và tải thẳng file `.pb.gz` đó về máy để mổ xẻ mà không cần tái hiện lại lỗi trên production.
+
+Khi đã có file `.pb.gz` trong tay, nắm vững 6 lệnh terminal kinh điển dưới đây của `go tool pprof` giúp bắt đúng dòng code thủ phạm chỉ trong vài phút:
+
+| Lệnh `pprof` | Kết quả hiển thị | Lúc nào dùng ngay trong sự cố |
+| :--- | :--- | :--- |
+| **`top 20 -cum`** | Top hàm xếp theo **Cumulative** (cả cây con) | Tìm nhanh handler hoặc job gốc đang gọi xuống chuỗi hàm chậm |
+| **`list HandleBatch`** | Gắn số mẫu CPU / RAM thẳng vào **từng dòng code Go** | Chỉ mặt đặt tên đúng dòng `fmt.Sprintf` hoặc convert slice đẻ rác |
+| **`peek Unmarshal`** | Liệt kê **hàm cha gọi tới** và **hàm con được gọi** | Lần ngược xem ai đang nắm giữ không chịu nhả bộ nhớ ở `inuse_space` |
+| **`weblist HotLoop`** | Code Go kẹp song song từng dòng **Assembly thật** | Bắt bẫy kiểm tra biên slice, dynamic dispatch hay lock ẩn bên dưới |
+| **`traces -alloc_objects`** | Xếp stack trace theo **số lượng object** thay vì byte | Tóm hàng triệu object tí hon `16 B` làm GC quét con trỏ mệt nhoài |
+| **`-diff_base=v1.pb.gz v2.pb.gz`** | Đồ thị hiệu số `+` / `-` giữa hai phiên bản | Chứng minh PR tối ưu thật sự giảm tải mà không phình ẩn chỗ khác |
+
+Ngoài ra, nhờ định dạng `.pprof` có tính cộng trừ tuyến tính, bạn dùng ngay cờ **`-diff_base`** để xuất biểu đồ Flame Graph chênh lệch đỏ/xanh giữa phiên bản cũ `v1` và bản vá `v2` (hoặc dùng `-base` trừ bớt tải nền dùng chung):
+
+```go
+// So sánh trực quan xem PR mới làm giảm (-) hay tăng (+) CPU/RAM ở đúng hàm nào:
+// go tool pprof -http=:8082 -diff_base=v1.cpu.pprof v2.cpu.pprof
+// Trừ bớt phần tải nền chung để tách đúng tác động của tính năng A:
+// go tool pprof -base=baseline.mem.pprof featureA.mem.pprof
+```
+
+<GoEffContinuousProfilingDiff />
+
+Bạn thử chuyển cả bốn chế độ profile và bấm trực tiếp vào từng thanh stack trong mô phỏng Flame Graph bên dưới:
+
+<GoEffProfileExplorerDemo />
+
+<Concepts title="Mấy khái niệm ở mục này">
+
+- **Continuous Profiling (Parca / Pyroscope)**: thu thập profile tự động định kỳ với chi phí nhẹ (&lt;5% CPU) để lưu lịch sử dài ngày, giữ trọn bằng chứng trước các pha tăng RAM đột ngột hay OOMKill.
+- **Differential Flame Graph (`-diff_base` / `-base`)**: so sánh trừ trực tiếp hai file `.pprof` theo từng call stack để chứng minh bản tối ưu thực sự giảm chi phí chứ không làm phình chỗ khác.
+
+</Concepts>
+
+---
+
+## Điểm rút ra (Key takeaways)
+
+- **Chụp profile rồi mới tối ưu**: luôn xuất `-cpuprofile` / `-memprofile` thay vì đoán mò; mắt thường rất dễ bỏ sót cấp phát ẩn trong hàm chuẩn như `bytes.Split`.
+- **Khóa chặt `/debug/pprof` vào cổng nội bộ**: chỉ gắn lên listener `127.0.0.1:6060` hoặc mạng VPC riêng, kết hợp `pprof.Do` để lọc theo endpoint/job.
+- **Đọc Flame Graph bằng `Flat` vs. `Cum` và bề rộng**: trục ngang xếp chữ cái A–Z (không phải thứ tự thời gian), phần đỉnh phẳng rộng mới là chỗ tự đốt tài nguyên.
+- **Chọn đúng cặp công cụ cho đúng bệnh**: bật `fgprof` khi nghi ngờ ngủ chờ I/O hay lock, soi `alloc_space` để giảm việc cho GC, và soi `inuse_space` để tóm rò RAM sống.
+- **Dùng Continuous Profiling &amp; `-diff_base`**: giữ ảnh hiện trường trước khi OOMKill làm mất dữ liệu và kiểm chứng kết quả từng PR bằng delta định lượng.
+
+---
+
+## Câu hỏi tự kiểm tra
+
+1. Trong báo cáo `go tool pprof -top`, `HandleRequest` hiện `0% Flat` và `94% Cum`, còn `internal/strconv.ParseUint` hiện `39,5% Flat`. Hàm nào đang tự tiêu tốn CPU trực tiếp và hàm nào chỉ làm nhiệm vụ gọi giùm hàm con? *(Xem Mục 2)*
+2. Khi nhìn vào một CPU Flame Graph, tại sao thấy hàm A nằm tít bên mép trái còn hàm B nằm bên phải lại *không* có nghĩa hàm A chạy trước hàm B? *(Xem Mục 2)*
+3. Một API mất tổng cộng 100 ms xử lý: chỉ tốn 15 ms parse JSON trên CPU và tới 85 ms ngủ chờ lock từ PostgreSQL. Vì sao CPU profile mặc định vẫn báo parse JSON ngốn gần 100%, và `fgprof` vạch trần 85 ms kia thế nào? *(Xem Mục 3)*
+4. Phân biệt `go tool pprof -alloc_space` với `-inuse_space`: cái nào dùng để bắt chỗ đẻ nhiều rác tạm (`bytes.Split`), cái nào dùng để tìm lỗi rò RAM không nhả trước lúc sập OOM? *(Xem Mục 3)*
+5. Vì sao đợi thấy pod bị Kubernetes OOMKill rồi mới `curl /debug/pprof/heap` thì gần như vô ích, và Continuous Profiling + `-diff_base` giúp ích ra sao? *(Xem Mục 4)*
+
+</Vi>
