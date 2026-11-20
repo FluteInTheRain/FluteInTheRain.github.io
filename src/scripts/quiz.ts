@@ -21,6 +21,9 @@ if (root) {
   const setsNav = root.querySelector<HTMLElement>('[data-sets-nav]')!;
   const chips = [...root.querySelectorAll<HTMLButtonElement>('[data-goto-set]')];
 
+  const qChips = [...root.querySelectorAll<HTMLButtonElement>('[data-goto-q]')];
+  const qNavs = [...root.querySelectorAll<HTMLElement>('[data-q-nav]')];
+
   let progress = loadProgress(store, key);
   let current = -1;
 
@@ -100,6 +103,11 @@ if (root) {
       const set = sets.find((s) => s.dataset.set === chip.dataset.gotoSet);
       const qs = set ? [...set.querySelectorAll<HTMLElement>('.quiz-q')] : [];
       chip.classList.toggle('is-done', qs.length > 0 && qs.every(isAnswered));
+    });    qChips.forEach((chip) => {
+      const q = questions.find((x) => x.dataset.q === chip.dataset.gotoQ);
+      if (!q) return;
+      chip.classList.toggle('is-right', q.classList.contains('is-right'));
+      chip.classList.toggle('is-wrong', q.classList.contains('is-wrong'));
     });
   }
 
@@ -107,6 +115,7 @@ if (root) {
     current = i;
     summary.hidden = true;
     questions.forEach((q, k) => q.classList.toggle('is-current', k === i));
+    qChips.forEach((chip) => chip.classList.toggle('is-current', chip.dataset.gotoQ === questions[i].dataset.q));
     const set = setOf(questions[i]);
     sets.forEach((s) => s.classList.toggle('is-current', s === set));
     chips.forEach((chip) => chip.classList.toggle('is-current', chip.dataset.gotoSet === set.dataset.set));
@@ -118,6 +127,7 @@ if (root) {
     questions.forEach((q) => q.classList.remove('is-current'));
     sets.forEach((s) => s.classList.remove('is-current'));
     chips.forEach((chip) => chip.classList.remove('is-current'));
+    qChips.forEach((chip) => chip.classList.remove('is-current'));
     const results = questions.map((q) => ({
       level: q.dataset.level as Level,
       correct: gradeAnswer({ answer: answerOf(q) }, progress[q.dataset.q ?? ''] ?? []).correct,
@@ -184,6 +194,19 @@ if (root) {
     });
   });
 
+  qChips.forEach((chip) => {
+    chip.addEventListener('click', () => {
+      const i = questions.findIndex((q) => q.dataset.q === chip.dataset.gotoQ);
+      if (i >= 0) show(i, false);
+    });
+  });
+  const step = (by: number) => {
+    const i = current + by;
+    if (current >= 0 && i >= 0 && i < questions.length) show(i, true);
+  };
+  root.querySelectorAll('[data-q-prev]').forEach((b) => b.addEventListener('click', () => step(-1)));
+  root.querySelectorAll('[data-q-next]').forEach((b) => b.addEventListener('click', () => step(1)));
+
   summary.querySelector('[data-retry-wrong]')?.addEventListener('click', () => {
     questions.forEach((q) => {
       const chosen = progress[q.dataset.q ?? ''];
@@ -209,6 +232,7 @@ if (root) {
   root.classList.add('js-quiz');
   progressBox.hidden = false;
   setsNav.hidden = false;
+  qNavs.forEach((n) => { n.hidden = false; });
   questions.forEach((q) => {
     resetQuestion(q);
     const chosen = progress[q.dataset.q ?? ''];
