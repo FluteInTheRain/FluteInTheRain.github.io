@@ -205,6 +205,19 @@ export function saveProgress(store: Store | null, key: string, p: Record<string,
 
 // ---- post headings
 
+/** English heading slugs of a post file: the ##/### lines before the first `</En>` */
+export function englishAnchors(mdx: string): Set<string> {
+  const lines = mdx.split('\n');
+  const end = lines.findIndex((l) => l.startsWith('</En>'));
+  const slugger = new Slugger();
+  const out = new Set<string>();
+  for (const l of lines.slice(0, end === -1 ? lines.length : end)) {
+    const m = l.match(/^#{2,3} (.*)/);
+    if (m) out.add(slugger.slug(m[1].replace(/<[^>]+>/g, '').trim()));
+  }
+  return out;
+}
+
 /**
  * English heading slug -> Vietnamese heading slug for one post file. The post holds an English block
  * (`</En>` ends it) and a Vietnamese block (`<Vi>` ... `</Vi>`) with the headings in the same order, so

@@ -2,10 +2,9 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import Slugger from 'github-slugger';
 import {
   validateSet, orderSets, shuffleOptions, gradeAnswer, scoreByLevel,
-  loadProgress, saveProgress, headingSlugPairs, type Store,
+  loadProgress, saveProgress, headingSlugPairs, englishAnchors, type Store,
 } from './quiz.ts';
 import type { QuizSet, QuizQuestion, Level, Track } from '../data/quiz/types.ts';
 
@@ -15,18 +14,7 @@ const read = (f: string) => JSON.parse(fs.readFileSync(f, 'utf8')) as QuizSet;
 const fixture = () => read(path.join(QUIZ_DIR, '_fixtures/sample-case.json'));
 const POST = 'reliable-scalable-maintainable-data-systems';
 
-/** English heading slugs of a post: the ##/### lines before the first </En> */
-function postAnchors(slug: string): Set<string> {
-  const lines = fs.readFileSync(path.join(ROOT, 'src/content/blog', `${slug}.mdx`), 'utf8').split('\n');
-  const end = lines.findIndex((l) => l.startsWith('</En>'));
-  const slugger = new Slugger();
-  const out = new Set<string>();
-  for (const l of lines.slice(0, end === -1 ? lines.length : end)) {
-    const m = l.match(/^#{2,3} (.*)/);
-    if (m) out.add(slugger.slug(m[1].replace(/<[^>]+>/g, '').trim()));
-  }
-  return out;
-}
+const postAnchors = (slug: string) => englishAnchors(fs.readFileSync(path.join(ROOT, 'src/content/blog', `${slug}.mdx`), 'utf8'));
 
 const anchors = () => postAnchors(POST);
 const clone = <T,>(x: T): T => structuredClone(x);

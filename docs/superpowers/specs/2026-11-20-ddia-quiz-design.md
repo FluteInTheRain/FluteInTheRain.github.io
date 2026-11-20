@@ -197,7 +197,7 @@ interview-style 20, AI 20; multi-select 4.
 | 5 | Remember (I) | Understand (AI) | Apply (AI) | Analyze (I) | Evaluate (AI) |
 | 6 | Understand (I) | Apply (AI) | Apply (AI) | Analyze (I, multi) | Evaluate (AI) |
 | 7 | Apply (I) | Apply (AI) | Analyze (I) | Analyze (AI, multi) | Evaluate (I) |
-| 8 | Apply (AI) | Analyze (I) | Analyze (AI, multi) | Evaluate (I) | Evaluate (AI) |
+| 8 | Apply (AI) | Apply (I) | Analyze (AI, multi) | Evaluate (I) | Evaluate (AI) |
 
 ## Open points
 
