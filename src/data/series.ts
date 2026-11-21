@@ -7,6 +7,7 @@ import type { ImageMetadata } from 'astro';
 import draftingSet from '../assets/series/drafting-set.jpg';
 import ramac305 from '../assets/series/ibm-305-ramac.jpg';
 import goGophers from '../assets/series/go-gopher-five-years.jpg';
+import stockCert from '../assets/series/stock-certificate-1892.jpg';
 
 export interface L10n { en: string; vi: string }
 
@@ -849,10 +850,239 @@ const golang: Series = {
   ],
 };
 
+const S = {
+  ownership: 'what-is-a-stock-ownership-dividends',
+  account: 'vietnam-stock-market-venues-open-account',
+  orders: 'vietnam-order-types-order-book-ato-atc',
+  settlement: 'stock-fees-taxes-settlement-t2-vsd',
+  dividends: 'shareholder-rights-dividends-corporate-actions',
+  statements: 'reading-financial-statements-investors-5-minutes',
+  ratios: 'pe-pb-roe-valuation-ratios-in-context',
+  macro: 'macro-industry-what-moves-stock-prices',
+  risk: 'margin-trading-risks-beginner-psychology',
+  plan: 'portfolio-dca-first-investment-plan',
+};
+
+const stocksBasics: Series = {
+  id: 'stocks-basics',
+  title: {
+    en: 'Stock market basics',
+    vi: 'Chứng khoán cơ bản',
+  },
+  kicker: { en: 'A 10-part series', vi: 'Series 10 bài' },
+  tagline: {
+    en: 'What a share is, how Vietnamese markets run, and how not to lose your first savings.',
+    vi: 'Cổ phiếu là gì, thị trường Việt chạy thế nào, và làm sao không mất khoản tiết kiệm đầu tiên.',
+  },
+  pitch: [
+    {
+      en: 'Most beginners lose money not because the market is rigged but because they never learned the mechanics: which order types actually fill, when money really arrives (T+2), what a dividend does to the price, and why margin makes every mistake bigger.',
+      vi: 'Người mới thua tiền đa số không phải vì thị trường chơi xấu, mà vì họ chưa học cơ chế: lệnh nào thật sự khớp, tiền bao giờ thật sự về (T+2), cổ tức làm giá thay đổi ra sao, và vì sao margin phóng to mọi sai lầm.',
+    },
+    {
+      en: 'Each post takes one step you can act on today — open an account, place an ATO order, skim a financial statement — and explains the machinery behind it with real numbers from Vietnamese markets and the classics of investing.',
+      vi: 'Mỗi bài là một bước làm được ngay hôm nay — mở tài khoản, đặt lệnh ATO, lướt qua một BCTC — kèm giải thích cơ chế phía sau bằng số thật từ thị trường Việt và các kinh điển của đầu tư.',
+    },
+  ],
+  credit: {
+    en: 'Assembled from Vietnamese market mechanics (HOSE, HNX and VSDC rules, fee schedules, issuer filings) plus investing classics: The Intelligent Investor (Graham), One Up on Wall Street (Lynch) and The Psychology of Money (Housel).',
+    vi: 'Tổng hợp từ cơ chế thị trường Việt (quy định HOSE, HNX, VSDC, bảng phí, báo cáo doanh nghiệp) cùng các kinh điển về đầu tư: The Intelligent Investor (Graham), One Up on Wall Street (Lynch) và The Psychology of Money (Housel).',
+  },
+  // A lithographed 1892 stock certificate: the "basic" unit of the market, before it was a number on a screen.
+  cover: {
+    subtitle: {
+      en: 'Ownership · Orders · Numbers · Discipline',
+      vi: 'Sở hữu · Lệnh · Con số · Kỷ luật',
+    },
+    image: stockCert,
+    alt: 'A lithographed stock certificate from 1892 with ornate borders and a central vignette.',
+    position: '50% 55%',
+    imprint: 'STOCKS',
+    credit: {
+      title: 'Original company stock certificate',
+      author: 'Downingsf',
+      url: 'https://commons.wikimedia.org/wiki/File:Original_company_stock_certificate.jpg',
+      license: 'CC BY-SA 3.0',
+    },
+  },
+  outcomes: [
+    {
+      en: 'Say what a share gives you: a claim on earnings and dividends, not a lottery ticket.',
+      vi: 'Nói được cổ phiếu cho bạn gì: quyền hưởng lợi nhuận và cổ tức, chứ không phải tấm vé số.',
+    },
+    {
+      en: 'Open an account and trade with intent: ATO/ATC/LO orders, fees, and the T+2 money path.',
+      vi: 'Mở tài khoản và đặt lệnh có chủ đích: lệnh ATO/ATC/LO, phí, và dòng tiền T+2.',
+    },
+    {
+      en: 'Skim a financial statement and read PE, PB and ROE with industry context.',
+      vi: 'Đọc lướt một BCTC và hiểu PE, PB, ROE đúng theo ngữ cảnh ngành.',
+    },
+    {
+      en: 'Run a first-year plan: DCA, position limits and written rules for when to sell.',
+      vi: 'Chạy được kế hoạch năm đầu: DCA, giới hạn tỷ trọng và quy tắc bán viết ra giấy.',
+    },
+  ],
+  acts: [
+    {
+      id: 'ground',
+      label: { en: 'Foundations', vi: 'Nền tảng' },
+      blurb: { en: 'What a share is, where to buy one', vi: 'Cổ phiếu là gì, mua ở đâu' },
+    },
+    {
+      id: 'money',
+      label: { en: 'The money path', vi: 'Dòng tiền' },
+      blurb: { en: 'Fees, settlement, dividends', vi: 'Phí, thanh toán, cổ tức' },
+    },
+    {
+      id: 'read',
+      label: { en: 'Reading the numbers', vi: 'Đọc số' },
+      blurb: { en: 'Statements, ratios, macro', vi: 'BCTC, chỉ số, vĩ mô' },
+    },
+    {
+      id: 'discipline',
+      label: { en: 'Staying in the game', vi: 'Trụ lại trên thị trường' },
+      blurb: { en: 'Risk, psychology, a plan', vi: 'Rủi ro, tâm lý, kế hoạch' },
+    },
+  ],
+  parts: [
+    {
+      slug: S.ownership,
+      topic: { en: 'A share is ownership', vi: 'Cổ phiếu là sở hữu' },
+      hook: {
+        en: 'One share is one slice of a company — earnings, dividends and why prices move.',
+        vi: 'Một cổ phiếu là một mảnh doanh nghiệp — lợi nhuận, cổ tức và vì sao giá chạy.',
+      },
+      act: 'ground',
+      builds: [],
+    },
+    {
+      slug: S.account,
+      topic: { en: 'Open an account', vi: 'Mở tài khoản' },
+      hook: {
+        en: 'Choosing a Vietnamese broker and what HOSE, HNX and UPCoM actually are.',
+        vi: 'Chọn công ty chứng khoán Việt Nam và HOSE, HNX, UPCoM thực ra là gì.',
+      },
+      act: 'ground',
+      builds: [S.ownership],
+    },
+    {
+      slug: S.orders,
+      topic: { en: 'Prices & orders', vi: 'Bảng giá & lệnh' },
+      hook: {
+        en: 'Reading the board and placing LO, ATO, ATC and MP orders without paying the spread.',
+        vi: 'Đọc bảng giá và đặt lệnh LO, ATO, ATC, MP mà không trả giá cho spread.',
+      },
+      act: 'ground',
+      builds: [S.account],
+    },
+    {
+      slug: S.settlement,
+      topic: { en: 'Fees & settlement', vi: 'Phí & thanh toán' },
+      hook: {
+        en: 'Where your money goes after a trade: fees, tax and T+2 settlement through VSDC.',
+        vi: 'Tiền của bạn đi đâu sau lệnh: phí, thuế và thanh toán bù trừ T+2 qua VSDC.',
+      },
+      act: 'money',
+      builds: [S.orders],
+    },
+    {
+      slug: S.dividends,
+      topic: { en: 'Dividends & rights', vi: 'Cổ tức & quyền' },
+      hook: {
+        en: 'Cash vs stock dividends, splits, ex-date traps and dilution from new issuance.',
+        vi: 'Cổ tức tiền hay cổ phiếu, chia tách, bẫy ex-date và pha loãng khi phát hành thêm.',
+      },
+      act: 'money',
+      builds: [S.settlement],
+    },
+    {
+      slug: S.statements,
+      topic: { en: 'Financial statements', vi: 'BCTC' },
+      hook: {
+        en: 'Five minutes with a financial statement: what to check and what smells wrong.',
+        vi: 'Năm phút với một BCTC: đọc gì, và gì là dấu hiệu đáng ngờ.',
+      },
+      act: 'read',
+      builds: [S.ownership],
+    },
+    {
+      slug: S.ratios,
+      topic: { en: 'Valuation ratios', vi: 'Chỉ số định giá' },
+      hook: {
+        en: 'PE, PB and ROE mean nothing without context: industry benchmarks and earnings cycles.',
+        vi: 'PE, PB, ROE không có nghĩa nếu thiếu ngữ cảnh: chuẩn ngành và chu kỳ lợi nhuận.',
+      },
+      act: 'read',
+      builds: [S.statements],
+    },
+    {
+      slug: S.macro,
+      topic: { en: 'Macro & industry', vi: 'Vĩ mô & ngành' },
+      hook: {
+        en: 'Interest rates, FX and cycles move whole sectors — read the current, not the noise.',
+        vi: 'Lãi suất, tỷ giá và chu kỳ di chuyển cả một ngành — đọc dòng chảy, đừng đọc nhiễu.',
+      },
+      act: 'read',
+      builds: [S.ratios],
+    },
+    {
+      slug: S.risk,
+      topic: { en: 'Risk & psychology', vi: 'Rủi ro & tâm lý' },
+      hook: {
+        en: 'Margin cuts both ways; herd behaviour, FOMO and how beginners actually lose money.',
+        vi: 'Margin hai lưỡi; tâm lý đám đông, FOMO và người mới thật sự thua tiền thế nào.',
+      },
+      act: 'discipline',
+      builds: [S.settlement, S.macro],
+    },
+    {
+      slug: S.plan,
+      topic: { en: 'Your first plan', vi: 'Kế hoạch đầu tiên' },
+      hook: {
+        en: 'A first-year plan: position sizing, DCA and written rules for when to sell.',
+        vi: 'Kế hoạch năm đầu: tỷ trọng, DCA và quy tắc bán viết ra giấy.',
+      },
+      act: 'discipline',
+      builds: [S.risk],
+    },
+  ],
+  paths: [
+    {
+      id: 'full',
+      label: { en: 'Read it all', vi: 'Đọc trọn bộ' },
+      who: {
+        en: 'You have an evening or two and want the whole picture, in the order it builds up.',
+        vi: 'Bạn có một hai buổi tối và muốn thấy bức tranh trọn vẹn, theo đúng thứ tự xây dần.',
+      },
+      order: [S.ownership, S.account, S.orders, S.settlement, S.dividends, S.statements, S.ratios, S.macro, S.risk, S.plan],
+    },
+    {
+      id: 'first-trade',
+      label: { en: 'Place your first trade', vi: 'Đặt lệnh đầu tiên' },
+      who: {
+        en: 'You want to trade this week: the mechanics, nothing else yet.',
+        vi: 'Bạn muốn đặt lệnh trong tuần này: chỉ cần cơ chế, chuyện khác để sau.',
+      },
+      order: [S.ownership, S.account, S.orders, S.settlement],
+    },
+    {
+      id: 'long-hold',
+      label: { en: 'Invest slow, hold long', vi: 'Đầu tư chậm, nắm dài hạn' },
+      who: {
+        en: 'You would rather not watch the board every day.',
+        vi: 'Bạn không muốn ngồi nhìn bảng giá mỗi ngày.',
+      },
+      order: [S.ownership, S.statements, S.ratios, S.dividends, S.risk, S.plan],
+    },
+  ],
+};
+
 export const SERIES: Record<string, Series> = {
   [refactoringUi.id]: refactoringUi,
   [ddia.id]: ddia,
   [golang.id]: golang,
+  [stocksBasics.id]: stocksBasics,
 };
 export const SERIES_IDS = Object.keys(SERIES);
 
