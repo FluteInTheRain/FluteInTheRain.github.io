@@ -47,6 +47,5 @@ export const ui = {
   searchPosts: { en: 'Search posts', vi: 'Tìm bài viết' },
   noMatch: { en: 'No posts match', vi: 'Không có bài nào khớp' },
   openSeries: { en: 'Open the series →', vi: 'Xem cả series →' },
-  soon: { en: 'soon', vi: 'sắp có' },
-  allPublished: { en: 'all published', vi: 'đã đăng đủ' },
+  soon: { en: 'Soon', vi: 'Sắp có' },
 } as const;
