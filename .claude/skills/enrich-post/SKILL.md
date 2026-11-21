@@ -26,7 +26,7 @@ Posts with 100% AI-drawn diagrams can still feel synthetic. Real engineers mix t
 
 ## Never
 
-- Add a cluttered, multi-box text-heavy diagram as the hero image. The hero visual must be exactly ONE artistic, philosophical, or real-world metaphor (e.g. balance scale, solo face-off), placed directly at the top with NO preamble announcement. (Exception: `golang`-series posts open with a real captured Go tooling screenshot instead of a metaphor — see `.claude/skills/book-to-post/style-guide.md`, "Go-Series Exception".)
+- Add a cluttered, multi-box text-heavy diagram as the hero image. The hero visual must be exactly ONE artistic, philosophical, or real-world metaphor (e.g. balance scale, solo face-off), placed directly at the top with NO preamble announcement. (Cover-only convention: `golang`-series posts set their frontmatter `cover` to a Renee French gopher artwork — heroes still follow this metaphor rule.)
 - Overlap text with boxes, nodes, or arrows in diagrams (keep labels in empty space next to what they explain, and set `nodesep: 0.9` / `ranksep: 1.2` in Python diagrams).
 - Add generated "infographic" PNGs (title banner, pill/badge labels, card grids, gradients, emoji). Diagrams and charts are drawn on the page; see `.claude/skills/book-to-post/SKILL.md` Step 6 B.
 - Copy a figure from a copyrighted book in `books/`.

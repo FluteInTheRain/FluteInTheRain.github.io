@@ -1,5 +1,7 @@
 # Go Series Native Covers (Gopher Art + Real Tooling Heroes) Implementation Plan
 
+> **Amendment (2026-11-21, Khang's call after reviewing the dev site):** scope narrowed to **covers only**. The in-post heroes keep their original metaphor photos; the "Hero artifact mapping" below was implemented, then reverted in a follow-up commit. Everything about covers (the mapping table) stands as shipped.
+
 **Goal:** Replace the metaphor photos in all 12 `golang` series posts with Go-native imagery. Each post's frontmatter `cover` (blog index cards, featured post, thumbnails, category pages) becomes an official Renee French gopher artwork (CC BY 3.0, Wikimedia Commons). Each post's in-post hero `<Figure>` (first figure under the title) becomes a genuine screenshot of Go tooling output captured locally with Go 1.27.1. DDIA, UI/UX, and standalone posts are untouched (possible follow-up if Khang wants the same direction there).
 
 **Why:** the golang series currently opens with historical metaphor photos (switchboard, Babbage gears, centrifugal governor, PDP-11, watermill…). Khang wants title images that are about Go itself. The series cover page already uses gopher art (`go-gopher-five-years.jpg`), so gopher covers give the series one coherent identity, and real tooling screenshots keep the site's "real, sourced, no AI imagery" philosophy.
