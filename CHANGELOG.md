@@ -3,6 +3,12 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-22 — Publish 8 bài draft của series Go
+
+- **Quyết định (user):** "Publish toan bo di" — sau khi hỏi vì sao GitHub Pages chỉ hiện 4 bài Go (nguyên nhân: 8 bài còn lại `draft: true`, thiết kế draft chỉ xem trong dev).
+- **Đã làm:** branch `feat/publish-go-drafts` — flip `draft: true` → `false` cho 8 bài Go (efficiency/hardware, composite-types, errors-concurrency, toolchain, hardware-cpu-caches, observability, profiling, three-rs). Build 56 pages (+8), 39 test pass.
+- **Lưu ý:** series Go giờ 12/12 published; pilot backend vẫn `draft: true` chờ duyệt giọng.
+
 ## 2026-11-22 — Ảnh trong bài render nhỏ gọn dạng chữ nhật (điều chỉnh display, không đổi file)
 
 - **Yêu cầu (user, đang xem dev server):** các ảnh trong bài "nên nhỏ lại 1 xíu và dạng chữ nhật" — trước đó figure render full cột ~990px (hero ảnh dọc 1048×1224 thành khối 990×1157, ảnh gần vuông trông như ô to).
