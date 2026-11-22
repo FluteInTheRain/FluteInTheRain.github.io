@@ -3,6 +3,13 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-22 — Sửa bài stocks post 1 sau khi PR #20 đã merge: cơ chế EPS kiểm toán sai
+
+- **Bối cảnh:** PR #20 (nhánh `feat/stocks-basics-post1`) được merge vào main trong lúc session còn đang chạy fix wave — main lên live với bản sai ở mục 2: bài giải thích EPS kiểm toán FPT 5,216 thấp hơn phép chia đơn giản ≈5,504 là do "weighted-average share count + cổ tức cổ phần 15% phát hành giữa năm" — **sai chiều** (weighted-average 1,699,740,091 thấp hơn end-count 1,703,507,121 nên chỉ làm EPS cao hơn ≈5,516). Cơ chế thật (Note 25 BCTN FPT 2025): EPS = (9,376,127,629,501 − 510,167,707,669 trích quỹ khen thưởng và phúc lợi) ÷ weighted-average 1,699,740,091 ≈ 5,216.
+- **Đã làm (fix `8eb3869`, đã qua re-review scoped):** sửa parenthetical mục 2 EN+VI về cơ chế trích quỹ khen thưởng & phúc lợi; thêm note đối xứng cho EPS kiểm toán Vinamilk (generic, không bịa số); quiz set-03 context + `s03q2.whyRight` EN+VI theo cơ chế đúng; quiz set-01 s01q4 đổi claim bịa "55,000 VND" → "≈5,500 VND" để framing "sai 1,000x, rơi 3 số 0" đúng chính xác cả hai chiều. Gate: build sạch (59 trang sau khi sync main — 8 bài Go publish + backend series từ PR #18/#19), `node --test` 41 pass, post-check 0 lỗi.
+- **Ai quyết:** final whole-branch review bắt fix (Critical/Important); user đã tự merge PR #20 ngoài session (cùng lúc đó một session khác cũng mở PR #18, #19).
+- **Chưa chốt:** `demo/__pycache__/trace_demo.cpython-313.pyc` bị track nhầm theo PR backend series — nên gitignore + untrack (việc riêng); `.nav-actions` tràn ~44px ở 360px (site-wide, cũ); bài 2 series stocks-basics.
+
 ## 2026-11-22 — Bài 1 series stocks-basics: "Cổ phiếu thật ra là gì"
 
 - **Đã làm:** publish bài 1 series `stocks-basics` (`/blog/what-is-a-stock-ownership-dividends/`, `draft: false`): body song ngữ EN/VI (5 mục + key takeaways + 5 câu ôn tập), hero chứng khoán 1863 (Wikimedia CC0), demo island "Your slice" (Task 3), quiz 8 bộ câu hỏi (`/quiz/`, Task 4), số liệu thật FPT/VNM tài chính 2025 từ 2 báo cáo thường niên đã kiểm toán + VSDC (cổ tức) + HOSE (ex-date) — đủ nguồn trong frontmatter `sources`. Bài publish khiến series card `stocks-basics` hiện trên blog index (thứ 4) và part 1 trên trang cover chuyển thành link "Bắt đầu từ Bài 1 →".
