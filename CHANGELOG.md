@@ -3,6 +3,13 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-22 — Pilot post 1 hoàn tất, chờ user duyệt giọng văn
+
+- **Quyết định (user):** "OK bạn làm cái backend pilot đi" — approval cho map 12 bài + pilot post 1.
+- **Đã làm (branch `feat/python-series`):** fix 1 chữ Cyrillic lọt vào body VI ("hai факт" → "hai thực tế"); tạo `demo/` (service `clue.api` tái dùng suốt series): `trace_demo.py` (endpoint `/cases/{case_id}` + middleware in ASGI scope, dispatch chain, thời gian round trip) + README; chạy thật bằng `uv run --with 'fastapi==0.165.0'` (Python 3.13) trên port 4324, curl `/cases/42`, thay block output trong bài bằng capture thật (0.73 ms, PID 30852) — block cũ trong draft không phải capture thật dù nội dung gần khớp. Build 47 pages + 39 test pass. Commits `63f45b7`, `3217bba`; branch pushed.
+- **Xác minh:** version "FastAPI 0.165" trong label terminal = đúng bản mới nhất trên PyPI (0.165.0); trace `curl -v https://fastapi.tiangolo.com/` trong bài khớp trace thật chạy lại hôm nay.
+- **Chưa chốt:** giọng văn pilot — chờ Khang đọc (`npm run dev` trong worktree, mở `/blog/backend-http-request-lifecycle/`); 11 bài còn lại + plan doc làm sau khi chốt giọng; quiz defer theo DDIA pattern.
+
 ## 2026-11-21 — Khởi động series `backend` "How backend actually works" (12 phần, Python demo)
 
 - **Quyết định (user):** series mới về backend, **kiến thức backend là chính, Python/FastAPI chỉ là demo**, sách Lubanovic (đã vào `books/fastapi/FastAPI.pdf`, gitignored) chỉ là reference kèm MDN/OWASP/12factor. Map 12 bài knowledge-first đã chốt sau khi đối chiếu overlap với DDIA: **0 bài trùng, 4 bài chạm khái niệm chung** có rule "state the split, link DDIA, never re-teach" ghi trong spec.
