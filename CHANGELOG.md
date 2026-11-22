@@ -3,6 +3,12 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-22 — Ảnh trong bài render nhỏ gọn dạng chữ nhật (điều chỉnh display, không đổi file)
+
+- **Yêu cầu (user, đang xem dev server):** các ảnh trong bài "nên nhỏ lại 1 xíu và dạng chữ nhật" — trước đó figure render full cột ~990px (hero ảnh dọc 1048×1224 thành khối 990×1157, ảnh gần vuông trông như ô to).
+- **Đã làm (`src/styles/style.css`, commit `b3e836c`):** `.prose .figure` max-width 860px căn giữa; `.prose .figure > img` `width: auto` + `max-height: 560px` (ảnh cao/vuông tự co, không cắt nội dung, zoom lightbox vẫn xem đủ ảnh gốc); hero (figure đầu tiên trong post) crop display 16:10 `object-fit: cover` như card (ảnh gốc nguyên vẹn khi zoom). Tránh đụng embed YouTube bằng selector `.figure > img` (yt img không phải con trực tiếp).
+- **Chưa chốt:** user chưa xem lại trên dev — số 860/560/16:10 có thể cần tinh theo phản hồi; các trang khác dùng `.prose` (nếu có) hưởng rule mới cùng lúc.
+
 ## 2026-11-22 — Chuẩn hoá kích thước ảnh thật: max width 1600px
 
 - **Quyết định (user chốt qua question):** mọi ảnh trong `src/assets/` (tải từ mạng lẫn capture local) phải resize về **max width 1600px**, giữ tỉ lệ, không upscale ảnh nhỏ; áp cho toàn project hiện tại + ghi quy ước cho ảnh tương lai (không thêm script gate).
