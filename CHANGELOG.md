@@ -29,6 +29,14 @@ Không cần đọc lại toàn bộ chat history — file này là nguồn sự
 - **Đã làm (worktree `python-series`, branch `feat/python-series`):** spec `docs/superpowers/specs/2026-11-21-backend-series-design.md` (commit `5ed8ac4`); series.ts thêm series `backend` (12 parts, 3 acts foundations/building/operating, 3 paths full/ai-review/oncall); trang cover `/blog/series/backend/` build OK (12 hàng "Soon"); plate = screenshot Swagger UI thật từ demo service FastAPI/uvicorn chạy local (`src/assets/series/backend-plate.png`); SeriesCover.astro + type thêm `credit.origin?` (mặc định 'Wikimedia Commons', tương thích ngược).
 - **Chưa chốt:** bài pilot (post 1 `backend-http-request-lifecycle`) đang soạn — chờ user duyệt giọng; 11 bài còn lại làm sau khi chốt giọng; quiz defer theo DDIA pattern.
 
+## 2026-11-21 — Series thứ 4: `stocks-basics` (Chứng khoán cơ bản) — khung trống
+
+- **Quyết định (user chốt qua question):** nguồn nội dung = **kết hợp nhiều nguồn** (không bám 1 cuốn sách như 3 series cũ; credit ghi cơ chế thị trường Việt HOSE/HNX/VSDC + kinh điển Graham/Lynch/Housel); góc nhìn = **người Việt mới vào thị trường** (mở tài khoản, ATO/ATC/LO, T+2, cổ tức, margin); đợt này **chỉ khung series trống** — 10 slug đặt tên trước, viết bài dần từng đợt; cover = **chứng chỉ cổ phiếu 1892** (Wikimedia, CC BY-SA 3.0, quy ước không ảnh AI). Title rút gọn theo yêu cầu user: "Stock market basics" / "Chứng khoán cơ bản".
+- **Đã làm:** spec `2026-11-21-stocks-basics-series-skeleton-design.md` + plan `2026-11-21-stocks-basics-series-skeleton.md`; branch `feat/stocks-basics-series`; entry `stocksBasics` trong `src/data/series.ts` (4 acts: Nền tảng / Dòng tiền / Đọc số / Trụ lại trên thị trường; 10 parts có builds; 3 paths: đọc trọn bộ / đặt lệnh đầu tiên / đầu tư chậm); ảnh `src/assets/series/stock-certificate-1892.jpg`.
+- **Kiểm tra:** build 47 pages sạch (+1 trang cover mới), 39 test pass; `/blog/series/stocks-basics/` render đủ với 0 bài (mọi part "Sắp có"); blog index vẫn đúng 3 series card (lọc `publishedCount > 0`); duyệt mắt `.shots/` (dark VI desktop, light VI 360px, blog index) không thấy lỗi layout.
+- **Chưa chốt:** chưa viết bài nào của series; khi viết bài đầu sẽ cần xem lại `position` của ảnh cover theo crop thật ở trang card.
+- **Lưu ý:** series rỗng không xuất hiện ngoài blog index cho đến khi bài đầu publish.
+
 ## 2026-11-21 — Thu hẹp: hero đầu bài quay về ảnh ẩn dụ, chỉ giữ cover gopher
 
 - **Quyết định (user, sau khi xem trực tiếp trên dev):** "Các cái hero đầu bài vẫn giữ như cũ. Chỉ có trên cái cover photo mới đổi thôi."
