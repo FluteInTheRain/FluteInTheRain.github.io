@@ -95,6 +95,8 @@ Reading from a replica right after a write can return the old value.
 
 Diagrams are drawn on the page as Astro SVG components or React islands, using the site's CSS tokens and font. Which tool for what, the reference components, and the rules (size, bilingual labels, unique SVG ids, phone scrolling, honesty about simulated numbers) are in `SKILL.md` Step 6 B. Never generate "infographic" PNGs (title banner, pill/badge labels, card grids, gradients, emoji): Khang rejected them as AI-looking.
 
+- **Real-image size convention (2026-11-22, Khang's call)**: every image stored in `src/assets/` — downloaded from the web (Wikimedia, vendor docs, product screenshots) or captured locally — must be resized to a **max width of 1600px** (aspect ratio preserved, never upscale smaller images). Nothing wider than 1600px ever reaches the reader: `Figure.astro` serves a `srcset` capped at 1600 and the zoom lightbox loads the same `currentSrc`, so oversized originals only bloat the repo and the build. Resize at import time (`sips --resampleWidth 1600 file.png`) and keep the file's format.
+
 - **Showdown / solo comparisons**: when contrasting two paradigms (Row-Store vs. Column-Store, a contained fault vs. a cascading failure), draw them as a direct visual face-off, top/bottom or left/right, showing the tangible difference rather than a wall of text boxes.
 - **No collisions**: no label crosses a line, box or other label; nothing is cut at the figure edge; Vietnamese labels (~20% longer) fit too. Place labels in empty space next to what they explain instead of boxing them.
 - **Motion only when it teaches**: `<AnimatedFlow />` packets moving along edges are fine; shaking, pulsing or blinking to signal "danger" is not. A static red outline says it.
