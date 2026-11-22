@@ -8,6 +8,7 @@ import draftingSet from '../assets/series/drafting-set.jpg';
 import ramac305 from '../assets/series/ibm-305-ramac.jpg';
 import goGophers from '../assets/series/go-gopher-five-years.jpg';
 import stockCert from '../assets/series/stock-certificate-1892.jpg';
+import backendPlate from '../assets/series/backend-plate.png';
 
 export interface L10n { en: string; vi: string }
 
@@ -1078,10 +1079,257 @@ const stocksBasics: Series = {
   ],
 };
 
+const B = {
+  lifecycle: 'backend-http-request-lifecycle',
+  rest: 'backend-rest-api-design',
+  validation: 'backend-validation-schemas',
+  layering: 'backend-layered-architecture',
+  data: 'backend-database-access-layer',
+  async: 'backend-async-concurrency-workers',
+  auth: 'backend-auth-oauth2-jwt',
+  caching: 'backend-caching-queues',
+  testing: 'backend-testing-strategy',
+  observability: 'backend-observability',
+  perf: 'backend-performance-p99',
+  deploy: 'backend-production-deploy',
+};
+
+const backend: Series = {
+  id: 'backend',
+  title: {
+    en: 'How backend actually works',
+    vi: 'Hiểu đúng bản chất Backend',
+  },
+  kicker: { en: 'A 12-part series', vi: 'Series 12 bài' },
+  tagline: {
+    en: 'Backend knowledge first, with Python and FastAPI as the running demo — the judgment AI still can’t write for you.',
+    vi: 'Kiến thức backend là chính, Python và FastAPI chỉ là bài demo chạy suốt — phần phán đoán mà AI chưa viết hộ được.',
+  },
+  pitch: [
+    {
+      en: 'AI writes a FastAPI service in seconds. It still POSTs everything, puts SQL right in the router, blocks the event loop with sync calls, and ships no tests, no logs, no timeouts — because backend is judgment, not syntax.',
+      vi: 'AI dựng service FastAPI chỉ trong vài giây. Nhưng nó vẫn POST hết mọi thứ, nhét SQL ngay trong router, chặn event loop bằng lời gọi sync, và không kèm test, log hay timeout — vì backend là phán đoán, không phải cú pháp.',
+    },
+    {
+      en: 'Each post takes one competence — the request lifecycle, API design, layering, data access, async, auth, caching, testing, observability, performance, deploys — explains the idea, then demonstrates it on a small running Python service you can rebuild yourself.',
+      vi: 'Mỗi bài đi gọn một năng lực — vòng đời request, thiết kế API, phân tầng, truy cập dữ liệu, async, auth, caching, testing, observability, hiệu năng, triển khai — nói rõ ý, rồi demo ngay trên một service Python nhỏ mà bạn có thể tự dựng lại.',
+    },
+  ],
+  credit: {
+    en: 'Backend knowledge demonstrated in Python with FastAPI. FastAPI: Modern Python Web Development (Bill Lubanovic, O’Reilly 2023) is one of the references, alongside MDN, OWASP, the 12-factor app, and official docs.',
+    vi: 'Kiến thức backend minh họa bằng Python với FastAPI. FastAPI: Modern Python Web Development (Bill Lubanovic, O’Reilly 2023) là một trong các tài liệu tham khảo, bên cạnh MDN, OWASP, 12-factor app và tài liệu chính thức.',
+  },
+  // The plate is the series' own demo service: the page every FastAPI app gives you for free.
+  cover: {
+    subtitle: {
+      en: 'Requests · APIs · Layers · Ops',
+      vi: 'Request · API · Tầng · Vận hành',
+    },
+    image: backendPlate,
+    alt: 'Swagger UI page of the series’ small FastAPI demo service, listing its /health, /cases and /reports endpoints with Try it out buttons.',
+    position: '50% 42%',
+    imprint: 'BACKEND',
+    credit: {
+      title: 'Swagger UI of the series demo service',
+      author: 'captured locally',
+      url: 'https://fastapi.tiangolo.com/',
+      license: 'screenshot',
+      origin: 'FastAPI docs',
+    },
+  },
+  outcomes: [
+    {
+      en: 'Design APIs by resource: right verbs, status codes that mean it, pagination, and idempotency that survives retries.',
+      vi: 'Thiết kế API theo resource: đúng verb, status code đúng nghĩa, phân trang và idempotency sống sót qua retry.',
+    },
+    {
+      en: 'Split web, service, and data layers so the router stays thin and business rules stay testable.',
+      vi: 'Tách tầng web – service – data để router luôn mỏng và luật nghiệp vụ luôn test được.',
+    },
+    {
+      en: 'Choose sync or async on purpose, size the worker pool, and never block the event loop again.',
+      vi: 'Chọn sync hay async có chủ đích, chỉnh đúng pool worker và không bao giờ chặn event loop nữa.',
+    },
+    {
+      en: 'Ship with tests, structured logs, metrics, timeouts, and a zero-downtime deploy you can explain.',
+      vi: 'Bàn giao kèm test, log cấu trúc, metric, timeout và một bản deploy không downtime mà bạn giải thích được.',
+    },
+  ],
+  acts: [
+    {
+      id: 'foundations',
+      label: { en: 'Foundations', vi: 'Nền tảng' },
+      blurb: { en: 'Requests, API design, validation at the edge', vi: 'Request, thiết kế API, validate ở biên' },
+    },
+    {
+      id: 'building',
+      label: { en: 'Building', vi: 'Dựng service' },
+      blurb: { en: 'Layers, data access, async, auth', vi: 'Phân tầng, truy cập dữ liệu, async, auth' },
+    },
+    {
+      id: 'operating',
+      label: { en: 'Operating', vi: 'Vận hành' },
+      blurb: { en: 'Caching, testing, observability, performance, deploys', vi: 'Caching, testing, observability, hiệu năng, triển khai' },
+    },
+  ],
+  parts: [
+    {
+      slug: B.lifecycle,
+      topic: { en: 'Request lifecycle', vi: 'Vòng đời request' },
+      hook: {
+        en: 'From URL to DNS, TCP, TLS, HTTP — down to the exact line of your code the server runs.',
+        vi: 'Từ URL qua DNS, TCP, TLS, HTTP — tới đúng dòng code của bạn mà server chạy.',
+      },
+      act: 'foundations',
+      builds: [],
+    },
+    {
+      slug: B.rest,
+      topic: { en: 'REST design', vi: 'Thiết kế REST' },
+      hook: {
+        en: 'Resources, verbs, status codes, pagination, idempotency — and the AI habits that break each.',
+        vi: 'Resource, verb, status code, phân trang, idempotency — và mấy thói quen của AI phá vỡ từng thứ.',
+      },
+      act: 'foundations',
+      builds: [B.lifecycle],
+    },
+    {
+      slug: B.validation,
+      topic: { en: 'Validation', vi: 'Validate ở biên' },
+      hook: {
+        en: 'Typed schemas at the boundary: reject early with 422s, never trust a client.',
+        vi: 'Schema có kiểu ở biên: từ chối sớm bằng 422, đừng bao giờ tin client.',
+      },
+      act: 'foundations',
+      builds: [B.rest],
+    },
+    {
+      slug: B.layering,
+      topic: { en: 'Layered design', vi: 'Phân tầng' },
+      hook: {
+        en: 'Web → service → data: why fat routers rot, and where business logic belongs.',
+        vi: 'Web → service → data: vì sao router béo là thảm họa và logic nghiệp vụ nằm ở đâu.',
+      },
+      act: 'building',
+      builds: [B.validation],
+    },
+    {
+      slug: B.data,
+      topic: { en: 'Data access', vi: 'Tầng dữ liệu' },
+      hook: {
+        en: 'Connection pools, a transaction per request, migrations, and the N+1 you can feel in p99.',
+        vi: 'Connection pool, một transaction mỗi request, migration và lỗi N+1 thấy ngay ở p99.',
+      },
+      act: 'building',
+      builds: [B.layering],
+    },
+    {
+      slug: B.async,
+      topic: { en: 'Async & workers', vi: 'Async & worker' },
+      hook: {
+        en: 'Event loop vs threads vs processes: when async wins, and the sync call that sinks it.',
+        vi: 'Event loop, thread, process: async thắng ở đâu, và lời gọi sync nào làm chìm nó.',
+      },
+      act: 'building',
+      builds: [B.lifecycle],
+    },
+    {
+      slug: B.auth,
+      topic: { en: 'Auth', vi: 'Xác thực' },
+      hook: {
+        en: 'Sessions vs JWT vs OAuth2, password hashing, scopes — and not becoming the confused deputy.',
+        vi: 'Session, JWT, OAuth2, băm mật khẩu, scope — và đừng trở thành confused deputy.',
+      },
+      act: 'building',
+      builds: [B.rest, B.data],
+    },
+    {
+      slug: B.caching,
+      topic: { en: 'Caching & jobs', vi: 'Cache & job nền' },
+      hook: {
+        en: 'Cache patterns, TTLs, invalidation, and background jobs that run at-least-once.',
+        vi: 'Mẫu cache, TTL, invalidation, và job nền chạy at-least-once.',
+      },
+      act: 'operating',
+      builds: [B.data],
+    },
+    {
+      slug: B.testing,
+      topic: { en: 'Testing', vi: 'Kiểm thử' },
+      hook: {
+        en: 'The pyramid in practice: unit vs integration vs e2e, fakes over mocks, load as a check.',
+        vi: 'Kim tự tháp kiểm thử: unit, integration, e2e, fake hơn mock, và load test như một bước.',
+      },
+      act: 'operating',
+      builds: [B.layering],
+    },
+    {
+      slug: B.observability,
+      topic: { en: 'Observability', vi: 'Observability' },
+      hook: {
+        en: 'Structured logs, metrics, traces, correlation IDs: debug by evidence, not by guess.',
+        vi: 'Log cấu trúc, metric, trace, correlation ID: debug bằng chứng cứ, không đoán mò.',
+      },
+      act: 'operating',
+      builds: [B.testing],
+    },
+    {
+      slug: B.perf,
+      topic: { en: 'Performance', vi: 'Hiệu năng' },
+      hook: {
+        en: 'p99 over averages, profiling before rewriting, timeouts, backpressure, load tests.',
+        vi: 'p99 thay vì trung bình, profile trước khi viết lại, timeout, backpressure, load test.',
+      },
+      act: 'operating',
+      builds: [B.observability, B.async],
+    },
+    {
+      slug: B.deploy,
+      topic: { en: 'Deploys', vi: 'Triển khai' },
+      hook: {
+        en: '12-factor config, Docker, Kubernetes, health checks, graceful shutdown, zero-downtime rolls.',
+        vi: 'Config kiểu 12-factor, Docker, Kubernetes, health check, graceful shutdown, deploy không downtime.',
+      },
+      act: 'operating',
+      builds: [B.perf, B.observability],
+    },
+  ],
+  paths: [
+    {
+      id: 'full',
+      label: { en: 'Read it all', vi: 'Đọc cả 12 bài' },
+      who: {
+        en: 'From the first byte of a request to a zero-downtime deploy.',
+        vi: 'Từ byte đầu tiên của request tới bản deploy không downtime.',
+      },
+      order: [B.lifecycle, B.rest, B.validation, B.layering, B.data, B.async, B.auth, B.caching, B.testing, B.observability, B.perf, B.deploy],
+    },
+    {
+      id: 'ai-review',
+      label: { en: 'Reviewing AI-written services', vi: 'Soi service do AI viết' },
+      who: {
+        en: 'Catch the API shape, layering, and test gaps AI tools routinely leave behind.',
+        vi: 'Bắt mấy lỗi hình dáng API, phân tầng và thiếu test mà AI hay để lại.',
+      },
+      order: [B.rest, B.validation, B.layering, B.testing],
+    },
+    {
+      id: 'oncall',
+      label: { en: 'Incident at 3 a.m.', vi: 'Sự cố lúc 3 giờ sáng' },
+      who: {
+        en: 'Service slow or down? Evidence first: logs, traces, p99, then the deploy path.',
+        vi: 'Service chậm hoặc chết? Chứng cứ trước: log, trace, p99, rồi tới đường deploy.',
+      },
+      order: [B.observability, B.perf, B.async, B.deploy],
+    },
+  ],
+};
+
 export const SERIES: Record<string, Series> = {
   [refactoringUi.id]: refactoringUi,
   [ddia.id]: ddia,
   [golang.id]: golang,
+  [backend.id]: backend,
   [stocksBasics.id]: stocksBasics,
 };
 export const SERIES_IDS = Object.keys(SERIES);
