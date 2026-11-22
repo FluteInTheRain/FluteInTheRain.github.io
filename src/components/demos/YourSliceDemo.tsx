@@ -1,4 +1,5 @@
 import React, { useState } from 'react';
+import { useId } from 'react';
 
 // Pinned numbers (Task 2 report, audited FY2025 annual reports):
 // - FPT: net profit attributable to parent shareholders 9,376 bn VND,
@@ -66,6 +67,7 @@ const pct = (v: number, vi: boolean) =>
   v.toLocaleString(vi ? 'vi-VN' : 'en-US', { maximumSignificantDigits: 3 });
 
 export default function YourSliceDemo() {
+  const inputId = useId();
   const [companyId, setCompanyId] = useState<CompanyId>('fpt');
   const [pos, setPos] = useState(DEFAULT_POS);
 
@@ -88,6 +90,7 @@ export default function YourSliceDemo() {
               key={id}
               type="button"
               className={companyId === id ? 'sd-btn is-on' : 'sd-btn'}
+              aria-pressed={companyId === id}
               onClick={() => setCompanyId(id)}
             >
               {COMPANIES[id].ticker}
@@ -95,7 +98,7 @@ export default function YourSliceDemo() {
           ))}
         </div>
         <div className="sd-group yourslice-slider-group">
-          <label className="yourslice-label" htmlFor="yourslice-range">
+          <label className="yourslice-label" htmlFor={inputId}>
             <span data-lang-en>Your shares</span>
             <span data-lang-vi>Số cổ phiếu của bạn</span>
           </label>
@@ -107,7 +110,7 @@ export default function YourSliceDemo() {
       </div>
 
       <input
-        id="yourslice-range"
+        id={inputId}
         className="yourslice-range"
         type="range"
         min={0}
