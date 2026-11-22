@@ -3,6 +3,13 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-22 — Chuẩn hoá kích thước ảnh thật: max width 1600px
+
+- **Quyết định (user chốt qua question):** mọi ảnh trong `src/assets/` (tải từ mạng lẫn capture local) phải resize về **max width 1600px**, giữ tỉ lệ, không upscale ảnh nhỏ; áp cho toàn project hiện tại + ghi quy ước cho ảnh tương lai (không thêm script gate).
+- **Cơ sở:** `Figure.astro` chỉ serve srcset tới 1600px và lightbox zoom dùng `currentSrc` (≤1600) — file gốc to hơn không bao giờ tới người đọc, chỉ làm nặng repo + build. Trước resize: 19/144 ảnh vượt chuẩn (to nhất 1.7MB, 2560–3861px).
+- **Đã làm (branch `feat/python-series`):** `sips --resampleWidth 1600` trên 19 file (cùng format, giữ tỉ lệ); thêm mục **Real-image size convention** vào `.claude/skills/book-to-post/style-guide.md` (mục Diagram Strategy & Visual Standards); build 47 pages + 39 test pass; commits `4e6aa39`, `04d459f`.
+- **Lưu ý:** ảnh <1600px giữ nguyên; aspect ratio giữ nguyên nên crop cover card không đổi; sau khi merge nhánh này về `main` là quy ước áp toàn site.
+
 ## 2026-11-22 — Pilot post 1 hoàn tất, chờ user duyệt giọng văn
 
 - **Quyết định (user):** "OK bạn làm cái backend pilot đi" — approval cho map 12 bài + pilot post 1.
