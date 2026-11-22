@@ -7,7 +7,9 @@ import type { ImageMetadata } from 'astro';
 import draftingSet from '../assets/series/drafting-set.jpg';
 import ramac305 from '../assets/series/ibm-305-ramac.jpg';
 import goGophers from '../assets/series/go-gopher-five-years.jpg';
+import stockCert from '../assets/series/stock-certificate-1892.jpg';
 import hoseBuilding from '../assets/series/ai-trading/hose-building.jpg';
+import backendPlate from '../assets/series/backend-plate.png';
 
 export interface L10n { en: string; vi: string }
 
@@ -850,6 +852,480 @@ const golang: Series = {
   ],
 };
 
+const S = {
+  ownership: 'what-is-a-stock-ownership-dividends',
+  account: 'vietnam-stock-market-venues-open-account',
+  orders: 'vietnam-order-types-order-book-ato-atc',
+  settlement: 'stock-fees-taxes-settlement-t2-vsd',
+  dividends: 'shareholder-rights-dividends-corporate-actions',
+  statements: 'reading-financial-statements-investors-5-minutes',
+  ratios: 'pe-pb-roe-valuation-ratios-in-context',
+  macro: 'macro-industry-what-moves-stock-prices',
+  risk: 'margin-trading-risks-beginner-psychology',
+  plan: 'portfolio-dca-first-investment-plan',
+};
+
+const stocksBasics: Series = {
+  id: 'stocks-basics',
+  title: {
+    en: 'Stock market basics',
+    vi: 'Chứng khoán cơ bản',
+  },
+  kicker: { en: 'A 10-part series', vi: 'Series 10 bài' },
+  tagline: {
+    en: 'What a share is, how Vietnamese markets run, and how not to lose your first savings.',
+    vi: 'Cổ phiếu là gì, thị trường Việt chạy thế nào, và làm sao không mất khoản tiết kiệm đầu tiên.',
+  },
+  pitch: [
+    {
+      en: 'Most beginners lose money not because the market is rigged but because they never learned the mechanics: which order types actually fill, when money really arrives (T+2), what a dividend does to the price, and why margin makes every mistake bigger.',
+      vi: 'Người mới thua tiền đa số không phải vì thị trường chơi xấu, mà vì họ chưa học cơ chế: lệnh nào thật sự khớp, tiền bao giờ thật sự về (T+2), cổ tức làm giá thay đổi ra sao, và vì sao margin phóng to mọi sai lầm.',
+    },
+    {
+      en: 'Each post takes one step you can act on today — open an account, place an ATO order, skim a financial statement — and explains the machinery behind it with real numbers from Vietnamese markets and the classics of investing.',
+      vi: 'Mỗi bài là một bước làm được ngay hôm nay — mở tài khoản, đặt lệnh ATO, lướt qua một BCTC — kèm giải thích cơ chế phía sau bằng số thật từ thị trường Việt và các kinh điển của đầu tư.',
+    },
+  ],
+  credit: {
+    en: 'Assembled from Vietnamese market mechanics (HOSE, HNX and VSDC rules, fee schedules, issuer filings) plus investing classics: The Intelligent Investor (Graham), One Up on Wall Street (Lynch) and The Psychology of Money (Housel).',
+    vi: 'Tổng hợp từ cơ chế thị trường Việt (quy định HOSE, HNX, VSDC, bảng phí, báo cáo doanh nghiệp) cùng các kinh điển về đầu tư: The Intelligent Investor (Graham), One Up on Wall Street (Lynch) và The Psychology of Money (Housel).',
+  },
+  // A lithographed 1892 stock certificate: the "basic" unit of the market, before it was a number on a screen.
+  cover: {
+    subtitle: {
+      en: 'Ownership · Orders · Numbers · Discipline',
+      vi: 'Sở hữu · Lệnh · Con số · Kỷ luật',
+    },
+    image: stockCert,
+    alt: 'A lithographed stock certificate from 1892 with ornate borders and a central vignette.',
+    position: '50% 55%',
+    imprint: 'STOCKS',
+    credit: {
+      title: 'Original company stock certificate',
+      author: 'Downingsf',
+      url: 'https://commons.wikimedia.org/wiki/File:Original_company_stock_certificate.jpg',
+      license: 'CC BY-SA 3.0',
+    },
+  },
+  outcomes: [
+    {
+      en: 'Say what a share gives you: a claim on earnings and dividends, not a lottery ticket.',
+      vi: 'Nói được cổ phiếu cho bạn gì: quyền hưởng lợi nhuận và cổ tức, chứ không phải tấm vé số.',
+    },
+    {
+      en: 'Open an account and trade with intent: ATO/ATC/LO orders, fees, and the T+2 money path.',
+      vi: 'Mở tài khoản và đặt lệnh có chủ đích: lệnh ATO/ATC/LO, phí, và dòng tiền T+2.',
+    },
+    {
+      en: 'Skim a financial statement and read PE, PB and ROE with industry context.',
+      vi: 'Đọc lướt một BCTC và hiểu PE, PB, ROE đúng theo ngữ cảnh ngành.',
+    },
+    {
+      en: 'Run a first-year plan: DCA, position limits and written rules for when to sell.',
+      vi: 'Chạy được kế hoạch năm đầu: DCA, giới hạn tỷ trọng và quy tắc bán viết ra giấy.',
+    },
+  ],
+  acts: [
+    {
+      id: 'ground',
+      label: { en: 'Foundations', vi: 'Nền tảng' },
+      blurb: { en: 'What a share is, where to buy one', vi: 'Cổ phiếu là gì, mua ở đâu' },
+    },
+    {
+      id: 'money',
+      label: { en: 'The money path', vi: 'Dòng tiền' },
+      blurb: { en: 'Fees, settlement, dividends', vi: 'Phí, thanh toán, cổ tức' },
+    },
+    {
+      id: 'read',
+      label: { en: 'Reading the numbers', vi: 'Đọc số' },
+      blurb: { en: 'Statements, ratios, macro', vi: 'BCTC, chỉ số, vĩ mô' },
+    },
+    {
+      id: 'discipline',
+      label: { en: 'Staying in the game', vi: 'Trụ lại trên thị trường' },
+      blurb: { en: 'Risk, psychology, a plan', vi: 'Rủi ro, tâm lý, kế hoạch' },
+    },
+  ],
+  parts: [
+    {
+      slug: S.ownership,
+      topic: { en: 'A share is ownership', vi: 'Cổ phiếu là sở hữu' },
+      hook: {
+        en: 'One share is one slice of a company — earnings, dividends and why prices move.',
+        vi: 'Một cổ phiếu là một mảnh doanh nghiệp — lợi nhuận, cổ tức và vì sao giá chạy.',
+      },
+      act: 'ground',
+      builds: [],
+    },
+    {
+      slug: S.account,
+      topic: { en: 'Open an account', vi: 'Mở tài khoản' },
+      hook: {
+        en: 'Choosing a Vietnamese broker and what HOSE, HNX and UPCoM actually are.',
+        vi: 'Chọn công ty chứng khoán Việt Nam và HOSE, HNX, UPCoM thực ra là gì.',
+      },
+      act: 'ground',
+      builds: [S.ownership],
+    },
+    {
+      slug: S.orders,
+      topic: { en: 'Prices & orders', vi: 'Bảng giá & lệnh' },
+      hook: {
+        en: 'Reading the board and placing LO, ATO, ATC and MP orders without paying the spread.',
+        vi: 'Đọc bảng giá và đặt lệnh LO, ATO, ATC, MP mà không trả giá cho spread.',
+      },
+      act: 'ground',
+      builds: [S.account],
+    },
+    {
+      slug: S.settlement,
+      topic: { en: 'Fees & settlement', vi: 'Phí & thanh toán' },
+      hook: {
+        en: 'Where your money goes after a trade: fees, tax and T+2 settlement through VSDC.',
+        vi: 'Tiền của bạn đi đâu sau lệnh: phí, thuế và thanh toán bù trừ T+2 qua VSDC.',
+      },
+      act: 'money',
+      builds: [S.orders],
+    },
+    {
+      slug: S.dividends,
+      topic: { en: 'Dividends & rights', vi: 'Cổ tức & quyền' },
+      hook: {
+        en: 'Cash vs stock dividends, splits, ex-date traps and dilution from new issuance.',
+        vi: 'Cổ tức tiền hay cổ phiếu, chia tách, bẫy ex-date và pha loãng khi phát hành thêm.',
+      },
+      act: 'money',
+      builds: [S.settlement],
+    },
+    {
+      slug: S.statements,
+      topic: { en: 'Financial statements', vi: 'BCTC' },
+      hook: {
+        en: 'Five minutes with a financial statement: what to check and what smells wrong.',
+        vi: 'Năm phút với một BCTC: đọc gì, và gì là dấu hiệu đáng ngờ.',
+      },
+      act: 'read',
+      builds: [S.ownership],
+    },
+    {
+      slug: S.ratios,
+      topic: { en: 'Valuation ratios', vi: 'Chỉ số định giá' },
+      hook: {
+        en: 'PE, PB and ROE mean nothing without context: industry benchmarks and earnings cycles.',
+        vi: 'PE, PB, ROE không có nghĩa nếu thiếu ngữ cảnh: chuẩn ngành và chu kỳ lợi nhuận.',
+      },
+      act: 'read',
+      builds: [S.statements],
+    },
+    {
+      slug: S.macro,
+      topic: { en: 'Macro & industry', vi: 'Vĩ mô & ngành' },
+      hook: {
+        en: 'Interest rates, FX and cycles move whole sectors — read the current, not the noise.',
+        vi: 'Lãi suất, tỷ giá và chu kỳ di chuyển cả một ngành — đọc dòng chảy, đừng đọc nhiễu.',
+      },
+      act: 'read',
+      builds: [S.ratios],
+    },
+    {
+      slug: S.risk,
+      topic: { en: 'Risk & psychology', vi: 'Rủi ro & tâm lý' },
+      hook: {
+        en: 'Margin cuts both ways; herd behaviour, FOMO and how beginners actually lose money.',
+        vi: 'Margin hai lưỡi; tâm lý đám đông, FOMO và người mới thật sự thua tiền thế nào.',
+      },
+      act: 'discipline',
+      builds: [S.settlement, S.macro],
+    },
+    {
+      slug: S.plan,
+      topic: { en: 'Your first plan', vi: 'Kế hoạch đầu tiên' },
+      hook: {
+        en: 'A first-year plan: position sizing, DCA and written rules for when to sell.',
+        vi: 'Kế hoạch năm đầu: tỷ trọng, DCA và quy tắc bán viết ra giấy.',
+      },
+      act: 'discipline',
+      builds: [S.risk],
+    },
+  ],
+  paths: [
+    {
+      id: 'full',
+      label: { en: 'Read it all', vi: 'Đọc trọn bộ' },
+      who: {
+        en: 'You have an evening or two and want the whole picture, in the order it builds up.',
+        vi: 'Bạn có một hai buổi tối và muốn thấy bức tranh trọn vẹn, theo đúng thứ tự xây dần.',
+      },
+      order: [S.ownership, S.account, S.orders, S.settlement, S.dividends, S.statements, S.ratios, S.macro, S.risk, S.plan],
+    },
+    {
+      id: 'first-trade',
+      label: { en: 'Place your first trade', vi: 'Đặt lệnh đầu tiên' },
+      who: {
+        en: 'You want to trade this week: the mechanics, nothing else yet.',
+        vi: 'Bạn muốn đặt lệnh trong tuần này: chỉ cần cơ chế, chuyện khác để sau.',
+      },
+      order: [S.ownership, S.account, S.orders, S.settlement],
+    },
+    {
+      id: 'long-hold',
+      label: { en: 'Invest slow, hold long', vi: 'Đầu tư chậm, nắm dài hạn' },
+      who: {
+        en: 'You would rather not watch the board every day.',
+        vi: 'Bạn không muốn ngồi nhìn bảng giá mỗi ngày.',
+      },
+      order: [S.ownership, S.statements, S.ratios, S.dividends, S.risk, S.plan],
+    },
+  ],
+};
+
+const B = {
+  lifecycle: 'backend-http-request-lifecycle',
+  rest: 'backend-rest-api-design',
+  validation: 'backend-validation-schemas',
+  layering: 'backend-layered-architecture',
+  data: 'backend-database-access-layer',
+  async: 'backend-async-concurrency-workers',
+  auth: 'backend-auth-oauth2-jwt',
+  caching: 'backend-caching-queues',
+  testing: 'backend-testing-strategy',
+  observability: 'backend-observability',
+  perf: 'backend-performance-p99',
+  deploy: 'backend-production-deploy',
+};
+
+const backend: Series = {
+  id: 'backend',
+  title: {
+    en: 'How backend actually works',
+    vi: 'Hiểu đúng bản chất Backend',
+  },
+  kicker: { en: 'A 12-part series', vi: 'Series 12 bài' },
+  tagline: {
+    en: 'Backend knowledge first, with Python and FastAPI as the running demo — the judgment AI still can’t write for you.',
+    vi: 'Kiến thức backend là chính, Python và FastAPI chỉ là bài demo chạy suốt — phần phán đoán mà AI chưa viết hộ được.',
+  },
+  pitch: [
+    {
+      en: 'AI writes a FastAPI service in seconds. It still POSTs everything, puts SQL right in the router, blocks the event loop with sync calls, and ships no tests, no logs, no timeouts — because backend is judgment, not syntax.',
+      vi: 'AI dựng service FastAPI chỉ trong vài giây. Nhưng nó vẫn POST hết mọi thứ, nhét SQL ngay trong router, chặn event loop bằng lời gọi sync, và không kèm test, log hay timeout — vì backend là phán đoán, không phải cú pháp.',
+    },
+    {
+      en: 'Each post takes one competence — the request lifecycle, API design, layering, data access, async, auth, caching, testing, observability, performance, deploys — explains the idea, then demonstrates it on a small running Python service you can rebuild yourself.',
+      vi: 'Mỗi bài đi gọn một năng lực — vòng đời request, thiết kế API, phân tầng, truy cập dữ liệu, async, auth, caching, testing, observability, hiệu năng, triển khai — nói rõ ý, rồi demo ngay trên một service Python nhỏ mà bạn có thể tự dựng lại.',
+    },
+  ],
+  credit: {
+    en: 'Backend knowledge demonstrated in Python with FastAPI. FastAPI: Modern Python Web Development (Bill Lubanovic, O’Reilly 2023) is one of the references, alongside MDN, OWASP, the 12-factor app, and official docs.',
+    vi: 'Kiến thức backend minh họa bằng Python với FastAPI. FastAPI: Modern Python Web Development (Bill Lubanovic, O’Reilly 2023) là một trong các tài liệu tham khảo, bên cạnh MDN, OWASP, 12-factor app và tài liệu chính thức.',
+  },
+  // The plate is the series' own demo service: the page every FastAPI app gives you for free.
+  cover: {
+    subtitle: {
+      en: 'Requests · APIs · Layers · Ops',
+      vi: 'Request · API · Tầng · Vận hành',
+    },
+    image: backendPlate,
+    alt: 'Swagger UI page of the series’ small FastAPI demo service, listing its /health, /cases and /reports endpoints with Try it out buttons.',
+    position: '50% 42%',
+    imprint: 'BACKEND',
+    credit: {
+      title: 'Swagger UI of the series demo service',
+      author: 'captured locally',
+      url: 'https://fastapi.tiangolo.com/',
+      license: 'screenshot',
+      origin: 'FastAPI docs',
+    },
+  },
+  outcomes: [
+    {
+      en: 'Design APIs by resource: right verbs, status codes that mean it, pagination, and idempotency that survives retries.',
+      vi: 'Thiết kế API theo resource: đúng verb, status code đúng nghĩa, phân trang và idempotency sống sót qua retry.',
+    },
+    {
+      en: 'Split web, service, and data layers so the router stays thin and business rules stay testable.',
+      vi: 'Tách tầng web – service – data để router luôn mỏng và luật nghiệp vụ luôn test được.',
+    },
+    {
+      en: 'Choose sync or async on purpose, size the worker pool, and never block the event loop again.',
+      vi: 'Chọn sync hay async có chủ đích, chỉnh đúng pool worker và không bao giờ chặn event loop nữa.',
+    },
+    {
+      en: 'Ship with tests, structured logs, metrics, timeouts, and a zero-downtime deploy you can explain.',
+      vi: 'Bàn giao kèm test, log cấu trúc, metric, timeout và một bản deploy không downtime mà bạn giải thích được.',
+    },
+  ],
+  acts: [
+    {
+      id: 'foundations',
+      label: { en: 'Foundations', vi: 'Nền tảng' },
+      blurb: { en: 'Requests, API design, validation at the edge', vi: 'Request, thiết kế API, validate ở biên' },
+    },
+    {
+      id: 'building',
+      label: { en: 'Building', vi: 'Dựng service' },
+      blurb: { en: 'Layers, data access, async, auth', vi: 'Phân tầng, truy cập dữ liệu, async, auth' },
+    },
+    {
+      id: 'operating',
+      label: { en: 'Operating', vi: 'Vận hành' },
+      blurb: { en: 'Caching, testing, observability, performance, deploys', vi: 'Caching, testing, observability, hiệu năng, triển khai' },
+    },
+  ],
+  parts: [
+    {
+      slug: B.lifecycle,
+      topic: { en: 'Request lifecycle', vi: 'Vòng đời request' },
+      hook: {
+        en: 'From URL to DNS, TCP, TLS, HTTP — down to the exact line of your code the server runs.',
+        vi: 'Từ URL qua DNS, TCP, TLS, HTTP — tới đúng dòng code của bạn mà server chạy.',
+      },
+      act: 'foundations',
+      builds: [],
+    },
+    {
+      slug: B.rest,
+      topic: { en: 'REST design', vi: 'Thiết kế REST' },
+      hook: {
+        en: 'Resources, verbs, status codes, pagination, idempotency — and the AI habits that break each.',
+        vi: 'Resource, verb, status code, phân trang, idempotency — và mấy thói quen của AI phá vỡ từng thứ.',
+      },
+      act: 'foundations',
+      builds: [B.lifecycle],
+    },
+    {
+      slug: B.validation,
+      topic: { en: 'Validation', vi: 'Validate ở biên' },
+      hook: {
+        en: 'Typed schemas at the boundary: reject early with 422s, never trust a client.',
+        vi: 'Schema có kiểu ở biên: từ chối sớm bằng 422, đừng bao giờ tin client.',
+      },
+      act: 'foundations',
+      builds: [B.rest],
+    },
+    {
+      slug: B.layering,
+      topic: { en: 'Layered design', vi: 'Phân tầng' },
+      hook: {
+        en: 'Web → service → data: why fat routers rot, and where business logic belongs.',
+        vi: 'Web → service → data: vì sao router béo là thảm họa và logic nghiệp vụ nằm ở đâu.',
+      },
+      act: 'building',
+      builds: [B.validation],
+    },
+    {
+      slug: B.data,
+      topic: { en: 'Data access', vi: 'Tầng dữ liệu' },
+      hook: {
+        en: 'Connection pools, a transaction per request, migrations, and the N+1 you can feel in p99.',
+        vi: 'Connection pool, một transaction mỗi request, migration và lỗi N+1 thấy ngay ở p99.',
+      },
+      act: 'building',
+      builds: [B.layering],
+    },
+    {
+      slug: B.async,
+      topic: { en: 'Async & workers', vi: 'Async & worker' },
+      hook: {
+        en: 'Event loop vs threads vs processes: when async wins, and the sync call that sinks it.',
+        vi: 'Event loop, thread, process: async thắng ở đâu, và lời gọi sync nào làm chìm nó.',
+      },
+      act: 'building',
+      builds: [B.lifecycle],
+    },
+    {
+      slug: B.auth,
+      topic: { en: 'Auth', vi: 'Xác thực' },
+      hook: {
+        en: 'Sessions vs JWT vs OAuth2, password hashing, scopes — and not becoming the confused deputy.',
+        vi: 'Session, JWT, OAuth2, băm mật khẩu, scope — và đừng trở thành confused deputy.',
+      },
+      act: 'building',
+      builds: [B.rest, B.data],
+    },
+    {
+      slug: B.caching,
+      topic: { en: 'Caching & jobs', vi: 'Cache & job nền' },
+      hook: {
+        en: 'Cache patterns, TTLs, invalidation, and background jobs that run at-least-once.',
+        vi: 'Mẫu cache, TTL, invalidation, và job nền chạy at-least-once.',
+      },
+      act: 'operating',
+      builds: [B.data],
+    },
+    {
+      slug: B.testing,
+      topic: { en: 'Testing', vi: 'Kiểm thử' },
+      hook: {
+        en: 'The pyramid in practice: unit vs integration vs e2e, fakes over mocks, load as a check.',
+        vi: 'Kim tự tháp kiểm thử: unit, integration, e2e, fake hơn mock, và load test như một bước.',
+      },
+      act: 'operating',
+      builds: [B.layering],
+    },
+    {
+      slug: B.observability,
+      topic: { en: 'Observability', vi: 'Observability' },
+      hook: {
+        en: 'Structured logs, metrics, traces, correlation IDs: debug by evidence, not by guess.',
+        vi: 'Log cấu trúc, metric, trace, correlation ID: debug bằng chứng cứ, không đoán mò.',
+      },
+      act: 'operating',
+      builds: [B.testing],
+    },
+    {
+      slug: B.perf,
+      topic: { en: 'Performance', vi: 'Hiệu năng' },
+      hook: {
+        en: 'p99 over averages, profiling before rewriting, timeouts, backpressure, load tests.',
+        vi: 'p99 thay vì trung bình, profile trước khi viết lại, timeout, backpressure, load test.',
+      },
+      act: 'operating',
+      builds: [B.observability, B.async],
+    },
+    {
+      slug: B.deploy,
+      topic: { en: 'Deploys', vi: 'Triển khai' },
+      hook: {
+        en: '12-factor config, Docker, Kubernetes, health checks, graceful shutdown, zero-downtime rolls.',
+        vi: 'Config kiểu 12-factor, Docker, Kubernetes, health check, graceful shutdown, deploy không downtime.',
+      },
+      act: 'operating',
+      builds: [B.perf, B.observability],
+    },
+  ],
+  paths: [
+    {
+      id: 'full',
+      label: { en: 'Read it all', vi: 'Đọc cả 12 bài' },
+      who: {
+        en: 'From the first byte of a request to a zero-downtime deploy.',
+        vi: 'Từ byte đầu tiên của request tới bản deploy không downtime.',
+      },
+      order: [B.lifecycle, B.rest, B.validation, B.layering, B.data, B.async, B.auth, B.caching, B.testing, B.observability, B.perf, B.deploy],
+    },
+    {
+      id: 'ai-review',
+      label: { en: 'Reviewing AI-written services', vi: 'Soi service do AI viết' },
+      who: {
+        en: 'Catch the API shape, layering, and test gaps AI tools routinely leave behind.',
+        vi: 'Bắt mấy lỗi hình dáng API, phân tầng và thiếu test mà AI hay để lại.',
+      },
+      order: [B.rest, B.validation, B.layering, B.testing],
+    },
+    {
+      id: 'oncall',
+      label: { en: 'Incident at 3 a.m.', vi: 'Sự cố lúc 3 giờ sáng' },
+      who: {
+        en: 'Service slow or down? Evidence first: logs, traces, p99, then the deploy path.',
+        vi: 'Service chậm hoặc chết? Chứng cứ trước: log, trace, p99, rồi tới đường deploy.',
+      },
+      order: [B.observability, B.perf, B.async, B.deploy],
+    },
+  ],
+};
+
 const AT = {
   market: 'ai-trading-the-market',
   signals: 'ai-trading-signals',
@@ -1224,6 +1700,8 @@ export const SERIES: Record<string, Series> = {
   [ddia.id]: ddia,
   [golang.id]: golang,
   [aiTrading.id]: aiTrading,
+  [backend.id]: backend,
+  [stocksBasics.id]: stocksBasics,
 };
 export const SERIES_IDS = Object.keys(SERIES);
 

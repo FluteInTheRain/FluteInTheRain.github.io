@@ -21,3 +21,5 @@ These rules come from the DDIA series run (Nov 2026). It used 60 Sonnet agents, 
 5. **Share building blocks.** Icons come only from `src/data/diagram-icons.ts` through `DiagramIcon`. Extend that catalogue on its own branch, never inside a post branch. Do not edit the shared components (`AnimatedFlow`, `Figure`, `DemoFrame`, `DiagramIcon`) from a post agent.
 6. **Read cropped screenshots.** For the lead, a whole-page screenshot costs far more context than a crop of the one figure being checked.
 7. **Stay under the usage cap.** Run waves of at most about 8 to 10 agents. A 5-hour usage cap stopped 14 agents mid-run in one go.
+
+SVG figures in `src/assets/blog/**` are rasterized to PNG in place with a plain sharp call, at double the SVG's logical size: `node -e "require('sharp')('src/assets/blog/<post>/<fig>.svg',{density:144}).png().toFile('src/assets/blog/<post>/<fig>.png')"` (sharp's default SVG density is 72 dpi = 1x; 144 dpi = 2x).
