@@ -8,6 +8,7 @@ import draftingSet from '../assets/series/drafting-set.jpg';
 import ramac305 from '../assets/series/ibm-305-ramac.jpg';
 import goGophers from '../assets/series/go-gopher-five-years.jpg';
 import stockCert from '../assets/series/stock-certificate-1892.jpg';
+import hoseBuilding from '../assets/series/ai-trading/hose-building.jpg';
 import backendPlate from '../assets/series/backend-plate.png';
 
 export interface L10n { en: string; vi: string }
@@ -1325,10 +1326,380 @@ const backend: Series = {
   ],
 };
 
+const AT = {
+  market: 'ai-trading-the-market',
+  signals: 'ai-trading-signals',
+  data: 'ai-trading-data',
+  statistics: 'ai-trading-statistics',
+  regime: 'ai-trading-regime',
+  factors: 'ai-trading-factors',
+  portfolio: 'ai-trading-portfolio',
+  prediction: 'ai-trading-prediction',
+  explainable: 'ai-trading-explainable-ai',
+  clustering: 'ai-trading-clustering',
+  graphs: 'ai-trading-graphs',
+  backtest: 'ai-trading-backtest',
+  production: 'ai-trading-production',
+  deepLearning: 'ai-trading-deep-learning',
+  sequence: 'ai-trading-sequence-models',
+  orderFlow: 'ai-trading-order-flow',
+  nlp: 'ai-trading-financial-nlp',
+  gnn: 'ai-trading-gnn',
+  rl: 'ai-trading-reinforcement-learning',
+  alpha: 'ai-trading-alpha',
+  agents: 'ai-trading-agents',
+  investmentOs: 'ai-trading-investment-os',
+};
+
+const aiTrading: Series = {
+  id: 'ai-trading',
+  title: {
+    en: 'AI for market systems, from the first order to the agent that decides',
+    vi: 'AI trong chứng khoán, từ cây lệnh đầu tiên tới agent ra quyết định',
+  },
+  kicker: { en: 'A 22-part series', vi: 'Series 22 bài' },
+  tagline: {
+    en: 'Written for beginners: how markets actually trade, where the signal hides in the noise, and how AI earns — or loses — its place in the loop.',
+    vi: 'Viết cho người mới: thị trường khớp lệnh ra sao, tín hiệu nằm đâu trong nhiễu, và AI lấy gì mà sống — hoặc thua — trong chuỗi quyết định này.',
+  },
+  pitch: [
+    {
+      en: 'Markets are the hardest place to apply machine learning: the signal is faint, the data is never repeated, and everything fights back the moment you trade on it. Most introductions skip that and jump straight to models.',
+      vi: 'Thị trường là nơi khó nhất để áp dụng machine learning: tín hiệu rất mỏng, dữ liệu không bao giờ lặp lại, và mọi thứ đều phản ứng lại ngay khi bạn dùng nó. Phần lớn tài liệu bỏ qua điều đó và nhảy thẳng vào mô hình.',
+    },
+    {
+      en: 'This series walks the whole path in order: what an order book is, why prices barely repeat themselves, how data quietly lies, then supervised learning, backtests that do not flatter you, deep learning on the order book, and finally agents that read the news and allocate capital. Every idea lands on a Vietnamese market case.',
+      vi: 'Series đi cả con đường theo thứ tự: sổ lệnh là gì, vì sao giá gần như không bao giờ lặp lại, dữ liệu nói dối kiểu nào, rồi supervised learning, backtest không tự lỡ mình, deep learning trên sổ lệnh, và cuối cùng là agent đọc tin và phân bổ vốn. Mọi ý tưởng đều hạ xuống một case thị trường Việt Nam.',
+    },
+  ],
+  credit: {
+    en: 'Built on the public curriculum and research of 51labs (Machine Learning for Financial Market), extended with public papers and Vietnamese market cases.',
+    vi: 'Dựa trên chương trình và nghiên cứu công khai của 51labs (Machine Learning for Financial Market), bổ sung paper công khai và case thị trường Việt Nam.',
+  },
+  // The Ho Chi Minh Stock Exchange building (District 1, HCMC): where Vietnamese orders are matched.
+  cover: {
+    subtitle: {
+      en: 'Market · Machine Learning · Deep Learning · RL & Agents',
+      vi: 'Thị trường · Machine Learning · Học sâu · RL & Agent',
+    },
+    image: hoseBuilding,
+    alt: 'The Ho Chi Minh Stock Exchange building on Nguyen Thai Binh street, District 1: a restored French-colonial facade under a clear sky.',
+    position: '50% 40%',
+    imprint: 'AI × MARKETS',
+    credit: {
+      title: 'So Giao Dich chung khoan tphcm, Nguyen Thai Binh, Quan 1, TPHCM',
+      author: 'trungydang',
+      url: 'https://commons.wikimedia.org/wiki/File:So_Giao_Dich_chung_khoan_tphcm-Nguy%E1%BB%85n_Th%C3%A1i_B%C3%ACnh,_Qu%E1%BA%ADn_1,_TPHCM,_Vi%E1%BB%87t_Nam_-_panoramio.jpg',
+      license: 'CC BY 3.0',
+    },
+  },
+  outcomes: [
+    {
+      en: 'Read an order book and a price chart without guessing what they mean.',
+      vi: 'Đọc được sổ lệnh và biểu đồ giá mà không phải đoán.',
+    },
+    {
+      en: 'Say why a model that looked brilliant in a backtest can still lose money.',
+      vi: 'Giải thích được vì sao một mô hình đẹp trong backtest vẫn có thể thua lỗ.',
+    },
+    {
+      en: 'Judge a financial data pipeline by what it would have shown on any past date.',
+      vi: 'Đánh giá pipeline dữ liệu tài chính theo thứ nó hiển thị tại bất kỳ ngày quá khứ nào.',
+    },
+    {
+      en: 'Know what AI can decide in a trading system — and what must stay human.',
+      vi: 'Biết AI quyết được gì trong hệ thống giao dịch — và gì phải giữ cho con người.',
+    },
+  ],
+  acts: [
+    {
+      id: 'market',
+      label: { en: 'The Market', vi: 'Thị trường' },
+      blurb: { en: 'How trades actually happen', vi: 'Giao dịch thật sự diễn ra ra sao' },
+    },
+    {
+      id: 'ml',
+      label: { en: 'Machine Learning', vi: 'Machine Learning' },
+      blurb: { en: 'Learn without fooling yourself', vi: 'Học mà không tự lỡ mình' },
+    },
+    {
+      id: 'dl',
+      label: { en: 'Deep Learning', vi: 'Học sâu' },
+      blurb: { en: 'Neural nets meet the order book', vi: 'Mạng nơ-ron gặp sổ lệnh' },
+    },
+    {
+      id: 'agentic',
+      label: { en: 'RL & Agents', vi: 'RL & Agent' },
+      blurb: { en: 'Systems that decide and act', vi: 'Hệ thống tự ra quyết định' },
+    },
+  ],
+  parts: [
+    {
+      slug: AT.market,
+      topic: { en: 'The Market', vi: 'Thị trường' },
+      hook: {
+        en: 'Order book, matching, candles, limit up/down: the machine every strategy lives inside.',
+        vi: 'Sổ lệnh, khớp lệnh, nến, limit up/down: cỗ máy mà mọi chiến lược phải sống trong đó.',
+      },
+      act: 'market',
+      builds: [],
+    },
+    {
+      slug: AT.signals,
+      topic: { en: 'Signals', vi: 'Tín hiệu' },
+      hook: {
+        en: 'Why markets are the hardest place for AI: faint signal, no repeats, everyone fights back.',
+        vi: 'Vì sao thị trường là nơi khó nhất cho AI: tín hiệu mỏng, không lặp lại, và ai cũng phản công.',
+      },
+      act: 'market',
+      builds: [AT.market],
+    },
+    {
+      slug: AT.data,
+      topic: { en: 'Data', vi: 'Dữ liệu' },
+      hook: {
+        en: 'Point-in-time data, survivorship bias, corporate actions: how financial data quietly lies.',
+        vi: 'Point-in-time, survivorship bias, corporate actions: dữ liệu tài chính nói dối kiểu nào.',
+      },
+      act: 'market',
+      builds: [AT.market],
+    },
+    {
+      slug: AT.statistics,
+      topic: { en: 'Statistics', vi: 'Thống kê' },
+      hook: {
+        en: 'Returns, Sharpe, regression, regularization — the only math this series needs.',
+        vi: 'Lợi suất, Sharpe, hồi quy, regularization — lượng toán duy nhất series cần.',
+      },
+      act: 'market',
+      builds: [AT.signals],
+    },
+    {
+      slug: AT.regime,
+      topic: { en: 'Regime', vi: 'Chu kỳ thị trường' },
+      hook: {
+        en: 'Markets change personality; EWMA to HMM, and why last year’s rules stop working.',
+        vi: 'Thị trường đổi tính cách; từ EWMA tới HMM, và vì sao luật của năm ngoái ngừng chạy.',
+      },
+      act: 'market',
+      builds: [AT.statistics],
+    },
+    {
+      slug: AT.factors,
+      topic: { en: 'Factors', vi: 'Factor' },
+      hook: {
+        en: 'Momentum, value, size: what a factor is, and why thousands died in the factor zoo.',
+        vi: 'Momentum, value, size: factor là gì, và vì sao hàng nghìn factor chết trong factor zoo.',
+      },
+      act: 'market',
+      builds: [AT.data],
+    },
+    {
+      slug: AT.portfolio,
+      topic: { en: 'Portfolio', vi: 'Danh mục' },
+      hook: {
+        en: 'Optimization, risk parity, margin — and what the 2020–25 HOSE margin cuts did to prices.',
+        vi: 'Tối ưu, risk parity, margin — và margin cuts HOSE 2020–25 làm gì với giá.',
+      },
+      act: 'market',
+      builds: [AT.regime, AT.factors],
+    },
+    {
+      slug: AT.prediction,
+      topic: { en: 'Prediction', vi: 'Dự đoán' },
+      hook: {
+        en: 'Supervised learning on returns: trees, ensembles, and the Kaggle lessons.',
+        vi: 'Supervised learning trên lợi suất: tree, ensemble, và bài học từ Kaggle.',
+      },
+      act: 'ml',
+      builds: [AT.data, AT.statistics],
+    },
+    {
+      slug: AT.explainable,
+      topic: { en: 'Explainable AI', vi: 'AI giải thích được' },
+      hook: {
+        en: 'Why the model ranked it, XAI in finance, and predict-then-rank done right.',
+        vi: 'Vì sao mô hình xếp nó cao, XAI trong tài chính, và predict-then-rank đúng cách.',
+      },
+      act: 'ml',
+      builds: [AT.prediction],
+    },
+    {
+      slug: AT.clustering,
+      topic: { en: 'Clustering', vi: 'Phân cụm' },
+      hook: {
+        en: 'Unsupervised structure: clusters, dendrograms, hierarchical risk parity.',
+        vi: 'Cấu trúc không nhãn: phân cụm, dendrogram, hierarchical risk parity.',
+      },
+      act: 'ml',
+      builds: [AT.statistics],
+    },
+    {
+      slug: AT.graphs,
+      topic: { en: 'Graphs', vi: 'Đồ thị' },
+      hook: {
+        en: 'Stocks as a network: community detection on VN100, graphs for regime detection.',
+        vi: 'Cổ phiếu như một mạng lưới: community detection trên VN100, graph cho regime.',
+      },
+      act: 'ml',
+      builds: [AT.clustering, AT.regime],
+    },
+    {
+      slug: AT.backtest,
+      topic: { en: 'Backtest', vi: 'Backtest' },
+      hook: {
+        en: 'Walk-forward, purged CV, deflated Sharpe: testing without flattering yourself.',
+        vi: 'Walk-forward, purged CV, deflated Sharpe: kiểm định mà không tự lừa mình.',
+      },
+      act: 'ml',
+      builds: [AT.prediction],
+    },
+    {
+      slug: AT.production,
+      topic: { en: 'Production', vi: 'Triển khai' },
+      hook: {
+        en: 'From signal to live system: TCA, price impact, and Knight Capital’s 45 minutes.',
+        vi: 'Từ signal tới hệ thống thật: TCA, price impact, và 45 phút của Knight Capital.',
+      },
+      act: 'ml',
+      builds: [AT.backtest],
+    },
+    {
+      slug: AT.deepLearning,
+      topic: { en: 'Deep Learning', vi: 'Học sâu' },
+      hook: {
+        en: 'Linear to MLP: what deep nets change about the prediction problem.',
+        vi: 'Từ linear tới MLP: deep net đổi gì trong bài toán dự đoán.',
+      },
+      act: 'dl',
+      builds: [AT.prediction],
+    },
+    {
+      slug: AT.sequence,
+      topic: { en: 'Sequence Models', vi: 'Mô hình chuỗi' },
+      hook: {
+        en: 'LSTM, Transformer, Deep Momentum Network, SharpeLoss: learning from time.',
+        vi: 'LSTM, Transformer, Deep Momentum Network, SharpeLoss: học từ chuỗi thời gian.',
+      },
+      act: 'dl',
+      builds: [AT.deepLearning],
+    },
+    {
+      slug: AT.orderFlow,
+      topic: { en: 'Order Flow', vi: 'Dòng lệnh' },
+      hook: {
+        en: 'Inside the microstructure: imbalance, DeepLOB, and reading the book like a model.',
+        vi: 'Trong vi cấu trúc: imbalance, DeepLOB, và đọc sổ lệnh như một mô hình.',
+      },
+      act: 'dl',
+      builds: [AT.sequence],
+    },
+    {
+      slug: AT.nlp,
+      topic: { en: 'Financial NLP', vi: 'NLP tài chính' },
+      hook: {
+        en: 'LLMs read the news: thematic investing, Alpha 6.8, sentiment before price.',
+        vi: 'LLM đọc tin: thematic investing, Alpha 6.8, cảm xúc đi trước giá.',
+      },
+      act: 'dl',
+      builds: [AT.deepLearning],
+    },
+    {
+      slug: AT.gnn,
+      topic: { en: 'GNN', vi: 'GNN' },
+      hook: {
+        en: 'Graph attention for stock ranking and regime-adaptive portfolios.',
+        vi: 'Graph attention cho xếp hạng cổ phiếu và danh mục thích ứng regime.',
+      },
+      act: 'dl',
+      builds: [AT.graphs, AT.sequence],
+    },
+    {
+      slug: AT.rl,
+      topic: { en: 'Reinforcement Learning', vi: 'Học tăng cường' },
+      hook: {
+        en: 'MDP to DQN/PPO: an agent learns to trade — and learns to hack your backtest.',
+        vi: 'MDP tới DQN/PPO: agent học giao dịch — và học cách hack backtest của bạn.',
+      },
+      act: 'agentic',
+      builds: [AT.deepLearning, AT.orderFlow],
+    },
+    {
+      slug: AT.alpha,
+      topic: { en: 'Alpha', vi: 'Alpha' },
+      hook: {
+        en: 'Search for strategies: genetic programming, MCTS, MuZero-inspired discovery.',
+        vi: 'Tìm kiếm chiến lược: genetic programming, MCTS, khai phá kiểu MuZero.',
+      },
+      act: 'agentic',
+      builds: [AT.rl],
+    },
+    {
+      slug: AT.agents,
+      topic: { en: 'Agents', vi: 'Agent' },
+      hook: {
+        en: 'LLM agents do the research: RAG, news pipelines, agentic valuation.',
+        vi: 'LLM agent làm phần nghiên cứu: RAG, pipeline tin tức, agentic valuation.',
+      },
+      act: 'agentic',
+      builds: [AT.nlp],
+    },
+    {
+      slug: AT.investmentOs,
+      topic: { en: 'Investment OS', vi: 'Hệ thống đầu tư' },
+      hook: {
+        en: 'Multi-agent investment teams, evaluation, and the limits of delegating judgement.',
+        vi: 'Đội đầu tư đa agent, đánh giá, và giới hạn của việc giao phó phán đoán.',
+      },
+      act: 'agentic',
+      builds: [AT.rl, AT.agents],
+    },
+  ],
+  paths: [
+    {
+      id: 'full',
+      label: { en: 'Read it all', vi: 'Đọc hết series' },
+      who: {
+        en: 'From zero to the agent team, in order.',
+        vi: 'Từ số 0 tới đội agent, theo đúng thứ tự.',
+      },
+      order: Object.values(AT),
+    },
+    {
+      id: 'beginner',
+      label: { en: 'New to markets & AI', vi: 'Chưa biết gì, đi từ đầu' },
+      who: {
+        en: 'You have never traded or trained a model. Act 1 is your course.',
+        vi: 'Bạn chưa từng giao dịch hay huấn luyện mô hình. Act 1 là khóa học của bạn.',
+      },
+      order: [AT.market, AT.signals, AT.data, AT.statistics, AT.regime, AT.factors, AT.portfolio],
+    },
+    {
+      id: 'ml',
+      label: { en: 'ML engineer entering quant', vi: 'ML engineer chuyển sang quant' },
+      who: {
+        en: 'You know sklearn and PyTorch. Skip the tutorials, learn the market.',
+        vi: 'Bạn rành sklearn và PyTorch. Bỏ phần tutorial, học phần thị trường.',
+      },
+      order: [AT.data, AT.statistics, AT.prediction, AT.backtest, AT.production, AT.deepLearning, AT.sequence, AT.orderFlow],
+    },
+    {
+      id: 'quant',
+      label: { en: 'Traditional quant learning AI', vi: 'Quant truyền thống học AI' },
+      who: {
+        en: 'You know portfolios and risk. See what the models add.',
+        vi: 'Bạn rành danh mục và rủi ro. Xem mô hình thêm được gì.',
+      },
+      order: [AT.signals, AT.statistics, AT.regime, AT.factors, AT.portfolio, AT.prediction, AT.explainable, AT.clustering, AT.backtest],
+    },
+  ],
+};
+
 export const SERIES: Record<string, Series> = {
   [refactoringUi.id]: refactoringUi,
   [ddia.id]: ddia,
   [golang.id]: golang,
+  [aiTrading.id]: aiTrading,
   [backend.id]: backend,
   [stocksBasics.id]: stocksBasics,
 };
