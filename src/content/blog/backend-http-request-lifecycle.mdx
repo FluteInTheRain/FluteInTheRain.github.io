@@ -27,6 +27,11 @@ import Concepts from '../../components/mdx/Concepts.astro';
 import Figure from '../../components/mdx/Figure.astro';
 import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
 import BackendLifecycleDiagram from '../../components/mdx/BackendLifecycleDiagram.astro';
+import BeP01Stations from '../../components/mdx/BeP01Stations.astro';
+import BeP01DnsWalk from '../../components/mdx/BeP01DnsWalk.astro';
+import BeP01TcpHandshake from '../../components/mdx/BeP01TcpHandshake.astro';
+import BeP01ReuseCost from '../../components/mdx/BeP01ReuseCost.astro';
+import BeP01TraceFirst from '../../components/mdx/BeP01TraceFirst.astro';
 import heroPneumatic from '../../assets/blog/backend-http-request-lifecycle/paris-pneumatic-post-apparatus.jpg';
 import networkMap from '../../assets/blog/backend-http-request-lifecycle/paris-pneumatic-network-map.png';
 
@@ -90,15 +95,80 @@ Ask curl to narrate one real request — its own docs page, over HTTPS:
 ```
 </TerminalOutput>
 
+The whole trace, drawn as one line:
+
+<BeP01Stations />
+
 Line by line:
 
 **DNS turns a name into an address.** `fastapi.tiangolo.com` became `172.66.46.235`. Your resolver asks around — cache, router, then the hierarchy — and each answer is cached for its TTL. In the Facebook outage, this is exactly the station that died: the resolver could not reach Facebook's nameservers at all.
 
+The asking order never changes:
+
+<BeP01DnsWalk />
+
 **TCP opens the pipe.** One round trip for the three-way handshake (`SYN`, `SYN-ACK`, `ACK`), then bytes can flow both ways. If the address is wrong or filtered, the request stalls here — your app logs nothing at all.
+
+The three packets, in order:
+
+<BeP01TcpHandshake />
 
 **TLS makes the pipe private.** One round trip in TLS 1.3 (two in TLS 1.2) to agree keys and check the certificate — that's the `CN=fastapi.tiangolo.com` and `SSL certificate verify ok` above. Every HTTPS request pays this before the first HTTP byte.
 
 **HTTP is the message inside the pipe.** `GET / HTTP/2` with a few headers. Notice `cf-ray: ...-SIN` in the response: Cloudflare's Singapore edge answered. Your request's station list depends on geography, not on your code.
+
+You can pay each station yourself, with nothing but the standard library — this is `demo/station_timing.py`:
+
+```python
+import socket
+import ssl
+import time
+
+HOST = "fastapi.tiangolo.com"
+
+
+def ms(since: float) -> float:
+    return (time.perf_counter() - since) * 1000
+
+
+# Station 1: DNS — a name becomes an address.
+t = time.perf_counter()
+addr = socket.getaddrinfo(HOST, 443, proto=socket.IPPROTO_TCP)[0][4][0]
+print(f"DNS   {ms(t):7.1f} ms   {HOST} -> {addr}")
+
+# Station 2: TCP — the three-way handshake opens the pipe.
+t = time.perf_counter()
+sock = socket.create_connection((HOST, 443))
+print(f"TCP   {ms(t):7.1f} ms   connected to {addr}:443")
+
+# Station 3: TLS — keys agreed, certificate checked.
+t = time.perf_counter()
+tls = ssl.create_default_context().wrap_socket(sock, server_hostname=HOST)
+print(f"TLS   {ms(t):7.1f} ms   {tls.version()}")
+
+# Station 4 + 5: HTTP is the letter inside the pipe; the first bytes back
+# are one more round trip. This is the only station your profiler ever sees.
+t = time.perf_counter()
+tls.sendall(
+    b"GET / HTTP/1.1\r\n"
+    + f"Host: {HOST}\r\n".encode()
+    + b"User-Agent: station-timing\r\n"
+    + b"Accept: */*\r\n"
+    + b"Connection: close\r\n\r\n"
+)
+status = tls.recv(256).split(b"\r\n")[0].decode()
+print(f"HTTP  {ms(t):7.1f} ms   {status}")
+tls.close()
+```
+
+<TerminalOutput command="uv run --python 3.13 station_timing.py" label="Python 3.13 · captured Nov 2026" caption="Each handshake lands near one round trip to Singapore (≈50–70 ms); the request itself adds the server's own round trip. Your profiler only ever sees the last line.">
+```text
+DNS      53.4 ms   fastapi.tiangolo.com -> 172.66.45.21
+TCP      52.8 ms   connected to 172.66.45.21:443
+TLS      69.9 ms   TLSv1.3
+HTTP    157.5 ms   HTTP/1.1 200 OK
+```
+</TerminalOutput>
 
 <Figure src={networkMap} alt="An 1870s map of the Paris pneumatic tube network: dozens of post offices linked by tubes crossing the city" caption="The Paris pneumatic network as drawn in the 1870s. Nobody drew a new map for each letter — the stations existed first, and letters just rode them. Your request rides DNS, TCP, TLS and HTTP the same way: the infrastructure predates your payload, and it is the same for every API you will ever ship." sourceTitle="Wikimedia Commons: Réseau pneumatique de Paris (Louis Figuier)" sourceUrl="https://commons.wikimedia.org/wiki/File:T5-_d520_-_Fig._425._%E2%80%94_R%C3%A9seau_pneumatique_de_Paris.png" />
 
@@ -119,6 +189,25 @@ Everything above happens before your process is involved. What does "running the
 uvicorn owns the socket. It parses bytes, closes handshakes, decodes HTTP — and calls one thing of yours: an ASGI app. The whole ASGI contract is one callable: `async def app(scope, receive, send)`. A request arrives as a `scope` dict; you read the body by awaiting `receive()`; you push the response by awaiting `send()`. FastAPI is a very large, very organized version of that callable, with routing, validation and docs riding on top.
 
 Here is the series' tiny demo service with one middleware printing what it sees:
+
+```python
+@app.middleware("http")
+async def trace_middleware(request: Request, call_next):
+    scope = request.scope
+    print(
+        f"ASGI scope: type={scope['type']} scheme={scope['scheme']}"
+        f" http_version={scope.get('http_version')}"
+    )
+    print(f"app -> router -> endpoint: {request.method} {request.url.path}")
+    started = time.perf_counter()
+    response = await call_next(request)
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    print(
+        f"endpoint returned, response back through the stack:"
+        f" {response.status_code} in {elapsed_ms:.2f} ms"
+    )
+    return response
+```
 
 <TerminalOutput command="uvicorn trace_demo:app — then: curl http://127.0.0.1:4324/cases/42" label="Python 3.13 · FastAPI 0.165 · captured locally" caption="The server's own view of one request: ASGI scope in, your endpoint in the middle, status code out — the rest is uvicorn's business.">
 ```text
@@ -158,6 +247,44 @@ But look at the last line of the curl trace: `Connection #0 ... left intact`. Th
 
 Keep this in your head as a budget: the first request on a fresh connection pays roughly 1 RTT for DNS (cached often), 1 for TCP, 1 for TLS 1.3 — before the server has received a single byte. On a 40 ms RTT link, your "2 ms endpoint" is a ~122 ms experience for the first request. The number you brag about is rarely the number users feel.
 
+That budget, drawn to scale:
+
+<BeP01ReuseCost />
+
+Run the pair yourself — this is `demo/reuse_timing.py`:
+
+```python
+import time
+
+import httpx
+
+URL = "https://fastapi.tiangolo.com/"
+
+
+def ms(since: float) -> float:
+    return (time.perf_counter() - since) * 1000
+
+
+with httpx.Client() as client:
+    t = time.perf_counter()
+    client.get(URL)
+    first = ms(t)
+
+    t = time.perf_counter()
+    client.get(URL)
+    second = ms(t)
+
+print(f"first request:  {first:7.1f} ms   (fresh connection)")
+print(f"second request:  {second:7.1f} ms   (connection reused)")
+```
+
+<TerminalOutput command="uv run --python 3.13 --with httpx reuse_timing.py" label="Python 3.13 · httpx · captured Nov 2026" caption="One httpx.Client, two GETs: the first pays DNS, TCP and TLS before its first byte; the second rides the same connection. The gap is the setup tax from the budget above.">
+```text
+first request:    293.7 ms   (fresh connection)
+second request:    131.2 ms   (connection reused)
+```
+</TerminalOutput>
+
 ---
 
 ## 4. Trace first, guess never
@@ -167,6 +294,10 @@ When something is slow, walk the stations in order — one tool per station, two
 1. `curl -v` — where does the trace pause? Resolution, connect, TLS, or time-to-first-byte after the request was sent?
 2. The server's access log — did the request even arrive, and how long did your box take? That's the red box's receipt.
 3. Only then open a profiler, if the receipt says the time is yours.
+
+The whole habit on one line:
+
+<BeP01TraceFirst />
 
 The Facebook outage is the extreme case: five billion requests never arrived, and no amount of endpoint profiling would have found a BGP route withdrawal. Your cases will be smaller — a flaky resolver, an expired certificate, a proxy timeout — but the discipline is identical: **find the station first, then fix the right box.**
 
@@ -179,16 +310,16 @@ The Facebook outage is the extreme case: five billion requests never arrived, an
 > "Mạng là thứ đáng tin cậy."
 > &mdash; *L. Peter Deutsch, ngụy biện số một trong tám ngụy biện về hệ phân tán*
 
-### Cái mở đầu: sáu tiếng không có lấy một request
+### Mở đầu: sáu tiếng không một request
 
-Ngày 4 tháng 10 năm 2021, Facebook không hề có lỗi code. Một lệnh bảo trì rút toàn bộ route BGP của chính backbone Facebook — kéo theo DNS authoritative của Facebook biến mất khỏi bản đồ internet. Mọi app tắt, tool nội bộ tắt, đến máy quét thẻ mở cửa văn phòng cũng tắt, suốt gần sáu tiếng. Ngày hôm đó không một dòng code của họ chạy sai: **không request nào tới được chỗ code** ([Janardhan, Meta Engineering](https://engineering.fb.com/2021/10/05/networking-traffic-outage-and-details/)).
+Ngày 4 tháng 10 năm 2021, Facebook không hề có lỗi code. Một lệnh bảo trì rút toàn bộ route BGP khỏi backbone của chính Facebook, kéo theo DNS authoritative của họ biến mất khỏi bản đồ internet. App tắt. Tool nội bộ tắt. Đến máy quét thẻ mở cửa văn phòng cũng tắt. Gần sáu tiếng như vậy. Không một dòng code nào của họ chạy sai hôm đó: **không request nào tới được chỗ code** ([Janardhan, Meta Engineering](https://engineering.fb.com/2021/10/05/networking-traffic-outage-and-details/)).
 
-Đó là điều đầu tiên cần hiểu về backend: trước khi Python của bạn chạy, request phải băng qua chuỗi trạm mà bạn không sở hữu trạm nào. Đa số sự cố nhàm chán lắm — một lần tra DNS chậm, một lần TLS handshake retry, một connection rớt — và không cái nào hiện lên trong profiler của bạn. Bài này đi theo từng trạm của một request, bằng chứng cứ thật, và trả lời bốn câu:
+Đó là bài học đầu tiên về backend: trước khi Python của bạn chạy, request phải băng qua một chuỗi trạm mà bạn không sở hữu cái nào. Đa số sự cố nhàm chán lắm — DNS tra chậm một nhịp, TLS handshake retry một lần, một connection rớt giữa đường — và chẳng cái nào lộ mặt trong profiler của bạn. Mình sẽ đi theo một request qua từng trạm, bằng capture thật, và trả lời bốn câu:
 
-1. **Các trạm trước code của bạn**: DNS, TCP, TLS, HTTP — mỗi trạm làm gì, và tính bạn bao nhiêu.
-2. **Code của bạn bắt đầu từ đâu**: uvicorn thực sự nắm gì, và ASGI đưa gì vào tay bạn.
-3. **Con ống quay lại**: vì sao request thứ hai trên một connection rẻ hơn nhiều lần request đầu.
-4. **Thói quen**: một trace nào cho biết trạm nào ăn mất thời gian.
+1. **Các trạm trước code của bạn**: DNS, TCP, TLS, HTTP — từng trạm làm gì, và đắt cỡ nào.
+2. **Code của bạn bắt đầu từ đâu**: uvicorn thực sự nắm những gì, và ASGI nhét gì vào tay bạn.
+3. **Con ống quay lại**: vì sao request thứ hai trên cùng một connection rẻ hơn request đầu nhiều lần.
+4. **Thói quen**: một trace duy nhất cho biết trạm nào ăn mất thời gian.
 
 ---
 
@@ -232,22 +363,87 @@ Bảo curl kể lại một request thật — chính trang docs của FastAPI, 
 ```
 </TerminalOutput>
 
+Toàn bộ trace, vẽ thành một dòng:
+
+<BeP01Stations />
+
 Từng dòng một:
 
-**DNS biến tên thành địa chỉ.** `fastapi.tiangolo.com` thành `172.66.46.235`. Resolver của bạn hỏi vòng — cache, router, rồi cả cây hệ thống — và mỗi câu trả lời được cache theo TTL của nó. Trong sự cố Facebook, trạm chết chính là trạm này: resolver không với tới nameserver của Facebook nổi.
+**DNS biến tên thành địa chỉ.** `fastapi.tiangolo.com` trở thành `172.66.46.235`. Resolver của bạn đi hỏi vòng — cache trước, router kế tiếp, rồi lên cả cây hệ thống — và câu trả lời nào cũng được lưu lại theo TTL riêng của nó. Trong sự cố Facebook, trạm chết chính là trạm này: resolver có muốn cũng không với tới nameserver của Facebook.
 
-**TCP mở ống.** Một round trip cho bộ bắt tay ba bước (`SYN`, `SYN-ACK`, `ACK`), rồi byte chạy được cả hai chiều. Địa chỉ sai hay bị chặn thì request kẹt ở đây — app của bạn không log được gì cả.
+Thứ tự hỏi không bao giờ đổi:
 
-**TLS làm ống thành private.** Một round trip với TLS 1.3 (hai round trip với TLS 1.2) để trao khoá và kiểm chứng chỉ — đó là dòng `CN=fastapi.tiangolo.com` và `SSL certificate verify ok` phía trên. Mọi request HTTPS đều trả khoản này trước byte HTTP đầu tiên.
+<BeP01DnsWalk />
 
-**HTTP là lá thư bên trong ống.** `GET / HTTP/2` kèm vài header. Để ý `cf-ray: ...-SIN` trong response: edge của Cloudflare bên Singapore trả lời. Danh sách trạm của request phụ thuộc vào vị trí địa lý, không phụ thuộc code của bạn.
+**TCP mở ống.** Một round trip cho bộ bắt tay ba bước (`SYN`, `SYN-ACK`, `ACK`), rồi byte chạy thoải mái cả hai chiều. Địa chỉ sai hoặc bị chặn thì request kẹt ngay tại đây — và app của bạn không log được lấy một dòng.
+
+Ba gói tin, theo thứ tự:
+
+<BeP01TcpHandshake />
+
+**TLS biến ống thành kênh riêng.** TLS 1.3 tốn một round trip (TLS 1.2 tốn hai) để trao khoá và đối chiếu chứng chỉ — chính là mấy dòng `CN=fastapi.tiangolo.com` và `SSL certificate verify ok` bạn thấy phía trên. Mọi request HTTPS đều trả khoản này trước byte HTTP đầu tiên.
+
+**HTTP là lá thư bỏ trong ống.** `GET / HTTP/2` kèm vài header. Để ý dòng `cf-ray: ...-SIN` trong response: edge của Cloudflare ở Singapore trả lời bạn đấy. Request đi qua những trạm nào tuỳ vào bạn đứng ở đâu trên bản đồ, chứ không tuỳ code của bạn.
+
+Bạn có thể tự tay trả tiền từng trạm, không cần framework nào ngoài standard library — đây là `demo/station_timing.py`:
+
+```python
+import socket
+import ssl
+import time
+
+HOST = "fastapi.tiangolo.com"
+
+
+def ms(since: float) -> float:
+    return (time.perf_counter() - since) * 1000
+
+
+# Station 1: DNS — a name becomes an address.
+t = time.perf_counter()
+addr = socket.getaddrinfo(HOST, 443, proto=socket.IPPROTO_TCP)[0][4][0]
+print(f"DNS   {ms(t):7.1f} ms   {HOST} -> {addr}")
+
+# Station 2: TCP — the three-way handshake opens the pipe.
+t = time.perf_counter()
+sock = socket.create_connection((HOST, 443))
+print(f"TCP   {ms(t):7.1f} ms   connected to {addr}:443")
+
+# Station 3: TLS — keys agreed, certificate checked.
+t = time.perf_counter()
+tls = ssl.create_default_context().wrap_socket(sock, server_hostname=HOST)
+print(f"TLS   {ms(t):7.1f} ms   {tls.version()}")
+
+# Station 4 + 5: HTTP is the letter inside the pipe; the first bytes back
+# are one more round trip. This is the only station your profiler ever sees.
+t = time.perf_counter()
+tls.sendall(
+    b"GET / HTTP/1.1\r\n"
+    + f"Host: {HOST}\r\n".encode()
+    + b"User-Agent: station-timing\r\n"
+    + b"Accept: */*\r\n"
+    + b"Connection: close\r\n\r\n"
+)
+status = tls.recv(256).split(b"\r\n")[0].decode()
+print(f"HTTP  {ms(t):7.1f} ms   {status}")
+tls.close()
+```
+
+<TerminalOutput command="uv run --python 3.13 station_timing.py" label="Python 3.13 · chụp tháng 11/2026" caption="Mỗi handshake ngang khoảng một round trip tới Singapore (≈50–70 ms); bản thân request cộng thêm round trip của server. Profiler của bạn chỉ nhìn thấy dòng cuối cùng.">
+```text
+DNS      53.4 ms   fastapi.tiangolo.com -> 172.66.45.21
+TCP      52.8 ms   connected to 172.66.45.21:443
+TLS      69.9 ms   TLSv1.3
+HTTP    157.5 ms   HTTP/1.1 200 OK
+```
+</TerminalOutput>
 
 <Figure src={networkMap} alt="Bản đồ mạng ống khí nén Paris thập niên 1870: hàng chục bưu điện nối với nhau bằng ống chạy khắp thành phố" caption="Mạng pneumatic Paris như vẽ thập niên 1870. Không ai vẽ lại bản đồ cho từng lá thư — trạm có trước, thư chỉ việc chạy theo. Request của bạn chạy trên DNS, TCP, TLS và HTTP y như vậy: hạ tầng có trước payload của bạn, và nó như nhau với mọi API bạn sẽ viết." sourceTitle="Wikimedia Commons: Réseau pneumatique de Paris (Louis Figuier)" sourceUrl="https://commons.wikimedia.org/wiki/File:T5-_d520_-_Fig._425._%E2%80%94_R%C3%A9seau_pneumatique_de_Paris.png" />
 
 <Concepts title="Mấy thuật ngữ phía trên, nói dễ hiểu">
 - **DNS (Domain Name System)**: danh bạ của internet — biến tên miền thành địa chỉ IP, cache ở mọi tầng.
 - **TCP handshake**: nghi thức ba gói (`SYN`, `SYN-ACK`, `ACK`) để mở một ống đáng tin, có thứ tự, giữa hai địa chỉ IP.
-- **TLS (Transport Layer Security)**: bước bắt tay kiểm chứng chỉ server và trao khoá mã hoá; TLS 1.3 chỉ tốn một round trip.
+- **TLS (Transport Layer Security)**: bước bắt tay đối chiếu chứng chỉ server và trao khoá mã hoá; TLS 1.3 chỉ tốn một round trip.
 - **RTT (round-trip time)**: thời gian gói đi qua và câu trả lời quay về. Handshake trả bằng RTT, không phải bằng mili-giây code của bạn.
 - **HTTP/2**: bản HTTP nhị phân, multiplex — nhiều request chung một connection không phải xếp hàng chờ nhau.
 </Concepts>
@@ -256,11 +452,30 @@ Từng dòng một:
 
 ## 2. Ô đỏ: code của bạn bắt đầu từ đâu
 
-Tất cả phía trên diễn ra trước khi process của bạn được nhắc tên. Vậy "chạy server" nghĩa là gì với một app Python?
+Tất cả những gì phía trên diễn ra khi process của bạn còn chưa được kéo vào câu chuyện. Vậy "chạy server" thực ra nghĩa là gì với một app Python?
 
-uvicorn nắm socket. Nó parse byte, đóng handshake, giải mã HTTP — rồi gọi đúng một thứ của bạn: một app ASGI. Hợp đồng ASGI gói gọn trong một callable: `async def app(scope, receive, send)`. Request tới dưới dạng dict `scope`; bạn đọc body bằng cách await `receive()`; đẩy response bằng cách await `send()`. FastAPI chính là một phiên bản cực lớn, cực có tổ chức của callable đó, với routing, validation và docs cài sẵn phía trên.
+uvicorn nắm socket. Nó parse byte, đóng các handshake, giải mã HTTP — rồi gọi đúng một thứ của bạn thôi: một app ASGI. Cả giao diện ASGI gói gọn trong một callable: `async def app(scope, receive, send)`. Request tới dưới dạng dict `scope`; muốn đọc body thì await `receive()`; muốn đẩy response thì await `send()`. FastAPI, suy cho cùng, cũng chỉ là một phiên bản cực lớn và cực có tổ chức của đúng callable đó — routing, validation, docs cài sẵn phía trên.
 
 Dưới đây là demo service của series với một middleware in ra những gì nó nhìn thấy:
+
+```python
+@app.middleware("http")
+async def trace_middleware(request: Request, call_next):
+    scope = request.scope
+    print(
+        f"ASGI scope: type={scope['type']} scheme={scope['scheme']}"
+        f" http_version={scope.get('http_version')}"
+    )
+    print(f"app -> router -> endpoint: {request.method} {request.url.path}")
+    started = time.perf_counter()
+    response = await call_next(request)
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    print(
+        f"endpoint returned, response back through the stack:"
+        f" {response.status_code} in {elapsed_ms:.2f} ms"
+    )
+    return response
+```
 
 <TerminalOutput command="uvicorn trace_demo:app — rồi: curl http://127.0.0.1:4324/cases/42" label="Python 3.13 · FastAPI 0.165 · chạy trên máy" caption="Góc nhìn của chính server về một request: ASGI scope vào, endpoint của bạn ở giữa, status code ra — phần còn lại là chuyện của uvicorn.">
 ```text
@@ -283,7 +498,7 @@ INFO:     127.0.0.1:54199 - "GET /cases/42 HTTP/1.1" 200 OK
 - Nếu một request **chặn trong** ô đỏ (gọi database chậm trong một `def` đồng bộ), nguyên bộ worker đứng lại cùng nó. Các bài sau trong series sẽ mổ phần này cho kỹ.
 
 <Callout type="warning" title="Thói quen AI cần bỏ">
-Code do AI sinh bắt đầu đo từ endpoint và coi mạng như tức thời. Khi user báo "app chậm", trạm ăn mất thời gian thường nằm ngoài process của bạn cũng thường như nằm trong — và `curl -v` tìm ra nó trong vài giây, còn profiler không thấy gì cả.
+Code do AI sinh có thói quen đo từ endpoint trở đi và coi mạng như tức thời. Khi user báo "app chậm", trạm ăn mất thời gian nằm ngoài process của bạn cũng thường y như nằm trong — `curl -v` tìm ra nó trong vài giây, còn profiler thì mù.
 </Callout>
 
 ---
@@ -298,7 +513,45 @@ Nhưng nhìn dòng cuối của trace curl: `Connection #0 ... left intact`. Ph�
 - Một **load test** tái dùng connection và một load test không tái dùng có thể chênh nhau xa trên cùng một service.
 - HTTP/2 đi xa hơn nữa: nhiều request cùng chạy trên một connection, nên chi phí "request thứ hai" lại co nhỏ thêm lần nữa.
 
-Giữ con số này trong đầu: request đầu tiên trên một connection mới trả khoảng 1 RTT cho DNS (nếu chưa cache), 1 cho TCP, 1 cho TLS 1.3 — trước khi server nhận được một byte nào. Trên đường RTT 40 ms, "endpoint 2 ms" của bạn là trải nghiệm ~122 ms với request đầu tiên. Con số bạn khoe hiếm khi là con số user cảm nhận.
+Giữ cái ngân sách này trong đầu: request đầu tiên trên một connection mới trả chừng 1 RTT cho DNS (nếu cache trống), 1 cho TCP, 1 cho TLS 1.3 — tất cả trước khi server nhận được một byte nào. Trên đường RTT 40 ms, "endpoint 2 ms" của bạn là trải nghiệm ~122 ms cho request đầu tiên. Con số bạn khoe hiếm khi là con số user cảm nhận.
+
+Ngân sách đó, vẽ đúng tỉ lệ:
+
+<BeP01ReuseCost />
+
+Chạy thử cặp này ngay — đây là `demo/reuse_timing.py`:
+
+```python
+import time
+
+import httpx
+
+URL = "https://fastapi.tiangolo.com/"
+
+
+def ms(since: float) -> float:
+    return (time.perf_counter() - since) * 1000
+
+
+with httpx.Client() as client:
+    t = time.perf_counter()
+    client.get(URL)
+    first = ms(t)
+
+    t = time.perf_counter()
+    client.get(URL)
+    second = ms(t)
+
+print(f"first request:  {first:7.1f} ms   (fresh connection)")
+print(f"second request:  {second:7.1f} ms   (connection reused)")
+```
+
+<TerminalOutput command="uv run --python 3.13 --with httpx reuse_timing.py" label="Python 3.13 · httpx · chụp tháng 11/2026" caption="Một httpx.Client, hai GET: request đầu trả DNS, TCP và TLS trước byte đầu tiên; request hai chạy trên đúng connection đó. Khoảng chênh chính là tiền setup trong ngân sách phía trên.">
+```text
+first request:    293.7 ms   (fresh connection)
+second request:    131.2 ms   (connection reused)
+```
+</TerminalOutput>
 
 ---
 
@@ -309,6 +562,10 @@ Khi có thứ gì đó chậm, đi qua từng trạm theo thứ tự — một t
 1. `curl -v` — trace dừng ở đâu? Tra địa chỉ, kết nối, TLS, hay time-to-first-byte sau khi request đã gửi?
 2. Access log của server — request có tới nơi không, và ô đỏ của bạn mất bao lâu? Đó là biên lai của phần code bạn.
 3. Mở profiler sau cùng, nếu biên lai nói thời gian nằm ở phần của bạn.
+
+Cả thói quen gói trong một dòng:
+
+<BeP01TraceFirst />
 
 Sự cố Facebook là trường hợp cực đoan: năm tỷ request không bao giờ tới nơi, và dù profile endpoint đến đâu cũng không tìm ra một lệnh rút route BGP. Ca của bạn sẽ nhỏ hơn — resolver chập chờn, chứng chỉ hết hạn, proxy timeout — nhưng kỷ luật y hệt: **tìm đúng trạm trước, rồi sửa đúng ô.**
 
