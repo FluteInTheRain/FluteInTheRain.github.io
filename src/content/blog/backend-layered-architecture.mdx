@@ -12,6 +12,10 @@ draft: true
 sources:
   - { title: "FastAPI: Modern Python Web Development", author: "Bill Lubanovic", chapters: "Ch. 8, 9", url: "https://www.oreilly.com/library/view/fastapi/9781098135091/" }
   - { title: "Bigger Applications - Multiple Files", author: "FastAPI docs", url: "https://fastapi.tiangolo.com/tutorial/bigger-applications/" }
+  - { title: "Dependencies", author: "FastAPI docs", url: "https://fastapi.tiangolo.com/tutorial/dependencies/" }
+  - { title: "Testing Dependencies with Overrides", author: "FastAPI docs", url: "https://fastapi.tiangolo.com/advanced/testing-dependencies/" }
+  - { title: "Handling Errors (custom exception handlers)", author: "FastAPI docs", url: "https://fastapi.tiangolo.com/tutorial/handling-errors/" }
+  - { title: "Testing", author: "FastAPI docs", url: "https://fastapi.tiangolo.com/tutorial/testing/" }
   - { title: "IV. Backing services", author: "The Twelve-Factor App", url: "https://12factor.net/backing-services" }
   - { title: "Service Layer (Patterns of Enterprise Application Architecture)", author: "Randy Stafford, Martin Fowler", url: "https://martinfowler.com/eaaCatalog/serviceLayer.html" }
   - { title: "Repository (Patterns of Enterprise Application Architecture)", author: "Edward Hieatt, Rob Mee, Martin Fowler", url: "https://martinfowler.com/eaaCatalog/repository.html" }
@@ -353,6 +357,8 @@ app.include_router(router)
 
 Read the endpoints as a checklist of the web layer's whole job: parse (Pydantic models), ask the service, shape the response (`_out` → `CaseOut`). The `409` never appears in a router — the exception handlers translate domain errors to status codes once, at the edge. (The [lifecycle post](/blog/backend-http-request-lifecycle/) left clue.api as a skeleton whose `/cases/42` answered `open` to every id — there was no storage at all. Now you can see each layer the request crosses, because each one prints its boundary.)
 
+Four FastAPI pieces carry that checklist, and each one earns its place. `@router.post("", status_code=201)` binds a function to a verb and path and sets the success status, so the function never says "201" in its body. The `body: OpenBody` parameter makes FastAPI parse and validate the JSON before your function runs; bad input is answered with a 422 and the service is never called. The `-> CaseOut` return type is what shapes the response: only those five fields leave, whatever else the record holds. And `@app.exception_handler(CaseRuleError)` registers one function that turns that exception into a response, wherever in the stack it was raised. `app.include_router(router)` then mounts all four endpoints under `/cases` in one line. The trap AI code falls into here is the opposite: `raise HTTPException(409)` from inside the service, which welds your rules to HTTP.
+
 Watch the same three requests from before, this time with the layers talking:
 
 <TerminalOutput command="uvicorn layered_app:app — then: curl POST /cases, POST /cases/C-1/assign, POST /cases/C-1/close" label="Python 3.13 · FastAPI 0.165 · captured Nov 2026" caption="The same behavior as the fat router, but now the log is a map: every request says which layer spoke, in which order, and what came back. Read one request top to bottom and you have read the architecture.">
@@ -409,7 +415,50 @@ Each red X is a code smell you will actually meet:
 - **The storage layer invents rules.** An `if` creeps into the repository "just while we're here", and now every caller of the repo gets that rule whether they asked for it or not — including the script you wrote to backfill data, which needed to break it.
 - **The service answers with status codes.** The moment a rule can return 409, it is married to HTTP; your CLI now prints `409` at a detective. Rules should raise *what happened*, and only the edge should decide *how to say it*.
 
-The wiring makes the direction real. `layered_app.py` builds the repository, hands it to `CaseService`, and the routers just *use* it — the two files below never import the one above. FastAPI's own guide for bigger applications leans the same way: split routers into modules, put the shared wiring in one dependencies module, keep the main file simple enough to read in one glance.
+The wiring makes the direction real, and the first version of it, `layered_app.py`, builds `service` as a module global that every endpoint reaches for. It works, but nothing in an endpoint's signature says it needs a service, and a test cannot hand it a different one. FastAPI has a feature for exactly this, `Depends`, and the file `demo/p04_depends.py` wires the same three layers with it:
+
+```python
+@lru_cache
+def get_repo() -> CaseRepository:
+    return InMemoryCaseRepository()  # built once: the dict must outlive a request
+
+
+def get_service(repo: CaseRepository = Depends(get_repo)) -> CaseService:
+    return CaseService(repo)  # a fresh, cheap service per request
+```
+
+Read it from the bottom. `get_service` declares that it needs a repository by naming `get_repo` in `Depends(...)`; FastAPI calls `get_repo` first and passes the result in. The `@lru_cache` is not decoration: the in-memory repository holds all the data, so it must be built once, while the service is cheap enough to rebuild per request. (AI-written code often forgets this and builds the repository inside `get_service`, so every request sees an empty store and every case is "not found".) The endpoints then ask for the service in their own signature:
+
+```python
+@router.post("", status_code=201)
+async def open_case(title: str, service: CaseService = Depends(get_service)) -> dict:
+    return vars(service.open_case(title=title))
+
+
+@router.post("/{case_id}/close")
+async def close(
+    case_id: str, resolution: str, service: CaseService = Depends(get_service)
+) -> dict:
+    return vars(service.close(case_id=case_id, resolution=resolution))
+
+```
+
+`service: CaseService = Depends(get_service)` says "give me a service" and nothing else: the endpoint does not know which repository sits underneath, or how it was built. It is still the web layer calling down one level. The only change is who does the wiring: your signature declares the need, FastAPI satisfies it.
+
+<TerminalOutput command="uvicorn p04_depends:app --port 4334 — then: curl POST /cases?title=..., POST /cases/C-1/close?resolution=x" label="Python 3.13 · FastAPI 0.165 · captured Nov 2026" caption="Same layers, same rules, same 409 as before: the Depends version behaves exactly like the global one. The trace lines come from the service and data layers, which neither know nor care how they were wired.">
+```text
+INFO:     Started server process [2022]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:4334 (Press CTRL+C to quit)
+service | open_case: the id and the open status are ours to set
+data    | add(C-1) -> in-memory store
+INFO:     127.0.0.1:53921 - "POST /cases?title=The%20missing%20gnome HTTP/1.1" 201 Created
+data    | get(C-1) <- in-memory store
+service | close(C-1): rule — a case closes with a detective on it
+INFO:     127.0.0.1:53922 - "POST /cases/C-1/close?resolution=x HTTP/1.1" 409 Conflict
+```
+</TerminalOutput>
 
 Now the payoff of that discipline — a rule refusal, watched from both sides:
 
@@ -505,6 +554,43 @@ data    | save(C-1) -> in-memory store
 </TerminalOutput>
 
 `FakeRepository` inherits nothing — the `Protocol` from section 2 is the whole reason that works. And notice what scenario [2] proves by existing: the same rules, a different repository, zero changes above the seam.
+
+**The same endpoints, tested over HTTP, still without a real store.** Because `get_repo` is a dependency, a test can replace it. `app.dependency_overrides` maps the original function to a substitute, and `TestClient` calls the app in-process, so no port is opened. `demo/p04_override.py`:
+
+```python
+fake = FakeRepository()
+app.dependency_overrides[get_repo] = lambda: fake
+client = TestClient(app)
+
+opened = client.post("/cases", params={"title": "The missing gnome"})
+print("open   ->", opened.status_code, opened.json()["case_id"])
+
+refused = client.post("/cases/C-1/close", params={"resolution": "given up"})
+print("close  ->", refused.status_code, refused.json()["detail"])
+
+missing = client.post("/cases/C-9/close", params={"resolution": "x"})
+print("ghost  ->", missing.status_code, missing.json()["detail"])
+
+fake.records["C-1"].detective = "wren"
+closed = client.post("/cases/C-1/close", params={"resolution": "found"})
+print("close  ->", closed.status_code, closed.json()["status"])
+print("fake saw", len(fake.records), "record; the real dict was never touched")
+```
+
+The routes, the validation, the service rules and both exception handlers run for real; only the repository is fake. That is why `409` and `404` show up here as real status codes. The caution: overrides live on the shared `app` object, so a test that forgets `app.dependency_overrides.clear()` leaks its fake into the next one.
+
+<TerminalOutput command="uv run --python 3.13 --with fastapi==0.165.0 --with httpx python -W ignore p04_override.py" label="Python 3.13 · FastAPI 0.165 · captured Nov 2026" caption="Four requests through the real FastAPI app, answered by a fake repository. The status codes come from the service's rules and the web layer's handlers, which is the part you wanted to test.">
+```text
+service | open_case: the id and the open status are ours to set
+open   -> 201 C-1
+service | close(C-1): rule — a case closes with a detective on it
+close  -> 409 an unassigned case cannot be closed
+ghost  -> 404 no case C-9
+service | close(C-1): rule — a case closes with a detective on it
+close  -> 200 closed
+fake saw 1 record; the real dict was never touched
+```
+</TerminalOutput>
 
 **Storage becomes a thing you swap.** That is not just test convenience; it is how the service survives its own success. The twelve-factor app treats a database as an *attached resource*: a deploy "should be able to swap out a local MySQL database with one managed by a third party... without any changes to the app's code" — only the handle in config changes. My clue.api is one in-memory dict today, but the interface already has the shape a real database needs (`add` inserts, `save` updates), so the next post in this series swaps the dict for SQLAlchemy and a real engine with `layered_service.py`, both routers and the exception handlers untouched — and that promise is the whole reason `CaseRepository` exists.
 
@@ -842,6 +928,8 @@ app.include_router(router)
 
 Đọc các endpoint như một checklist của toàn bộ công việc tầng web: parse (Pydantic model), gọi service, định hình response (`_out` → `CaseOut`). Con số `409` không bao giờ xuất hiện trong router — hai exception handler dịch lỗi nghiệp vụ sang status code đúng một lần, ngay ở biên. ([Bài vòng đời request](/blog/backend-http-request-lifecycle/) để lại clue.api là một bộ khung mà `/cases/42` trả `open` cho mọi id — vì hồi đó chưa có lưu trữ. Giờ bạn nhìn thấy từng tầng mà request băng qua, vì từng tầng tự in ranh giới của mình.)
 
+Bốn mảnh của FastAPI gánh cái checklist đó, mỗi mảnh có lý do riêng. `@router.post("", status_code=201)` gắn một hàm vào verb và path, đồng thời chốt status thành công, nên thân hàm không cần viết "201". Tham số `body: OpenBody` khiến FastAPI parse và validate JSON trước khi hàm của bạn chạy; input sai bị trả 422 và service không bao giờ bị gọi. Kiểu trả về `-> CaseOut` quyết định hình dạng response: chỉ năm field đó đi ra, record có thêm gì cũng mặc. Còn `@app.exception_handler(CaseRuleError)` đăng ký một hàm biến exception ấy thành response, bất kể nó bị ném từ chỗ nào trong stack. `app.include_router(router)` gắn cả bốn endpoint vào `/cases` trong một dòng. Cái bẫy AI hay dính là ngược lại: `raise HTTPException(409)` ngay trong service, hàn chặt luật vào HTTP.
+
 Xem lại ba request lúc nãy, lần này các tầng lên tiếng:
 
 <TerminalOutput command="uvicorn layered_app:app — rồi: curl POST /cases, POST /cases/C-1/assign, POST /cases/C-1/close" label="Python 3.13 · FastAPI 0.165 · chụp tháng 11/2026" caption="Cùng hành xử với router béo, nhưng giờ log là một tấm bản đồ: mỗi request nói rõ tầng nào nói chuyện, theo thứ tự nào, và nhận lại gì. Đọc một request từ trên xuống là bạn vừa đọc xong kiến trúc.">
@@ -898,7 +986,50 @@ Mỗi dấu X đỏ là một code smell bạn sẽ gặp thật:
 - **Tầng lưu trữ tự đặt ra luật.** Một câu `if` lẻ loi len vào repository "tiện tay thôi", và mọi bên gọi repo đều dính luật này dù có muốn hay không — kể cả script backfill dữ liệu của bạn, thứ vốn cần phá luật.
 - **Service trả về status code.** Luật mà trả được 409 là coi như đã cưới HTTP; CLI của bạn giờ in `409` ra mặt thám tử. Luật nên raise *chuyện gì đã xảy ra*, còn việc *nói nó thế nào* chỉ thuộc về biên.
 
-Cách wiring làm cho chiều phụ thuộc thành thật. `layered_app.py` dựng repository, đưa nó cho `CaseService`, rồi router chỉ việc *dùng* — hai file bên dưới không bao giờ import file phía trên. Chính guide của FastAPI cho app lớn cũng đi chiều này: tách router thành module, gom phần wiring dùng chung vào một dependencies module, giữ file chính gọn đến mức đọc một cái là hiểu.
+Cách wiring làm cho chiều phụ thuộc thành thật, và bản đầu tiên, `layered_app.py`, dựng `service` thành biến global của module để mọi endpoint với tay lấy. Chạy được, nhưng chữ ký endpoint không hề nói nó cần service, và test cũng không đưa được cho nó một service khác. FastAPI có sẵn tính năng cho đúng việc này, `Depends`, và file `demo/p04_depends.py` đấu ba tầng đó bằng nó:
+
+```python
+@lru_cache
+def get_repo() -> CaseRepository:
+    return InMemoryCaseRepository()  # built once: the dict must outlive a request
+
+
+def get_service(repo: CaseRepository = Depends(get_repo)) -> CaseService:
+    return CaseService(repo)  # a fresh, cheap service per request
+```
+
+Đọc từ dưới lên. `get_service` khai báo nó cần một repository bằng cách ghi `get_repo` trong `Depends(...)`; FastAPI gọi `get_repo` trước rồi truyền kết quả vào. `@lru_cache` không phải để trang trí: repository in-memory giữ toàn bộ dữ liệu nên chỉ được dựng một lần, còn service đủ rẻ để dựng lại mỗi request. (Code AI viết hay quên điều này và dựng repository ngay trong `get_service`, thế là request nào cũng thấy kho rỗng và case nào cũng "không tìm thấy".) Rồi các endpoint xin service ngay trong chữ ký của mình:
+
+```python
+@router.post("", status_code=201)
+async def open_case(title: str, service: CaseService = Depends(get_service)) -> dict:
+    return vars(service.open_case(title=title))
+
+
+@router.post("/{case_id}/close")
+async def close(
+    case_id: str, resolution: str, service: CaseService = Depends(get_service)
+) -> dict:
+    return vars(service.close(case_id=case_id, resolution=resolution))
+
+```
+
+`service: CaseService = Depends(get_service)` chỉ nói "đưa tôi một service": endpoint không biết bên dưới là repository nào, hay nó được dựng ra sao. Vẫn là tầng web gọi xuống đúng một tầng. Khác biệt duy nhất là ai làm việc đấu nối: chữ ký của bạn khai báo nhu cầu, FastAPI đáp ứng.
+
+<TerminalOutput command="uvicorn p04_depends:app --port 4334 — rồi: curl POST /cases?title=..., POST /cases/C-1/close?resolution=x" label="Python 3.13 · FastAPI 0.165 · chụp tháng 11/2026" caption="Cùng các tầng, cùng luật, cùng 409 như trước: bản Depends hành xử y hệt bản dùng global. Các dòng trace đến từ tầng service và data, hai tầng không biết và cũng không cần biết mình được đấu nối kiểu gì.">
+```text
+INFO:     Started server process [2022]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:4334 (Press CTRL+C to quit)
+service | open_case: the id and the open status are ours to set
+data    | add(C-1) -> in-memory store
+INFO:     127.0.0.1:53921 - "POST /cases?title=The%20missing%20gnome HTTP/1.1" 201 Created
+data    | get(C-1) <- in-memory store
+service | close(C-1): rule — a case closes with a detective on it
+INFO:     127.0.0.1:53922 - "POST /cases/C-1/close?resolution=x HTTP/1.1" 409 Conflict
+```
+</TerminalOutput>
 
 Giờ hãy xem kỷ luật đó trả tiền — một lần luật từ chối, nhìn từ hai phía:
 
@@ -994,6 +1125,43 @@ data    | save(C-1) -> in-memory store
 </TerminalOutput>
 
 `FakeRepository` không inherit từ đâu cả — cái `Protocol` ở phần 2 chính là lý do nó chạy được. Và để ý kịch bản [2] chứng minh điều gì chỉ bằng việc tồn tại: cùng luật, repository khác, không sửa gì ở trên đường nối.
+
+**Cùng các endpoint, test qua HTTP, vẫn không cần kho thật.** Vì `get_repo` là một dependency, test có thể thay nó. `app.dependency_overrides` ánh xạ hàm gốc sang một hàm thay thế, còn `TestClient` gọi app ngay trong process nên không mở port nào. `demo/p04_override.py`:
+
+```python
+fake = FakeRepository()
+app.dependency_overrides[get_repo] = lambda: fake
+client = TestClient(app)
+
+opened = client.post("/cases", params={"title": "The missing gnome"})
+print("open   ->", opened.status_code, opened.json()["case_id"])
+
+refused = client.post("/cases/C-1/close", params={"resolution": "given up"})
+print("close  ->", refused.status_code, refused.json()["detail"])
+
+missing = client.post("/cases/C-9/close", params={"resolution": "x"})
+print("ghost  ->", missing.status_code, missing.json()["detail"])
+
+fake.records["C-1"].detective = "wren"
+closed = client.post("/cases/C-1/close", params={"resolution": "found"})
+print("close  ->", closed.status_code, closed.json()["status"])
+print("fake saw", len(fake.records), "record; the real dict was never touched")
+```
+
+Route, validation, luật của service và cả hai exception handler đều chạy thật; chỉ có repository là giả. Vì vậy `409` và `404` ở đây là status code thật. Lưu ý: override nằm trên object `app` dùng chung, nên test nào quên `app.dependency_overrides.clear()` sẽ để rơi đồ giả sang test kế tiếp.
+
+<TerminalOutput command="uv run --python 3.13 --with fastapi==0.165.0 --with httpx python -W ignore p04_override.py" label="Python 3.13 · FastAPI 0.165 · chụp tháng 11/2026" caption="Bốn request đi qua app FastAPI thật, được trả lời bởi một repository giả. Status code đến từ luật của service và handler của tầng web, đúng phần bạn muốn test.">
+```text
+service | open_case: the id and the open status are ours to set
+open   -> 201 C-1
+service | close(C-1): rule — a case closes with a detective on it
+close  -> 409 an unassigned case cannot be closed
+ghost  -> 404 no case C-9
+service | close(C-1): rule — a case closes with a detective on it
+close  -> 200 closed
+fake saw 1 record; the real dict was never touched
+```
+</TerminalOutput>
 
 **Lưu trữ thành thứ thay được.** Đó không chỉ là tiện lợi khi test; đó là cách service sống nổi qua chính thành công của nó. Twelve-factor coi database là một *attached resource*: một deploy "phải có thể thay database MySQL local bằng một dịch vụ bên thứ ba… mà không sửa gì code của app" — chỉ đổi handle trong config. clue.api của mình hôm nay là một dict trong bộ nhớ, nhưng interface đã có sẵn hình dạng một database thật cần (`add` để insert, `save` để update), nên bài tiếp theo của series sẽ thay dict bằng SQLAlchemy với engine thật mà `layered_service.py`, cả hai router lẫn exception handler, không đổi một dòng — và lời hứa đó là toàn bộ lý do `CaseRepository` tồn tại.
 
