@@ -144,6 +144,8 @@ capped:   base=[10 20 30 40 50] safe=[20 30 99] len(safe)=3 cap(safe)=4 sameAddr
 ```
 </TerminalOutput>
 
+`unsafe.Sizeof` comes from the `unsafe` package, which exposes low-level details the compiler normally hides. It reports the size in bytes of the variable's own value. For a slice that is the 24-byte header, not the elements behind it. This post uses `unsafe` only for that measurement.
+
 <GoP11SliceHeader />
 
 In [the HTTP service post](/blog/go-http-service-net-http-json-middleware/), `store.list()` wrote `out := make([]Todo, len(s.todos)); copy(out, s.todos)` instead of `return s.todos` or `return s.todos[:limit]`. Returning a direct sub-slice would expose the backing array after `s.mu.Unlock()`: a handler calling `append` on the returned list could overwrite the next `Todo` inside `store` without holding the lock. To stop shared-array writes, either cap the slice with a **full slice expression** `s[low:high:max]` (setting `cap = max - low`) or allocate and `copy` (remembering `copy(dst, src)` copies `min(len(dst), len(src))` items, or use `slices.Clone(s)`).
@@ -261,7 +263,9 @@ after clear([2:]):   2.2 MiB
 ```
 </TerminalOutput>
 
-You can fix this either by copying `items[:2]` into a fresh 2-element slice (`slices.Clone(items[:2])`) or by zeroing the excluded tail (`clear(items[2:])` in Go 1.21+) before reslicing. Copying walks `0..i-1` and drops excess capacity; `clear` walks `i..n-1` and preserves capacity if the slice will refill soon.
+`runtime.KeepAlive(kept)` is a marker that says "`kept` is still in use up to this line". Without it the compiler may decide `kept` is dead earlier and let the garbage collector free the memory before `heapMiB()` measures it, which would hide the effect. It does nothing else.
+
+You can fix this either by copying `items[:2]` into a fresh 2-element slice (`slices.Clone` returns a new slice holding a copy of the elements) or by zeroing the excluded tail (`clear(items[2:])`, Go 1.21+, sets every element in the range to its zero value) before reslicing. Copying walks `0..i-1` and drops excess capacity; `clear` walks `i..n-1` and preserves capacity if the slice will refill soon.
 
 ### Substring leaks and `strings.Clone`
 
@@ -392,7 +396,7 @@ Step through how `delete()` leaves tables pinned and test both fixes below, then
 
 ## 3. Range copies, map iteration, and labeled break
 
-Go replaces `while` and `foreach` with `for`. Its `range` form looks declarative, yet three evaluation rules quietly drop updates, freeze loop bounds, or turn `break` into a no-op.
+Go has a single loop keyword, `for`. Its `range` form looks declarative, yet three evaluation rules quietly drop updates, freeze loop bounds, or turn `break` into a no-op.
 
 ### `range` evaluates once and copies every element
 
@@ -602,7 +606,7 @@ Use `TrimSuffix` / `TrimPrefix` for exact suffixes or prefixes, and reserve `Tri
 Because strings are immutable, writing `s += part` in a loop allocates and copies the entire accumulated string on every iteration. `strings.Builder` maintains an internal `[]byte` buffer and writes sequentially, and calling `sb.Grow(totalBytes)` up front drops 500 string concatenations from 499 allocations to 1 (keep in mind `strings.Builder` is not safe for concurrent use and panics if copied by value after writing, as shown in [Go structs and interfaces](/blog/go-structs-methods-interfaces/)).
 
 ```go
-var testParts = slices.Repeat([]string{"todo-123"}, 500)
+var testParts = slices.Repeat([]string{"todo-123"}, 500) // 500 copies of one string
 
 func BenchmarkStringConcatPlus(b *testing.B) {
 	for b.Loop() {
@@ -687,6 +691,8 @@ BenchmarkSanitizeViaBytes-8    	126833329	         8.920 ns/op	       0 B/op	   
 ```
 </TerminalOutput>
 
+`//go:noinline` above a function is a compiler instruction: do not paste this function's body into its caller. It keeps the two helpers as real calls so the benchmark times what it says, and it changes nothing about what they compute.
+
 ### Comparing composite values (`==`, `any`, and `slices.Equal`)
 
 Before closing on Go's memory types, remember two boundary rules already covered earlier in the series: numeric overflow, octal `0o` notation, and float tolerance live in [Go variables, types, pointers and functions](/blog/go-variables-types-pointers-functions/), and choosing value vs pointer receivers on structs lives in [Go structs and interfaces](/blog/go-structs-methods-interfaces/).
@@ -725,7 +731,7 @@ exit status 2
 
 When comparing structs with slices or maps, pick the standard-library helper over `reflect.DeepEqual` in hot paths:
 
-1. **`reflect.DeepEqual` is slow and treats `nil` as unequal to `[]int{}`**: on a 100-int `todoSnapshot`, `reflect.DeepEqual` took `1047 ns/op` (`96 B/op`, `2 allocs/op`) versus `35.48 ns/op` (`0 allocs/op`) for a custom `equal` method using `slices.Equal`.
+1. **`reflect.DeepEqual` is slow and treats `nil` as unequal to `[]int{}`**: on a `todoSnapshot` (a struct holding one 100-element `[]int`), `reflect.DeepEqual` took `1047 ns/op` (`96 B/op`, `2 allocs/op`) versus `35.48 ns/op` (`0 allocs/op`) for a hand-written `equal` method that calls `slices.Equal` on that field.
 2. **Standard comparison helpers**: use `slices.Equal` / `slices.EqualFunc`, `maps.Equal`, and `bytes.Equal` in production code, or `google/go-cmp` in tests.
 
 ```go
@@ -884,6 +890,8 @@ capped:   base=[10 20 30 40 50] safe=[20 30 99] len(safe)=3 cap(safe)=4 sameAddr
 ```
 </TerminalOutput>
 
+`unsafe.Sizeof` nằm trong package `unsafe`, nơi lộ ra những chi tiết cấp thấp mà compiler thường giấu. Nó trả về kích thước theo byte của chính giá trị biến. Với slice đó là header 24 byte, không phải các phần tử phía sau. Bài này chỉ dùng `unsafe` để đo như vậy.
+
 <GoP11SliceHeader />
 
 Quay lại [bài dựng HTTP service](/blog/go-http-service-net-http-json-middleware/), lý do `store.list()` viết `out := make([]Todo, len(s.todos)); copy(out, s.todos)` thay vì trả thẳng `s.todos` hay `s.todos[:limit]` nằm ở đây. Nếu trả sub-slice trực tiếp, một handler gọi `append` sau khi `s.mu.Unlock()` có thể ghi đè lên `Todo` tiếp theo trong `store` mà không qua khóa mutex. Để chặn ghi đè chéo, hãy khóa trần bằng **full slice expression** `s[low:high:max]` (đặt `cap = max - low`) hoặc cấp phát và `copy` (lưu ý `copy(dst, src)` chỉ chép `min(len(dst), len(src))` phần tử, hoặc dùng `slices.Clone(s)`).
@@ -1001,7 +1009,9 @@ after clear([2:]):   2.2 MiB
 ```
 </TerminalOutput>
 
-Bạn có hai cách gỡ: hoặc chép `items[:2]` sang slice mới (`slices.Clone(items[:2])`), hoặc xóa trắng phần đuôi bỏ đi (`clear(items[2:])` từ Go 1.21+) trước khi cắt. Cách chép duyệt từ `0..i-1` và trả luôn phần `cap` thừa; `clear` duyệt từ `i..n-1` và giữ lại mảng nền nếu slice sắp đầy lại.
+`runtime.KeepAlive(kept)` là dấu hiệu báo "`kept` vẫn còn được dùng tới dòng này". Thiếu nó, compiler có thể coi `kept` đã hết dùng từ sớm và để garbage collector thu bộ nhớ trước khi `heapMiB()` đo, làm mất hiệu ứng cần xem. Ngoài ra nó không làm gì khác.
+
+Bạn có hai cách gỡ: hoặc chép `items[:2]` sang slice mới (`slices.Clone` trả về slice mới chứa bản sao các phần tử), hoặc xóa trắng phần đuôi bỏ đi (`clear(items[2:])`, từ Go 1.21+, đặt mọi phần tử trong khoảng đó về giá trị zero) trước khi cắt. Cách chép duyệt từ `0..i-1` và trả luôn phần `cap` thừa; `clear` duyệt từ `i..n-1` và giữ lại mảng nền nếu slice sắp đầy lại.
 
 ### Chuỗi con ghim bộ nhớ và `strings.Clone`
 
@@ -1132,7 +1142,7 @@ Bấm từng bước xem tận mắt tại sao `delete()` giữ nguyên dung lư
 
 ## 3. Bản sao trong vòng lặp `range`, duyệt map và `break` có nhãn
 
-Go gom `while` và `foreach` vào duy nhất từ khóa `for`. Cú pháp `range` nhìn rất gọn, nhưng ba quy tắc định giá và sao chép ngầm của nó rất dễ làm rơi dữ liệu sửa đổi hoặc làm câu lệnh `break` nhảy nhầm chỗ.
+Go chỉ có một từ khóa vòng lặp là `for`. Cú pháp `range` nhìn rất gọn, nhưng ba quy tắc định giá và sao chép ngầm của nó rất dễ làm rơi dữ liệu sửa đổi hoặc làm câu lệnh `break` nhảy nhầm chỗ.
 
 ### `range` định giá một lần và copy từng phần tử
 
@@ -1342,7 +1352,7 @@ Hãy dùng `TrimSuffix` / `TrimPrefix` để bỏ đuôi file hay hậu tố URL
 Vì chuỗi bất biến, viết `s += part` trong vòng lặp bắt Go cấp phát một chuỗi mới và chép lại toàn bộ phần đã nối ở mỗi bước. `strings.Builder` ghi nối tiếp vào một `[]byte` nội bộ, và gọi trước `sb.Grow(totalBytes)` giảm chi phí nối 500 chuỗi từ 499 lần cấp phát xuống đúng 1 lần (nhớ rằng `strings.Builder` không an toàn khi nhiều goroutine ghi cùng lúc và sẽ panic nếu copy theo giá trị sau khi đã ghi, như đã thử ở [Struct và interface trong Go](/blog/go-structs-methods-interfaces/)).
 
 ```go
-var testParts = slices.Repeat([]string{"todo-123"}, 500)
+var testParts = slices.Repeat([]string{"todo-123"}, 500) // 500 copies of one string
 
 func BenchmarkStringConcatPlus(b *testing.B) {
 	for b.Loop() {
@@ -1427,6 +1437,8 @@ BenchmarkSanitizeViaBytes-8    	126833329	         8.920 ns/op	       0 B/op	   
 ```
 </TerminalOutput>
 
+`//go:noinline` đặt trên một hàm là chỉ thị cho compiler: đừng chép thân hàm này vào nơi gọi nó. Nó giữ hai hàm kia là lời gọi thật để benchmark đo đúng thứ cần đo, và không đổi kết quả tính toán của chúng.
+
 ### So sánh giá trị (`==`, panic với `any` và `slices.Equal`)
 
 Trước khi khép lại phần kiểu dữ liệu, hai nhóm quy tắc khác đã có bài riêng: tràn số nguyên, viết số bát phân `0o` và sai số dấu phẩy động nằm ở [Kiểu dữ liệu và hàm trong Go](/blog/go-variables-types-pointers-functions/), còn quy tắc chọn value hay pointer receiver cho struct nằm ở [Struct và interface trong Go](/blog/go-structs-methods-interfaces/).
@@ -1465,7 +1477,7 @@ exit status 2
 
 Khi cần so sánh struct chứa slice hay map trong code chạy thật, hãy tránh `reflect.DeepEqual`:
 
-1. **`reflect.DeepEqual` vừa chậm vừa phân biệt `nil` với `[]int{}`**: trên cùng một `todoSnapshot` dài 100 phần tử `int`, `reflect.DeepEqual` tốn `1047 ns/op` (`96 B/op`, `2 allocs/op`) trong khi hàm `equal` tự viết bằng `slices.Equal` chỉ mất `35,48 ns/op` (`0 allocs/op`).
+1. **`reflect.DeepEqual` vừa chậm vừa phân biệt `nil` với `[]int{}`**: trên một `todoSnapshot` (struct chứa một `[]int` 100 phần tử), `reflect.DeepEqual` tốn `1047 ns/op` (`96 B/op`, `2 allocs/op`) trong khi hàm `equal` tự viết, gọi `slices.Equal` trên trường đó, chỉ mất `35,48 ns/op` (`0 allocs/op`).
 2. **Hàm chuẩn sẵn có**: hãy ưu tiên `slices.Equal` / `slices.EqualFunc`, `maps.Equal` và `bytes.Equal` cho logic nghiệp vụ, hoặc dùng `google/go-cmp` khi viết test.
 
 ```go
