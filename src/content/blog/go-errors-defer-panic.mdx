@@ -1,0 +1,1205 @@
+---
+title: "Go errors"
+title_vi: "Lỗi trong Go"
+description: "Errors in Go for newcomers: errors as values, wrapping with %w, errors.Is and errors.As, handling an error once, defer and closures, named results, and panic."
+description_vi: "Lỗi trong Go cho người mới: lỗi là giá trị, bọc lỗi bằng %w, errors.Is và errors.As, xử lý lỗi một lần, defer và closure, named result, và panic."
+date: 2026-11-23
+category: "backend"
+tags: ["golang", "errors", "defer", "panic", "100-go-mistakes"]
+cover: "../../assets/series/golang/go-gopher-pencil-helmet.jpg"
+cover_alt: "Pencil drawing of the Go gopher wearing a helmet, drawn by Renee French"
+draft: true
+sources:
+  - { title: "100 Go Mistakes and How to Avoid Them", author: "Teiva Harsanyi", chapters: "Mistakes #43, #44, #48, #49, #50, #51, #52, #53, #54", url: "https://100go.co/" }
+  - { title: "Errors are values", author: "Rob Pike (The Go Blog)", url: "https://go.dev/blog/errors-are-values" }
+  - { title: "Working with Errors in Go 1.13", author: "Damien Neil and Jonathan Amsterdam (The Go Blog)", url: "https://go.dev/blog/go1.13-errors" }
+  - { title: "Defer, Panic, and Recover", author: "Andrew Gerrand (The Go Blog)", url: "https://go.dev/blog/defer-panic-and-recover" }
+  - { title: "gVisor issue #16043: gofer: fsync(2)/close(2) drop deferred write errors for files on FUSE/NFS bind mounts", author: "google/gvisor contributors", url: "https://github.com/google/gvisor/issues/16043" }
+  - { title: "gVisor pull request #16044: gofer: report deferred write errors on fsync(2) and close(2)", author: "google/gvisor contributors", url: "https://github.com/google/gvisor/pull/16044" }
+  - { title: "gVisor pull request #15979: gofer: propagate sync errors from syncRemoteFileLocked", author: "google/gvisor contributors", url: "https://github.com/google/gvisor/pull/15979" }
+  - { title: "Don't defer Close() on writable files", author: "Joe Shaw", url: "https://www.joeshaw.org/dont-defer-close-on-writable-files/" }
+  - { title: "errors package documentation", author: "The Go Authors", url: "https://pkg.go.dev/errors" }
+  - { title: "net/http package documentation (Handler)", author: "The Go Authors", url: "https://pkg.go.dev/net/http#Handler" }
+  - { title: "Go gopher pencil helmet (CC BY 3.0), used as the cover", author: "Renee French", url: "https://commons.wikimedia.org/wiki/File:Go_gopher_pencil_helmet.jpg" }
+  - { title: "Smoke detector, Russia (05).jpg (CC0)", author: "Georg Pik", url: "https://commons.wikimedia.org/wiki/File:Smoke_detector,_Russia_(05).jpg" }
+---
+
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import En from '../../components/mdx/En.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import GoErrorChainDemo from '../../components/mdx/GoErrorChainDemo.astro';
+import GoP05DeferClosure from '../../components/mdx/GoP05DeferClosure.astro';
+import GoP05DeferLoop from '../../components/mdx/GoP05DeferLoop.astro';
+import GoP05Fsync from '../../components/mdx/GoP05Fsync.astro';
+import GoP05LogOnce from '../../components/mdx/GoP05LogOnce.astro';
+import GoP05NamedResult from '../../components/mdx/GoP05NamedResult.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import heroSmoke from '../../assets/blog/go-errors-defer-panic/smoke-detector.jpg';
+
+<En>
+
+<Figure src={heroSmoke} alt="A white round smoke detector mounted on a ceiling" caption="A smoke detector only helps if someone reacts when it sounds. A Go error is the same: the function raises it, and the caller has to listen." sourceTitle="Wikimedia Commons: Smoke detector, Russia (05).jpg (CC0, Georg Pik)" sourceUrl="https://commons.wikimedia.org/wiki/File:Smoke_detector,_Russia_(05).jpg" />
+
+> "Values can be programmed, and since errors are values, errors can be programmed."
+> &mdash; *Rob Pike*, The Go Blog
+
+### fsync returned 0, and the data was gone
+
+[gVisor](https://github.com/google/gvisor) is a sandbox for containers, written in Go. In October 2026 a contributor reported ([issue #16043](https://github.com/google/gvisor/issues/16043)) that a program inside it, writing to a FUSE or NFS mount with a disk quota (JuiceFS, for example), could go over the quota and never find out. On JuiceFS itself, `fsync` and `close` return the quota error (`EDQUOT`). Under gVisor they returned 0, which means "success", and the extra data was lost.
+
+The cause was in the Go code, in three places. One function that syncs a file to the host dropped the result and always returned `nil`. Another never reached the host's flush at all. A third discarded the result of closing the host file. The reporter's [pull request #16044](https://github.com/google/gvisor/pull/16044) listed all three dropped errors, but it was closed without being merged and the issue is still open. A maintainer pointed to [pull request #15979](https://github.com/google/gvisor/pull/15979), "propagate sync errors from `syncRemoteFileLocked`", merged on 25 October 2026. That one fixes the `fsync` path only, which is one of the three places.
+
+<GoP05Fsync />
+
+An error was produced, then ignored. Go gives you a simple way to handle errors, and a few traps that look harmless.
+
+<Callout type="note" title="TL;DR">
+A Go function reports failure by returning an `error` value, and the caller checks it with `if err != nil`. Add context when you pass an error up (`fmt.Errorf` with `%w`), compare with `errors.Is` and `errors.As`, and handle each error once: log it or return it, not both. Use `defer` for cleanup, and check the error of `Close` on files you wrote. Use `panic` only for bugs and impossible states, never for expected failures.
+</Callout>
+
+## Coming from Java, Python or JavaScript
+
+In those languages a failure jumps out of the function and lands in a `catch` block somewhere up the stack. Go has no such jump. The function hands the error back like any other result, and you decide on the next line what to do with it.
+
+| You know | Java | Python | JavaScript | Go |
+|---|---|---|---|---|
+| Report a failure | `throw new X()` | `raise X()` | `throw new Error()` | `return err` (a normal return value) |
+| Handle it | `try / catch` | `try / except` | `try / catch` | `if err != nil { ... }` right after the call |
+| Cleanup | `finally`, try-with-resources | `with`, `finally` | `finally` | `defer` |
+| A bug that should never happen | unchecked exception | uncaught exception | uncaught exception | `panic` |
+| Where the failure can come from | any line may throw | any line may raise | any line may throw | every call that can fail returns an `error` (a bug can still `panic`) |
+
+The big difference is the last row. When you read Go code, every place that can fail is written out, and you can see it without opening the called function.
+
+<Concepts>
+
+- **error**: Go's built-in type for "something went wrong". A function returns one as its last result. `nil` means no error.
+- **Sentinel error**: a ready-made error stored in a variable, such as `os.ErrNotExist`, so callers can test for that exact case.
+- **Wrapping**: adding context to an error while keeping the original inside it, so the cause can still be found.
+- **panic**: Go's emergency stop. It unwinds the stack, runs deferred calls, and crashes the program unless something recovers.
+
+</Concepts>
+
+---
+
+## Errors are values
+
+An `error` in Go is not a special kind of object. It is an ordinary value with one method, `Error() string`, that returns its message. (A type that has the right methods can stand in wherever one is asked for; [Go structs and interfaces](/blog/go-structs-methods-interfaces/) explains how.) A function that can fail returns an `error` as its last result, and returns `nil` when all went well.
+
+```go
+package main
+
+import (
+	"fmt"
+	"strconv"
+)
+
+func main() {
+	n, err := strconv.Atoi("42")
+	fmt.Println(n, err)
+
+	n, err = strconv.Atoi("4x2")
+	if err != nil {
+		fmt.Println("could not parse:", err)
+		return
+	}
+	fmt.Println(n)
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="The first call succeeds, so err is nil. The second fails, and the error message already names the function and the bad input.">
+```text
+42 <nil>
+could not parse: strconv.Atoi: parsing "4x2": invalid syntax
+```
+</TerminalOutput>
+
+`strconv.Atoi` converts text to an integer. It returns two results, the number and an error. When the text is not a number, the number is `0` and the error says why. You check the error before you touch the number.
+
+`if err != nil` shows up so often that people joke about it. The Go team chose this on purpose. There is no hidden path out of a function, so reading top to bottom tells you what really happens. The cost is typing. And because errors are plain values, you can build them, store them, compare them and pass them around like any other value. That is what Rob Pike's quote at the top means.
+
+The common move is to add context and return the error to your caller. The "happy path stays on the left" habit from [Go types and functions](/blog/go-variables-types-pointers-functions/) applies: handle the error and return early, so the normal flow reads straight down.
+
+## Creating, wrapping and checking errors
+
+To make an error yourself, use `errors.New("text")` or `fmt.Errorf("text %d", n)`. To let callers test for one specific failure, store the error in a package-level variable. By convention its name starts with `Err`.
+
+When a lower layer fails, the layer above usually knows more about what it was trying to do. So it adds that. `fmt.Errorf` has a special verb for this: `%w` ("wrap"). It builds a new error whose message contains the old one, and keeps the old one inside so it can be recovered later. (For the other `fmt` verbs, see [the verb table](/blog/go-variables-types-pointers-functions/) in the types post.)
+
+```go
+package main
+
+import (
+	"errors"
+	"fmt"
+	"os"
+)
+
+var ErrNotFound = errors.New("not found")
+
+func findUser(id int) error {
+	if id != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func loadProfile(id int) error {
+	if err := findUser(id); err != nil {
+		return fmt.Errorf("load profile %d: %w", id, err)
+	}
+	return nil
+}
+
+func handle(id int) error {
+	if err := loadProfile(id); err != nil {
+		return fmt.Errorf("handle request: %w", err)
+	}
+	return nil
+}
+
+func main() {
+	err := handle(7)
+	fmt.Println(err)
+	fmt.Println(err == ErrNotFound)
+	fmt.Println(errors.Is(err, ErrNotFound))
+	fmt.Println(errors.Unwrap(err))
+
+	_, err = os.Open("missing.txt")
+	fmt.Println(err)
+	fmt.Println(errors.Is(err, os.ErrNotExist))
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="The message reads like a stack of context. == fails because the error was wrapped; errors.Is looks inside the wrappers and finds the original.">
+```text
+handle request: load profile 7: not found
+false
+true
+load profile 7: not found
+open missing.txt: no such file or directory
+true
+```
+</TerminalOutput>
+
+Read the output line by line. The message is a sentence built from three layers, outermost first. `err == ErrNotFound` is `false`, because `err` is now a wrapper, not the sentinel itself. `errors.Is(err, ErrNotFound)` is `true`: it follows the chain of wrappers and asks each one whether it is the target. `errors.Unwrap` peels exactly one layer. The last two lines show that the standard library uses the same pattern: a failed `os.Open` is an error you can test with `errors.Is(err, os.ErrNotExist)`.
+
+Try the chain yourself. The demo below uses the same `findUser` chain. Peel it one layer at a time, then switch the middle layer to `%v` and watch the link break.
+
+<GoErrorChainDemo />
+
+The `%v` trap is worth seeing in real output. `%v` copies the text of an error into the new message but does not keep the error itself.
+
+```go
+package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+var ErrNotFound = errors.New("not found")
+
+func main() {
+	withW := fmt.Errorf("load: %w", ErrNotFound)
+	withV := fmt.Errorf("load: %v", ErrNotFound)
+	fmt.Println(withW, errors.Is(withW, ErrNotFound))
+	fmt.Println(withV, errors.Is(withV, ErrNotFound))
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Same message, different behavior. Only %w keeps the original error reachable.">
+```text
+load: not found true
+load: not found false
+```
+</TerminalOutput>
+
+So when should you wrap with `%w`, and when `%v`? Use `%w` when callers should be able to test for the cause, and `%v` when you want to hide an implementation detail, such as a database driver's error type.
+
+### `errors.As`: when the error carries data
+
+Sometimes you need more than "is it this error": you need a field from it. For that you define your own error type, a struct with an `Error` method. `errors.As` walks the chain, finds the first error of the given type, and copies it into your variable.
+
+```go
+package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+type ValidationError struct {
+	Field string
+}
+
+func (e *ValidationError) Error() string {
+	return "invalid field: " + e.Field
+}
+
+func validate() error {
+	return &ValidationError{Field: "email"}
+}
+
+func main() {
+	err := fmt.Errorf("signup: %w", validate())
+
+	var ve *ValidationError
+	if errors.As(err, &ve) {
+		fmt.Println("bad field is", ve.Field)
+	}
+	fmt.Println(err)
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="errors.As found a *ValidationError inside the wrapped error and filled in ve, so the code can read ve.Field.">
+```text
+bad field is email
+signup: invalid field: email
+```
+</TerminalOutput>
+
+Two details. `&ve` is a pointer to the variable, as you learned in [the pointers section](/blog/go-variables-types-pointers-functions/), because `errors.As` has to write into it. And the check was a type check done by `errors.As`, not a plain type assertion: a plain assertion on `err` would have failed here, since `err` is the `signup:` wrapper. If you need to check wrapped errors, use `errors.Is` and `errors.As`, never `==` or a direct type check.
+
+### `errors.Join`: several errors at once
+
+When you run several independent checks and want to report all the failures, `errors.Join` combines them into one error. `errors.Is` still sees each one.
+
+```go
+package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+func main() {
+	errName := errors.New("name is empty")
+	errAge := errors.New("age is negative")
+
+	err := errors.Join(errName, errAge)
+	fmt.Println(err)
+	fmt.Println(errors.Is(err, errAge))
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Join prints one message per line. errors.Is still finds each error inside.">
+```text
+name is empty
+age is negative
+true
+```
+</TerminalOutput>
+
+## Handle an error once
+
+When a function fails, you have two honest choices: deal with it, or pass it up. The mistake is to do both, logging the error and then returning it as well. The caller then logs it again, and one failure fills the log with the same event three times, each with less context than the last.
+
+```go
+package main
+
+import (
+	"errors"
+	"fmt"
+	"log"
+	"os"
+)
+
+func readConfig() error {
+	return errors.New("permission denied")
+}
+
+func start() error {
+	if err := readConfig(); err != nil {
+		log.Println("readConfig failed:", err)
+		return fmt.Errorf("start: %w", err)
+	}
+	return nil
+}
+
+func main() {
+	log.SetFlags(0)
+	log.SetOutput(os.Stdout)
+	if err := start(); err != nil {
+		log.Println("main:", err)
+	}
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="One failure, two log lines. Add one more layer that also logs, and it becomes three. (log.SetFlags and SetOutput only drop the timestamp and print to the screen, so the output is easy to read.)">
+```text
+readConfig failed: permission denied
+main: start: permission denied
+```
+</TerminalOutput>
+
+The fix: lower layers wrap and return, and only the top layer, usually `main` or the request handler, logs or reports. The wrapped message already carries the path through the layers.
+
+<GoP05LogOnce />
+
+Equally bad is dropping an error without anyone deciding to. `result, _ := doThing()` throws the error away. Sometimes that is fine, but then say so on purpose: write `_ = doThing()` with a comment on why. A dropped error does not crash; it returns a clean-looking success, as in the gVisor bug.
+
+## defer: cleanup you cannot forget
+
+`defer` puts a call on a list that Go runs when the surrounding function returns. You already know the rules from [the defer section](/blog/go-variables-types-pointers-functions/): last in, first out, and arguments are fixed on the `defer` line. This section adds what that post promised: a deferred call that reads a *later* value, `defer` inside a loop, and what `defer` does for errors.
+
+### Defer in a loop waits for the function, not the iteration
+
+A `defer` runs when the **function** returns, not when the loop iteration ends. In a loop that opens a resource each time, the closing calls pile up until the whole function finishes.
+
+```go
+package main
+
+import "fmt"
+
+func processAll(names []string) {
+	for _, n := range names {
+		fmt.Println("open", n)
+		defer fmt.Println("close", n)
+	}
+	fmt.Println("all processed")
+}
+
+func processOne(n string) {
+	fmt.Println("open", n)
+	defer fmt.Println("close", n)
+}
+
+func main() {
+	processAll([]string{"a", "b", "c"})
+	fmt.Println("--")
+	for _, n := range []string{"a", "b", "c"} {
+		processOne(n)
+	}
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Top: all three opens come before any close, so with real files all three stay open. Bottom: moving the body into its own function closes each one right away.">
+```text
+open a
+open b
+open c
+all processed
+close c
+close b
+close a
+--
+open a
+close a
+open b
+close b
+open c
+close c
+```
+</TerminalOutput>
+
+With a thousand files, the top version holds a thousand open at once and can hit the operating system's limit. The fix is the bottom version: put the loop body in its own function, so each call cleans up when it returns.
+
+<GoP05DeferLoop />
+
+### Closures: a function written inline
+
+A **closure** is a function written right where you need it, without a name. It can read and change the variables of the function around it. You write it as `func() { ... }`, and add `()` after the closing brace to call it, or hand it to `defer` to call later.
+
+That is the answer to "how do I make a deferred call see a later value". The argument form freezes the value on the `defer` line. A closure does not take the value at all. It looks up the variable when it runs.
+
+```go
+package main
+
+import "fmt"
+
+func main() {
+	x := 1
+	defer fmt.Println("argument snapshot:", x)
+	defer func() {
+		fmt.Println("closure reads x now:", x)
+	}()
+	x = 2
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="The closure runs first (last in, first out) and sees x as 2. The plain defer froze x as 1 on its own line.">
+```text
+closure reads x now: 2
+argument snapshot: 1
+```
+</TerminalOutput>
+
+<GoP05DeferClosure />
+
+### Named results, and the `err` they quietly keep
+
+So far every function returned unnamed results, like `(int, error)`. Go also lets you name them in the signature: `func check(n int) (msg string, err error)`. Two things follow. Each name is a variable that exists from the first line and starts at its zero value (`""` for `msg`, `nil` for `err`). And a bare `return` with no values returns whatever those variables hold right now.
+
+Named results are good for one thing: documenting the signature. `(lat, lng float64)` tells you which number is which, and `(float64, float64)` does not. They also matter for `defer`, because a deferred closure can change a named result after the `return` line has run. But they hide a trap: `err` exists even when you never assigned to it.
+
+```go
+package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+func validate(n int) error {
+	if n < 0 {
+		return errors.New("negative input")
+	}
+	return nil
+}
+
+func check(n int) (msg string, err error) {
+	if e := validate(n); e != nil {
+		return "", err
+	}
+	return "ok", nil
+}
+
+func main() {
+	msg, err := check(-5)
+	fmt.Printf("msg=%q err=%v\n", msg, err)
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="validate failed, yet check returned a nil error. The line returns err, the named result that was never set, instead of e.">
+```text
+msg="" err=<nil>
+```
+</TerminalOutput>
+
+<GoP05NamedResult />
+
+Read the `if` carefully. `e` holds the failure, but the line returns `err`, the named result, which nobody has set. The author meant to return `e`. The code compiles and passes go vet, because `err` is a perfectly valid variable, and its value is the zero value `nil`. With unnamed results, this line would have been a compile error, since no `err` would exist. The fix is to assign to the named result with plain `=`, not to create a new variable with `:=`. This is the same shadowing trap as in [the variables post](/blog/go-variables-types-pointers-functions/), and `:=` here would hide the named `err` in the same way:
+
+```go
+func check(n int) (msg string, err error) {
+	if err = validate(n); err != nil {
+		return "", err
+	}
+	return "ok", nil
+}
+```
+
+With the same `main`, `check(-5)` now prints `msg="" err=negative input`. A bare `return` (no values) is legal here too, but it hides which values go out, so write them out and keep named results for the signature and the `defer` trick below.
+
+### Check the error from Close on files you wrote
+
+`defer file.Close()` is the classic cleanup line, and for files you only read it is fine. For a file you *wrote*, `Close` is where buffered write errors can surface, and `defer` throws the returned error away. The Go program reports success while the data is not on disk. This is the same shape as the gVisor bug, and [Joe Shaw wrote it up](https://www.joeshaw.org/dont-defer-close-on-writable-files/) as a warning for Go programmers.
+
+A deferred closure plus a named result fixes it. The closure runs after the function body, so if the body succeeded but `Close` failed, the closure can set `err`.
+
+```go
+package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+type file struct{}
+
+func (f *file) Write(s string) error { fmt.Println("write", s); return nil }
+func (f *file) Close() error        { return errors.New("close: disk full") }
+
+func saveBad() error {
+	f := &file{}
+	defer f.Close()
+	return f.Write("data")
+}
+
+func saveGood() (err error) {
+	f := &file{}
+	defer func() {
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+	}()
+	return f.Write("data")
+}
+
+func main() {
+	fmt.Println("bad:", saveBad())
+	fmt.Println("good:", saveGood())
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Both functions wrote successfully, and Close failed in both. Only saveGood reports it. (The file type is a small stand-in whose Close always fails, so the output is predictable.)">
+```text
+write data
+bad: <nil>
+write data
+good: close: disk full
+```
+</TerminalOutput>
+
+Take the closure apart in three steps, starting with the `if` line. An `if` can run a short statement before its test, separated by `;`: `if cerr := f.Close(); err == nil` first calls `Close` and stores its result in `cerr`, then tests `err == nil`. Second, `err` is the named result of `saveGood`, so the closure can change what the function returns. Third, `defer func() { ... }()` is the closure from the section above: it runs when `saveGood` is about to return, after `f.Write("data")` has produced its value. Put together: the write result is returned, then `Close` runs, and if the write succeeded (`err == nil`) the `Close` error becomes the result.
+
+The `err == nil` check keeps the first error: if the write already failed, that is the more useful one to report, and a later `Close` error must not hide it. Writing `file` as a struct with methods is covered in [Go structs and interfaces](/blog/go-structs-methods-interfaces/).
+
+## panic and recover
+
+A `panic` is the emergency exit. It stops the normal flow, runs the deferred calls on the way out, and then crashes the program with a stack trace. Go raises panics itself for bugs such as an index out of range, a nil map write, or an integer divide by zero.
+
+```go
+package main
+
+import "fmt"
+
+func main() {
+	defer fmt.Println("deferred still runs")
+	var s []int
+	fmt.Println(s[3])
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="The deferred line runs first, then the panic message, then a stack trace (trimmed here after the panic line) and exit status 2.">
+```text
+deferred still runs
+panic: runtime error: index out of range [3] with length 0
+```
+</TerminalOutput>
+
+`recover` stops a panic, but only when it is called directly inside a deferred function. It returns the value that was passed to `panic`, or `nil` if there is no panic.
+
+```go
+package main
+
+import "fmt"
+
+func safeDivide(a, b int) (result int, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("recovered: %v", r)
+		}
+	}()
+	return a / b, nil
+}
+
+func main() {
+	fmt.Println(safeDivide(10, 2))
+	fmt.Println(safeDivide(1, 0))
+	fmt.Println("program keeps running")
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="The divide by zero is turned into an ordinary error through the named result err, and the program carries on. (fmt.Println can print a call that returns two values directly.)">
+```text
+5 <nil>
+0 recovered: runtime error: integer divide by zero
+program keeps running
+```
+</TerminalOutput>
+
+Here is the rule for when to use each. Expected failures such as a missing file, bad user input or a timed-out request are errors, and you return them. A panic is for something that should never happen, such as a broken internal assumption, or code that cannot start: the standard `regexp.MustCompile` panics on a pattern that is wrong at write time, because that is a bug you want to see on the first run.
+
+`recover` belongs at a boundary. `net/http` is the standard example. Its [documentation](https://pkg.go.dev/net/http#Handler) says that if a handler panics, the server assumes the effect is limited to that one request, recovers, and logs a stack trace. One bad request does not take the server down. Do not use panic and recover as a try/catch for normal control flow. A panic inside another goroutine cannot be recovered by the code that started it; [Go goroutines and channels](/blog/go-goroutines-channels-select/) covers that.
+
+## Key takeaways
+
+- A failing function returns an `error` as its last result. Check it with `if err != nil` right after the call, and return early.
+- Create errors with `errors.New` or `fmt.Errorf`. Wrap with `%w` to add context and keep the cause. `%v` keeps only the text.
+- Test with `errors.Is` (a specific error) and `errors.As` (a type, to read its fields). Never `==` on a wrapped error.
+- Handle each error once: log or return, not both. Never drop one without a stated reason.
+- `defer` runs at function exit, not at loop-iteration end. A closure reads a variable when it runs; a plain deferred argument is frozen.
+- Named results document a signature, and `err` exists even if you never set it, so `return "", err` can silently return `nil`.
+- Check the `Close` error of files you wrote.
+- Panic is for bugs and impossible states. Recover at a boundary, such as one request, and turn the panic into an error.
+
+## Review questions
+
+1. `errors.Is(err, ErrNotFound)` returns `false` even though the message text contains "not found". Name two possible causes. (See "Creating, wrapping and checking errors".)
+2. Your service logs the same failure three times with different wording. What rule did it break, and where should the log call live? (See "Handle an error once".)
+3. A loop opens 10,000 files with `defer f.Close()` inside the loop and the program fails with "too many open files". Why, and how do you fix it? (See "Defer in a loop waits for the function, not the iteration".)
+4. A function with named results `(n int, err error)` returns `0, err` after a failed call and the caller sees no error. What probably went wrong? (See "Named results, and the `err` they quietly keep".)
+5. When is it right to call `panic` yourself, and where does `recover` belong? (See "panic and recover".)
+
+### Coming later in the series
+
+How an `error` that is a nil pointer can still be non-nil, and how errors travel between goroutines, come in later posts: [Go interfaces deep dive](/blog/go-abstractions-interfaces-generics-errors/) and [Go goroutines and channels](/blog/go-goroutines-channels-select/). Writing tests for error paths is in [Go testing](/blog/go-testing-table-tests/).
+
+</En>
+
+<Vi>
+
+<Figure src={heroSmoke} alt="Một chiếc đầu báo khói tròn màu trắng gắn trên trần nhà" caption="Đầu báo khói chỉ có ích khi có người phản ứng lúc nó kêu. Lỗi trong Go cũng vậy: hàm phát ra lỗi, nơi gọi phải lắng nghe." sourceTitle="Wikimedia Commons: Smoke detector, Russia (05).jpg (CC0, Georg Pik)" sourceUrl="https://commons.wikimedia.org/wiki/File:Smoke_detector,_Russia_(05).jpg" />
+
+> "Giá trị thì lập trình được, và vì lỗi là giá trị, nên lỗi cũng lập trình được."
+> &mdash; *Rob Pike*, The Go Blog
+
+### fsync trả về 0, và dữ liệu biến mất
+
+[gVisor](https://github.com/google/gvisor) là một sandbox cho container, viết bằng Go. Tháng 10/2026, một contributor báo ([issue #16043](https://github.com/google/gvisor/issues/16043)) rằng chương trình chạy bên trong nó, khi ghi vào mount FUSE hoặc NFS có hạn mức đĩa (ví dụ JuiceFS), có thể ghi vượt hạn mức mà không bao giờ biết. Trên chính JuiceFS, `fsync` và `close` trả về lỗi quota (`EDQUOT`). Dưới gVisor chúng trả về 0, nghĩa là "thành công", và phần dữ liệu thừa bị mất.
+
+Nguyên nhân nằm trong code Go, ở ba chỗ. Một hàm đồng bộ file xuống host bỏ kết quả và luôn trả `nil`. Một chỗ khác không bao giờ chạm tới lệnh flush của host. Chỗ thứ ba vứt kết quả khi đóng file của host. [Pull request #16044](https://github.com/google/gvisor/pull/16044) của người báo liệt kê cả ba lỗi bị bỏ, nhưng nó bị đóng mà không merge và issue vẫn còn mở. Một maintainer chỉ tới [pull request #15979](https://github.com/google/gvisor/pull/15979), "propagate sync errors from `syncRemoteFileLocked`", merge ngày 25/10/2026. PR đó chỉ sửa đường `fsync`, tức một trong ba chỗ.
+
+<GoP05Fsync />
+
+Lỗi được tạo ra rồi bị bỏ qua. Go cho bạn một cách xử lý lỗi đơn giản, và vài cái bẫy trông vô hại.
+
+<Callout type="note" title="TL;DR">
+Hàm Go báo thất bại bằng cách trả về một giá trị `error`, và nơi gọi kiểm tra bằng `if err != nil`. Thêm ngữ cảnh khi chuyển lỗi lên trên (`fmt.Errorf` với `%w`), so sánh bằng `errors.Is` và `errors.As`, và xử lý mỗi lỗi một lần: log hoặc return, không làm cả hai. Dùng `defer` để dọn dẹp, và kiểm tra lỗi của `Close` với file bạn đã ghi. Chỉ dùng `panic` cho bug và trạng thái không thể xảy ra, không bao giờ cho lỗi dự kiến được.
+</Callout>
+
+## Quen Java, Python hay JavaScript
+
+Ở các ngôn ngữ đó, một thất bại nhảy ra khỏi hàm và rơi vào khối `catch` ở đâu đó phía trên. Go không có cú nhảy này. Hàm trả lỗi về như mọi kết quả khác, và bạn quyết định ngay dòng kế tiếp phải làm gì với nó.
+
+| Bạn đã biết | Java | Python | JavaScript | Go |
+|---|---|---|---|---|
+| Báo thất bại | `throw new X()` | `raise X()` | `throw new Error()` | `return err` (giá trị trả về bình thường) |
+| Xử lý | `try / catch` | `try / except` | `try / catch` | `if err != nil { ... }` ngay sau lời gọi |
+| Dọn dẹp | `finally`, try-with-resources | `with`, `finally` | `finally` | `defer` |
+| Bug không bao giờ nên xảy ra | unchecked exception | exception không bắt | exception không bắt | `panic` |
+| Lỗi có thể đến từ đâu | dòng nào cũng có thể throw | dòng nào cũng có thể raise | dòng nào cũng có thể throw | mọi lời gọi có thể lỗi đều trả `error` (bug vẫn có thể `panic`) |
+
+Khác biệt lớn nằm ở hàng cuối. Khi đọc code Go, mọi chỗ có thể thất bại đều được viết ra, bạn thấy ngay mà không phải mở hàm được gọi.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **error**: kiểu dựng sẵn của Go cho "có gì đó sai". Hàm trả nó ở kết quả cuối. `nil` nghĩa là không có lỗi.
+- **Sentinel error**: lỗi làm sẵn, lưu trong một biến, như `os.ErrNotExist`, để nơi gọi kiểm tra đúng trường hợp đó.
+- **Wrapping (bọc lỗi)**: thêm ngữ cảnh vào lỗi mà vẫn giữ lỗi gốc bên trong, để còn tìm ra nguyên nhân.
+- **panic**: nút dừng khẩn cấp của Go. Nó tháo ngược stack, chạy các lời gọi defer, và làm sập chương trình trừ khi có gì đó recover.
+
+</Concepts>
+
+---
+
+## Lỗi là giá trị
+
+`error` trong Go không phải một loại đối tượng đặc biệt. Nó là một giá trị bình thường với một method, `Error() string`, trả về thông báo. (Một kiểu có đúng các method thì dùng được ở bất cứ chỗ nào cần nó; [Go structs và interface](/blog/go-structs-methods-interfaces/) giải thích cách làm.) Hàm có thể thất bại trả `error` ở kết quả cuối, và trả `nil` khi mọi thứ ổn.
+
+```go
+package main
+
+import (
+	"fmt"
+	"strconv"
+)
+
+func main() {
+	n, err := strconv.Atoi("42")
+	fmt.Println(n, err)
+
+	n, err = strconv.Atoi("4x2")
+	if err != nil {
+		fmt.Println("could not parse:", err)
+		return
+	}
+	fmt.Println(n)
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Lời gọi đầu thành công nên err là nil. Lời gọi thứ hai thất bại, và thông báo lỗi đã nêu tên hàm cùng dữ liệu sai.">
+```text
+42 <nil>
+could not parse: strconv.Atoi: parsing "4x2": invalid syntax
+```
+</TerminalOutput>
+
+`strconv.Atoi` đổi văn bản thành số nguyên. Nó trả hai kết quả, số và lỗi. Khi văn bản không phải số, số là `0` và lỗi nói rõ lý do. Bạn kiểm tra lỗi trước khi đụng tới số.
+
+`if err != nil` xuất hiện nhiều tới mức người ta lấy ra đùa. Nhóm Go chọn vậy có chủ ý. Không có đường thoát ẩn ra khỏi hàm, nên đọc từ trên xuống là biết chuyện gì thực sự xảy ra. Cái giá là gõ nhiều. Và vì lỗi là giá trị bình thường, bạn có thể tạo, lưu, so sánh và truyền đi như mọi giá trị khác. Đó là ý của câu trích của Rob Pike ở đầu bài.
+
+Việc thường làm là thêm ngữ cảnh rồi trả lỗi cho nơi gọi. Thói quen "đường chính nằm bên trái" từ bài [Go types và functions](/blog/go-variables-types-pointers-functions/) vẫn áp dụng: xử lý lỗi rồi return sớm, để luồng bình thường đọc thẳng một mạch từ trên xuống.
+
+## Tạo, bọc và kiểm tra lỗi
+
+Muốn tự tạo lỗi, dùng `errors.New("text")` hoặc `fmt.Errorf("text %d", n)`. Muốn nơi gọi kiểm tra được một thất bại cụ thể, lưu lỗi đó trong biến ở mức package. Theo quy ước, tên bắt đầu bằng `Err`.
+
+Khi một tầng thấp hơn thất bại, tầng trên thường biết rõ hơn nó đang cố làm gì, nên nó thêm thông tin đó. `fmt.Errorf` có một verb riêng cho việc này: `%w` ("wrap"). Nó tạo lỗi mới có thông báo chứa lỗi cũ, và giữ lỗi cũ bên trong để lấy lại được sau. (Các verb khác của `fmt` xem [bảng verb](/blog/go-variables-types-pointers-functions/) ở bài về kiểu dữ liệu.)
+
+```go
+package main
+
+import (
+	"errors"
+	"fmt"
+	"os"
+)
+
+var ErrNotFound = errors.New("not found")
+
+func findUser(id int) error {
+	if id != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func loadProfile(id int) error {
+	if err := findUser(id); err != nil {
+		return fmt.Errorf("load profile %d: %w", id, err)
+	}
+	return nil
+}
+
+func handle(id int) error {
+	if err := loadProfile(id); err != nil {
+		return fmt.Errorf("handle request: %w", err)
+	}
+	return nil
+}
+
+func main() {
+	err := handle(7)
+	fmt.Println(err)
+	fmt.Println(err == ErrNotFound)
+	fmt.Println(errors.Is(err, ErrNotFound))
+	fmt.Println(errors.Unwrap(err))
+
+	_, err = os.Open("missing.txt")
+	fmt.Println(err)
+	fmt.Println(errors.Is(err, os.ErrNotExist))
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Thông báo đọc như một chồng ngữ cảnh. == sai vì lỗi đã bị bọc; errors.Is nhìn vào bên trong các lớp bọc và tìm ra lỗi gốc.">
+```text
+handle request: load profile 7: not found
+false
+true
+load profile 7: not found
+open missing.txt: no such file or directory
+true
+```
+</TerminalOutput>
+
+Đọc output từng dòng. Thông báo là một câu ghép từ ba tầng, tầng ngoài cùng đứng đầu. `err == ErrNotFound` là `false`, vì `err` giờ là lớp bọc chứ không phải chính sentinel. `errors.Is(err, ErrNotFound)` là `true`: nó đi theo chuỗi các lớp bọc và hỏi từng lớp xem có phải đích không. `errors.Unwrap` chỉ bóc đúng một lớp. Hai dòng cuối cho thấy thư viện chuẩn dùng cùng kiểu này: `os.Open` thất bại cho ra một lỗi mà bạn kiểm tra được bằng `errors.Is(err, os.ErrNotExist)`.
+
+Tự thử với chuỗi lỗi. Demo dưới đây dùng đúng chuỗi `findUser` ở trên. Bóc từng tầng một, rồi đổi tầng giữa sang `%v` và xem đường nối đứt.
+
+<GoErrorChainDemo />
+
+Cái bẫy `%v` đáng xem bằng output thật. `%v` chép chữ của lỗi vào thông báo mới nhưng không giữ chính lỗi đó.
+
+```go
+package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+var ErrNotFound = errors.New("not found")
+
+func main() {
+	withW := fmt.Errorf("load: %w", ErrNotFound)
+	withV := fmt.Errorf("load: %v", ErrNotFound)
+	fmt.Println(withW, errors.Is(withW, ErrNotFound))
+	fmt.Println(withV, errors.Is(withV, ErrNotFound))
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Cùng thông báo, hành vi khác nhau. Chỉ %w giữ lỗi gốc để còn truy cập được.">
+```text
+load: not found true
+load: not found false
+```
+</TerminalOutput>
+
+Vậy khi nào bọc bằng `%w`, khi nào `%v`? Dùng `%w` khi nơi gọi nên kiểm tra được nguyên nhân, và `%v` khi bạn muốn giấu chi tiết cài đặt, như kiểu lỗi của driver database.
+
+### `errors.As`: khi lỗi mang theo dữ liệu
+
+Đôi khi bạn cần nhiều hơn "có phải lỗi này không": bạn cần một trường bên trong nó. Lúc đó bạn tự định nghĩa kiểu lỗi, là một struct có method `Error`. `errors.As` đi dọc chuỗi, tìm lỗi đầu tiên đúng kiểu, và chép nó vào biến của bạn.
+
+```go
+package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+type ValidationError struct {
+	Field string
+}
+
+func (e *ValidationError) Error() string {
+	return "invalid field: " + e.Field
+}
+
+func validate() error {
+	return &ValidationError{Field: "email"}
+}
+
+func main() {
+	err := fmt.Errorf("signup: %w", validate())
+
+	var ve *ValidationError
+	if errors.As(err, &ve) {
+		fmt.Println("bad field is", ve.Field)
+	}
+	fmt.Println(err)
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="errors.As tìm thấy một *ValidationError bên trong lỗi đã bọc và điền vào ve, nên code đọc được ve.Field.">
+```text
+bad field is email
+signup: invalid field: email
+```
+</TerminalOutput>
+
+Hai chi tiết. `&ve` là con trỏ tới biến, như bạn đã học ở [phần con trỏ](/blog/go-variables-types-pointers-functions/), vì `errors.As` phải ghi vào nó. Và việc kiểm tra là kiểm tra kiểu do `errors.As` làm, không phải type assertion thường: type assertion thường trên `err` sẽ thất bại ở đây, vì `err` là lớp bọc `signup:`. Nếu cần kiểm tra lỗi đã bọc, dùng `errors.Is` và `errors.As`, không bao giờ dùng `==` hay kiểm tra kiểu trực tiếp.
+
+### `errors.Join`: nhiều lỗi cùng lúc
+
+Khi chạy nhiều kiểm tra độc lập và muốn báo hết các thất bại, `errors.Join` gộp chúng thành một lỗi. `errors.Is` vẫn thấy từng lỗi.
+
+```go
+package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+func main() {
+	errName := errors.New("name is empty")
+	errAge := errors.New("age is negative")
+
+	err := errors.Join(errName, errAge)
+	fmt.Println(err)
+	fmt.Println(errors.Is(err, errAge))
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Join in mỗi lỗi một dòng. errors.Is vẫn tìm ra từng lỗi bên trong.">
+```text
+name is empty
+age is negative
+true
+```
+</TerminalOutput>
+
+## Xử lý lỗi một lần
+
+Khi hàm thất bại, bạn có hai lựa chọn đàng hoàng: xử lý nó, hoặc chuyển nó lên. Sai lầm là làm cả hai, vừa log lỗi vừa return nó. Nơi gọi lại log lần nữa, và một thất bại làm log đầy cùng một sự kiện ba lần, mỗi lần ít ngữ cảnh hơn lần trước.
+
+```go
+package main
+
+import (
+	"errors"
+	"fmt"
+	"log"
+	"os"
+)
+
+func readConfig() error {
+	return errors.New("permission denied")
+}
+
+func start() error {
+	if err := readConfig(); err != nil {
+		log.Println("readConfig failed:", err)
+		return fmt.Errorf("start: %w", err)
+	}
+	return nil
+}
+
+func main() {
+	log.SetFlags(0)
+	log.SetOutput(os.Stdout)
+	if err := start(); err != nil {
+		log.Println("main:", err)
+	}
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Một thất bại, hai dòng log. Thêm một tầng nữa cũng log thì thành ba. (log.SetFlags và SetOutput chỉ bỏ timestamp và in ra màn hình cho dễ đọc.)">
+```text
+readConfig failed: permission denied
+main: start: permission denied
+```
+</TerminalOutput>
+
+Cách sửa: các tầng thấp bọc rồi return, và chỉ tầng trên cùng, thường là `main` hoặc handler của request, mới log hay báo. Thông báo đã bọc tự mang theo đường đi qua các tầng.
+
+<GoP05LogOnce />
+
+Tệ không kém là bỏ lỗi mà không ai quyết định. `result, _ := doThing()` vứt lỗi đi. Đôi khi vậy là ổn, nhưng hãy làm có chủ ý: viết `_ = doThing()` kèm comment nêu lý do. Lỗi bị bỏ không làm sập gì cả; nó trả về một kết quả thành công trông sạch sẽ, như bug gVisor.
+
+## defer: dọn dẹp không thể quên
+
+`defer` đặt một lời gọi vào danh sách mà Go chạy khi hàm bao quanh return. Bạn đã biết các quy tắc từ [phần defer](/blog/go-variables-types-pointers-functions/): vào sau ra trước, và đối số được cố định ở dòng `defer`. Phần này thêm điều bài đó đã hứa: lời gọi defer đọc một giá trị *về sau*, `defer` trong vòng lặp, và `defer` làm gì với lỗi.
+
+### Defer trong vòng lặp chờ hết hàm, không chờ hết vòng
+
+`defer` chạy khi **hàm** return, không phải khi một vòng lặp kết thúc. Trong vòng lặp mở một tài nguyên mỗi lần, các lời gọi đóng chất đống cho tới khi cả hàm xong.
+
+```go
+package main
+
+import "fmt"
+
+func processAll(names []string) {
+	for _, n := range names {
+		fmt.Println("open", n)
+		defer fmt.Println("close", n)
+	}
+	fmt.Println("all processed")
+}
+
+func processOne(n string) {
+	fmt.Println("open", n)
+	defer fmt.Println("close", n)
+}
+
+func main() {
+	processAll([]string{"a", "b", "c"})
+	fmt.Println("--")
+	for _, n := range []string{"a", "b", "c"} {
+		processOne(n)
+	}
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Phần trên: cả ba lần open đứng trước mọi lần close, nên với file thật cả ba cùng mở. Phần dưới: đưa thân vòng lặp vào hàm riêng thì mỗi file được đóng ngay.">
+```text
+open a
+open b
+open c
+all processed
+close c
+close b
+close a
+--
+open a
+close a
+open b
+close b
+open c
+close c
+```
+</TerminalOutput>
+
+Với một nghìn file, bản trên giữ một nghìn file mở cùng lúc và có thể chạm giới hạn của hệ điều hành. Cách sửa là bản dưới: đưa thân vòng lặp vào hàm riêng, để mỗi lời gọi tự dọn khi return.
+
+<GoP05DeferLoop />
+
+### Closure: hàm viết ngay tại chỗ
+
+**Closure** là một hàm viết ngay chỗ bạn cần, không có tên. Nó đọc và sửa được biến của hàm bao quanh. Bạn viết `func() { ... }`, thêm `()` sau dấu ngoặc đóng để gọi ngay, hoặc đưa cho `defer` để gọi sau.
+
+Đó là câu trả lời cho "làm sao để lời gọi defer thấy giá trị về sau". Dạng truyền đối số đóng băng giá trị ở dòng `defer`. Closure thì không nhận giá trị nào cả. Nó tra biến lúc chạy.
+
+```go
+package main
+
+import "fmt"
+
+func main() {
+	x := 1
+	defer fmt.Println("argument snapshot:", x)
+	defer func() {
+		fmt.Println("closure reads x now:", x)
+	}()
+	x = 2
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Closure chạy trước (vào sau ra trước) và thấy x là 2. Lệnh defer thường đã đóng băng x là 1 ngay ở dòng của nó.">
+```text
+closure reads x now: 2
+argument snapshot: 1
+```
+</TerminalOutput>
+
+<GoP05DeferClosure />
+
+### Named result, và `err` lặng lẽ còn đó
+
+Tới giờ mọi hàm đều trả kết quả không tên, như `(int, error)`. Go cũng cho đặt tên ngay trong chữ ký: `func check(n int) (msg string, err error)`. Có hai hệ quả. Mỗi tên là một biến tồn tại từ dòng đầu và bắt đầu bằng zero value (`""` cho `msg`, `nil` cho `err`). Và lệnh `return` trần, không kèm giá trị, trả về những gì các biến đó đang giữ lúc này.
+
+Named result tốt cho đúng một việc: làm tài liệu cho chữ ký. `(lat, lng float64)` cho biết số nào là số nào, còn `(float64, float64)` thì không. Chúng cũng quan trọng với `defer`, vì closure được defer có thể đổi named result sau khi dòng `return` đã chạy. Nhưng chúng giấu một cái bẫy: `err` tồn tại kể cả khi bạn chưa bao giờ gán cho nó.
+
+```go
+package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+func validate(n int) error {
+	if n < 0 {
+		return errors.New("negative input")
+	}
+	return nil
+}
+
+func check(n int) (msg string, err error) {
+	if e := validate(n); e != nil {
+		return "", err
+	}
+	return "ok", nil
+}
+
+func main() {
+	msg, err := check(-5)
+	fmt.Printf("msg=%q err=%v\n", msg, err)
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="validate thất bại, vậy mà check trả về lỗi nil. Dòng đó trả err, named result chưa từng được gán, thay vì e.">
+```text
+msg="" err=<nil>
+```
+</TerminalOutput>
+
+<GoP05NamedResult />
+
+Đọc kỹ dòng `if`. `e` giữ lỗi, nhưng dòng đó trả `err`, named result chưa ai gán. Tác giả định trả `e`. Code biên dịch được và qua go vet, vì `err` là một biến hợp lệ, và giá trị của nó là zero value `nil`. Với kết quả không tên, dòng này sẽ là lỗi biên dịch, vì không có `err` nào. Cách sửa là gán cho named result bằng `=` thường, đừng tạo biến mới bằng `:=`. Đây chính là cái bẫy shadowing trong [bài về biến](/blog/go-variables-types-pointers-functions/), và `:=` ở đây sẽ che `err` có tên theo cùng cách:
+
+```go
+func check(n int) (msg string, err error) {
+	if err = validate(n); err != nil {
+		return "", err
+	}
+	return "ok", nil
+}
+```
+
+Với cùng `main`, `check(-5)` giờ in ra `msg="" err=negative input`. `return` trần (không kèm giá trị) ở đây cũng hợp lệ, nhưng nó giấu việc giá trị nào được trả ra, nên hãy viết rõ ra, và chỉ giữ named result cho chữ ký và mẹo `defer` dưới đây.
+
+### Kiểm tra lỗi của Close với file bạn đã ghi
+
+`defer file.Close()` là dòng dọn dẹp kinh điển, và với file chỉ đọc thì ổn. Với file bạn đã *ghi*, `Close` là nơi lỗi ghi đã đệm có thể lộ ra, còn `defer` vứt lỗi trả về đi. Chương trình Go báo thành công trong khi dữ liệu chưa nằm trên đĩa. Đây cùng dạng với bug gVisor, và [Joe Shaw đã viết lại](https://www.joeshaw.org/dont-defer-close-on-writable-files/) như một lời cảnh báo cho dân Go.
+
+Closure được defer cộng với named result sửa được chuyện này. Closure chạy sau thân hàm, nên nếu thân hàm thành công mà `Close` thất bại, closure có thể gán `err`.
+
+```go
+package main
+
+import (
+	"errors"
+	"fmt"
+)
+
+type file struct{}
+
+func (f *file) Write(s string) error { fmt.Println("write", s); return nil }
+func (f *file) Close() error        { return errors.New("close: disk full") }
+
+func saveBad() error {
+	f := &file{}
+	defer f.Close()
+	return f.Write("data")
+}
+
+func saveGood() (err error) {
+	f := &file{}
+	defer func() {
+		if cerr := f.Close(); err == nil {
+			err = cerr
+		}
+	}()
+	return f.Write("data")
+}
+
+func main() {
+	fmt.Println("bad:", saveBad())
+	fmt.Println("good:", saveGood())
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Cả hai hàm ghi thành công, và Close thất bại ở cả hai. Chỉ saveGood báo ra. (Kiểu file là một đồ giả nhỏ có Close luôn thất bại, để output đoán trước được.)">
+```text
+write data
+bad: <nil>
+write data
+good: close: disk full
+```
+</TerminalOutput>
+
+Hãy tách closure thành ba bước, bắt đầu từ dòng `if`. Một `if` có thể chạy một câu lệnh ngắn trước phép thử, ngăn cách bằng `;`: `if cerr := f.Close(); err == nil` gọi `Close` trước và lưu kết quả vào `cerr`, rồi mới thử `err == nil`. Thứ hai, `err` là named result của `saveGood`, nên closure có thể đổi giá trị hàm trả về. Thứ ba, `defer func() { ... }()` là closure ở phần trên: nó chạy khi `saveGood` sắp return, sau khi `f.Write("data")` đã cho ra giá trị. Gộp lại: kết quả ghi được trả về, rồi `Close` chạy, và nếu việc ghi thành công (`err == nil`) thì lỗi `Close` thành kết quả.
+
+Phép thử `err == nil` giữ lỗi đầu tiên: nếu việc ghi đã lỗi thì đó là lỗi hữu ích hơn để báo, và lỗi `Close` sau đó không được che nó. Cách viết `file` thành struct có method nằm ở [Go structs và interface](/blog/go-structs-methods-interfaces/).
+
+## panic và recover
+
+`panic` là lối thoát khẩn cấp. Nó dừng luồng bình thường, chạy các lời gọi defer trên đường thoát, rồi làm sập chương trình kèm stack trace. Chính Go phát ra panic cho các bug như chỉ số vượt giới hạn, ghi vào map nil, hay chia số nguyên cho 0.
+
+```go
+package main
+
+import "fmt"
+
+func main() {
+	defer fmt.Println("deferred still runs")
+	var s []int
+	fmt.Println(s[3])
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Dòng defer chạy trước, rồi tới thông báo panic, rồi stack trace (ở đây đã cắt sau dòng panic) và exit status 2.">
+```text
+deferred still runs
+panic: runtime error: index out of range [3] with length 0
+```
+</TerminalOutput>
+
+`recover` chặn được một panic, nhưng chỉ khi được gọi trực tiếp trong hàm được defer. Nó trả về giá trị đã truyền cho `panic`, hoặc `nil` nếu không có panic.
+
+```go
+package main
+
+import "fmt"
+
+func safeDivide(a, b int) (result int, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("recovered: %v", r)
+		}
+	}()
+	return a / b, nil
+}
+
+func main() {
+	fmt.Println(safeDivide(10, 2))
+	fmt.Println(safeDivide(1, 0))
+	fmt.Println("program keeps running")
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Phép chia cho 0 được đổi thành lỗi bình thường qua named result err, và chương trình chạy tiếp. (fmt.Println in thẳng được một lời gọi trả về hai giá trị.)">
+```text
+5 <nil>
+0 recovered: runtime error: integer divide by zero
+program keeps running
+```
+</TerminalOutput>
+
+Quy tắc chọn dùng cái nào. Thất bại dự kiến được như file không tồn tại, input sai của người dùng hay request quá hạn là lỗi, và bạn return chúng. `panic` dành cho điều không bao giờ nên xảy ra, như một giả định nội bộ bị phá, hay code không thể khởi động: hàm chuẩn `regexp.MustCompile` panic khi mẫu viết sai ngay lúc viết, vì đó là bug bạn muốn thấy ngay ở lần chạy đầu tiên.
+
+`recover` thuộc về ranh giới. `net/http` là ví dụ chuẩn. [Tài liệu](https://pkg.go.dev/net/http#Handler) của nó nói rằng nếu một handler panic, server coi như ảnh hưởng chỉ nằm trong request đó, recover và log stack trace. Một request xấu không làm sập cả server. Đừng dùng panic và recover như try/catch cho luồng điều khiển bình thường. Một panic trong goroutine khác thì code đã khởi động nó không recover được; [Go goroutine và channel](/blog/go-goroutines-channels-select/) nói về chuyện đó.
+
+## Key takeaways
+
+- Hàm thất bại trả `error` ở kết quả cuối. Kiểm tra bằng `if err != nil` ngay sau lời gọi, và return sớm.
+- Tạo lỗi bằng `errors.New` hoặc `fmt.Errorf`. Bọc bằng `%w` để thêm ngữ cảnh và giữ nguyên nhân. `%v` chỉ giữ chữ.
+- Kiểm tra bằng `errors.Is` (một lỗi cụ thể) và `errors.As` (một kiểu, để đọc các trường). Không bao giờ `==` với lỗi đã bọc.
+- Xử lý mỗi lỗi một lần: log hoặc return, không làm cả hai. Đừng bỏ lỗi nào mà không nêu lý do.
+- `defer` chạy khi hàm thoát, không phải khi hết một vòng lặp. Closure đọc biến lúc chạy; đối số defer thường thì bị đóng băng.
+- Named result làm tài liệu cho chữ ký, và `err` tồn tại kể cả khi bạn chưa gán, nên `return "", err` có thể âm thầm trả `nil`.
+- Kiểm tra lỗi `Close` của file bạn đã ghi.
+- Panic dành cho bug và trạng thái không thể xảy ra. Recover ở ranh giới, như một request, và đổi panic thành lỗi.
+
+## Review questions
+
+1. `errors.Is(err, ErrNotFound)` trả `false` dù thông báo có chữ "not found". Nêu hai nguyên nhân có thể. (Xem "Tạo, bọc và kiểm tra lỗi".)
+2. Service của bạn log cùng một thất bại ba lần với ba cách diễn đạt. Nó đã vi phạm quy tắc nào, và lời gọi log nên đặt ở đâu? (Xem "Xử lý lỗi một lần".)
+3. Một vòng lặp mở 10.000 file với `defer f.Close()` ngay trong vòng lặp và chương trình báo "too many open files". Vì sao, và sửa thế nào? (Xem "Defer trong vòng lặp chờ hết hàm, không chờ hết vòng".)
+4. Hàm có named result `(n int, err error)` trả `0, err` sau một lời gọi thất bại mà nơi gọi không thấy lỗi nào. Nhiều khả năng đã sai ở đâu? (Xem "Named result, và `err` lặng lẽ còn đó".)
+5. Khi nào tự gọi `panic` là đúng, và `recover` nên đặt ở đâu? (Xem "panic và recover".)
+
+### Sắp tới trong series
+
+Chuyện một `error` là con trỏ nil vẫn có thể khác nil, và cách lỗi đi giữa các goroutine, nằm ở các bài sau: [Go interfaces chuyên sâu](/blog/go-abstractions-interfaces-generics-errors/) và [Go goroutine và channel](/blog/go-goroutines-channels-select/). Viết test cho các đường lỗi nằm ở [Go testing](/blog/go-testing-table-tests/).
+
+</Vi>
