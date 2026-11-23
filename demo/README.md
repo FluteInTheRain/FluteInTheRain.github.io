@@ -1,6 +1,6 @@
 # demo/ — the backend series' running demo service
 
-The blog series **"How backend actually works"** (`src/content/blog/backend-*.mdx`)
+The blog series **"Backend with Python FastAPI"** (`src/content/blog/backend-*.mdx`)
 traces one small FastAPI service across its 12 posts: it starts as the trace
 skeleton below and gains layers, a database, auth, tests, observability and
 deploys as the series goes on. Keeping the code in the repo is what makes every
