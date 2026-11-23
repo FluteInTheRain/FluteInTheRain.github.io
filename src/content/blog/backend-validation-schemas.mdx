@@ -14,6 +14,9 @@ sources:
   - { title: "Pydantic documentation", author: "Pydantic Services SAS", url: "https://docs.pydantic.dev/latest/" }
   - { title: "Request Body", author: "FastAPI documentation", url: "https://fastapi.tiangolo.com/tutorial/body/" }
   - { title: "Handling Errors", author: "FastAPI documentation", url: "https://fastapi.tiangolo.com/tutorial/handling-errors/" }
+  - { title: "Query Parameters and String Validations", author: "FastAPI documentation", url: "https://fastapi.tiangolo.com/tutorial/query-params-str-validations/" }
+  - { title: "Path Parameters and Numeric Validations", author: "FastAPI documentation", url: "https://fastapi.tiangolo.com/tutorial/path-params-numeric-validations/" }
+  - { title: "Configuration: extra attribute behavior", author: "Pydantic documentation", url: "https://docs.pydantic.dev/latest/concepts/config/#extra-attributes" }
   - { title: "Response Model - Return Type", author: "FastAPI documentation", url: "https://fastapi.tiangolo.com/tutorial/response-model/" }
   - { title: "422 Unprocessable Content", author: "MDN Web Docs", url: "https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/status/422" }
   - { title: "Input Validation Cheat Sheet", author: "OWASP Cheat Sheet Series", url: "https://cheatsheetseries.owasp.org/cheatsheets/Input_Validation_Cheat_Sheet.html" }
@@ -178,6 +181,58 @@ The untyped door answered 200 OK and echoed the junk. The typed door answered 42
 
 That wall is the whole idea. The model is the door; your code lives behind it and only ever meets checked values. Notice also what the rules themselves are: OWASP's field table reads like a description of `CaseCreate` — strings get length limits and a required shape, numbers get a type plus minimum and maximum, objects get required fields. And the strategy is **allow-list, not deny-list**: define what you accept and reject everything outside it; do not try to recognize every malicious string. `Field(pattern=r"^CLUE-[0-9]{4}$")` accepts exactly one shape. A denylist that strips "suspicious characters" would reject legitimate names and still not make the database query safe — that's a different control, parameterization, not validation.
 
+A model is not the only thing at the door. Before FastAPI validates anything, it has to decide *where in the request* each parameter comes from — and it decides from the signature alone. `demo/p03_boundary.py` (a second, smaller demo for this post, run on port 4333) puts all three kinds of input on one endpoint:
+
+```python
+class Draft(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: Annotated[str, Field(min_length=3, max_length=120)]
+    priority: Annotated[int, Field(ge=1, le=5)] = 3
+
+
+class DraftSaved(BaseModel):
+    case_id: str
+    title: str
+    priority: int
+    dry_run: bool
+
+
+@app.put("/cases/{case_id}/draft")
+async def save_draft(
+    case_id: Annotated[str, Path(pattern=r"^[0-9a-f]{8}$")],
+    draft: Draft,
+    dry_run: Annotated[bool, Query()] = False,
+) -> DraftSaved:
+    return DraftSaved(case_id=case_id, dry_run=dry_run, **draft.model_dump())
+```
+
+The rules, in the order FastAPI applies them to `save_draft`:
+
+- A name that appears in the path template (`{case_id}` in `"/cases/{case_id}/draft"`) is a **path** parameter. `Annotated[str, Path(pattern=...)]` bolts a constraint onto it: eight hex characters or the request never reaches the function.
+- A parameter whose type is a `BaseModel` (`draft: Draft`) is the **JSON body**. That is the whole trick behind "typed door" in the last section: the type hint is the instruction.
+- Anything else — a plain scalar like `dry_run: bool` — is a **query** parameter. `Annotated[bool, Query()] = False` makes it optional with a default, and FastAPI converts the string `"true"` to a real `bool` for you.
+- `Annotated[int, Field(ge=1, le=5)]` is the same constraint idea as the `Field(...)` defaults in `CaseCreate`, written in the newer `Annotated` style; `Path`, `Query` and `Field` all feed the same validator.
+
+Send one valid request and watch each value land where the signature said:
+
+<TerminalOutput command={"curl -si -X PUT 'http://127.0.0.1:4333/cases/1b68a63a/draft?dry_run=true' -H 'content-type: application/json' -d '{\"title\": \"Stolen schema\", \"priority\": 4}'"} label="Python 3.13 · FastAPI 0.165 · Pydantic 2.14 · captured Nov 2026" caption="The path id, the query flag and the JSON body all arrive as typed Python values. dry_run=true came in as the string 'true' and left as a real boolean.">
+```text
+HTTP/1.1 200 OK
+date: Mon, 23 Nov 2026 08:49:01 GMT
+server: uvicorn
+content-length: 74
+content-type: application/json
+
+{"case_id":"1b68a63a","title":"Stolen schema","priority":4,"dry_run":true}
+```
+</TerminalOutput>
+
+<Callout type="warning" title="Where AI-written endpoints slip">
+Two habits. Reading the query string by hand (`request.query_params.get("dry_run") == "true"`) gives you strings and a hand-rolled parser per endpoint. And a bare `dict` or `Request` argument opts out of every constraint above: the signature stops describing the input, so FastAPI has nothing to check. Constraints belong in the type hints, because the signature is the only thing FastAPI reads.
+</Callout>
+
+
 <Concepts>
 - **Trust boundary**: the line where data crosses from "not ours" to "ours". A request crosses one — and so does a message off your own queue, or a row read back from your own database.
 - **Pydantic model**: a `BaseModel` class that describes data with types and constraints. Pydantic checks every field against it while building the instance — here, the instance is built at the API door.
@@ -221,6 +276,32 @@ Now the rejection itself. It is not a string — it's a list of error objects, a
 - `input` and `ctx` — the offending value and the constraint it broke, echoed back so the caller can see their own mistake.
 
 Why 422 and not 400? MDN draws the line: the server "understood the content type of the request content, and the syntax of the request content was correct, but it was unable to process the contained instructions" ([422 Unprocessable Content](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/status/422)). The JSON parsed fine; the rules said no. And the whole structured body is just FastAPI's default handler for `RequestValidationError` — if your API owes callers a different error shape, you can override that one handler and keep everything else ([Handling Errors](https://fastapi.tiangolo.com/tutorial/handling-errors/)).
+
+You do not have to accept that default shape. `demo/p03_boundary.py` registers one handler, and every validation failure in the app, whether it comes from path, query or body, goes through it.
+
+```python
+@app.exception_handler(RequestValidationError)
+async def flat_422(request: Request, exc: RequestValidationError) -> JSONResponse:
+    fields = {".".join(str(part) for part in e["loc"]): e["msg"] for e in exc.errors()}
+    return JSONResponse(status_code=422, content={"error": "invalid_request", "fields": fields})
+```
+
+`@app.exception_handler(RequestValidationError)` tells FastAPI: when validation raises this exception, call my function instead of the built-in one. `exc.errors()` returns the same list of `type` / `loc` / `msg` objects you saw before, so the handler can fold them into any shape the API promises — here one flat `fields` map keyed by where the problem sits. Because `loc` starts with `path`, `query` or `body`, the caller can tell which door they got wrong. All three failures at once:
+
+<TerminalOutput command={"curl -si -X PUT 'http://127.0.0.1:4333/cases/NOPE/draft?dry_run=maybe' -H 'content-type: application/json' -d '{\"title\": \"??\"}'"} label="Python 3.13 · FastAPI 0.165 · Pydantic 2.14 · captured Nov 2026" caption="One request, three broken inputs, three entries. Your handler still never ran: the 422 is reshaped on the way out of the boundary, not after the code behind it.">
+```text
+HTTP/1.1 422 Unprocessable Content
+date: Mon, 23 Nov 2026 08:49:01 GMT
+server: uvicorn
+content-length: 232
+content-type: application/json
+
+{"error":"invalid_request","fields":{"path.case_id":"String should match pattern '^[0-9a-f]{8}$'","query.dry_run":"Input should be a valid boolean, unable to interpret input","body.title":"String should have at least 3 characters"}}
+```
+</TerminalOutput>
+
+The trap worth knowing: a handler registered for `Exception` or a broad `try/except` around the endpoint tends to swallow this error and answer 400 or 500 for what is plainly the caller's mistake. Register for `RequestValidationError` specifically and keep the 422 status.
+
 
 <Concepts>
 - **Fail fast**: reject invalid input as close to the door as possible. The further junk travels — handler, storage, downstream jobs — the more of your system it touches and the harder the cleanup.
@@ -304,6 +385,60 @@ content-type: application/json
 
 The FastAPI docs make the same point with a scarier example: a sign-up endpoint that returns its own input model, and the plaintext password rides back out in the response ([Response Model - Return Type](https://fastapi.tiangolo.com/tutorial/response-model/)). Declare a separate output model and "FastAPI will take care of filtering out all the data that is not declared in the output model". The handler's dict is not the contract — `CaseOut` is. The mask also runs the other way: FastAPI validates the outgoing data against `CaseOut`, so a handler bug that returns garbage becomes a server error, not a payload your callers have to survive.
 
+Where does the response contract come from? Two spellings do the same job. `response_model=CaseOut` on the decorator is the explicit one, used in `demo/schemas.py`. `-> DraftSaved` as the return annotation in `save_draft` is the shorter one: FastAPI reads the annotation and treats it as the `response_model`. Either way, the class ends up in the same place. Ask the running service what it promises about this one endpoint:
+
+<TerminalOutput command={"curl -s http://127.0.0.1:4333/openapi.json | jq '.paths[\"/cases/{case_id}/draft\"].put | {parameters, requestBody, response_200: .responses[\"200\"]}'"} label="Python 3.13 · FastAPI 0.165 · Pydantic 2.14 · captured Nov 2026" caption="The whole contract of one endpoint, generated from the signature: the path and query parameters with their constraints, the request body pointing at Draft, and the 200 response pointing at DraftSaved. The -> DraftSaved annotation is why that last $ref is there.">
+```text
+{
+  "parameters": [
+    {
+      "name": "case_id",
+      "in": "path",
+      "required": true,
+      "schema": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{8}$",
+        "title": "Case Id"
+      }
+    },
+    {
+      "name": "dry_run",
+      "in": "query",
+      "required": false,
+      "schema": {
+        "type": "boolean",
+        "default": false,
+        "title": "Dry Run"
+      }
+    }
+  ],
+  "requestBody": {
+    "required": true,
+    "content": {
+      "application/json": {
+        "schema": {
+          "$ref": "#/components/schemas/Draft"
+        }
+      }
+    }
+  },
+  "response_200": {
+    "description": "Successful Response",
+    "content": {
+      "application/json": {
+        "schema": {
+          "$ref": "#/components/schemas/DraftSaved"
+        }
+      }
+    }
+  }
+}
+```
+</TerminalOutput>
+
+Every piece of the signature turned into a line of the contract. Generated clients and Swagger UI read this file, so a change to a type hint is a change to the API that other people build against. That is the reason to treat the model as a contract and not as a convenience.
+
+
 <Concepts>
 - **JSON Schema**: a JSON document describing data — which fields exist, their types, their constraints. Pydantic generates one from each model; FastAPI collects them into `openapi.json`.
 - **OpenAPI**: the machine-readable description of a whole API — paths, parameters, schemas. `/docs` is just one viewer for it; client generators are another.
@@ -319,6 +454,22 @@ This is the part the machine still gets wrong. An AI writes a working endpoint i
 <Callout type="warning" title="The AI habit to break">
 Generated endpoints trust client input. Three tells: `payload: dict` at the top of the handler — no door at all; manual `if "title" not in payload` checks scattered through the body — the rules exist, but they drift and junk still gets in; and a hand-built `return {...}` — the response is whatever the last refactor happened to leave in the dict. All three pass review when the tests only ever send valid input.
 </Callout>
+
+One more constraint closes a door the other rules leave open. By default Pydantic ignores fields it does not know. A caller who sends `"is_admin": true` gets a clean 200 and the field silently disappears — or worse, lands somewhere later when someone changes `Draft` to a bigger model. `model_config = ConfigDict(extra="forbid")`, which you saw on `Draft` above, turns the unknown field into an error:
+
+<TerminalOutput command={"curl -si -X PUT http://127.0.0.1:4333/cases/1b68a63a/draft -H 'content-type: application/json' -d '{\"title\": \"Stolen schema\", \"is_admin\": true}'"} label="Python 3.13 · FastAPI 0.165 · Pydantic 2.14 · captured Nov 2026" caption="A field the model never declared is refused by name. Silence about extras is how mass-assignment bugs start; forbid makes the contract strict in both directions.">
+```text
+HTTP/1.1 422 Unprocessable Content
+date: Mon, 23 Nov 2026 08:49:01 GMT
+server: uvicorn
+content-length: 87
+content-type: application/json
+
+{"error":"invalid_request","fields":{"body.is_admin":"Extra inputs are not permitted"}}
+```
+</TerminalOutput>
+
+That is "never meet a stranger" at the field level: the model lists who is allowed in, and anything else is turned away, not ignored.
 
 So when you review an endpoint — yours, a teammate's, or a model's — three checks, three minutes, in this order:
 
@@ -474,6 +625,58 @@ Cửa không kiểu trả 200 OK và nhả rác ra lại. Cửa có kiểu trả
 
 Bức tường đó là toàn bộ ý tưởng. Model là cánh cửa; code của bạn ở phía sau và chỉ gặp dữ liệu đã qua kiểm tra. Để ý cả bản thân các luật: bảng quy tắc của OWASP đọc như mô tả `CaseCreate` — string thì giới hạn độ dài và hình dạng, số thì khai type kèm min/max, object thì khai rõ field nào bắt buộc. Và chiến lược là **allow-list, không phải deny-list**: khai báo nhận cái gì, từ chối mọi thứ ngoài nó; đừng cố gắng nhận diện từng chuỗi độc hại. `Field(pattern=r"^CLUE-[0-9]{4}$")` chấp nhận đúng một hình dạng. Còn danh sách đen gột "ký tự khả nghi" thì chặn cả tên hợp lệ mà vẫn không làm truy vấn database an toàn thêm chút nào — đó là một cơ chế khác (parameterization), không phải validation.
 
+Model không phải thứ duy nhất đứng ở cửa. Trước khi validate bất cứ gì, FastAPI phải quyết định mỗi tham số lấy từ *đâu trong request* — và nó quyết định chỉ bằng chữ ký hàm. `demo/p03_boundary.py` (demo thứ hai, nhỏ hơn, chạy trên port 4333) đặt cả ba loại input vào một endpoint:
+
+```python
+class Draft(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    title: Annotated[str, Field(min_length=3, max_length=120)]
+    priority: Annotated[int, Field(ge=1, le=5)] = 3
+
+
+class DraftSaved(BaseModel):
+    case_id: str
+    title: str
+    priority: int
+    dry_run: bool
+
+
+@app.put("/cases/{case_id}/draft")
+async def save_draft(
+    case_id: Annotated[str, Path(pattern=r"^[0-9a-f]{8}$")],
+    draft: Draft,
+    dry_run: Annotated[bool, Query()] = False,
+) -> DraftSaved:
+    return DraftSaved(case_id=case_id, dry_run=dry_run, **draft.model_dump())
+```
+
+Các luật, theo thứ tự FastAPI áp lên `save_draft`:
+
+- Tên nào xuất hiện trong path template (`{case_id}` trong `"/cases/{case_id}/draft"`) là tham số **path**. `Annotated[str, Path(pattern=...)]` gắn thêm ràng buộc: đúng tám ký tự hex, không thì request chẳng tới được hàm.
+- Tham số có type là một `BaseModel` (`draft: Draft`) chính là **JSON body**. Đó là toàn bộ mánh của "cánh cửa có kiểu" ở phần trước: type hint chính là chỉ thị.
+- Còn lại — scalar thường như `dry_run: bool` — là tham số **query**. `Annotated[bool, Query()] = False` biến nó thành tuỳ chọn có default, và FastAPI tự đổi chuỗi `"true"` thành `bool` thật.
+- `Annotated[int, Field(ge=1, le=5)]` cùng ý với các `Field(...)` mặc định trong `CaseCreate`, viết theo kiểu `Annotated` mới hơn; `Path`, `Query`, `Field` đều đổ vào cùng một validator.
+
+Gửi một request hợp lệ và xem từng giá trị rơi đúng chỗ chữ ký đã khai:
+
+<TerminalOutput command={"curl -si -X PUT 'http://127.0.0.1:4333/cases/1b68a63a/draft?dry_run=true' -H 'content-type: application/json' -d '{\"title\": \"Stolen schema\", \"priority\": 4}'"} label="Python 3.13 · FastAPI 0.165 · Pydantic 2.14 · chụp tháng 11/2026" caption="Path id, cờ query và JSON body đều tới nơi dưới dạng giá trị Python có kiểu. dry_run=true vào là chuỗi 'true' và ra là boolean thật.">
+```text
+HTTP/1.1 200 OK
+date: Mon, 23 Nov 2026 08:49:01 GMT
+server: uvicorn
+content-length: 74
+content-type: application/json
+
+{"case_id":"1b68a63a","title":"Stolen schema","priority":4,"dry_run":true}
+```
+</TerminalOutput>
+
+<Callout type="warning" title="Chỗ endpoint AI viết hay trượt">
+Hai thói quen. Đọc query string bằng tay (`request.query_params.get("dry_run") == "true"`) cho bạn toàn chuỗi và một bộ parse tự chế cho mỗi endpoint. Và một tham số `dict` hay `Request` trần thì bỏ qua mọi ràng buộc ở trên: chữ ký thôi mô tả input, FastAPI không còn gì để kiểm. Ràng buộc phải nằm trong type hint, vì chữ ký là thứ duy nhất FastAPI đọc.
+</Callout>
+
+
 <Concepts title="Mấy thuật ngữ phía trên, nói dễ hiểu">
 - **Trust boundary (ranh giới niềm tin)**: đường ranh nơi dữ liệu chuyển từ "không phải của mình" sang "của mình". Request đi qua nó — và message từ queue của chính bạn, hay dòng đọc lại từ database của chính bạn, cũng vậy.
 - **Pydantic model**: một class `BaseModel` mô tả dữ liệu bằng type và ràng buộc. Pydantic kiểm từng field theo nó ngay lúc dựng instance — ở đây, instance được dựng ngay tại cửa API.
@@ -517,6 +720,32 @@ Giờ tới chính lời từ chối. Nó không phải một chuỗi — nó l�
 - `input` và `ctx` — giá trị gây lỗi và ràng buộc nó vi phạm, trả lại để caller tự nhìn thấy sai của mình.
 
 Vì sao là 422 mà không phải 400? MDN vạch ranh: server "hiểu content type của request, cú pháp cũng đúng, nhưng không xử lý được phần chỉ dẫn bên trong" ([422 Unprocessable Content](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/status/422)). JSON parse tốt đẹp; luật mới nói không. Còn toàn bộ body có cấu trúc đó chỉ là handler mặc định của FastAPI cho `RequestValidationError` — nếu API của bạn nợ caller một hình dạng lỗi khác, override đúng handler đó là được, giữ nguyên mọi thứ còn lại ([Handling Errors](https://fastapi.tiangolo.com/tutorial/handling-errors/)).
+
+Bạn không phải nhận hình dạng mặc định đó. `demo/p03_boundary.py` đăng ký một handler, và mọi lỗi validate trong app, dù tới từ path, query hay body, đều đi qua nó.
+
+```python
+@app.exception_handler(RequestValidationError)
+async def flat_422(request: Request, exc: RequestValidationError) -> JSONResponse:
+    fields = {".".join(str(part) for part in e["loc"]): e["msg"] for e in exc.errors()}
+    return JSONResponse(status_code=422, content={"error": "invalid_request", "fields": fields})
+```
+
+`@app.exception_handler(RequestValidationError)` bảo FastAPI: khi validate ném exception này thì gọi hàm của mình thay cho hàm có sẵn. `exc.errors()` trả đúng danh sách object `type` / `loc` / `msg` bạn đã thấy, nên handler gói chúng lại thành hình dạng nào API hứa cũng được — ở đây là một map `fields` phẳng, khoá là chỗ có vấn đề. Vì `loc` mở đầu bằng `path`, `query` hoặc `body`, caller biết ngay mình sai cửa nào. Cả ba lỗi cùng lúc:
+
+<TerminalOutput command={"curl -si -X PUT 'http://127.0.0.1:4333/cases/NOPE/draft?dry_run=maybe' -H 'content-type: application/json' -d '{\"title\": \"??\"}'"} label="Python 3.13 · FastAPI 0.165 · Pydantic 2.14 · chụp tháng 11/2026" caption="Một request, ba input hỏng, ba mục. Handler của bạn vẫn không chạy: 422 được định hình lại ngay lúc đi ra khỏi biên giới, không phải sau code phía sau.">
+```text
+HTTP/1.1 422 Unprocessable Content
+date: Mon, 23 Nov 2026 08:49:01 GMT
+server: uvicorn
+content-length: 232
+content-type: application/json
+
+{"error":"invalid_request","fields":{"path.case_id":"String should match pattern '^[0-9a-f]{8}$'","query.dry_run":"Input should be a valid boolean, unable to interpret input","body.title":"String should have at least 3 characters"}}
+```
+</TerminalOutput>
+
+Cái bẫy đáng biết: handler đăng ký cho `Exception` hoặc một `try/except` rộng bọc quanh endpoint hay nuốt lỗi này rồi trả 400 hoặc 500 cho thứ rõ ràng là lỗi của caller. Hãy đăng ký riêng cho `RequestValidationError` và giữ status 422.
+
 
 <Concepts title="Mấy thuật ngữ phía trên, nói dễ hiểu">
 - **Fail fast (chết sớm)**: từ chối input xấu càng gần cửa càng tốt. Rác đi càng xa — handler, kho dữ liệu, job downstream — thì chạm càng nhiều bộ phận và dọn càng khó.
@@ -600,6 +829,60 @@ content-type: application/json
 
 Tài liệu FastAPI lấy một ví dụ đáng sợ hơn cho cùng luận điểm: endpoint đăng ký trả về đúng input model của nó, và mật khẩu dạng plaintext bay ngược ra trong response ([Response Model - Return Type](https://fastapi.tiangolo.com/tutorial/response-model/)). Khai một output model riêng, thì "FastAPI sẽ lọc ra mọi dữ liệu không được khai báo trong output model". Dict trong handler không phải contract — `CaseOut` mới là. Tấm mặt nạ còn chạy ngược chiều nữa: FastAPI validate dữ liệu gửi ra theo `CaseOut`, nên một bug trả rác trong handler sẽ thành server error, không phải một payload mà caller phải gánh.
 
+Hợp đồng của response đến từ đâu? Hai cách viết, cùng một việc. `response_model=CaseOut` trên decorator là cách tường minh, dùng trong `demo/schemas.py`. `-> DraftSaved` làm return annotation trong `save_draft` là cách gọn hơn: FastAPI đọc annotation và coi nó là `response_model`. Cách nào thì class cũng đi về cùng một chỗ. Hỏi thẳng service đang chạy xem nó hứa gì về đúng endpoint này:
+
+<TerminalOutput command={"curl -s http://127.0.0.1:4333/openapi.json | jq '.paths[\"/cases/{case_id}/draft\"].put | {parameters, requestBody, response_200: .responses[\"200\"]}'"} label="Python 3.13 · FastAPI 0.165 · Pydantic 2.14 · chụp tháng 11/2026" caption="Toàn bộ hợp đồng của một endpoint, sinh ra từ chữ ký hàm: tham số path và query kèm ràng buộc, request body trỏ tới Draft, response 200 trỏ tới DraftSaved. Annotation -> DraftSaved là lý do có cái $ref cuối cùng.">
+```text
+{
+  "parameters": [
+    {
+      "name": "case_id",
+      "in": "path",
+      "required": true,
+      "schema": {
+        "type": "string",
+        "pattern": "^[0-9a-f]{8}$",
+        "title": "Case Id"
+      }
+    },
+    {
+      "name": "dry_run",
+      "in": "query",
+      "required": false,
+      "schema": {
+        "type": "boolean",
+        "default": false,
+        "title": "Dry Run"
+      }
+    }
+  ],
+  "requestBody": {
+    "required": true,
+    "content": {
+      "application/json": {
+        "schema": {
+          "$ref": "#/components/schemas/Draft"
+        }
+      }
+    }
+  },
+  "response_200": {
+    "description": "Successful Response",
+    "content": {
+      "application/json": {
+        "schema": {
+          "$ref": "#/components/schemas/DraftSaved"
+        }
+      }
+    }
+  }
+}
+```
+</TerminalOutput>
+
+Mỗi mảnh của chữ ký hóa thành một dòng của hợp đồng. Client sinh tự động và Swagger UI đọc file này, nên đổi một type hint là đổi API mà người khác đang xây lên. Đó là lý do nên coi model là hợp đồng chứ không phải món tiện tay.
+
+
 <Concepts title="Mấy thuật ngữ phía trên, nói dễ hiểu">
 - **JSON Schema**: một tài liệu JSON mô tả dữ liệu — field nào tồn tại, type gì, ràng buộc ra sao. Pydantic sinh nó từ model; FastAPI gom lại thành `openapi.json`.
 - **OpenAPI**: bản mô tả đọc bằng máy của cả một API — path, tham số, schema. `/docs` chỉ là một trình xem cho nó; bộ sinh client code là một trình xem khác.
@@ -615,6 +898,22 @@ Tài liệu FastAPI lấy một ví dụ đáng sợ hơn cho cùng luận đi�
 <Callout type="warning" title="Thói quen AI cần bỏ">
 Code sinh sẵn tin input của client. Ba dấu hiệu: `payload: dict` ngay đầu handler — không có cửa; mấy dòng `if "title" not in payload` rải rác trong thân hàm — luật có đấy, nhưng chúng trôi dạt và rác vẫn lọt; và `return {...}` dựng tay — response là cái gì thì phụ thuộc vào lần refactor gần nhất để lại gì trong dict. Cả ba đều qua review, nếu test chỉ toàn gửi input hợp lệ.
 </Callout>
+
+Còn một ràng buộc nữa đóng cánh cửa mà các luật kia để hở. Mặc định Pydantic bỏ qua field nó không biết. Caller gửi `"is_admin": true` nhận 200 sạch sẽ và field cứ thế biến mất — hoặc tệ hơn, nó lọt vào đâu đó về sau khi ai đó đổi `Draft` thành model lớn hơn. `model_config = ConfigDict(extra="forbid")`, thứ bạn đã thấy trên `Draft` ở trên, biến field lạ thành lỗi:
+
+<TerminalOutput command={"curl -si -X PUT http://127.0.0.1:4333/cases/1b68a63a/draft -H 'content-type: application/json' -d '{\"title\": \"Stolen schema\", \"is_admin\": true}'"} label="Python 3.13 · FastAPI 0.165 · Pydantic 2.14 · chụp tháng 11/2026" caption="Field model chưa khai báo bị từ chối đích danh. Im lặng với field thừa là cách các bug mass-assignment bắt đầu; forbid làm hợp đồng chặt cả hai chiều.">
+```text
+HTTP/1.1 422 Unprocessable Content
+date: Mon, 23 Nov 2026 08:49:01 GMT
+server: uvicorn
+content-length: 87
+content-type: application/json
+
+{"error":"invalid_request","fields":{"body.is_admin":"Extra inputs are not permitted"}}
+```
+</TerminalOutput>
+
+Đó là "không gặp người lạ" ở cấp field: model liệt kê ai được vào, thứ gì khác bị đuổi chứ không bị lờ đi.
 
 Nên khi bạn review một endpoint — của mình, của đồng nghiệp, hay của model — ba phép kiểm, ba phút, theo đúng thứ tự:
 
