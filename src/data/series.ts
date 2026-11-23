@@ -738,7 +738,7 @@ const golang: Series = {
         vi: 'Không có class: struct, value/pointer receiver, embedding thay kế thừa, interface ngầm định và type switch.',
       },
       act: 'basics',
-      builds: [G.types, G.collections],
+      builds: [G.collections],
     },
     {
       slug: G.errors,
@@ -748,7 +748,7 @@ const golang: Series = {
         vi: 'Lỗi là giá trị, bọc %w, errors.Is/As/Join, xử lý lỗi một lần, bẫy err với named result và panic/recover.',
       },
       act: 'basics',
-      builds: [G.types, G.structs],
+      builds: [G.structs],
     },
     {
       slug: G.testing,
@@ -758,7 +758,7 @@ const golang: Series = {
         vi: 'Table-driven test, t.Helper, coverage, -short và build tag, httptest và làm quen với cờ -race.',
       },
       act: 'basics',
-      builds: [G.structs, G.errors],
+      builds: [G.errors],
     },
     {
       slug: G.goroutines,
@@ -768,7 +768,7 @@ const golang: Series = {
         vi: 'Concurrency vs parallelism, go f(), WaitGroup, channel có/không buffer, select và đường dừng cho mọi goroutine.',
       },
       act: 'concurrency',
-      builds: [G.types, G.collections],
+      builds: [G.testing],
     },
     {
       slug: G.context,
@@ -778,7 +778,7 @@ const golang: Series = {
         vi: 'Lan truyền timeout/cancel qua context.Context, Mutex/RWMutex, tránh copy kiểu sync và chọn channel hay mutex.',
       },
       act: 'concurrency',
-      builds: [G.errors, G.goroutines],
+      builds: [G.goroutines],
     },
     {
       slug: G.concurrencyPatterns,
@@ -788,7 +788,7 @@ const golang: Series = {
         vi: 'Worker pool, pipeline kèm hủy ngang, fan-out/fan-in, semaphore, rate limit và tắt gọn với errgroup.',
       },
       act: 'concurrency',
-      builds: [G.goroutines, G.context],
+      builds: [G.context],
     },
     {
       slug: G.httpService,
@@ -798,7 +798,7 @@ const golang: Series = {
         vi: 'Gom cấp 1–2 thành JSON API chuẩn thư viện Go: routing, middleware, slog, timeout, tắt êm và đóng gói FROM scratch.',
       },
       act: 'concurrency',
-      builds: [G.basics, G.errors, G.testing, G.context],
+      builds: [G.concurrencyPatterns],
     },
     {
       slug: G.memory,
@@ -808,7 +808,7 @@ const golang: Series = {
         vi: 'Slice header, append ghi đè ngầm, rò RAM ở slice/map, map SwissTable, range copy và bẫy strings.Trim.',
       },
       act: 'internals',
-      builds: [G.collections, G.structs],
+      builds: [G.httpService],
     },
     {
       slug: G.abstractions,
@@ -818,7 +818,7 @@ const golang: Series = {
         vi: 'Cặp (type, data) của interface, bẫy typed nil, interface phía người gọi, generics, functional options và embedding.',
       },
       act: 'internals',
-      builds: [G.structs, G.errors],
+      builds: [G.memory],
     },
     {
       slug: G.concurrency,
@@ -828,7 +828,7 @@ const golang: Series = {
         vi: 'Bộ lập lịch GMP, data race vs race condition, biến vòng lặp Go 1.22, select ngẫu nhiên, nil channel và deadlock ở etcd.',
       },
       act: 'internals',
-      builds: [G.goroutines, G.context],
+      builds: [G.abstractions],
     },
     {
       slug: G.production,
@@ -838,7 +838,7 @@ const golang: Series = {
         vi: 'Bẫy http.DefaultClient, rò time.After, JSON và pool database/sql, quên return sau http.Error và bóp CPU trên K8s.',
       },
       act: 'internals',
-      builds: [G.httpService, G.concurrency],
+      builds: [G.concurrency],
     },
     {
       slug: G.workflow,
@@ -858,7 +858,7 @@ const golang: Series = {
         vi: 'Cache CPU và false sharing, căn lề struct, escape analysis, bộ nhớ ảo VSS/RSS, GC ba màu và GOMEMLIMIT.',
       },
       act: 'performance',
-      builds: [G.memory, G.workflow],
+      builds: [G.workflow],
     },
     {
       slug: G.benchmarking,
@@ -868,7 +868,7 @@ const golang: Series = {
         vi: 'Chỉ số RED/USE, RAM container vs runtime, viết microbenchmark không tự lừa (b.Loop), benchstat và macrobenchmark.',
       },
       act: 'performance',
-      builds: [G.testing, G.workflow, G.hardware],
+      builds: [G.hardware],
     },
     {
       slug: G.profiling,
@@ -888,7 +888,7 @@ const golang: Series = {
         vi: 'Làm ít việc hơn, Three Rs, tối ưu Sum1 tới Sum6Reader chạy streaming RAM cố định, sharding và đánh đổi của sync.Pool.',
       },
       act: 'performance',
-      builds: [G.hardware, G.profiling],
+      builds: [G.profiling],
     },
     {
       slug: G.interview,
@@ -898,7 +898,7 @@ const golang: Series = {
         vi: 'Hỏi-đáp bản chất cấp 1–4, bài tập đoán output kiểm chứng trên Go 1.27 và 3 bài live-coding kèm test -race.',
       },
       act: 'interview',
-      builds: [G.concurrencyPatterns, G.memory, G.abstractions, G.concurrency, G.hardware],
+      builds: [G.patterns],
     },
   ],
   paths: [
