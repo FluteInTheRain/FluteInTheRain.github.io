@@ -3,6 +3,14 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-23 — Series backend: lồng ví dụ FastAPI chạy thật vào bài 1–4
+
+- **Đã làm (branch `content/backend-fastapi-framing`):** spec v3 + plan recipe mục 1 ghi quy tắc mới; 4 agent Sonnet (mỗi bài 1 worktree cắt từ nhánh này) viết lại bài 1–4: FastAPI lồng trong bài, **ý nào đụng code thì có ví dụ FastAPI chạy được trong `demo/pNN_*.py` + capture thật**, phần chữ giải thích chính code đó (không có section "In FastAPI" riêng). File demo mới: `p01_raw_asgi.py`, `p02_idempotency.py`, `p02_versions.py`, `p03_boundary.py`, `p04_depends.py`, `p04_override.py` (đã thêm vào `demo/README.md`). Tiêu biểu: bài 2 dựng `Idempotency-Key` bằng `Header()` + `/v1` vs `/v2`; bài 3 handler 422 + `extra="forbid"` + trích `/openapi.json`; bài 4 `Depends` + `dependency_overrides`/`TestClient`.
+- **Controller review:** bài 1 output 422 bị cắt 3 header (`date`/`server`/`content-length`) → chạy lại thật và thay bản đầy đủ; bài 4 chạy lại `p04_override.py` khớp từng dòng; bài 3 kiểm nhãn Pydantic 2.14 đúng (2.14.4).
+- **Ai quyết:** user ("lồng ghép fastAPI vào trong nội dung… thay vì tách section riêng"; "phần nào đụng code thì cứ dựng ví dụ code bằng fastAPI và giải thích ra"). Lần chạy đầu (section "In FastAPI" riêng) user dừng giữa chừng, không commit gì.
+- **Kiểm tra:** build 68 pages + 47 test sạch; mọi fence python trong 4 bài có nguyên văn trong `demo/*.py`; `post-check.sh` cả 4 bài sạch (http=200).
+- **Chưa chốt:** bài 1 đã xuất bản nên merge là lên site ngay; bài 2–4 vẫn `draft: true` chờ user đọc; chưa chạy vision QA vì không thêm hình.
+
 ## 2026-11-23 — Trang series: Mục lục dùng nhãn của sơ đồ, bỏ dòng mô tả lộ trình "Đọc hết", đổi tên series backend
 
 - **Đã làm (branch `fix/series-page-contents-topics`):** `SeriesContents.astro` lấy tiêu đề mỗi dòng từ `part.topic` (đúng nhãn ô trong sơ đồ đọc phía trên) thay vì title bài viết — áp dụng cho mọi series vì component dùng chung. Xoá `who` của path `full` ở cả 6 series (vd. "Từ byte đầu tiên của request tới bản deploy không downtime."); `SeriesPath.who` thành optional, `SeriesMap.astro` chỉ render dòng `who` khi có.
