@@ -61,6 +61,8 @@ You probably already have a name for most of these shapes. Go builds them from c
 
 The big difference is where the pool lives. In Java the pool is an object you configure. In Go the pool is only a loop in each goroutine and a channel they share, so there is nothing to configure and nothing to hide: you can read the whole pattern in twenty lines.
 
+Six patterns is a lot for one sitting. If you only want the short version, jump to the "Choosing a pattern" table near the end, then come back for the ones you need.
+
 <Concepts>
 
 - **Worker pool**: a fixed number of goroutines that all take jobs from one channel. The number of workers caps how much work runs at once.
@@ -148,9 +150,92 @@ The goroutine that feeds `jobs` is separate on purpose. If `main` fed the jobs i
 
 Nine jobs of 50 ms take 450 ms on one worker and 150 ms on three. That is the point of the pool, and it also shows its limit: the speed-up stops when the workers outnumber the jobs, or when the real bottleneck (a database, a CPU core, an API with a quota) is saturated. A common starting point is one worker per CPU core for CPU-bound work, and more for work that mostly waits on a network. Measure, then change the number.
 
-Shutdown path: Closing `jobs` ends every worker's `range` loop. Each worker's `defer wg.Done()` fires. A small goroutine waits on the `WaitGroup` and then closes `results`, which ends the loop in `main`. The rule behind this is the one from post 7: the sender closes. Here the producer closes `jobs`, and the closer goroutine closes `results` because it is the only one that knows when every worker is done. If `main` stopped reading `results` early, the workers would block on their next send and never exit, and the pipeline section below shows how to prevent that.
+Shutdown path: Closing `jobs` ends every worker's `range` loop. Each worker's `defer wg.Done()` fires. A small goroutine waits on the `WaitGroup` and then closes `results`, which ends the loop in `main`. The rule behind this is the one from post 7: the sender closes. Here the producer closes `jobs`, and the closer goroutine closes `results` because it is the only one that knows when every worker is done. This path only works while `main` keeps reading `results`. If `main` stopped early, every worker would block on its next send and never exit. Measured on the program above with `main` reading just one result: 6 goroutines stay alive (`main`, 3 workers, the producer and the closer). The next snippet fixes that.
 
 Since Go 1.25 a `WaitGroup` also has a `Go` method, so `wg.Go(func() { ... })` replaces the `Add(1)`, `go` and `defer wg.Done()` triple. This post keeps the long form so each step is visible.
+
+### Stopping a pool early
+
+To let a pool stop when the caller walks away, give every goroutine that can block on a channel a second way out. A `context` carries a `Done()` channel that closes when somebody calls `cancel()`; [post 8](/blog/go-context-timeouts-mutexes/) covers it in full, and the pipeline section below uses the same three pieces. Here the producer and each worker replace a plain send with a `select` between the send and `<-ctx.Done()`, and `main` reads one result and then calls `cancel()`.
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"runtime"
+	"sync"
+	"time"
+)
+
+type result struct {
+	job    int
+	square int
+}
+
+func run(ctx context.Context, workers int) <-chan result {
+	jobs := make(chan int)
+	results := make(chan result)
+
+	var wg sync.WaitGroup
+	for w := 1; w <= workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for n := range jobs {
+				time.Sleep(50 * time.Millisecond) // pretend work
+				select {
+				case results <- result{job: n, square: n * n}:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+
+	go func() {
+		defer close(jobs)
+		for n := 1; n <= 9; n++ {
+			select {
+			case jobs <- n:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	return results
+}
+
+func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+	results := run(ctx, 3)
+
+	<-results
+	fmt.Println("took one result, now stopping")
+	cancel() // main stops reading, so tell the pool to stop
+
+	time.Sleep(200 * time.Millisecond)
+	fmt.Println("goroutines still alive:", runtime.NumGoroutine())
+}
+```
+
+<TerminalOutput command="go run -race main.go" label="Go 1.27.1 · darwin/arm64" caption="Two real runs with the race detector on, no race reported. After cancel only main is left, so the count is 1. The same program without the two selects printed 6 on the same check.">
+```text
+took one result, now stopping
+goroutines still alive: 1
+took one result, now stopping
+goroutines still alive: 1
+```
+</TerminalOutput>
+
+Now there are two exits. If `main` reads everything, `jobs` closes and the pool ends as before. If `main` cancels, the producer and every worker leave through their `ctx.Done()` case, the `WaitGroup` fills, and the closer closes `results`.
 
 ### Try it: change the worker count
 
@@ -280,7 +365,7 @@ goroutines still alive: 1
 ```
 </TerminalOutput>
 
-Each stage uses `defer close(out)`, so its output channel closes no matter which path it leaves by. Now the two unfinished stages see `ctx.Done()` close, return, and the count drops to 1.
+Each stage uses `defer close(out)`, so its output channel closes no matter which path it leaves by. Now the two unfinished stages see `ctx.Done()` close, return, and the count drops to 1. `square` can leave by either door: if it is stuck sending, through its own `ctx.Done()` case; if it is waiting to receive, because `gen` returned through `ctx.Done()` and its `defer close(out)` closed the channel `square` calls `in`, which ends `for n := range in`.
 
 Shutdown path: There are two exits, and a good pipeline handles both. On the normal path the first stage runs out of input and closes its channel, and the close travels down the chain as each stage's `range` loop ends. On the early path somebody cancels the context, and each stage leaves through its `ctx.Done()` case. The habit to build is to check `ctx.Done()` at every point where a goroutine can block on a channel.
 
@@ -373,7 +458,7 @@ func main() {
 }
 ```
 
-`merge` starts one goroutine per input channel, each copying values to `out`. It uses a `WaitGroup` for the same reason the pool did: only after every copier is finished is it safe to close `out`. In `main`, three copies of `square` all read from the same `in` channel (fan-out), and `merge` turns their three outputs into one (fan-in). Each copy sleeps 50 ms per value to stand in for slow work.
+Read `merge` in four steps. (1) It makes one output channel, `out`. (2) For each input channel `c` it starts a goroutine that copies every value from `c` to `out`, or leaves early if the context is cancelled. (3) Each copier calls `wg.Done()` when it leaves. (4) One last goroutine waits on the `WaitGroup` and only then closes `out`, for the same reason the pool did: closing earlier would let a copier send on a closed channel. Each copier uses `c` from the loop. That is safe since Go 1.22, because every iteration gets its own `c` (and its own `i` or `id` in the later examples); [post 7](/blog/go-goroutines-channels-select/) explains it. In `main`, three copies of `square` all read from the same `in` channel (fan-out), and `merge` turns their three outputs into one (fan-in). Each copy sleeps 50 ms per value to stand in for slow work.
 
 <TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="One real run. Nine values at 50 ms each would take 450 ms in one stage, and three copies take about 150 ms. The sum is always 285. The order in which values come out of merge is not fixed, which is why the program only adds them up.">
 ```text
@@ -419,9 +504,9 @@ func main() {
 }
 ```
 
-`chan struct{}` is a channel whose values carry no data (an empty struct takes no memory), which is the usual way to write "just a token". With capacity 3, the fourth `sem <- struct{}{}` blocks until some task runs `<-sem`. The `defer func() { <-sem }()` line returns the slot even if the task exits early. And `len(sem)` is the number of slots in use right now, which the program prints so you can see the limit at work.
+`chan struct{}` is a channel whose values carry no data (an empty struct takes no memory), which is the usual way to write "just a token". With capacity 3, the fourth `sem <- struct{}{}` blocks until some task runs `<-sem`. The `defer func() { <-sem }()` line returns the slot even if the task exits early. It is wrapped in a small function because `defer` needs a function call, and `<-sem` on its own is a receive, not a call. Each goroutine also gets its own `i`, the same Go 1.22 rule as in `merge`. And `len(sem)` is the number of slots in use right now, which the program prints so you can see the limit at work.
 
-<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="One real run. The slot count climbs to 3 and stays there. The order of the tasks is different every run, and the count printed next to a task can read one step stale because the other tasks are taking and releasing slots at the same time.">
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="One real run. The slot count climbs to 3 and stays there. The order of the tasks is different every run, and the lines come out in the order the goroutines reached `Println`, which is not the order they took a slot. That is why the first line can say task 8 with 1 slot in use: it simply got there first, while the others were still waiting for a slot.">
 ```text
 task 8 running, slots in use: 1
 task 4 running, slots in use: 2
@@ -439,7 +524,7 @@ In this version all 8 goroutines start immediately, and 5 of them wait at the `s
 
 When to use which? A worker pool is the better fit when each worker has setup cost (a database connection, a buffer) that you want to reuse, or when you want a queue in front of the workers. A semaphore is the better fit for "do these N things, at most K at a time" with no state to share.
 
-Shutdown path: The `defer` that releases the slot is the whole shutdown story: whether a task finishes, returns early or panics, its slot comes back. The `WaitGroup` tells `main` when every task is done. To stop waiting for a slot when the caller gives up, replace the plain send with a `select` that also listens to `<-ctx.Done()`, as in the pipeline.
+Shutdown path: The `defer` that releases the slot is the whole shutdown story: whether a task finishes or returns early, its slot comes back. A panic that nobody recovers (post 5) crashes the whole program, so slots only matter after a panic if the task recovers it. The `WaitGroup` tells `main` when every task is done. To stop waiting for a slot when the caller gives up, replace the plain send with a `select` that also listens to `<-ctx.Done()`, as in the pipeline.
 
 ---
 
@@ -598,7 +683,7 @@ group failed: fetch 2: upstream returned 503
 
 One thing to remember: cancelling the context only helps tasks that look at it. A function that ignores `ctx` runs to the end no matter what, so every function you pass to `g.Go` should pass `ctx` down to whatever it calls (an HTTP request, a database query) or `select` on it.
 
-Shutdown path: `g.Wait()` returns only after every goroutine has returned, so nothing is left behind. The group's context is cancelled when a task fails or when `Wait` returns, whichever comes first. Task 5 shows the edge: it only got a free slot after task 2 failed, so it started with an already-cancelled context and left right away.
+Shutdown path: `g.Wait()` returns only after every goroutine has returned, so nothing is left behind. The group's context is cancelled when a task fails or when `Wait` returns, whichever comes first. Task 5 shows the edge: it only got a free slot after task 2 failed, so it started with an already-cancelled context and left right away. Task 3 is the other case: it started at 0 ms and would have finished at 300 ms, but the cancel at 200 ms reached it first. Task 4 got task 1's slot at 100 ms and was cancelled at 200 ms the same way.
 
 ---
 
@@ -606,7 +691,7 @@ Shutdown path: `g.Wait()` returns only after every goroutine has returned, so no
 
 | Pattern | Problem it solves | Stops when | Watch for |
 |---|---|---|---|
-| Worker pool | Cap how much runs at once, with a queue in front | the jobs channel is closed, or the context is cancelled | a consumer that stops reading `results` and strands the workers |
+| Worker pool | Cap how much runs at once, with a queue in front | the jobs channel is closed, or the context is cancelled (the early-stop version above) | a consumer that stops reading `results` and strands the workers |
 | Pipeline | Split work into small steps with backpressure | the first stage closes, or the context is cancelled | a stage with a send that does not also select on `ctx.Done()` |
 | Fan-out and fan-in | Speed up one slow stage | every copy has returned, then the merge closes | output order is no longer the input order |
 | Semaphore channel | At most K tasks do real work at once | each task releases its slot with `defer` | acquiring the slot inside the goroutine still starts every goroutine |
@@ -670,6 +755,8 @@ Bạn có lẽ đã có tên cho hầu hết các hình dạng này. Go dựng c
 | Chạy một nhóm, dừng khi có lỗi đầu tiên | `ExecutorCompletionService` và tự hủy | `asyncio.TaskGroup` (hủy phần còn lại) | `Promise.all` báo lỗi nhưng các việc kia vẫn chạy | `errgroup` |
 
 Khác biệt lớn nhất là chỗ pool nằm ở đâu. Trong Java, pool là một đối tượng bạn cấu hình. Trong Go, pool chỉ là một vòng lặp trong mỗi goroutine cộng một channel dùng chung, nên không có gì để cấu hình và không có gì bị giấu: bạn đọc hết mẫu này trong hai chục dòng.
+
+Sáu mẫu là nhiều cho một lần ngồi đọc. Nếu chỉ cần bản ngắn, hãy nhảy tới bảng "Chọn mẫu nào" gần cuối bài, rồi quay lại đọc những mẫu bạn cần.
 
 <Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
 
@@ -758,9 +845,92 @@ Goroutine đưa job vào là một goroutine riêng, có chủ đích. Nếu `ma
 
 Chín job, mỗi job 50 ms, mất 450 ms với một worker và 150 ms với ba worker. Đó là cái lợi của pool, và nó cũng cho thấy giới hạn: tốc độ ngừng tăng khi worker nhiều hơn job, hoặc khi chỗ nghẽn thật (một database, một nhân CPU, một API có hạn mức) đã bão hòa. Điểm xuất phát hay dùng là một worker cho mỗi nhân CPU với việc nặng tính toán, và nhiều hơn với việc chủ yếu chờ mạng. Hãy đo rồi mới đổi số.
 
-Đường tắt: Đóng `jobs` làm vòng `range` của mọi worker kết thúc. `defer wg.Done()` của từng worker chạy. Một goroutine nhỏ chờ `WaitGroup` rồi đóng `results`, nhờ đó vòng lặp trong `main` kết thúc. Quy tắc phía sau là quy tắc từ bài 7: bên gửi đóng. Ở đây producer đóng `jobs`, còn goroutine đóng `results` là vì chỉ nó biết khi nào mọi worker đã xong. Nếu `main` ngừng đọc `results` sớm, các worker sẽ bị chặn ở lệnh gửi kế tiếp và không bao giờ thoát, và phần pipeline bên dưới chỉ cách ngăn chuyện đó.
+Đường tắt: Đóng `jobs` làm vòng `range` của mọi worker kết thúc. `defer wg.Done()` của từng worker chạy. Một goroutine nhỏ chờ `WaitGroup` rồi đóng `results`, nhờ đó vòng lặp trong `main` kết thúc. Quy tắc phía sau là quy tắc từ bài 7: bên gửi đóng. Ở đây producer đóng `jobs`, còn goroutine đóng `results` là vì chỉ nó biết khi nào mọi worker đã xong. Đường này chỉ chạy được khi `main` còn đọc `results`. Nếu `main` dừng sớm, mọi worker sẽ bị chặn ở lệnh gửi kế tiếp và không bao giờ thoát. Đo trên chương trình ở trên khi `main` chỉ đọc một kết quả: còn 6 goroutine sống (`main`, 3 worker, producer và goroutine đóng). Đoạn code kế tiếp sửa chuyện đó.
 
 Từ Go 1.25, `WaitGroup` còn có phương thức `Go`, nên `wg.Go(func() { ... })` thay cho bộ ba `Add(1)`, `go` và `defer wg.Done()`. Bài này giữ dạng dài để từng bước nhìn thấy được.
+
+### Dừng pool sớm
+
+Để pool dừng được khi bên gọi bỏ đi, hãy cho mọi goroutine có thể bị chặn trên channel một lối thoát thứ hai. Một `context` mang channel `Done()` đóng lại khi có người gọi `cancel()`; [bài 8](/blog/go-context-timeouts-mutexes/) nói đầy đủ về nó, và phần pipeline bên dưới dùng đúng ba mảnh này. Ở đây producer và từng worker thay lệnh gửi trơn bằng một `select` giữa lệnh gửi và `<-ctx.Done()`, còn `main` đọc một kết quả rồi gọi `cancel()`.
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"runtime"
+	"sync"
+	"time"
+)
+
+type result struct {
+	job    int
+	square int
+}
+
+func run(ctx context.Context, workers int) <-chan result {
+	jobs := make(chan int)
+	results := make(chan result)
+
+	var wg sync.WaitGroup
+	for w := 1; w <= workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for n := range jobs {
+				time.Sleep(50 * time.Millisecond) // pretend work
+				select {
+				case results <- result{job: n, square: n * n}:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+
+	go func() {
+		defer close(jobs)
+		for n := 1; n <= 9; n++ {
+			select {
+			case jobs <- n:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	return results
+}
+
+func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+	results := run(ctx, 3)
+
+	<-results
+	fmt.Println("took one result, now stopping")
+	cancel() // main stops reading, so tell the pool to stop
+
+	time.Sleep(200 * time.Millisecond)
+	fmt.Println("goroutines still alive:", runtime.NumGoroutine())
+}
+```
+
+<TerminalOutput command="go run -race main.go" label="Go 1.27.1 · darwin/arm64" caption="Hai lần chạy thật có bật race detector, không báo race. Sau cancel chỉ còn main, nên số đếm là 1. Chương trình giống hệt nhưng không có hai lệnh select in ra 6 ở cùng phép kiểm tra.">
+```text
+took one result, now stopping
+goroutines still alive: 1
+took one result, now stopping
+goroutines still alive: 1
+```
+</TerminalOutput>
+
+Giờ có hai lối thoát. Nếu `main` đọc hết, `jobs` đóng và pool kết thúc như trước. Nếu `main` hủy, producer và mọi worker thoát qua nhánh `ctx.Done()` của mình, `WaitGroup` đầy, và goroutine đóng đóng `results`.
 
 ### Thử đi: đổi số worker
 
@@ -890,7 +1060,7 @@ goroutines still alive: 1
 ```
 </TerminalOutput>
 
-Mỗi stage dùng `defer close(out)`, nên channel đầu ra của nó đóng dù thoát bằng đường nào. Giờ hai stage còn dang dở thấy `ctx.Done()` đóng, return, và số đếm giảm về 1.
+Mỗi stage dùng `defer close(out)`, nên channel đầu ra của nó đóng dù thoát bằng đường nào. Giờ hai stage còn dang dở thấy `ctx.Done()` đóng, return, và số đếm giảm về 1. `square` có thể thoát bằng một trong hai cửa: nếu đang kẹt ở lệnh gửi thì qua nhánh `ctx.Done()` của chính nó; nếu đang chờ nhận thì vì `gen` đã return qua `ctx.Done()` và `defer close(out)` của nó đóng channel mà `square` gọi là `in`, làm `for n := range in` kết thúc.
 
 Đường tắt: Có hai lối thoát, và một pipeline tốt xử lý cả hai. Ở đường bình thường, stage đầu hết đầu vào và đóng channel của nó, rồi việc đóng lan xuống chuỗi khi vòng `range` của từng stage kết thúc. Ở đường thoát sớm, có người hủy context, và mỗi stage thoát qua nhánh `ctx.Done()` của nó. Thói quen cần tập là kiểm tra `ctx.Done()` ở mọi chỗ mà một goroutine có thể bị chặn trên channel.
 
@@ -983,7 +1153,7 @@ func main() {
 }
 ```
 
-`merge` mở một goroutine cho mỗi channel đầu vào, mỗi cái chép giá trị sang `out`. Nó dùng `WaitGroup` với cùng lý do như pool: chỉ khi mọi goroutine chép đã xong mới an toàn để đóng `out`. Trong `main`, ba bản `square` cùng đọc từ một channel `in` (fan-out), và `merge` biến ba đầu ra thành một (fan-in). Mỗi bản ngủ 50 ms cho mỗi giá trị để đại diện cho việc chậm.
+Đọc `merge` theo bốn bước. (1) Nó tạo một channel đầu ra là `out`. (2) Với mỗi channel đầu vào `c`, nó mở một goroutine chép từng giá trị từ `c` sang `out`, hoặc thoát sớm nếu context bị hủy. (3) Mỗi goroutine chép gọi `wg.Done()` khi thoát. (4) Một goroutine cuối chờ `WaitGroup` rồi mới đóng `out`, cùng lý do như pool: đóng sớm hơn thì một goroutine chép có thể gửi vào channel đã đóng. Mỗi goroutine chép dùng `c` của vòng lặp. Việc đó an toàn từ Go 1.22, vì mỗi vòng có biến `c` riêng (và `i` hay `id` riêng ở các ví dụ sau); [bài 7](/blog/go-goroutines-channels-select/) giải thích. Trong `main`, ba bản `square` cùng đọc từ một channel `in` (fan-out), và `merge` biến ba đầu ra thành một (fan-in). Mỗi bản ngủ 50 ms cho mỗi giá trị để đại diện cho việc chậm.
 
 <TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Một lần chạy thật. Chín giá trị, mỗi giá trị 50 ms, mất 450 ms nếu chỉ có một stage, ba bản sao mất khoảng 150 ms. Tổng luôn là 285. Thứ tự giá trị ra khỏi merge không cố định, nên chương trình chỉ cộng chúng lại.">
 ```text
@@ -1029,9 +1199,9 @@ func main() {
 }
 ```
 
-`chan struct{}` là channel mà giá trị không mang dữ liệu (struct rỗng không tốn bộ nhớ), cách quen thuộc để viết "chỉ là một cái thẻ". Với dung lượng 3, lệnh `sem <- struct{}{}` thứ tư bị chặn cho đến khi một task chạy `<-sem`. Dòng `defer func() { <-sem }()` trả slot kể cả khi task thoát sớm. Còn `len(sem)` là số slot đang dùng ngay lúc này, chương trình in ra để bạn thấy giới hạn hoạt động.
+`chan struct{}` là channel mà giá trị không mang dữ liệu (struct rỗng không tốn bộ nhớ), cách quen thuộc để viết "chỉ là một cái thẻ". Với dung lượng 3, lệnh `sem <- struct{}{}` thứ tư bị chặn cho đến khi một task chạy `<-sem`. Dòng `defer func() { <-sem }()` trả slot kể cả khi task thoát sớm. Nó được bọc trong một hàm nhỏ vì `defer` cần một lời gọi hàm, còn `<-sem` đứng một mình là một phép nhận, không phải lời gọi. Mỗi goroutine cũng có `i` riêng, cùng quy tắc Go 1.22 như trong `merge`. Còn `len(sem)` là số slot đang dùng ngay lúc này, chương trình in ra để bạn thấy giới hạn hoạt động.
 
-<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Một lần chạy thật. Số slot tăng lên 3 rồi giữ nguyên. Thứ tự các task khác nhau mỗi lần chạy, và số đếm in cạnh một task có thể cũ một nhịp vì các task khác đang lấy và trả slot cùng lúc.">
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Một lần chạy thật. Số slot tăng lên 3 rồi giữ nguyên. Thứ tự các task khác nhau mỗi lần chạy, và các dòng ra theo thứ tự các goroutine chạm tới `Println`, không phải thứ tự chúng lấy slot. Vì vậy dòng đầu có thể là task 8 với 1 slot đang dùng: nó chỉ đến trước, khi các task kia còn đang chờ slot.">
 ```text
 task 8 running, slots in use: 1
 task 4 running, slots in use: 2
@@ -1049,7 +1219,7 @@ done
 
 Khi nào dùng cái nào? Worker pool hợp hơn khi mỗi worker có chi phí khởi tạo (một kết nối database, một buffer) mà bạn muốn tái dùng, hoặc khi bạn muốn có hàng đợi trước các worker. Semaphore hợp hơn với kiểu "làm N việc này, mỗi lần tối đa K việc" và không có trạng thái nào để chia sẻ.
 
-Đường tắt: Câu `defer` trả slot chính là toàn bộ câu chuyện tắt: task xong, return sớm hay panic thì slot đều được trả. `WaitGroup` báo cho `main` biết khi mọi task đã xong. Để thôi chờ slot khi bên gọi bỏ cuộc, hãy thay lệnh gửi trơn bằng một `select` có thêm `<-ctx.Done()`, như trong pipeline.
+Đường tắt: Câu `defer` trả slot chính là toàn bộ câu chuyện tắt: task xong hay return sớm thì slot đều được trả. Một panic không ai recover (bài 5) làm sập cả chương trình, nên sau panic slot chỉ có ý nghĩa nếu task tự recover nó. `WaitGroup` báo cho `main` biết khi mọi task đã xong. Để thôi chờ slot khi bên gọi bỏ cuộc, hãy thay lệnh gửi trơn bằng một `select` có thêm `<-ctx.Done()`, như trong pipeline.
 
 ---
 
@@ -1208,7 +1378,7 @@ group failed: fetch 2: upstream returned 503
 
 Một điều cần nhớ: hủy context chỉ giúp được những task có nhìn vào nó. Hàm bỏ qua `ctx` sẽ chạy đến hết bất kể chuyện gì, nên mọi hàm bạn đưa cho `g.Go` phải truyền `ctx` xuống thứ nó gọi (một HTTP request, một câu truy vấn database) hoặc tự `select` trên nó.
 
-Đường tắt: `g.Wait()` chỉ return sau khi mọi goroutine đã return, nên không có gì bị bỏ lại. Context của nhóm bị hủy khi một task lỗi hoặc khi `Wait` return, cái nào đến trước. Task 5 cho thấy trường hợp biên: nó chỉ có slot trống sau khi task 2 lỗi, nên bắt đầu với một context đã bị hủy và thoát ngay.
+Đường tắt: `g.Wait()` chỉ return sau khi mọi goroutine đã return, nên không có gì bị bỏ lại. Context của nhóm bị hủy khi một task lỗi hoặc khi `Wait` return, cái nào đến trước. Task 5 cho thấy trường hợp biên: nó chỉ có slot trống sau khi task 2 lỗi, nên bắt đầu với một context đã bị hủy và thoát ngay. Task 3 là trường hợp còn lại: nó bắt đầu ở 0 ms và lẽ ra xong ở 300 ms, nhưng lệnh hủy ở 200 ms đến trước. Task 4 nhận slot của task 1 ở 100 ms và bị hủy ở 200 ms theo cùng cách.
 
 ---
 
@@ -1216,7 +1386,7 @@ Một điều cần nhớ: hủy context chỉ giúp được những task có n
 
 | Mẫu | Giải quyết việc gì | Dừng khi | Cần để ý |
 |---|---|---|---|
-| Worker pool | Giới hạn lượng việc chạy cùng lúc, có hàng đợi phía trước | channel jobs bị đóng, hoặc context bị hủy | bên tiêu thụ ngừng đọc `results` làm worker kẹt lại |
+| Worker pool | Giới hạn lượng việc chạy cùng lúc, có hàng đợi phía trước | channel jobs bị đóng, hoặc context bị hủy (bản dừng sớm ở trên) | bên tiêu thụ ngừng đọc `results` làm worker kẹt lại |
 | Pipeline | Chia việc thành các bước nhỏ có backpressure | stage đầu đóng, hoặc context bị hủy | stage có lệnh gửi mà không `select` thêm `ctx.Done()` |
 | Fan-out và fan-in | Tăng tốc một stage chậm | mọi bản sao đã return, rồi merge đóng | thứ tự đầu ra không còn là thứ tự đầu vào |
 | Semaphore channel | Tối đa K task làm việc thật cùng lúc | mỗi task trả slot bằng `defer` | lấy slot bên trong goroutine vẫn mở hết các goroutine |
