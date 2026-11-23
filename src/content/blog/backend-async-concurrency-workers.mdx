@@ -1,0 +1,704 @@
+---
+title: "One thread, many requests"
+title_vi: "Một thread, nhiều request"
+description: "async def only wins if the body awaits: one blocking call inside it turned ten 1-second requests into ten seconds. Event loop, threads, processes and workers, measured."
+description_vi: "async def chỉ nhanh khi thân hàm có await: một lời gọi chặn bên trong là mười request một giây thành mười giây. Event loop, thread, process và worker, đo thật."
+date: 2026-11-23
+category: "backend"
+tags: ["backend", "python", "fastapi", "async", "concurrency", "workers"]
+cover: "../../assets/blog/backend-async-concurrency-workers/loop-swagger-cover.png"
+cover_alt: "Swagger UI of the demo service running the blocking-call experiment, listing /async-await, /async-blocking, /plain-def, /trap, /fixed-async, /fixed-def and /threadpool-limit"
+draft: true
+sources:
+  - { title: "FastAPI: Modern Python Web Development", author: "Bill Lubanovic", chapters: "Ch. 4", url: "https://www.oreilly.com/library/view/fastapi/9781098135091/" }
+  - { title: "Concurrency and async / await", author: "FastAPI docs", url: "https://fastapi.tiangolo.com/async/" }
+  - { title: "Background Tasks", author: "FastAPI docs", url: "https://fastapi.tiangolo.com/tutorial/background-tasks/" }
+  - { title: "Settings and Environments: Deployment (--workers)", author: "Uvicorn docs", url: "https://www.uvicorn.org/deployment/" }
+  - { title: "Developing with asyncio: debug mode and blocking calls", author: "Python docs", url: "https://docs.python.org/3/library/asyncio-dev.html" }
+  - { title: "Running blocking code (asyncio.to_thread, run_in_executor)", author: "Python docs", url: "https://docs.python.org/3/library/asyncio-eventloop.html#executing-code-in-thread-or-process-pools" }
+  - { title: "Global Interpreter Lock", author: "Python docs glossary", url: "https://docs.python.org/3/glossary.html#term-global-interpreter-lock" }
+  - { title: "concurrent.futures.ProcessPoolExecutor", author: "Python docs", url: "https://docs.python.org/3/library/concurrent.futures.html#processpoolexecutor" }
+  - { title: "Details of the Cloudflare outage on July 2, 2019", author: "John Graham-Cumming, Cloudflare blog", url: "https://blog.cloudflare.com/details-of-the-cloudflare-outage-on-july-2-2019/" }
+  - { title: "Concurrency is not parallelism", author: "Rob Pike, The Go Blog", url: "https://go.dev/blog/waza-talk" }
+  - { title: "Cars line up outside drive-in teller windows (Public domain)", author: "Declan Haun, National Archives, May 1973", url: "https://commons.wikimedia.org/wiki/File:CARS_LINE_UP_OUTSIDE_DRIVE_IN_TELLER_WINDOWS_-_NARA_-_546432.jpg" }
+---
+
+import En from '../../components/mdx/En.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
+import BeP06ThreeWays from '../../components/mdx/BeP06ThreeWays.astro';
+import BeP06LoopTimeline from '../../components/mdx/BeP06LoopTimeline.astro';
+import BeP06WallTimes from '../../components/mdx/BeP06WallTimes.astro';
+import BeP06WhichTool from '../../components/mdx/BeP06WhichTool.astro';
+import BeP06CpuOptions from '../../components/mdx/BeP06CpuOptions.astro';
+import BeP06WorkersOwn from '../../components/mdx/BeP06WorkersOwn.astro';
+import heroTeller from '../../assets/blog/backend-async-concurrency-workers/drive-in-teller-1973.jpg';
+
+<En>
+
+<Figure src={heroTeller} alt="Cars lined up one behind another outside the drive-in teller windows of a bank, May 1973" caption="A drive-in bank works because the teller serves whoever is at the window and passes the tube along while the paperwork waits somewhere else. It jams the moment one customer parks at the window and starts a phone call. Your event loop is that teller: one worker, many cars, and a rule that nobody sits at the window and waits." sourceTitle="Wikimedia Commons: Cars line up outside drive-in teller windows, 1973 (Declan Haun, National Archives)" sourceUrl="https://commons.wikimedia.org/wiki/File:CARS_LINE_UP_OUTSIDE_DRIVE_IN_TELLER_WINDOWS_-_NARA_-_546432.jpg" />
+
+> "Concurrency is not parallelism."
+> &mdash; *Rob Pike*
+
+### The hook: nothing crashed, everything stopped
+
+On 2 July 2019 Cloudflare pushed an update to its WAF rules. One rule contained a regular expression that, in Cloudflare's own words, "backtracked enormously and exhausted CPU used for HTTP/HTTPS serving". CPUs hit "nearly 100%" across the network, and "the Cloudflare service went down for 27 minutes". An engineer told the author "we had lost 80% of our traffic".
+
+Nothing crashed. Every server was busy doing exactly what it was told, on one job that would not finish and would not step aside. That is not an asyncio story, but it has the same shape as the bug this post is about: **one piece of work that holds the processor and never hands it back starves everything that shares it.**
+
+Your FastAPI process has a small version of that hazard built in. By default one thread of Python, the *event loop*, serves every request in flight. That is wonderful while requests wait. It is a trap the moment one of them does not.
+
+Four questions:
+
+1. **Where a request spends its time**, and the three tools for doing more than one thing: event loop, threads, processes.
+2. **How a one-second wait costs 1 second or 10**, and how FastAPI decides between `async def` and `def`.
+3. **The trap AI code falls into**: a blocking client inside `async def`, and CPU work with the GIL.
+4. **What `--workers` buys, and what `BackgroundTasks` cannot promise.**
+
+---
+
+## 1. Most of a request is waiting
+
+An endpoint calls the database, then another service, then maybe writes a file. During each call your Python code does nothing: it waits for bytes to come back. A typical handler computes for a moment and waits for much longer. So the question for a backend is rarely "how do I compute faster?" It is: **what does the server do with all those idle moments?**
+
+Three tools answer that, and each one fits a different kind of work:
+
+<BeP06ThreeWays />
+
+Plain version of each:
+
+- **Event loop (asyncio).** One thread runs many tasks by taking turns. A task runs until it says `await`, which means "I am waiting; run someone else." No two tasks ever run at the same instant, so there is nothing to lock. Cheap enough for thousands of waiting connections.
+- **Threads.** Several threads inside one process. The OS switches between them. In CPython the GIL (global interpreter lock) lets only one thread run Python bytecode at a time, so threads help when code *waits* and do not help when it *computes*.
+- **Processes.** Separate interpreters, each with its own memory. They run in parallel on separate cores. The price: they share nothing, and starting and talking to them costs more.
+
+The [lifecycle post](/blog/backend-http-request-lifecycle/) left uvicorn at the door: it accepts the connection, parses HTTP, and calls your code. Now you can see what that means: one uvicorn process is one event loop on one thread, and your endpoint runs on it unless you say otherwise.
+
+<Concepts>
+- **Event loop**: the scheduler inside asyncio. It runs one task at a time and switches only at an `await`.
+- **`await`**: "pause me until this finishes, and let other tasks run meanwhile". Only awaitable things (like `asyncio.sleep` or an async client's `get`) can be awaited.
+- **Blocking call**: a call that holds the thread until it finishes (`time.sleep`, `requests.get`). Inside the event loop thread, it freezes every other task.
+- **GIL**: CPython's lock that lets one thread run Python bytecode at a time. It is why threads do not speed up pure-Python computation.
+- **Worker**: here, one uvicorn process serving requests. `--workers N` starts N of them.
+</Concepts>
+
+---
+
+## 2. One sleep, two outcomes
+
+FastAPI picks the tool from how you *declare* the endpoint. An `async def` runs directly on the event loop. A plain `def` is handed to a pool of threads, so it cannot freeze the loop. Here are the same one-second wait written three ways, in `demo/p06_loop.py`:
+
+```python
+@app.get("/async-await")
+async def async_await() -> dict:
+    await asyncio.sleep(1)  # hands the loop back while it waits
+    return {"route": "async-await"}
+
+
+@app.get("/async-blocking")
+async def async_blocking() -> dict:
+    time.sleep(1)  # never hands the loop back
+    return {"route": "async-blocking"}
+
+
+@app.get("/plain-def")
+def plain_def() -> dict:
+    time.sleep(1)  # FastAPI runs a plain def in a worker thread
+    return {"route": "plain-def"}
+```
+
+`await asyncio.sleep(1)` pauses only this request and lets the loop serve others. `time.sleep(1)` pauses the whole thread, and in an `async def` that thread is the loop's. The plain `def` blocks too, but only a pool thread, which is why FastAPI's docs say to use `def` when your code calls blocking libraries.
+
+Ten concurrent requests to each, with a `/health` ping sent 0.2 s into the burst:
+
+<TerminalOutput command="python p06_load.py http://127.0.0.1:4336 /async-await 10 --probe  (then /async-blocking, then /plain-def)" label="Python 3.13.16 · FastAPI 0.165.0 · uvicorn 0.54.0 · httpx 0.28.1 · Apple M2 · captured Nov 2026" caption="Same wait, three declarations. The middle line is the bug: the unrelated /health request, which should take microseconds, sat behind ten sleeping requests for 9.85 s.">
+```text
+GET /async-await x10: wall 1.06 s (fastest 1.05 s, slowest 1.06 s) | /health sent at +0.2 s answered after 0.00 s
+GET /async-blocking x10: wall 10.05 s (fastest 1.02 s, slowest 10.05 s) | /health sent at +0.2 s answered after 9.85 s
+GET /plain-def x10: wall 1.03 s (fastest 1.03 s, slowest 1.03 s) | /health sent at +0.2 s answered after 0.00 s
+```
+</TerminalOutput>
+
+The same ten requests, drawn as time:
+
+<BeP06LoopTimeline />
+
+That `/health` number is the part that bites in production. A load balancer's health check is just another request. If the loop is stuck, the check times out, the instance is declared dead, and the stuck process takes the blame for a bug that lives in one endpoint.
+
+You can make Python name the culprit. Run with `PYTHONASYNCIODEBUG=1` and asyncio reports any task that held the loop for too long (default: over 100 ms):
+
+<TerminalOutput command="PYTHONASYNCIODEBUG=1 uvicorn p06_loop:app --port 4336 — then: curl /async-blocking" label="Python 3.13.16 · FastAPI 0.165.0 · uvicorn 0.54.0 · httpx 0.28.1 · Apple M2 · captured Nov 2026" caption="One request to /async-blocking. The line is real; the middle is elided (the file paths of the site-packages install), the ending is untouched. The plain def request made no such report.">
+```text
+Executing <Task finished name='Task-3' coro=<RequestResponseCycle.run_asgi() done, defined at …/site-packages/uvicorn/protocols/http/httptools_impl.py:420> result=None created at …/site-packages/uvicorn/protocols/http/httptools_impl.py:309> took 1.004 seconds
+```
+</TerminalOutput>
+
+The thread pool behind plain `def` is finite. FastAPI (through anyio) gives it 40 threads by default, and you can read that off the running app (`/threadpool-limit`). Fifty one-second sleepers in plain `def`, versus fifty awaiting ones:
+
+<TerminalOutput command="curl /threadpool-limit — then: python p06_load.py http://127.0.0.1:4336 /plain-def 50  and  /async-await 50" label="Python 3.13.16 · FastAPI 0.165.0 · uvicorn 0.54.0 · httpx 0.28.1 · Apple M2 · captured Nov 2026" caption="40 threads, so 50 requests take two rounds: 2.04 s. The awaiting version has no pool to run out of, and finishes all 50 in 1.06 s. Threads are a fallback for blocking libraries, not a free scaling trick.">
+```text
+{"worker_threads_for_plain_def":40}
+GET /plain-def x50: wall 2.04 s (fastest 1.03 s, slowest 2.04 s)
+GET /async-await x50: wall 1.06 s (fastest 1.03 s, slowest 1.06 s)
+```
+</TerminalOutput>
+
+<Callout type="warning" title="The AI habit to break">
+Generated endpoints are almost all `async def`, because that is how the tutorials look. But `async def` is not a speed setting. It is a promise that the body will `await` whatever it waits on. A body with no `await` in it, or one that calls a blocking function, is slower and more dangerous than the plain `def` it replaced.
+</Callout>
+
+---
+
+## 3. The call that sinks it
+
+The classic: an `async def` endpoint that calls a perfectly ordinary client library. `requests` is the most common one; a synchronous database driver does the same thing. The code looks like it belongs. Here are three versions of one call to an upstream API that takes 0.5 s (`demo/p06_upstream.py` plays the upstream; `demo/p06_loop.py` calls it):
+
+```python
+@app.get("/trap")
+async def trap() -> dict:
+    # `requests` is a blocking client: the whole loop waits with it.
+    return requests.get(UPSTREAM).json()
+
+
+@app.get("/fixed-async")
+async def fixed_async() -> dict:
+    async with httpx.AsyncClient() as client:
+        return (await client.get(UPSTREAM)).json()
+
+
+@app.get("/fixed-def")
+def fixed_def() -> dict:
+    return requests.get(UPSTREAM).json()
+```
+
+`/trap` is what AI writes. `requests.get` blocks the thread until the answer arrives, and in `async def` that thread is the loop's. `/fixed-async` keeps `async def` but uses `httpx.AsyncClient`, whose `get` can be awaited, so the loop serves others while waiting. `/fixed-def` is the cheapest fix of all: change `async def` to `def` and keep `requests`. FastAPI moves it to a thread.
+
+<TerminalOutput command="python p06_load.py http://127.0.0.1:4336 /trap 10 --probe  (then /fixed-async, then /fixed-def)" label="Python 3.13.16 · FastAPI 0.165.0 · uvicorn 0.54.0 · httpx 0.28.1 · requests 2.34.2 · Apple M2 · captured Nov 2026" caption="Ten requests, an upstream that takes 0.5 s. The trap needs ten half-seconds, one after another: 5.06 s, and /health waited 4.86 s. Either fix finishes in about the time of one call.">
+```text
+GET /trap x10: wall 5.06 s (fastest 0.53 s, slowest 5.06 s) | /health sent at +0.2 s answered after 4.86 s
+GET /fixed-async x10: wall 0.62 s (fastest 0.61 s, slowest 0.62 s) | /health sent at +0.2 s answered after 0.00 s
+GET /fixed-def x10: wall 0.53 s (fastest 0.52 s, slowest 0.53 s) | /health sent at +0.2 s answered after 0.00 s
+```
+</TerminalOutput>
+
+<BeP06WallTimes />
+
+When you review an endpoint, ask one question: **what is it waiting on, and does the declaration match?**
+
+<BeP06WhichTool />
+
+If you must call one blocking function from inside an `async def` that does other awaited work, hand just that call to a thread: `await run_in_threadpool(fn, arg)` (from `fastapi.concurrency`) or `await asyncio.to_thread(fn, arg)`. The call blocks a pool thread and the loop stays free.
+
+<Concepts>
+- **Async library**: a client whose network calls are awaitable (`httpx.AsyncClient`, async database drivers). It tells the loop "I am waiting" instead of holding the thread.
+- **Sync library**: a client whose calls simply block (`requests`, a classic database driver). Safe in a plain `def`, harmful inside `async def`.
+- **Thread pool**: a fixed set of threads that take plain `def` endpoints. FastAPI's default has 40.
+</Concepts>
+
+---
+
+## 4. When the work is the CPU
+
+Waiting is the easy case. Computing is the hard one, because nothing is idle to overlap. Add a function that burns about half a second of pure-Python arithmetic, and run it three ways, in `demo/p06_cpu.py`:
+
+```python
+@app.get("/cpu-inline")
+async def cpu_inline() -> dict:
+    return {"sum": burn()}  # CPU on the event loop: nothing else runs
+
+
+@app.get("/cpu-thread")
+async def cpu_thread() -> dict:
+    return {"sum": await run_in_threadpool(burn)}  # a thread, same interpreter
+
+
+@app.get("/cpu-process")
+async def cpu_process() -> dict:
+    loop = asyncio.get_running_loop()
+    return {"sum": await loop.run_in_executor(app.state.pool, burn)}  # another process
+```
+
+`/cpu-inline` is the trap again: CPU work in `async def` holds the loop. `/cpu-thread` moves it to a thread with `run_in_threadpool`, which FastAPI itself uses for plain `def`. `/cpu-process` sends it to a `ProcessPoolExecutor` (started once in the app's lifespan, 4 processes) through `loop.run_in_executor`. The function gets pickled, run in another interpreter, and the result is pickled back.
+
+Four concurrent requests, each one burn of 0.5 s (a single request measured alone: 0.50 s):
+
+<TerminalOutput command="python p06_load.py http://127.0.0.1:4376 /cpu-inline 4 --probe  (first alone with x1, then 4 at once: /cpu-inline, /cpu-thread, /cpu-process twice)" label="Python 3.13.16 · FastAPI 0.165.0 · uvicorn 0.54.0 · httpx 0.28.1 · Apple M2 · captured Nov 2026" caption="Inline: 4 x 0.5 s in a row = 2.00 s, and /health waited 1.80 s. Thread: the same 1.97 s of total work, but /health answered in 0.09 s. Process: the four burns really overlap. The first run (0.91 s) also pays to start the workers; the second is 0.62 s.">
+```text
+GET /cpu-inline x1: wall 0.50 s (fastest 0.50 s, slowest 0.50 s)
+GET /cpu-inline x4: wall 2.00 s (fastest 0.51 s, slowest 2.00 s) | /health sent at +0.2 s answered after 1.80 s
+GET /cpu-thread x4: wall 1.97 s (fastest 1.89 s, slowest 1.97 s) | /health sent at +0.2 s answered after 0.09 s
+GET /cpu-process x4: wall 0.91 s (fastest 0.86 s, slowest 0.91 s) | /health sent at +0.2 s answered after 0.00 s
+GET /cpu-process x4: wall 0.62 s (fastest 0.61 s, slowest 0.62 s) | /health sent at +0.2 s answered after 0.00 s
+```
+</TerminalOutput>
+
+<BeP06CpuOptions />
+
+Read the thread row twice. It did not make the work faster: 1.97 s against 2.00 s inline. That is the GIL, honestly measured. What the thread bought is that `/health` stays responsive, because the interpreter switches between threads every few milliseconds even while one of them computes. Only the process pool made the work itself faster, because only separate interpreters run on separate cores.
+
+The process hop is not free: arguments and results are pickled and copied, and a process pool costs memory. It pays for work that takes a noticeable fraction of a second. For work that takes a millisecond, the hop costs more than it saves, and for long or scheduled jobs there is a better home, a separate worker (the queue part of this series comes later). Libraries that release the GIL in their C code (numerical libraries do) can run in threads in parallel. Pure-Python loops cannot.
+
+---
+
+## 5. What a worker owns
+
+`uvicorn --workers 3` starts a parent and three worker processes. All of them listen on the same socket, and the kernel hands each new connection to one of them. This is the third tool from section 1, built into the server. Each worker imports your app on its own, so each has its own event loop, its own thread pool, and its own copy of every module-level variable. See it in `demo/p06_workers.py`:
+
+```python
+hits = 0  # module state: every worker process gets its own copy
+
+
+@app.get("/hit")
+async def hit() -> dict:
+    global hits
+    hits += 1
+    return {"pid": os.getpid(), "hits": hits}
+```
+
+`hits` is a plain module variable, an in-memory counter. `os.getpid()` says which process answered. A driver (`demo/p06_hits.py`) calls `/hit` twelve times, a new connection each time, then twelve times over one kept-alive connection:
+
+<TerminalOutput command="uvicorn p06_workers:app --port 4396 --workers 3 — then: python p06_hits.py http://127.0.0.1:4396 12  (and with --keep-alive)" label="Python 3.13.16 · FastAPI 0.165.0 · uvicorn 0.54.0 · httpx 0.28.1 · Apple M2 · captured Nov 2026" caption="Three workers, one counter that is not one counter. pid 48988 counts to 11, pid 48990 counts to 1, and the third worker (48989) never got a request, so its counter is still 0 and it does not appear. The kept-alive run all lands on one worker, which then reads 13: 1 from before plus these 12.">
+```text
+12 requests over a new connection per request:
+  pid 48988: served 11, its own counter reads 11
+  pid 48990: served 1, its own counter reads 1
+12 requests over one kept-alive connection:
+  pid 48990: served 12, its own counter reads 13
+```
+</TerminalOutput>
+
+<BeP06WorkersOwn />
+
+Two consequences. First, **state in memory is per worker**: anything you keep in a dict (the `InMemoryCaseRepository` from the [layering post](/blog/backend-layered-architecture/) is exactly that) splits into three dicts that disagree. A real shared store becomes necessary the moment you run more than one worker. Second, the distribution is the kernel's choice, not a fair round-robin: in my run, one worker took 11 of 12 connections. On macOS this is uneven; I did not measure Linux.
+
+Does `--workers` fix a blocking endpoint? It softens it:
+
+<TerminalOutput command="python p06_load.py http://127.0.0.1:4396 /async-blocking 10  (twice, then /async-await 10)" label="Python 3.13.16 · FastAPI 0.165.0 · uvicorn 0.54.0 · httpx 0.28.1 · Apple M2 · captured Nov 2026" caption="With 3 workers, ten blocking requests take 7.05 s and 7.10 s, down from 10.05 s with one. The ceiling is the busiest worker, since the kernel does not balance. The awaiting version needs one worker for 1.04 s.">
+```text
+GET /async-blocking x10: wall 7.05 s (fastest 1.03 s, slowest 7.05 s)
+GET /async-blocking x10: wall 7.10 s (fastest 1.03 s, slowest 7.10 s)
+GET /async-await x10: wall 1.04 s (fastest 1.03 s, slowest 1.04 s)
+```
+</TerminalOutput>
+
+More workers shrink the blast radius of a blocking call; they do not remove it. Fix the call first, then add workers for the reason they exist: more CPU cores in use, and a worker that dies does not take the others with it. How many depends on cores and memory, so measure it rather than copying a number.
+
+<Concepts>
+- **Worker process**: one complete copy of your app (loop, thread pool, memory) serving requests. More workers means more cores in use and more RAM.
+- **Per-process state**: a module variable lives in one worker only. Sharing needs something outside the processes: a database, a cache.
+- **Connection affinity**: a kept-alive connection keeps talking to the worker that accepted it.
+</Concepts>
+
+---
+
+## 6. After the response is sent
+
+One more tool sits on the same ground: sometimes the work should not make the client wait at all (build a report, send an email). FastAPI's `BackgroundTasks` runs a function after the response has gone out. `demo/p06_background.py`:
+
+```python
+def build_report(case_id: str) -> None:
+    log(f"report for {case_id}: started")
+    time.sleep(2)  # stands in for slow work: a PDF, a mail, a data export
+    log(f"report for {case_id}: finished")
+
+
+@app.post("/cases/{case_id}/report", status_code=202)
+async def request_report(case_id: str, background: BackgroundTasks) -> dict:
+    background.add_task(build_report, case_id)  # runs after the response is sent
+    log(f"{case_id}: returning 202")
+    return {"status": "accepted"}
+```
+
+The endpoint returns `202 Accepted` right away, and `build_report` starts only after the response is on the wire. It runs in the same process: a plain `def` task goes to the thread pool, an `async def` task goes on the loop (so a blocking call there freezes it, the same trap again).
+
+<TerminalOutput command="uvicorn p06_background:app --port 4336 — then: curl -X POST /cases/C-1/report" label="Python 3.13.16 · FastAPI 0.165.0 · uvicorn 0.54.0 · httpx 0.28.1 · Apple M2 · captured Nov 2026" caption="The client got its 202 in about 3 ms. The task started right after, and finished two seconds later.">
+```text
+client: HTTP 202 after 0.003115s
+[+ 4.37 s] C-1: returning 202
+INFO:     127.0.0.1:59067 - "POST /cases/C-1/report HTTP/1.1" 202 Accepted
+[+ 4.38 s] report for C-1: started
+[+ 6.39 s] report for C-1: finished
+```
+</TerminalOutput>
+
+Now the limit. Same server, a second case, and a `kill -9` half a second into the task, which is what an out-of-memory kill or a crash looks like:
+
+<TerminalOutput command="curl -X POST /cases/C-2/report — then, 0.5 s later: kill -9 <the server>" label="Python 3.13.16 · FastAPI 0.165.0 · uvicorn 0.54.0 · httpx 0.28.1 · Apple M2 · captured Nov 2026" caption="The client was told 202 Accepted. The task never finished, and nothing will ever retry it: the work lived only in that process's memory.">
+```text
+client: HTTP 202 after 0.001620s
+[+ 4.41 s] C-2: returning 202
+INFO:     127.0.0.1:59076 - "POST /cases/C-2/report HTTP/1.1" 202 Accepted
+[+ 4.42 s] report for C-2: started
+(0.5 s later: kill -9, the server process is gone; nothing more is ever printed)
+```
+</TerminalOutput>
+
+| | `BackgroundTasks` | A real queue + worker |
+|---|---|---|
+| Runs where | After the response, in the same process | In a separate worker process |
+| Survives a crash or deploy | No | Yes, the job is stored outside the process |
+| Retries on failure | No | Yes, if you build it in |
+| Competes with requests for CPU | Yes | No, scale it separately |
+| Good for | Fast, cheap, droppable work (a log line, a cache warm) | Anything the user is counting on |
+
+The rule of thumb: if losing the task would be a bug report, it does not belong in `BackgroundTasks`. Queues, retries and at-least-once delivery come later in the series.
+
+<Callout type="note" title="Do not reach for async because it sounds modern">
+A small service with a sync database driver and no outbound HTTP can be a plain `def` service, and be perfectly correct. The point of this post is not "use async". It is: match the declaration to what the function waits on, and know which of the three tools you are standing on.
+</Callout>
+
+---
+
+## Key takeaways
+
+- A request spends most of its time waiting, and the three tools differ in what they do with that time: the event loop overlaps waits on one thread, threads overlap waits inside one interpreter, processes run work in parallel.
+- `async def` is a promise to `await`. A blocking call inside it (`time.sleep`, `requests.get`, a sync driver) froze ten requests into ten seconds, and a `/health` ping behind them for 9.85 s.
+- Plain `def` is the safe home for blocking libraries (40 threads by default); an async library is the way to keep `async def` honest.
+- Threads do not speed up pure-Python CPU work (1.97 s against 2.00 s); a process pool does (0.62 s). Reach for it when the work is long enough to repay the hop.
+- Each `--workers` process has its own memory, so in-memory state diverges (11, 1 and 0 in one run), and `BackgroundTasks` dies with its process.
+
+## Review questions
+
+1. Ten requests each await a one-second sleep and take 1.06 s; the same code with `time.sleep` takes 10.05 s. What exactly is different about who holds the thread? (Section 2)
+2. Why is changing `async def trap()` to `def trap()` a valid fix when `requests` stays, and when would you rather switch to `httpx.AsyncClient`? (Section 3)
+3. A thread did not speed up the four CPU requests but kept `/health` answering in 0.09 s. Explain both facts. (Section 4)
+4. You deploy with `--workers 3` and your in-memory case dictionary starts returning "not found" for cases you just created. What happened, and what must change? (Section 5)
+5. A user is promised a PDF by email, and the server is restarted during the build. What do `BackgroundTasks` guarantee here, and what would you use instead? (Section 6)
+
+</En>
+
+<Vi>
+
+<Figure src={heroTeller} alt="Những chiếc ô tô xếp hàng nối đuôi nhau trước các cửa sổ giao dịch drive-in của một ngân hàng, tháng 5 năm 1973" caption="Ngân hàng drive-in chạy trơn tru vì giao dịch viên phục vụ xe nào đang ở cửa sổ rồi chuyển ống đựng tiền đi, còn giấy tờ thì để chờ chỗ khác. Nó tắc ngay khi có một khách đậu lại ở cửa sổ và bắt đầu gọi điện. Event loop của bạn chính là giao dịch viên đó: một người làm, nhiều xe, và một luật là không ai ngồi lại ở cửa sổ để chờ." sourceTitle="Wikimedia Commons: Cars line up outside drive-in teller windows, 1973 (Declan Haun, National Archives)" sourceUrl="https://commons.wikimedia.org/wiki/File:CARS_LINE_UP_OUTSIDE_DRIVE_IN_TELLER_WINDOWS_-_NARA_-_546432.jpg" />
+
+> "Concurrency không phải là parallelism."
+> &mdash; *Rob Pike*
+
+### Mở đầu: không gì sập, mọi thứ đứng im
+
+Ngày 2/7/2019, Cloudflare đẩy một bản cập nhật cho luật WAF. Một luật trong đó chứa một biểu thức chính quy mà theo chính lời Cloudflare "backtrack khủng khiếp và ngốn hết CPU dùng để phục vụ HTTP/HTTPS". CPU chạm "gần 100%" trên toàn mạng, và "dịch vụ Cloudflare ngừng 27 phút". Một kỹ sư kể với tác giả: "chúng tôi mất 80% lưu lượng".
+
+Không có gì crash. Mọi server vẫn bận rộn làm đúng thứ được giao, trên một việc không chịu kết thúc mà cũng không chịu nhường chỗ. Đó không phải chuyện asyncio, nhưng nó cùng hình dạng với lỗi của bài này: **một đoạn việc giữ chặt bộ xử lý và không bao giờ trả lại sẽ bỏ đói mọi thứ dùng chung với nó.**
+
+Process FastAPI của bạn có sẵn một phiên bản nhỏ của rủi ro đó. Mặc định, một thread Python, tức *event loop*, phục vụ mọi request đang chạy. Tuyệt vời khi các request chỉ đang chờ. Và là cái bẫy ngay khi có một request không chỉ chờ.
+
+Bốn câu hỏi:
+
+1. **Một request tốn thời gian vào đâu**, và ba công cụ để làm nhiều việc một lúc: event loop, thread, process.
+2. **Vì sao một lần chờ một giây tốn 1 giây hay 10 giây**, và FastAPI chọn giữa `async def` và `def` thế nào.
+3. **Cái bẫy code do AI viết hay dính**: client chặn bên trong `async def`, và việc nặng CPU với GIL.
+4. **`--workers` mua được gì, và `BackgroundTasks` không thể hứa gì.**
+
+---
+
+## 1. Phần lớn request là chờ
+
+Một endpoint gọi database, rồi gọi một service khác, rồi có thể ghi file. Trong mỗi lời gọi, code Python của bạn không làm gì cả: nó đợi dữ liệu quay về. Một handler điển hình tính toán chốc lát và chờ lâu hơn nhiều. Nên câu hỏi của backend hiếm khi là "làm sao tính nhanh hơn?" mà là: **server làm gì với tất cả những khoảng rảnh đó?**
+
+Có ba công cụ trả lời câu này, mỗi cái hợp với một loại việc:
+
+<BeP06ThreeWays />
+
+Giải thích đơn giản từng cái:
+
+- **Event loop (asyncio).** Một thread chạy nhiều task bằng cách thay phiên nhau. Một task chạy cho tới khi nó nói `await`, nghĩa là "tôi đang chờ, cho người khác chạy đi". Không hai task nào chạy cùng một thời điểm, nên không cần khoá. Đủ rẻ cho hàng nghìn kết nối đang chờ.
+- **Thread.** Nhiều thread trong một process. Hệ điều hành đổi qua đổi lại giữa chúng. Trong CPython, GIL (global interpreter lock) chỉ cho một thread chạy bytecode Python tại một thời điểm, nên thread giúp được khi code *chờ* và không giúp gì khi code *tính toán*.
+- **Process.** Các interpreter riêng, mỗi cái có bộ nhớ riêng. Chúng chạy song song trên các core khác nhau. Cái giá: không chia sẻ gì với nhau, và khởi động hay nói chuyện với chúng tốn hơn.
+
+[Bài lifecycle](/blog/backend-http-request-lifecycle/) dừng uvicorn ở cửa: nó nhận kết nối, parse HTTP, rồi gọi code của bạn. Giờ bạn thấy điều đó nghĩa là gì: một process uvicorn là một event loop trên một thread, và endpoint của bạn chạy trên đó trừ khi bạn nói khác đi.
+
+<Concepts>
+- **Event loop**: bộ lập lịch bên trong asyncio. Nó chạy mỗi lúc một task và chỉ đổi lượt ở chỗ `await`.
+- **`await`**: "tạm dừng tôi tới khi việc này xong, và cho task khác chạy trong lúc đó". Chỉ những thứ awaitable (như `asyncio.sleep` hay `get` của một client async) mới await được.
+- **Lời gọi chặn (blocking call)**: lời gọi giữ thread cho tới khi xong (`time.sleep`, `requests.get`). Trong thread của event loop, nó đóng băng mọi task khác.
+- **GIL**: cái khoá của CPython chỉ cho một thread chạy bytecode Python mỗi lúc. Nó là lý do thread không làm tính toán thuần Python nhanh hơn.
+- **Worker**: ở đây là một process uvicorn đang phục vụ request. `--workers N` bật N cái.
+</Concepts>
+
+---
+
+## 2. Một lần sleep, hai kết cục
+
+FastAPI chọn công cụ theo cách bạn *khai báo* endpoint. `async def` chạy thẳng trên event loop. `def` thường được giao cho một pool thread, nên không thể làm đứng loop. Đây là cùng một lần chờ một giây viết ba kiểu, trong `demo/p06_loop.py`:
+
+```python
+@app.get("/async-await")
+async def async_await() -> dict:
+    await asyncio.sleep(1)  # hands the loop back while it waits
+    return {"route": "async-await"}
+
+
+@app.get("/async-blocking")
+async def async_blocking() -> dict:
+    time.sleep(1)  # never hands the loop back
+    return {"route": "async-blocking"}
+
+
+@app.get("/plain-def")
+def plain_def() -> dict:
+    time.sleep(1)  # FastAPI runs a plain def in a worker thread
+    return {"route": "plain-def"}
+```
+
+`await asyncio.sleep(1)` chỉ tạm dừng request này và để loop phục vụ request khác. `time.sleep(1)` dừng cả thread, và trong `async def` thread đó là của loop. `def` thường cũng bị chặn, nhưng chỉ là một thread trong pool, nên tài liệu FastAPI bảo hãy dùng `def` khi code gọi thư viện chặn.
+
+Mười request đồng thời tới mỗi endpoint, kèm một ping `/health` gửi sau 0.2 s:
+
+<TerminalOutput command="python p06_load.py http://127.0.0.1:4336 /async-await 10 --probe  (rồi /async-blocking, rồi /plain-def)" label="Python 3.13.16 · FastAPI 0.165.0 · uvicorn 0.54.0 · httpx 0.28.1 · Apple M2 · captured Nov 2026" caption="Cùng một lần chờ, ba kiểu khai báo. Dòng giữa là bug: request /health không liên quan, lẽ ra chỉ mất vài micro giây, phải xếp sau mười request đang ngủ suốt 9.85 s.">
+```text
+GET /async-await x10: wall 1.06 s (fastest 1.05 s, slowest 1.06 s) | /health sent at +0.2 s answered after 0.00 s
+GET /async-blocking x10: wall 10.05 s (fastest 1.02 s, slowest 10.05 s) | /health sent at +0.2 s answered after 9.85 s
+GET /plain-def x10: wall 1.03 s (fastest 1.03 s, slowest 1.03 s) | /health sent at +0.2 s answered after 0.00 s
+```
+</TerminalOutput>
+
+Cũng mười request đó, vẽ theo thời gian:
+
+<BeP06LoopTimeline />
+
+Con số `/health` mới là chỗ đau ngoài production. Health check của load balancer cũng chỉ là một request. Loop bị kẹt thì check timeout, instance bị coi là chết, và process đang kẹt gánh tội cho một bug nằm ở một endpoint.
+
+Bạn có thể bắt Python chỉ mặt thủ phạm. Chạy với `PYTHONASYNCIODEBUG=1`, asyncio sẽ báo mọi task giữ loop quá lâu (mặc định: hơn 100 ms):
+
+<TerminalOutput command="PYTHONASYNCIODEBUG=1 uvicorn p06_loop:app --port 4336 — rồi: curl /async-blocking" label="Python 3.13.16 · FastAPI 0.165.0 · uvicorn 0.54.0 · httpx 0.28.1 · Apple M2 · captured Nov 2026" caption="Một request tới /async-blocking. Dòng này là thật; phần giữa được lược bớt (đường dẫn file của site-packages), phần cuối giữ nguyên. Request tới plain def không bị báo như vậy.">
+```text
+Executing <Task finished name='Task-3' coro=<RequestResponseCycle.run_asgi() done, defined at …/site-packages/uvicorn/protocols/http/httptools_impl.py:420> result=None created at …/site-packages/uvicorn/protocols/http/httptools_impl.py:309> took 1.004 seconds
+```
+</TerminalOutput>
+
+Pool thread phía sau `def` thường là hữu hạn. FastAPI (qua anyio) mặc định cho nó 40 thread, và bạn đọc được con số đó ngay trên app đang chạy (`/threadpool-limit`). Năm mươi request ngủ một giây trong `def` thường, so với năm mươi request dùng await:
+
+<TerminalOutput command="curl /threadpool-limit — rồi: python p06_load.py http://127.0.0.1:4336 /plain-def 50  và  /async-await 50" label="Python 3.13.16 · FastAPI 0.165.0 · uvicorn 0.54.0 · httpx 0.28.1 · Apple M2 · captured Nov 2026" caption="40 thread, nên 50 request cần hai lượt: 2.04 s. Bản dùng await không có pool nào để cạn, xong cả 50 trong 1.06 s. Thread là phương án dự phòng cho thư viện chặn, không phải mẹo scale miễn phí.">
+```text
+{"worker_threads_for_plain_def":40}
+GET /plain-def x50: wall 2.04 s (fastest 1.03 s, slowest 2.04 s)
+GET /async-await x50: wall 1.06 s (fastest 1.03 s, slowest 1.06 s)
+```
+</TerminalOutput>
+
+<Callout type="warning" title="Thói quen AI cần bỏ">
+Endpoint do AI sinh gần như toàn là `async def`, vì tutorial trông như vậy. Nhưng `async def` không phải nút tăng tốc. Nó là lời hứa rằng thân hàm sẽ `await` thứ nó chờ. Thân hàm không có `await`, hoặc gọi một hàm chặn, thì chậm hơn và nguy hiểm hơn chính cái `def` thường mà nó thay thế.
+</Callout>
+
+---
+
+## 3. Lời gọi làm sập loop
+
+Kinh điển nhất: một endpoint `async def` gọi một client library hoàn toàn bình thường. `requests` là ví dụ phổ biến nhất; một driver database đồng bộ cũng y hệt. Code nhìn rất hợp lý. Đây là ba bản của cùng một lời gọi tới upstream mất 0.5 s (`demo/p06_upstream.py` đóng vai upstream; `demo/p06_loop.py` gọi nó):
+
+```python
+@app.get("/trap")
+async def trap() -> dict:
+    # `requests` is a blocking client: the whole loop waits with it.
+    return requests.get(UPSTREAM).json()
+
+
+@app.get("/fixed-async")
+async def fixed_async() -> dict:
+    async with httpx.AsyncClient() as client:
+        return (await client.get(UPSTREAM)).json()
+
+
+@app.get("/fixed-def")
+def fixed_def() -> dict:
+    return requests.get(UPSTREAM).json()
+```
+
+`/trap` là thứ AI viết. `requests.get` chặn thread tới khi có câu trả lời, và trong `async def` thread đó là của loop. `/fixed-async` giữ `async def` nhưng dùng `httpx.AsyncClient`, có `get` await được, nên loop phục vụ request khác trong lúc chờ. `/fixed-def` là cách sửa rẻ nhất: đổi `async def` thành `def` và giữ `requests`. FastAPI đẩy nó sang một thread.
+
+<TerminalOutput command="python p06_load.py http://127.0.0.1:4336 /trap 10 --probe  (rồi /fixed-async, rồi /fixed-def)" label="Python 3.13.16 · FastAPI 0.165.0 · uvicorn 0.54.0 · httpx 0.28.1 · requests 2.34.2 · Apple M2 · captured Nov 2026" caption="Mười request, upstream mất 0.5 s. Bản bẫy cần mười lần nửa giây nối đuôi nhau: 5.06 s, và /health phải chờ 4.86 s. Cả hai cách sửa đều xong trong khoảng thời gian của một lời gọi.">
+```text
+GET /trap x10: wall 5.06 s (fastest 0.53 s, slowest 5.06 s) | /health sent at +0.2 s answered after 4.86 s
+GET /fixed-async x10: wall 0.62 s (fastest 0.61 s, slowest 0.62 s) | /health sent at +0.2 s answered after 0.00 s
+GET /fixed-def x10: wall 0.53 s (fastest 0.52 s, slowest 0.53 s) | /health sent at +0.2 s answered after 0.00 s
+```
+</TerminalOutput>
+
+<BeP06WallTimes />
+
+Khi review một endpoint, hãy hỏi một câu: **nó đang chờ cái gì, và khai báo có khớp không?**
+
+<BeP06WhichTool />
+
+Nếu buộc phải gọi một hàm chặn từ trong một `async def` còn làm việc await khác, hãy giao riêng lời gọi đó cho thread: `await run_in_threadpool(fn, arg)` (từ `fastapi.concurrency`) hoặc `await asyncio.to_thread(fn, arg)`. Lời gọi chặn một thread trong pool và loop vẫn rảnh.
+
+<Concepts>
+- **Thư viện async**: client có các lời gọi mạng await được (`httpx.AsyncClient`, driver database async). Nó báo với loop "tôi đang chờ" thay vì giữ thread.
+- **Thư viện sync**: client có lời gọi cứ thế chặn (`requests`, driver database kiểu cũ). An toàn trong `def` thường, có hại trong `async def`.
+- **Pool thread**: một tập thread cố định nhận các endpoint `def` thường. Mặc định của FastAPI là 40.
+</Concepts>
+
+---
+
+## 4. Khi việc nặng là CPU
+
+Chờ là ca dễ. Tính toán mới là ca khó, vì không còn khoảng rảnh nào để chồng lên nhau. Thêm một hàm đốt chừng nửa giây tính toán thuần Python và chạy nó ba cách, trong `demo/p06_cpu.py`:
+
+```python
+@app.get("/cpu-inline")
+async def cpu_inline() -> dict:
+    return {"sum": burn()}  # CPU on the event loop: nothing else runs
+
+
+@app.get("/cpu-thread")
+async def cpu_thread() -> dict:
+    return {"sum": await run_in_threadpool(burn)}  # a thread, same interpreter
+
+
+@app.get("/cpu-process")
+async def cpu_process() -> dict:
+    loop = asyncio.get_running_loop()
+    return {"sum": await loop.run_in_executor(app.state.pool, burn)}  # another process
+```
+
+`/cpu-inline` lại là cái bẫy: việc CPU trong `async def` giữ chặt loop. `/cpu-thread` chuyển nó sang thread bằng `run_in_threadpool`, chính hàm FastAPI dùng cho `def` thường. `/cpu-process` gửi nó vào một `ProcessPoolExecutor` (khởi tạo một lần trong lifespan của app, 4 process) qua `loop.run_in_executor`. Hàm được pickle, chạy trong một interpreter khác, rồi kết quả được pickle trả về.
+
+Bốn request đồng thời, mỗi cái một lần burn 0.5 s (đo một request đơn lẻ: 0.50 s):
+
+<TerminalOutput command="python p06_load.py http://127.0.0.1:4376 /cpu-inline 4 --probe  (đầu tiên chạy một mình với x1, rồi 4 cái cùng lúc: /cpu-inline, /cpu-thread, /cpu-process hai lần)" label="Python 3.13.16 · FastAPI 0.165.0 · uvicorn 0.54.0 · httpx 0.28.1 · Apple M2 · captured Nov 2026" caption="Inline: 4 x 0.5 s nối tiếp = 2.00 s, và /health chờ 1.80 s. Thread: cũng 1.97 s tổng công việc, nhưng /health trả lời trong 0.09 s. Process: bốn lần burn thật sự chồng lên nhau. Lần đầu (0.91 s) còn phải trả tiền khởi động worker; lần hai là 0.62 s.">
+```text
+GET /cpu-inline x1: wall 0.50 s (fastest 0.50 s, slowest 0.50 s)
+GET /cpu-inline x4: wall 2.00 s (fastest 0.51 s, slowest 2.00 s) | /health sent at +0.2 s answered after 1.80 s
+GET /cpu-thread x4: wall 1.97 s (fastest 1.89 s, slowest 1.97 s) | /health sent at +0.2 s answered after 0.09 s
+GET /cpu-process x4: wall 0.91 s (fastest 0.86 s, slowest 0.91 s) | /health sent at +0.2 s answered after 0.00 s
+GET /cpu-process x4: wall 0.62 s (fastest 0.61 s, slowest 0.62 s) | /health sent at +0.2 s answered after 0.00 s
+```
+</TerminalOutput>
+
+<BeP06CpuOptions />
+
+Hãy đọc dòng thread hai lần. Nó không làm việc nhanh hơn: 1.97 s so với 2.00 s inline. Đó là GIL, được đo trung thực. Thứ thread mua được là `/health` vẫn trả lời, vì interpreter đổi qua lại giữa các thread mỗi vài mili giây dù một thread đang tính. Chỉ process pool mới làm chính công việc nhanh hơn, vì chỉ các interpreter riêng mới chạy trên các core riêng.
+
+Bước nhảy sang process không miễn phí: tham số và kết quả bị pickle và sao chép, và process pool tốn RAM. Nó đáng khi việc mất một phần đáng kể của một giây. Với việc chỉ mất một mili giây, bước nhảy tốn hơn lợi, còn với việc dài hoặc theo lịch thì có chỗ ở tốt hơn: một worker riêng (phần queue của series sẽ nói sau). Thư viện nhả GIL trong code C (thư viện tính số hay làm vậy) có thể chạy song song trong thread. Vòng lặp Python thuần thì không.
+
+---
+
+## 5. Worker sở hữu gì
+
+`uvicorn --workers 3` bật một parent và ba process worker. Cả ba cùng lắng nghe trên một socket, và kernel giao mỗi kết nối mới cho một trong số chúng. Đây là công cụ thứ ba ở mục 1, có sẵn trong server. Mỗi worker tự import app của bạn, nên mỗi cái có event loop riêng, pool thread riêng, và bản sao riêng của mọi biến cấp module. Xem trong `demo/p06_workers.py`:
+
+```python
+hits = 0  # module state: every worker process gets its own copy
+
+
+@app.get("/hit")
+async def hit() -> dict:
+    global hits
+    hits += 1
+    return {"pid": os.getpid(), "hits": hits}
+```
+
+`hits` là một biến module thường, một bộ đếm trong bộ nhớ. `os.getpid()` cho biết process nào trả lời. Một script driver (`demo/p06_hits.py`) gọi `/hit` mười hai lần, mỗi lần một kết nối mới, rồi mười hai lần trên một kết nối keep-alive:
+
+<TerminalOutput command="uvicorn p06_workers:app --port 4396 --workers 3 — rồi: python p06_hits.py http://127.0.0.1:4396 12  (và thêm --keep-alive)" label="Python 3.13.16 · FastAPI 0.165.0 · uvicorn 0.54.0 · httpx 0.28.1 · Apple M2 · captured Nov 2026" caption="Ba worker, một bộ đếm mà không phải một bộ đếm. pid 48988 đếm tới 11, pid 48990 đếm tới 1, còn worker thứ ba (48989) chưa nhận request nào, nên bộ đếm của nó vẫn là 0 và không xuất hiện. Lượt keep-alive dồn hết vào một worker, nên nó đọc ra 13: 1 từ lượt trước cộng 12 lượt này.">
+```text
+12 requests over a new connection per request:
+  pid 48988: served 11, its own counter reads 11
+  pid 48990: served 1, its own counter reads 1
+12 requests over one kept-alive connection:
+  pid 48990: served 12, its own counter reads 13
+```
+</TerminalOutput>
+
+<BeP06WorkersOwn />
+
+Hai hệ quả. Thứ nhất, **state trong bộ nhớ là của từng worker**: mọi thứ bạn giữ trong một dict (`InMemoryCaseRepository` ở [bài layering](/blog/backend-layered-architecture/) đúng là như vậy) tách thành ba dict bất đồng với nhau. Chạy nhiều hơn một worker là bắt buộc phải có một nơi lưu dùng chung thật. Thứ hai, việc phân phối do kernel quyết, không phải round-robin công bằng: trong lần chạy của mình, một worker nhận 11 trên 12 kết nối. Trên macOS thì lệch như vậy; mình chưa đo trên Linux.
+
+`--workers` có sửa được endpoint chặn không? Nó chỉ làm dịu bớt:
+
+<TerminalOutput command="python p06_load.py http://127.0.0.1:4396 /async-blocking 10  (hai lần, rồi /async-await 10)" label="Python 3.13.16 · FastAPI 0.165.0 · uvicorn 0.54.0 · httpx 0.28.1 · Apple M2 · captured Nov 2026" caption="Với 3 worker, mười request chặn mất 7.05 s và 7.10 s, giảm từ 10.05 s khi chỉ có một. Trần là worker bận nhất, vì kernel không cân bằng tải. Bản dùng await chỉ cần một worker và mất 1.04 s.">
+```text
+GET /async-blocking x10: wall 7.05 s (fastest 1.03 s, slowest 7.05 s)
+GET /async-blocking x10: wall 7.10 s (fastest 1.03 s, slowest 7.10 s)
+GET /async-await x10: wall 1.04 s (fastest 1.03 s, slowest 1.04 s)
+```
+</TerminalOutput>
+
+Thêm worker thu nhỏ vùng bị ảnh hưởng của một lời gọi chặn, chứ không xoá được nó. Sửa lời gọi trước, rồi thêm worker vì đúng lý do chúng tồn tại: dùng được nhiều core hơn, và một worker chết không kéo theo những worker khác. Bao nhiêu worker thì tuỳ core và RAM, hãy đo thay vì chép một con số.
+
+<Concepts>
+- **Worker process**: một bản sao hoàn chỉnh của app (loop, pool thread, bộ nhớ) đang phục vụ request. Nhiều worker hơn nghĩa là dùng nhiều core hơn và tốn RAM hơn.
+- **State theo process**: một biến module chỉ sống trong một worker. Muốn chia sẻ cần thứ nằm ngoài các process: database, cache.
+- **Connection affinity**: một kết nối keep-alive cứ nói chuyện với worker đã nhận nó.
+</Concepts>
+
+---
+
+## 6. Sau khi response đã gửi
+
+Còn một công cụ nữa đứng trên cùng nền đất này: có việc không nên bắt client chờ (dựng báo cáo, gửi email). `BackgroundTasks` của FastAPI chạy một hàm sau khi response đã đi ra. `demo/p06_background.py`:
+
+```python
+def build_report(case_id: str) -> None:
+    log(f"report for {case_id}: started")
+    time.sleep(2)  # stands in for slow work: a PDF, a mail, a data export
+    log(f"report for {case_id}: finished")
+
+
+@app.post("/cases/{case_id}/report", status_code=202)
+async def request_report(case_id: str, background: BackgroundTasks) -> dict:
+    background.add_task(build_report, case_id)  # runs after the response is sent
+    log(f"{case_id}: returning 202")
+    return {"status": "accepted"}
+```
+
+Endpoint trả về `202 Accepted` ngay, và `build_report` chỉ bắt đầu sau khi response đã lên dây. Nó chạy trong cùng process: task `def` thường vào pool thread, task `async def` chạy trên loop (nên một lời gọi chặn ở đó làm đứng loop, lại cái bẫy cũ).
+
+<TerminalOutput command="uvicorn p06_background:app --port 4336 — rồi: curl -X POST /cases/C-1/report" label="Python 3.13.16 · FastAPI 0.165.0 · uvicorn 0.54.0 · httpx 0.28.1 · Apple M2 · captured Nov 2026" caption="Client nhận 202 sau chừng 3 ms. Task bắt đầu ngay sau đó và xong sau hai giây.">
+```text
+client: HTTP 202 after 0.003115s
+[+ 4.37 s] C-1: returning 202
+INFO:     127.0.0.1:59067 - "POST /cases/C-1/report HTTP/1.1" 202 Accepted
+[+ 4.38 s] report for C-1: started
+[+ 6.39 s] report for C-1: finished
+```
+</TerminalOutput>
+
+Giờ tới giới hạn. Cùng server, một case khác, và một cú `kill -9` nửa giây sau khi task bắt đầu, giống như khi bị OOM kill hoặc crash:
+
+<TerminalOutput command="curl -X POST /cases/C-2/report — rồi, 0.5 s sau: kill -9 <server>" label="Python 3.13.16 · FastAPI 0.165.0 · uvicorn 0.54.0 · httpx 0.28.1 · Apple M2 · captured Nov 2026" caption="Client đã được báo 202 Accepted. Task không bao giờ xong, và sẽ không ai thử lại: công việc chỉ nằm trong bộ nhớ của process đó.">
+```text
+client: HTTP 202 after 0.001620s
+[+ 4.41 s] C-2: returning 202
+INFO:     127.0.0.1:59076 - "POST /cases/C-2/report HTTP/1.1" 202 Accepted
+[+ 4.42 s] report for C-2: started
+(0.5 s later: kill -9, the server process is gone; nothing more is ever printed)
+```
+</TerminalOutput>
+
+| | `BackgroundTasks` | Queue thật + worker |
+|---|---|---|
+| Chạy ở đâu | Sau response, trong cùng process | Trong process worker riêng |
+| Sống sót khi crash hoặc deploy | Không | Có, job được lưu ngoài process |
+| Thử lại khi lỗi | Không | Có, nếu bạn xây vào |
+| Tranh CPU với request | Có | Không, scale riêng được |
+| Hợp với | Việc nhanh, rẻ, mất cũng được (một dòng log, làm nóng cache) | Mọi thứ người dùng đang trông chờ |
+
+Quy tắc ngón tay cái: nếu mất task là thành một bug report, nó không thuộc về `BackgroundTasks`. Queue, retry và at-least-once delivery sẽ nói ở phần sau của series.
+
+<Callout type="note" title="Đừng dùng async chỉ vì nghe hiện đại">
+Một service nhỏ dùng driver database đồng bộ và không gọi HTTP ra ngoài hoàn toàn có thể là service `def` thường, và vẫn đúng. Ý của bài không phải "hãy dùng async". Mà là: khớp khai báo với thứ hàm đang chờ, và biết mình đang đứng trên công cụ nào trong ba cái.
+</Callout>
+
+---
+
+## Điểm rút ra (Key takeaways)
+
+- Một request dành phần lớn thời gian để chờ, và ba công cụ khác nhau ở chỗ xử lý khoảng chờ đó: event loop chồng các lần chờ trên một thread, thread chồng các lần chờ trong một interpreter, process chạy việc song song.
+- `async def` là lời hứa sẽ `await`. Một lời gọi chặn bên trong (`time.sleep`, `requests.get`, driver sync) biến mười request một giây thành mười giây, và để một ping `/health` đứng sau chúng 9.85 s.
+- `def` thường là chỗ an toàn cho thư viện chặn (mặc định 40 thread); thư viện async là cách giữ cho `async def` trung thực.
+- Thread không làm việc CPU thuần Python nhanh hơn (1.97 s so với 2.00 s); process pool thì có (0.62 s). Dùng nó khi việc đủ dài để bù bước nhảy.
+- Mỗi process của `--workers` có bộ nhớ riêng, nên state trong RAM lệch nhau (11, 1 và 0 trong một lần chạy), và `BackgroundTasks` chết cùng process của nó.
+
+## Câu hỏi ôn tập (Review questions)
+
+1. Mười request cùng await một giây sleep mất 1.06 s; cùng code đó với `time.sleep` mất 10.05 s. Khác nhau chính xác ở chỗ ai đang giữ thread? (Mục 2)
+2. Vì sao đổi `async def trap()` thành `def trap()` là cách sửa hợp lệ khi vẫn giữ `requests`, và khi nào bạn muốn đổi sang `httpx.AsyncClient` hơn? (Mục 3)
+3. Một thread không làm bốn request CPU nhanh hơn nhưng giữ `/health` trả lời trong 0.09 s. Giải thích cả hai điều này. (Mục 4)
+4. Bạn deploy với `--workers 3` và dict case trong bộ nhớ bắt đầu trả "not found" cho những case vừa tạo. Chuyện gì xảy ra, và phải đổi gì? (Mục 5)
+5. Người dùng được hứa nhận PDF qua email, và server khởi động lại giữa lúc dựng file. `BackgroundTasks` bảo đảm gì ở đây, và bạn sẽ dùng gì thay? (Mục 6)
+
+</Vi>
