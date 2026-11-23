@@ -73,7 +73,7 @@ Main DRAM is ~100x slower than L1 cache, so pack values contiguously in slices, 
 </Callout>
 
 <Callout type="tip" title="Recap before diving down">
-From [Go memory](/blog/go-memory-data-types-slices-maps-strings/) you already know how slice headers, map buckets, and strings sit in memory, and from [When to optimize](/blog/go-efficiency-workflow-raer-tfbo-hardware-memory/) you have RAER budgets and TFBO to decide when tuning earns its keep. Next come the hardware and runtime mechanics underneath those budgets, using our `Todo` handler from [Build a Go HTTP service](/blog/go-http-service-net-http-json-middleware/) to make compiler escapes concrete.
+From [Go memory](/blog/go-memory-data-types-slices-maps-strings/) you already know how slice headers, map buckets, and strings sit in memory, and from [When to optimize](/blog/go-efficiency-workflow-raer-tfbo-hardware-memory/) you have RAER budgets (Resource-Aware Efficiency Requirements: written limits for latency and memory) and the TFBO loop (Test, Fix, Benchmark, Optimize) to decide when tuning earns its keep. Tags such as `#91` in the headings below point to the matching mistake in *100 Go Mistakes and How to Avoid Them*, if you want the book's version. Next come the hardware and runtime mechanics underneath those budgets, using our `Todo` handler from [Build a Go HTTP service](/blog/go-http-service-net-http-json-middleware/) to make compiler escapes concrete.
 </Callout>
 
 <Concepts>
@@ -386,6 +386,8 @@ func (m *Mutex) Lock() {
 Adding `-d=ssa/check_bce/debug=1` exposes **Bounds Check Elimination (BCE)** at the same time. Go inserts bounds checks before slice accesses (`if idx >= len(s) { panic }`) unless the SSA optimizer proves the index stays in range. Reslicing a 4-element window and reading `_ = win[3]` once clears all four bounds checks inside the loop:
 
 ```go
+package bce
+
 func sumEveryFourth(s []int) int {
 	var total int
 	for i := 0; i+3 < len(s); i += 4 {
@@ -408,21 +410,16 @@ func sumWithBCEHint(s []int) int {
 }
 ```
 
-<TerminalOutput command="go build -gcflags='-m=1 -d=ssa/check_bce/debug=1' bce_clean.go" label="Apple M2 · Go 1.27.1" caption="Real Go 1.27.1 compiler output: sumEveryFourth emits four Found IsInBounds checks on line 22, while sumWithBCEHint emits zero inside its loop (cutting ~25 us to ~19 us on 100k ints).">
+<TerminalOutput command="go build -gcflags='-m=1 -d=ssa/check_bce/debug=1' bce_clean.go" label="Apple M2 · Go 1.27.1" caption="Real Go 1.27.1 compiler output: sumEveryFourth emits four Found IsInBounds checks on line 6, while sumWithBCEHint emits zero inside its loop (cutting ~25 us to ~19 us on 100k ints).">
 ```text
-./bce_clean.go:3:6: can inline addVal
-./bce_clean.go:19:6: can inline sumEveryFourth
-./bce_clean.go:27:6: can inline sumWithBCEHint
-./bce_clean.go:16:15: inlining call to addVal
-./bce_clean.go:6:14: x does not escape
-./bce_clean.go:6:17: y does not escape
-./bce_clean.go:10:2: moved to heap: z
-./bce_clean.go:19:21: s does not escape
-./bce_clean.go:27:21: s does not escape
-./bce_clean.go:22:13: Found IsInBounds
-./bce_clean.go:22:20: Found IsInBounds
-./bce_clean.go:22:29: Found IsInBounds
-./bce_clean.go:22:38: Found IsInBounds
+./bce_clean.go:3:6: can inline sumEveryFourth
+./bce_clean.go:11:6: can inline sumWithBCEHint
+./bce_clean.go:3:21: s does not escape
+./bce_clean.go:11:21: s does not escape
+./bce_clean.go:6:13: Found IsInBounds
+./bce_clean.go:6:20: Found IsInBounds
+./bce_clean.go:6:29: Found IsInBounds
+./bce_clean.go:6:38: Found IsInBounds
 ```
 </TerminalOutput>
 
@@ -556,9 +553,9 @@ Plugging a `50 MiB` steady live heap inside a `512 MiB` pod into `Target = Live 
 
 | Setting (`Live = 50 MiB`, Pod = `512 MiB`) | Next GC target | Garbage allowed per cycle | Relative GC frequency |
 | :--- | :--- | :--- | :--- |
-| `GOGC=50`, no limit | `75 MiB` | `25 MiB` | 4x vs. `GOGC=400` |
-| `GOGC=100` (default) | `100 MiB` | `50 MiB` | 2x (leaves ~300 MiB unused) |
-| `GOGC=400`, `GOMEMLIMIT=400MiB` | `250 MiB` | `200 MiB` | 0.5x (~4x fewer cycles than default) |
+| `GOGC=50`, no limit | `75 MiB` | `25 MiB` | 2x (twice as many cycles as default) |
+| `GOGC=100` (default) | `100 MiB` | `50 MiB` | 1x baseline (leaves ~300 MiB unused) |
+| `GOGC=400`, `GOMEMLIMIT=400MiB` | `250 MiB` | `200 MiB` | 0.25x (~4x fewer cycles than default) |
 | `GOGC=off`, `GOMEMLIMIT=400MiB` | ~`400 MiB` total | ~`340 MiB` headroom | Minimum until live data spikes near limit |
 
 Two container companions belong right next to GC tuning in Kubernetes: Go 1.25+ adjusts `GOMAXPROCS` for container quotas, though CPU limits still trigger Linux **CFS throttling** as covered in [Go in production](/blog/go-production-stdlib-cpu-cache-gc-kubernetes/). Once this hardware and GC picture is clear, measure speedups rigorously in [Go benchmarking](/blog/go-observability-metrics-microbenchmarks-benchstat/) and pinpoint hotspots with `pprof` in [Go profiling](/blog/go-profiling-pprof-flamegraphs-off-cpu-continuous/).
@@ -619,7 +616,7 @@ Giữa một vòng lặp Go và giới hạn container là năm tầng phần c�
 </Callout>
 
 <Callout type="tip" title="Nhắc nhanh trước khi đi sâu">
-Ở [Bộ nhớ trong Go](/blog/go-memory-data-types-slices-maps-strings/) bạn đã nắm slice header, map bucket và chuỗi trên heap; còn ở [Khi nào nên tối ưu](/blog/go-efficiency-workflow-raer-tfbo-hardware-memory/) mình đã bàn về ngân sách RAER và chu trình TFBO. Phần dưới mổ thẳng tầng phần cứng và runtime đứng sau các ngân sách đó, lấy luôn struct `Todo` và `writeJSON` từ [Xây dựng HTTP service bằng Go](/blog/go-http-service-net-http-json-middleware/) làm ví dụ soi trình biên dịch.
+Ở [Bộ nhớ trong Go](/blog/go-memory-data-types-slices-maps-strings/) bạn đã nắm slice header, map bucket và chuỗi trên heap; còn ở [Khi nào nên tối ưu](/blog/go-efficiency-workflow-raer-tfbo-hardware-memory/) mình đã bàn về ngân sách RAER (Resource-Aware Efficiency Requirements: giới hạn độ trễ và bộ nhớ viết ra giấy) và vòng TFBO (Test, Fix, Benchmark, Optimize). Các nhãn như `#91` trong tiêu đề bên dưới là số thứ tự lỗi tương ứng trong sách *100 Go Mistakes and How to Avoid Them*, nếu bạn muốn đọc thêm bản gốc. Phần dưới mổ thẳng tầng phần cứng và runtime đứng sau các ngân sách đó, lấy luôn struct `Todo` và `writeJSON` từ [Xây dựng HTTP service bằng Go](/blog/go-http-service-net-http-json-middleware/) làm ví dụ soi trình biên dịch.
 </Callout>
 
 <Concepts title="Giải thích nhanh mấy thuật ngữ nền tảng">
@@ -932,6 +929,8 @@ func (m *Mutex) Lock() {
 Kèm thêm cờ `-d=ssa/check_bce/debug=1`, ta soi được luôn **Bounds Check Elimination (BCE)**. Go tự chèn lệnh kiểm tra an toàn trước khi đọc slice (`if idx >= len(s) { panic }`) trừ khi pha SSA chứng minh được chỉ số không thể vượt biên. Tạo cửa sổ 4 phần tử rồi chạm `_ = win[3]` một lần giúp trình biên dịch gỡ hết các bước kiểm tra bên dưới:
 
 ```go
+package bce
+
 func sumEveryFourth(s []int) int {
 	var total int
 	for i := 0; i+3 < len(s); i += 4 {
@@ -954,21 +953,16 @@ func sumWithBCEHint(s []int) int {
 }
 ```
 
-<TerminalOutput command="go build -gcflags='-m=1 -d=ssa/check_bce/debug=1' bce_clean.go" label="Apple M2 · Go 1.27.1" caption="Kết quả thật trên Go 1.27.1: sumEveryFourth phát sinh 4 dòng Found IsInBounds tại dòng 22, còn sumWithBCEHint sạch bóng kiểm tra biên trong vòng lặp (rút ~25 us xuống ~19 us trên 100k số int).">
+<TerminalOutput command="go build -gcflags='-m=1 -d=ssa/check_bce/debug=1' bce_clean.go" label="Apple M2 · Go 1.27.1" caption="Kết quả thật trên Go 1.27.1: sumEveryFourth phát sinh 4 dòng Found IsInBounds tại dòng 6, còn sumWithBCEHint sạch bóng kiểm tra biên trong vòng lặp (rút ~25 us xuống ~19 us trên 100k số int).">
 ```text
-./bce_clean.go:3:6: can inline addVal
-./bce_clean.go:19:6: can inline sumEveryFourth
-./bce_clean.go:27:6: can inline sumWithBCEHint
-./bce_clean.go:16:15: inlining call to addVal
-./bce_clean.go:6:14: x does not escape
-./bce_clean.go:6:17: y does not escape
-./bce_clean.go:10:2: moved to heap: z
-./bce_clean.go:19:21: s does not escape
-./bce_clean.go:27:21: s does not escape
-./bce_clean.go:22:13: Found IsInBounds
-./bce_clean.go:22:20: Found IsInBounds
-./bce_clean.go:22:29: Found IsInBounds
-./bce_clean.go:22:38: Found IsInBounds
+./bce_clean.go:3:6: can inline sumEveryFourth
+./bce_clean.go:11:6: can inline sumWithBCEHint
+./bce_clean.go:3:21: s does not escape
+./bce_clean.go:11:21: s does not escape
+./bce_clean.go:6:13: Found IsInBounds
+./bce_clean.go:6:20: Found IsInBounds
+./bce_clean.go:6:29: Found IsInBounds
+./bce_clean.go:6:38: Found IsInBounds
 ```
 </TerminalOutput>
 
@@ -1102,9 +1096,9 @@ Thay thử một service giữ `50 MiB` dữ liệu sống trong pod `512 MiB` v
 
 | Cấu hình (`Live = 50 MiB`, Pod = `512 MiB`) | Ngưỡng kích GC kế tiếp | Rác mới cho phép mỗi vòng | Tần suất GC tương đối |
 | :--- | :--- | :--- | :--- |
-| `GOGC=50`, không đặt trần | `75 MiB` | `25 MiB` | Gấp 4x so với `GOGC=400` |
-| `GOGC=100` (mặc định) | `100 MiB` | `50 MiB` | Gấp 2x (bỏ phí ~300 MiB RAM trống) |
-| `GOGC=400`, `GOMEMLIMIT=400MiB` | `250 MiB` | `200 MiB` | 0,5x (~ít vòng GC hơn 4 lần) |
+| `GOGC=50`, không đặt trần | `75 MiB` | `25 MiB` | 2x (gấp đôi số vòng GC so với mặc định) |
+| `GOGC=100` (mặc định) | `100 MiB` | `50 MiB` | 1x, làm mốc (bỏ phí ~300 MiB RAM trống) |
+| `GOGC=400`, `GOMEMLIMIT=400MiB` | `250 MiB` | `200 MiB` | 0,25x (~ít vòng GC hơn 4 lần so với mặc định) |
 | `GOGC=off`, `GOMEMLIMIT=400MiB` | ~`400 MiB` tổng | ~`340 MiB` khoảng thở | Thấp nhất tới khi dữ liệu sống chạm trần |
 
 Khi đẩy dịch vụ lên Kubernetes, có hai mảnh ghép đi liền với tinh chỉnh GC: cách `GOMAXPROCS` (đã nhận diện container từ Go 1.25+) phối hợp với **CFS CPU throttling** trên Linux nằm ở [Go trên production](/blog/go-production-stdlib-cpu-cache-gc-kubernetes/). Còn để chứng minh tốc độ bằng số liệu chuẩn và lần đúng điểm nóng qua `pprof`, hai bước kế tiếp là [Đo hiệu năng và benchstat](/blog/go-observability-metrics-microbenchmarks-benchstat/) cùng [Profiling Go với pprof](/blog/go-profiling-pprof-flamegraphs-off-cpu-continuous/).
