@@ -14,7 +14,7 @@ sources:
   - { title: "efficientgo/examples: the Sum code from the book", author: "Bartłomiej Płotka", url: "https://github.com/efficientgo/examples" }
   - { title: "sync.Pool documentation", author: "The Go Authors", url: "https://pkg.go.dev/sync#Pool" }
   - { title: "golang/go issue #23199: sync: Pool example suggests incorrect usage", author: "Joe Tsai (dsnet)", url: "https://github.com/golang/go/issues/23199" }
-  - { title: "Go 1.27.1 source, src/fmt/print.go: (*pp).free caps the buffer it returns to the pool", author: "The Go Authors", url: "https://github.com/golang/go/blob/go1.27.1/src/fmt/print.go#L155-L166" }
+  - { title: "Go 1.27.1 source, src/fmt/print.go: (*pp).free drops an oversized buffer and puts back only the printer", author: "The Go Authors", url: "https://github.com/golang/go/blob/go1.27.1/src/fmt/print.go#L155-L174" }
   - { title: "benchstat: statistical comparison of Go benchmarks", author: "The Go Authors", url: "https://pkg.go.dev/golang.org/x/perf/cmd/benchstat" }
   - { title: "io.SectionReader", author: "The Go Authors", url: "https://pkg.go.dev/io#SectionReader" }
   - { title: "Waterwheel and sluice gate at Odell Mill (CC BY-SA 2.0)", author: "Nigel Stickells", url: "https://commons.wikimedia.org/wiki/File:Waterwheel_and_Sluice_Gate_at_Odell_Mill_-_geograph.org.uk_-_290595.jpg" }
@@ -233,7 +233,7 @@ Sum   6.000 ± 0%   5.000 ± 0%  -16.67% (p=0.000 n=10)   5.000 ± 0%  -16.67% (
 ```
 </TerminalOutput>
 
-Read it from left to right. Dropping the split cut time by 55% and memory by 76%. Skipping the string copy added another 11%, with no change in memory. The tailored parser added 32% more and deleted the `unsafe` call, so the final code is both faster and safer than `Sum3`. On the test machine in *Efficient Go* the same four versions took 101, 50, 25 and 14 ms for 2,000,000 lines. The numbers differ, the shape does not.
+Read it from left to right. Dropping the split cut time by 55% and memory by 76%. Skipping the string copy added another 11%, with no change in memory. The tailored parser added 32% more and deleted the `unsafe` call, so the final code is both faster and safer than `Sum3`. On the test machine in *Efficient Go* similar versions took 101, 50, 25 and 14 ms for 2,000,000 lines. The numbers differ, the shape does not.
 
 Goal 1 asked for 20 ms. `Sum2` (23.55 ms) and `Sum3` (21.02 ms) miss it, `Sum4` (14.36 ms) meets it. **Stop there.** More tuning would cost readability for no requirement.
 
@@ -511,7 +511,7 @@ The shown code leaves out two things to keep the idea visible: an error from a w
 
 The results, with `Sum6` run at `-cpu 4` as the baseline:
 
-<TerminalOutput command="benchstat -col /impl -filter '/impl:Sum6 OR /impl:Goroutine-per-line OR /impl:Channel-workers OR /impl:Sharded-SectionReader' conc.txt" label="Apple M2 · Go 1.27.1 · 1,000,000 lines · -cpu 4" caption="One goroutine per line is 1686% slower than Sum6, a channel-fed pool 787% slower, and sharding 69% faster. The sharded run varies more (± 29%): the M2 has 4 performance and 4 efficiency cores, and -cpu 4 does not choose which ones.">
+<TerminalOutput command="benchstat -col /impl -filter '/impl:Sum6 OR /impl:Goroutine-per-line OR /impl:Channel-workers OR /impl:Sharded-SectionReader' conc.txt" label="Apple M2 · Go 1.27.1 · 1,000,000 lines · -cpu 4" caption="One goroutine per line is 1686% slower than Sum6, a channel-fed pool 787% slower, and sharding about 3 times faster (69% less time). The sharded run varies more (± 29%): the M2 has 4 performance and 4 efficiency cores, and -cpu 4 does not choose which ones.">
 ```text
 goos: darwin
 goarch: arm64
@@ -558,7 +558,7 @@ Everything so far was Reduce and Reuse. The last R is the one people reach for f
 
 In December 2017 Joe Tsai opened [golang/go issue 23199](https://github.com/golang/go/issues/23199), titled "sync: Pool example suggests incorrect usage". His point was that a pool assumes every entry costs about the same, but the `bytes.Buffer` in the documentation's example can hold anything from a few bytes to hundreds of megabytes. One large request grows a buffer; the buffer goes back to the pool; small requests keep picking it up, and the big allocation stays pinned. As of today the issue is still open.
 
-The standard library takes the point. In Go 1.27.1, `fmt` pools its printer state, and `(*pp).free` in `src/fmt/print.go` (lines 155 to 166) refuses to put back a printer whose buffer grew past 64 KiB, with a comment that names issue 23199. Here is the same idea as a function of your own:
+The standard library takes the point. In Go 1.27.1, `fmt` pools its printer state, and `(*pp).free` in `src/fmt/print.go` (lines 155 to 174) drops an oversized buffer (past 64 KiB) and puts back only the printer, with a comment that names issue 23199. Here is the same idea as a function of your own:
 
 ```go
 var bufPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
@@ -567,7 +567,7 @@ func render(w io.Writer, name string) error {
 	buf := bufPool.Get().(*bytes.Buffer)
 	buf.Reset() // clear what the last user left behind
 	defer func() {
-		if buf.Cap() <= 64<<10 { // like fmt: do not keep a huge buffer
+		if buf.Cap() <= 64<<10 { // same idea: do not keep a huge buffer
 			bufPool.Put(buf)
 		}
 	}()
@@ -701,7 +701,7 @@ after 1 GC:   same buffer: true  New calls: 1
 after 2 GCs:  same buffer: false  New calls: 2
 ```
 
-I ran it five times and got these three lines every time. With more than one processor, a goroutine can move to another one between `Put` and `Get`, and the buffer may be missed even after one GC, so do not build on the survival of a pooled object: the same program without the `GOMAXPROCS(1)` line printed `false` after one GC in 8 of 10 runs. A microbenchmark never sees this, because it never lets a GC happen between two uses. A real service does. Step through the three cases below: a hit on the processor's private slot, the victim tier across two GCs, and a buffer put back without `Reset`.
+I ran it five times and got these three lines every time. With more than one processor, a goroutine can move to another one between `Put` and `Get`, and the buffer may be missed even after one GC, so do not build on the survival of a pooled object: the same program without the `GOMAXPROCS(1)` line printed `false` after one GC in most runs. A microbenchmark never sees this, because it never lets a GC happen between two uses. A real service does. Step through the three cases below: a hit on the processor's private slot, the victim tier across two GCs, and a buffer put back without `Reset`.
 
 <GoSyncPoolLifecycleDemo />
 
@@ -999,7 +999,7 @@ Sum   6.000 ± 0%   5.000 ± 0%  -16.67% (p=0.000 n=10)   5.000 ± 0%  -16.67% (
 ```
 </TerminalOutput>
 
-Đọc từ trái sang phải. Bỏ việc cắt giảm 55% thời gian và 76% bộ nhớ. Bỏ bản chép string thêm 11%, bộ nhớ không đổi. Bộ parse riêng thêm 32% nữa và xoá luôn lời gọi `unsafe`, nên code cuối vừa nhanh hơn vừa an toàn hơn `Sum3`. Trên máy của tác giả sách, bốn phiên bản này chạy 101, 50, 25 và 14 ms cho 2.000.000 dòng. Số khác nhau nhưng hình dạng thì giống.
+Đọc từ trái sang phải. Bỏ việc cắt giảm 55% thời gian và 76% bộ nhớ. Bỏ bản chép string thêm 11%, bộ nhớ không đổi. Bộ parse riêng thêm 32% nữa và xoá luôn lời gọi `unsafe`, nên code cuối vừa nhanh hơn vừa an toàn hơn `Sum3`. Trên máy của tác giả sách, các phiên bản tương tự chạy 101, 50, 25 và 14 ms cho 2.000.000 dòng. Số khác nhau nhưng hình dạng thì giống.
 
 Mục tiêu 1 đòi 20 ms. `Sum2` (23,55 ms) và `Sum3` (21,02 ms) chưa đạt, `Sum4` (14,36 ms) đạt. **Dừng ở đó.** Tinh chỉnh thêm sẽ đổi tính dễ đọc lấy một yêu cầu không ai đặt ra.
 
@@ -1277,7 +1277,7 @@ Code ở trên bỏ qua hai thứ để ý tưởng dễ thấy: lỗi từ `Sum
 
 Kết quả, lấy `Sum6` chạy ở `-cpu 4` làm mốc:
 
-<TerminalOutput command="benchstat -col /impl -filter '/impl:Sum6 OR /impl:Goroutine-per-line OR /impl:Channel-workers OR /impl:Sharded-SectionReader' conc.txt" label="Apple M2 · Go 1.27.1 · 1.000.000 dòng · -cpu 4" caption="Một goroutine mỗi dòng chậm hơn Sum6 1686%, pool cấp việc qua channel chậm hơn 787%, còn chia khúc nhanh hơn 69%. Bản chia khúc dao động nhiều hơn (± 29%): M2 có 4 nhân hiệu năng và 4 nhân tiết kiệm điện, và -cpu 4 không chọn nhân nào.">
+<TerminalOutput command="benchstat -col /impl -filter '/impl:Sum6 OR /impl:Goroutine-per-line OR /impl:Channel-workers OR /impl:Sharded-SectionReader' conc.txt" label="Apple M2 · Go 1.27.1 · 1.000.000 dòng · -cpu 4" caption="Một goroutine mỗi dòng chậm hơn Sum6 1686%, pool cấp việc qua channel chậm hơn 787%, còn chia khúc nhanh hơn khoảng 3 lần (ít hơn 69% thời gian). Bản chia khúc dao động nhiều hơn (± 29%): M2 có 4 nhân hiệu năng và 4 nhân tiết kiệm điện, và -cpu 4 không chọn nhân nào.">
 ```text
 goos: darwin
 goarch: arm64
@@ -1324,7 +1324,7 @@ Hai giới hạn trước khi bạn chép lại. Chia khúc chỉ có ích ở �
 
 Tháng 12 năm 2017, Joe Tsai mở [golang/go issue 23199](https://github.com/golang/go/issues/23199) với tựa "sync: Pool example suggests incorrect usage". Ý của anh là pool giả định mọi phần tử tốn cỡ như nhau, nhưng `bytes.Buffer` trong ví dụ của tài liệu có thể chứa từ vài byte đến hàng trăm megabyte. Một request lớn làm buffer phình ra; buffer được trả về pool; các request nhỏ cứ nhặt lại nó, và vùng cấp phát lớn đó bị ghim lại. Tính đến hôm nay issue vẫn còn mở.
 
-Thư viện chuẩn đã nhận ý đó. Trong Go 1.27.1, `fmt` dùng pool cho trạng thái printer, và `(*pp).free` trong `src/fmt/print.go` (dòng 155 đến 166) từ chối trả về một printer có buffer đã lớn quá 64 KiB, kèm chú thích nêu tên issue 23199. Đây là cùng ý đó thành một hàm của riêng bạn:
+Thư viện chuẩn đã nhận ý đó. Trong Go 1.27.1, `fmt` dùng pool cho trạng thái printer, và `(*pp).free` trong `src/fmt/print.go` (dòng 155 đến 174) bỏ buffer quá lớn (quá 64 KiB) và chỉ trả lại printer, kèm chú thích nêu tên issue 23199. Đây là cùng ý đó thành một hàm của riêng bạn:
 
 ```go
 var bufPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
@@ -1333,7 +1333,7 @@ func render(w io.Writer, name string) error {
 	buf := bufPool.Get().(*bytes.Buffer)
 	buf.Reset() // clear what the last user left behind
 	defer func() {
-		if buf.Cap() <= 64<<10 { // like fmt: do not keep a huge buffer
+		if buf.Cap() <= 64<<10 { // same idea: do not keep a huge buffer
 			bufPool.Put(buf)
 		}
 	}()
@@ -1467,7 +1467,7 @@ after 1 GC:   same buffer: true  New calls: 1
 after 2 GCs:  same buffer: false  New calls: 2
 ```
 
-Mình chạy năm lần và lần nào cũng ra ba dòng này. Khi có nhiều hơn một processor, một goroutine có thể chuyển sang processor khác giữa `Put` và `Get`, và buffer có thể bị lỡ ngay cả sau một lần GC, nên đừng xây gì trên việc object trong pool còn sống: cũng chương trình đó nhưng bỏ dòng `GOMAXPROCS(1)` in `false` sau một lần GC ở 8 trong 10 lần chạy. Microbenchmark không bao giờ thấy điều này, vì nó không để GC xảy ra giữa hai lần dùng. Một service thật thì có. Hãy bấm qua ba trường hợp bên dưới: trúng ô private của processor, tầng victim qua hai lần GC, và một buffer được trả về mà không `Reset`.
+Mình chạy năm lần và lần nào cũng ra ba dòng này. Khi có nhiều hơn một processor, một goroutine có thể chuyển sang processor khác giữa `Put` và `Get`, và buffer có thể bị lỡ ngay cả sau một lần GC, nên đừng xây gì trên việc object trong pool còn sống: cũng chương trình đó nhưng bỏ dòng `GOMAXPROCS(1)` in `false` sau một lần GC ở phần lớn các lần chạy. Microbenchmark không bao giờ thấy điều này, vì nó không để GC xảy ra giữa hai lần dùng. Một service thật thì có. Hãy bấm qua ba trường hợp bên dưới: trúng ô private của processor, tầng victim qua hai lần GC, và một buffer được trả về mà không `Reset`.
 
 <GoSyncPoolLifecycleDemo />
 
