@@ -3,6 +3,14 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-23 — Backend pilot: humanize giọng VI + 5 sơ đồ SVG mới
+
+- **Đã làm (branch `feat/backend-post1-visuals`, plan `docs/superpowers/plans/2026-11-23-backend-post1-humanize-visuals.md`):** humanize toàn bộ body VI của bài 1 series backend (`backend-http-request-lifecycle.mdx`) theo `voice.md` — **EN giữ nguyên để so giọng trước/sau**; kiểm bằng keep-diff SKILL.md Step 7 ("non-prose unchanged": mọi fact, số liệu, code block, JSX, link, cấu trúc 4 mục, EN byte-identical). Thêm 5 sơ đồ SVG vẽ trên trang kiểu `GoP01*` (`BeP01Stations/DnsWalk/TcpHandshake/ReuseCost/TraceFirst`), đặt đối xứng EN/VI mỗi mục: timeline 6 trạm khớp đúng trace curl trong bài, đường resolver (cache→router→hierarchy + TTL), TCP bắt tay 3 gói 1 RTT, ngân sách request đầu ~122ms vs request hai ~2ms (caption ghi rõ illustrative theo luật honesty), flow trace-trước-đoán-sau 3 bước. Bài giờ có 6 sơ đồ SVG (kèm red box cũ) + 2 ảnh ẩn dụ + 2 terminal capture.
+- **Ai quyết:** user đọc pilot trên dev — "giọng nên human thêm, hình/sơ đồ hơi ít"; chốt qua question: **5 sơ đồ** (bỏ phương án TLS 1.2 vs 1.3 vì prose đã nói) + **humanize chỉ VI**.
+- **Kiểm tra:** 2 vòng review bằng subagent vision (claude-haiku) trên 3 screenshot sáng EN/VI + tối VI (`figshot.sh`). Vòng 1 bắt 2 defect thật: Stations clip chữ "response back" ở mép phải; ReuseCost bar-2 dùng nhầm tọa độ bar-1 (sliver đỏ lệch sang phải, ghost rect width âm không render, label đè "≈ 2 ms" + tràn mép) — sửa cả hai, vòng 2 PASS 0 defect. Gate: `npm run build` 63 pages sạch, `node --test` 47 pass, trang dev 200, 5 component render đủ 2 bản EN/VI.
+- **Chưa chốt:** bài vẫn `draft: true` chờ user duyệt lại giọng + sơ đồ trên dev (`/blog/backend-http-request-lifecycle/`, server :4321 đang chạy). Duyệt xong mới flip `draft: false` + viết plan 11 bài còn lại theo map trong spec.
+- **Lưu ý:** working tree đang có thay đổi **chưa commit của session khác** (các file `src/components/series/*` + `src/pages/blog/series/[id].astro`, việc cutover series Go) — bản PR này không đụng, không stage các file đó.
+
 ## 2026-11-23 — Series Go: bài 4–10 (draft) và sơ đồ cho bài 1–10
 
 - **Đã làm:** viết bài 4–10 của series Go mới (`draft: true`): structs/interfaces, errors, testing, goroutines/channels, context/mutex, concurrency patterns, HTTP service. Mỗi bài có fact review, test người đọc mới và một vòng sửa. Thêm 51 sơ đồ SVG vẽ trên trang (`src/components/mdx/GoP01*`…`GoP10*`, khoảng 5 sơ đồ mỗi bài) cho cả bài 1–10. Mỗi sơ đồ được kiểm tra sự thật và chụp màn hình sáng/tối. Spec redesign sửa phân bổ sách: post 4 không giữ mục 100GM nào; #11 (functional options) và generics (`Stack[T]`) chuyển sang post 12.
