@@ -56,7 +56,7 @@ import cpuDie from '../../assets/blog/go-hardware-cpu-caches-virtual-memory-gc-a
 
 High-level Go hides pointers, page tables, and garbage collection behind ordinary loops and struct values. Under light load that abstraction holds up, while real production traffic exposes where it bends:
 
-- **Discord's two-minute latency spikes.** Discord's Read States service kept tens of millions of cached entries in an in-memory Go LRU cache. Because Go forces a garbage collection cycle at least every two minutes even when heap growth is small, scanning millions of live pointer-heavy cache entries caused predictable CPU and tail-latency spikes until Discord moved that service to Rust.
+- **Discord's two-minute latency spikes.** Discord's Read States service kept tens of millions of cached entries in an in-memory Go LRU cache. Because Go forces a garbage collection cycle at least every two minutes even when heap growth is small, scanning millions of live pointer-heavy cache entries caused predictable CPU and tail-latency spikes.
 - **Uber reclaiming ~70,000 CPU cores across 30 services.** Microservices running with default `GOGC=100` inside containers with plenty of spare RAM burned up to 25% of total CPU inside `runtime.scanobject`. Dynamically scaling GC targets against container memory headroom recovered tens of thousands of cores, which helped motivate `GOMEMLIMIT` in Go 1.19.
 - **Linux RSS surprises between Go 1.12 and Go 1.15.** When Go switched Linux memory release from `MADV_DONTNEED` to lazy `MADV_FREE`, freed heap spans stayed counted in process `RSS` until the kernel faced memory pressure. Kubernetes dashboards reported rising memory even while Go's heap sat mostly empty, so Go 1.16 restored `MADV_DONTNEED` as the default.
 
@@ -104,7 +104,7 @@ Whenever Go reads `s[0]` and misses L1, the CPU fetches an entire **cache line**
 
 ### Spatial locality, AoS vs. SoA, and unpredictable strides (`#91`)
 
-Here are three comparisons on Go 1.27.1 (Apple M2): summing a `512×512` `int64` matrix row-by-row vs. column-by-column, storing structs as an array (`[]OrderAoS`) vs. separate field slices (`OrderSoA`), and walking a slice vs. chasing pointers down a linked list:
+Here are three comparisons on Go 1.27.1 (Apple M2): summing a `512×512` `int64` matrix row-by-row vs. column-by-column, storing structs as an array (`[]OrderAoS`) vs. separate field slices (`OrderSoA`), and walking a slice vs. chasing pointers down a linked list. `for r := range 512` is Go 1.22+ shorthand that counts `r` from `0` to `511`. Each `Benchmark...` result in this post comes from a `testing.B` function shaped like the ones in [Go memory](/blog/go-memory-data-types-slices-maps-strings/) (`for b.Loop() { ... }` around the code shown); setup that only builds the input data is left out, and [Go benchmarking](/blog/go-observability-metrics-microbenchmarks-benchstat/) explains how that machinery works:
 
 ```go
 // Row-major walks contiguous 8-byte steps; Col-major jumps 4,096 bytes per step
@@ -139,9 +139,9 @@ BenchmarkStride_LinkedList-8    1736     661215 ns/op    0 B/op    0 allocs/op
 ```
 </TerminalOutput>
 
-Look at `BenchmarkStride_LinkedList-8` in that table: all `500,000` nodes came from one contiguous slice (`make([]listNode, 500_000)`), and Apple M2's wide out-of-order engine hid most of the gap (`661-972 µs` across runs vs. `637-647 µs` for the slice). Once linked-list nodes scatter across random heap pages, every `n = n.next` hop becomes a **non-unit stride** that breaks hardware prefetching and forces serial `~80-100 ns` DRAM waits.
+Look at `BenchmarkStride_LinkedList-8` in that table. It walks `for n := head; n != nil; n = n.next` over nodes of `type listNode struct { val int64; next *listNode }`, while `BenchmarkStride_Slice-8` loops over a plain `[]int64` of the same length. All `500,000` nodes came from one contiguous slice (`make([]listNode, 500_000)`), and Apple M2's wide out-of-order engine hid most of the gap (`661-972 µs` across runs vs. `637-647 µs` for the slice). Once linked-list nodes scatter across random heap pages, every `n = n.next` hop becomes a **non-unit stride** that breaks hardware prefetching and forces serial `~80-100 ns` DRAM waits.
 
-Cache geometry brings hardware-specific surprises too. On a `32 KiB`, 8-way set-associative L1D cache (`64 sets × 64 B = 4 KiB`), stepping by `512` `int64` columns (`4,096 B`) hashes every row into the exact same cache set (**conflict misses** at a **critical stride**), whereas `513` columns spreads across sets. On Apple M2's larger L1 cache, `512` and `513` columns ran nearly identically (`~515 ns/op` vs. `~550 ns/op`), which is why microbenchmarks need verification on production hardware.
+Cache geometry brings hardware-specific surprises too. On a `32 KiB`, 8-way set-associative L1D cache (the cache is split into sets, and each address maps to exactly one set that holds only 8 lines; `64 sets × 64 B = 4 KiB`), stepping by `512` `int64` columns (`4,096 B`) hashes every row into the exact same cache set (**conflict misses** at a **critical stride**), whereas `513` columns spreads across sets. On Apple M2's larger L1 cache, `512` and `513` columns ran nearly identically (`~515 ns/op` vs. `~550 ns/op`), which is why microbenchmarks need verification on production hardware.
 
 ### False sharing across CPU cores (`#92`)
 
@@ -160,6 +160,8 @@ type CountersPad128 struct {
 }
 ```
 
+The blank field `_ [120]byte` is never read or written; it only occupies space so that `b` starts on a different cache line from `a`.
+
 <GoP16CacheLineFalseSharing />
 
 <TerminalOutput command="go test -run=^$ -bench='BenchmarkFalseSharing_' -benchmem -count=3 ." label="Apple M2 · Go 1.27.1" caption="Separating two concurrent atomic counters onto different cache lines cuts runtime roughly 3x across 100k updates per goroutine with no algorithmic change.">
@@ -175,7 +177,7 @@ Another clean fix in Go is keeping a local `int64` on each worker's stack and su
 ### Instruction-level parallelism and data hazards (`#93`)
 
 Modern cores are **superscalar**: they decode, reorder, and run multiple independent instructions in parallel each cycle. Two hazards stall those pipelines:
-- **Control hazards (branches):** unpredictable `if` checks flush speculative pipelines (10-20 cycles lost), although Go's compiler emits branchless `CSEL`/`CMOV` machine instructions for simple conditional updates.
+- **Control hazards (branches):** unpredictable `if` checks flush speculative pipelines (10-20 cycles lost), although Go's compiler emits branchless `CSEL` (ARM64) / `CMOV` (x86-64) machine instructions, which pick one of two values without jumping, for simple conditional updates.
 - **Data hazards (dependencies):** if instruction `B` reads what instruction `A` just wrote, the core has to serialize them.
 
 Splitting one sum accumulator (`total += s[i]`) into two independent accumulators (`a += s[i]; b += s[i+1]`) breaks that read-after-write chain so the core runs both additions in parallel:
@@ -229,7 +231,7 @@ A Go struct often takes more memory than the sum of its fields. On 64-bit CPUs, 
 
 <GoP16StructPadding />
 
-Running `unsafe.Sizeof` and `unsafe.Offsetof` on Go 1.27.1 shows how field order affects `Unpadded`, `Padded`, and Post 10's `Todo` struct if you later add an `Archived bool` field:
+Running `unsafe.Sizeof` and `unsafe.Offsetof` (functions from the `unsafe` package that report a type's size in bytes and a field's byte offset inside its struct; they only read layout and do nothing unsafe here) on Go 1.27.1 shows how field order affects `Unpadded`, `Padded`, and Post 10's `Todo` struct if you later add an `Archived bool` field:
 
 ```go
 type Unpadded struct {
@@ -291,7 +293,7 @@ Reorder fields in hot or high-volume structs where memory density shows up in pr
 
 ## 3. Stack, heap, escape analysis, inlining, and BCE
 
-In C or C++, you explicitly separate stack locals from `malloc`. In Go, you write `&x` or values naturally and the compiler decides where each variable belongs (`#95`):
+In Go, you write `&x` or values naturally and the compiler decides where each variable belongs (`#95`):
 
 - **Goroutine stack:** each goroutine owns a private, contiguous stack (starting at `2 KiB` on 64-bit Linux and macOS) that grows or shrinks as needed. Pushing local variables subtracts from the CPU stack pointer (`SP`); returning moves `SP` back in one instruction with zero locks, zero GC tracking, and high L1 locality.
 - **Shared heap:** a process-wide memory pool shared across goroutines (`runtime.mallocgc`). Objects that outlive their declaring frame sit on the heap, so the GC has to trace their pointers and sweep them later.
@@ -321,6 +323,19 @@ Go's escape analyzer enforces two invariants documented in `src/cmd/compile/inte
 // reused across loop iterations for logically distinct variables).
 ```
 </GitHubCode>
+
+Here are the two functions behind that rule. The `//go:noinline` comment is a compiler directive that stops the compiler from pasting a function into its caller, so the escape decision stays visible in the benchmark:
+
+```go
+//go:noinline
+func sumDown(x, y *int) int { return *x + *y } // pointers passed down
+
+//go:noinline
+func sumUp(x, y int) *int { // pointer returned up
+	z := x + y
+	return &z
+}
+```
 
 The practical rule is **sharing down stays on the stack; sharing up escapes to the heap**. Passing `&a` down into `sumDown(&a, &b)` keeps `a` and `b` on the caller's stack because the caller outlives `sumDown`. Returning `&z` up from `sumUp(a, b)` forces `z` onto the heap, making `BenchmarkStackVsHeap_Ptr` pay `8 B/op, 1 alloc/op` (`~8.6-11.2 ns/op` vs. `~2.8-3.5 ns/op` for returning `int` by value on Apple M2).
 
@@ -383,7 +398,7 @@ func (m *Mutex) Lock() {
 ```
 </GitHubCode>
 
-Adding `-d=ssa/check_bce/debug=1` exposes **Bounds Check Elimination (BCE)** at the same time. Go inserts bounds checks before slice accesses (`if idx >= len(s) { panic }`) unless the SSA optimizer proves the index stays in range. Reslicing a 4-element window and reading `_ = win[3]` once clears all four bounds checks inside the loop:
+Adding `-d=ssa/check_bce/debug=1` exposes **Bounds Check Elimination (BCE)** at the same time. Go inserts bounds checks before slice accesses (`if idx >= len(s) { panic }`) unless the SSA optimizer (SSA, static single assignment, is the compiler's internal form of your code) proves the index stays in range. Reslicing a 4-element window and reading `_ = win[3]` once clears all four bounds checks inside the loop:
 
 ```go
 package bce
@@ -506,7 +521,7 @@ Step through all three colors, the Hybrid Write Barrier mutation guard, and memo
 
 <GoTricolorGcDemo />
 
-Running our allocation churn benchmark on Go 1.27.1 with `GODEBUG=gctrace=1` shows sub-millisecond STW pauses in practice:
+Running our allocation churn benchmark on Go 1.27.1 with `GODEBUG=gctrace=1` shows sub-millisecond STW pauses in practice. `BenchmarkAllocChurn` allocates a fresh `32 KiB` `[]byte` on every iteration and stores it in a package-level variable so it must live on the heap, and `./p16check.test` is the test binary produced by `go test -c`:
 
 <TerminalOutput command="GODEBUG=gctrace=1 ./p16check.test -test.run=^$ -test.bench=BenchmarkAllocChurn -test.benchtime=30ms" label="Apple M2 · Go 1.27.1" caption="Real Go 1.27.1 gctrace=1 lines: MarkSetup and MarkTerm pauses stay sub-millisecond (0.16 ms and 0.024 ms on cycle 4), while live heap drops from 4 MB down to 1 MB across 8 Ps.">
 ```text
@@ -599,7 +614,7 @@ Two container companions belong right next to GC tuning in Kubernetes: Go 1.25+ 
 
 Code Go bậc cao giấu con trỏ, bảng trang nhớ ảo và garbage collector đằng sau những vòng lặp và struct rất bình thường. Lúc ít tải lớp vỏ ấy chạy êm, nhưng tải production nhanh chóng kéo màn che đó xuống:
 
-- **Cơn giật p99 theo chu kỳ 2 phút ở Discord.** Dịch vụ Read States của Discord giữ hàng chục triệu mục trong một LRU cache viết bằng Go. Vì Go ép chạy GC ít nhất 2 phút một lần kể cả khi heap ít tăng, mỗi đợt quét qua cây con trỏ khổng lồ ấy đều làm CPU và độ trễ đuôi vọt lên đều đặn, buộc họ chuyển dịch vụ đó sang Rust.
+- **Cơn giật p99 theo chu kỳ 2 phút ở Discord.** Dịch vụ Read States của Discord giữ hàng chục triệu mục trong một LRU cache viết bằng Go. Vì Go ép chạy GC ít nhất 2 phút một lần kể cả khi heap ít tăng, mỗi đợt quét qua cây con trỏ khổng lồ ấy đều làm CPU và độ trễ đuôi vọt lên đều đặn.
 - **Uber thu hồi ~70.000 nhân CPU trên 30 microservice.** Chạy mặc định `GOGC=100` trong những container thừa mứa RAM khiến nhiều dịch vụ đốt tới 25% CPU trong `runtime.scanobject`. Khi tự điều chỉnh mục tiêu GC theo đúng phần RAM trống của container, Uber tiết kiệm hàng chục nghìn nhân, góp phần mở đường cho `GOMEMLIMIT` ở Go 1.19.
 - **Bẫy RSS trên Linux từ Go 1.12 đến 1.15.** Khi Go chuyển từ `MADV_DONTNEED` sang `MADV_FREE` để trả RAM kiểu lười, các vùng heap đã dọn vẫn nằm nguyên trong chỉ số `RSS` cho tới khi OS thiếu RAM thật. Biểu đồ Kubernetes liên tục báo sắp tràn bộ nhớ dù heap Go đang rỗng, nên tới Go 1.16 đội ngũ runtime phải đưa `MADV_DONTNEED` về lại mặc định.
 
@@ -647,7 +662,7 @@ Mỗi lần Go đọc `s[0]` bị hụt L1, CPU bốc nguyên một **cache line
 
 ### Cục bộ không gian, AoS vs. SoA và bước nhảy khó đoán (`#91`)
 
-Dưới đây là ba phép thử thực tế trên Go 1.27.1 (Apple M2): cộng ma trận `512×512` `int64` theo hàng vs. theo cột, lưu mảng struct (`[]OrderAoS`) vs. tách cột slice (`OrderSoA`), và duyệt slice vs. duyệt danh sách liên kết con trỏ:
+Dưới đây là ba phép thử thực tế trên Go 1.27.1 (Apple M2): cộng ma trận `512×512` `int64` theo hàng vs. theo cột, lưu mảng struct (`[]OrderAoS`) vs. tách cột slice (`OrderSoA`), và duyệt slice vs. duyệt danh sách liên kết con trỏ. `for r := range 512` là cú pháp Go 1.22+ đếm `r` từ `0` đến `511`. Mọi kết quả `Benchmark...` trong bài đến từ một hàm `testing.B` có dạng như ở bài [Go memory](/blog/go-memory-data-types-slices-maps-strings/) (`for b.Loop() { ... }` bao quanh đoạn code được trình bày); phần dựng dữ liệu đầu vào được lược bỏ, còn cơ chế bên trong benchmark được giải thích ở bài [Go benchmarking](/blog/go-observability-metrics-microbenchmarks-benchstat/):
 
 ```go
 // Duyệt theo hàng đi bước 8 byte liền kề; duyệt cột nhảy cóc 4.096 byte mỗi bước
@@ -682,9 +697,9 @@ BenchmarkStride_LinkedList-8    1736     661215 ns/op    0 B/op    0 allocs/op
 ```
 </TerminalOutput>
 
-Nhìn kỹ `BenchmarkStride_LinkedList-8` ở bảng trên: trong bài test đó toàn bộ `500.000` node nằm trong một mảng cấp phát liên tiếp (`make([]listNode, 500_000)`), cộng thêm bộ thực thi ngoài thứ tự (out-of-order) rộng của Apple M2 nên kết quả bám sát slice (`661-972 µs` tùy lượt so với `637-647 µs`). Với linked list cấp phát rải rác ngoài heap thật, mỗi bước `n = n.next` trở thành **bước nhảy không đều (non-unit stride)** làm mạch nạp trước bó tay, ép nhân đứng đợi `~80-100 ns` DRAM ở từng node.
+Nhìn kỹ `BenchmarkStride_LinkedList-8` ở bảng trên. Bài đó duyệt `for n := head; n != nil; n = n.next` qua các node kiểu `type listNode struct { val int64; next *listNode }`, còn `BenchmarkStride_Slice-8` lặp qua một `[]int64` thường cùng độ dài. Trong bài test đó toàn bộ `500.000` node nằm trong một mảng cấp phát liên tiếp (`make([]listNode, 500_000)`), cộng thêm bộ thực thi ngoài thứ tự (out-of-order) rộng của Apple M2 nên kết quả bám sát slice (`661-972 µs` tùy lượt so với `637-647 µs`). Với linked list cấp phát rải rác ngoài heap thật, mỗi bước `n = n.next` trở thành **bước nhảy không đều (non-unit stride)** làm mạch nạp trước bó tay, ép nhân đứng đợi `~80-100 ns` DRAM ở từng node.
 
-Hình học cache cũng tạo ra các bẫy tùy kiến trúc máy. Trên server dùng L1D `32 KiB` chia 8 đường (set-associative, `64 set × 64 B = 4 KiB`), bước nhảy `512` cột `int64` (`4.096 B`) ép mọi hàng dồn vào đúng một cache set (**conflict miss** ở **bước nhảy tới hạn**, critical stride), trong khi `513` cột lại rải đều ra các set. Trên Apple M2 với cấu trúc L1 lớn hơn, `512` vs. `513` cột cho tốc độ ngang nhau (`~515 ns/op` vs. `~550 ns/op`), nhắc mình luôn kiểm chứng lại benchmark trên đúng phần cứng production.
+Hình học cache cũng tạo ra các bẫy tùy kiến trúc máy. Trên server dùng L1D `32 KiB` chia 8 đường (set-associative: cache chia thành các set, mỗi địa chỉ chỉ rơi vào đúng một set và set đó chứa tối đa 8 line; `64 set × 64 B = 4 KiB`), bước nhảy `512` cột `int64` (`4.096 B`) ép mọi hàng dồn vào đúng một cache set (**conflict miss** ở **bước nhảy tới hạn**, critical stride), trong khi `513` cột lại rải đều ra các set. Trên Apple M2 với cấu trúc L1 lớn hơn, `512` vs. `513` cột cho tốc độ ngang nhau (`~515 ns/op` vs. `~550 ns/op`), nhắc mình luôn kiểm chứng lại benchmark trên đúng phần cứng production.
 
 ### False sharing giữa hai nhân CPU (`#92`)
 
@@ -703,6 +718,8 @@ type CountersPad128 struct {
 }
 ```
 
+Trường trống `_ [120]byte` không bao giờ được đọc hay ghi; nó chỉ chiếm chỗ để `b` nằm ở cache line khác với `a`.
+
 <GoP16CacheLineFalseSharing />
 
 <TerminalOutput command="go test -run=^$ -bench='BenchmarkFalseSharing_' -benchmem -count=3 ." label="Apple M2 · Go 1.27.1" caption="Tách hai biến đếm atomic sang hai cache line khác nhau rút thời gian chạy xuống gần một phần ba qua 100k lần cộng ở mỗi goroutine mà không đổi thuật toán.">
@@ -718,7 +735,7 @@ Thay vì chèn byte đệm, mỗi worker chỉ cần giữ một biến `int64` 
 ### Song song cấp lệnh (ILP) và phụ thuộc dữ liệu (`#93`)
 
 Nhân CPU hiện đại là máy **siêu vô hướng (superscalar)**: trong một chu kỳ xung nhịp, nó có thể giải mã và chạy song song nhiều lệnh độc lập. Hai loại rào cản phá thế song song đó:
-- **Rào cản điều khiển (control hazard):** nhánh `if` khó đoán khiến pipeline phải xả bỏ các lệnh đoán sai (tốn 10-20 chu kỳ), dù với phép gán có điều kiện đơn giản trình biên dịch Go thường hạ thành lệnh `CSEL`/`CMOV` không rẽ nhánh.
+- **Rào cản điều khiển (control hazard):** nhánh `if` khó đoán khiến pipeline phải xả bỏ các lệnh đoán sai (tốn 10-20 chu kỳ), dù với phép gán có điều kiện đơn giản trình biên dịch Go thường hạ thành lệnh `CSEL` (ARM64) / `CMOV` (x86-64) không rẽ nhánh, tức chọn một trong hai giá trị mà không cần nhảy.
 - **Rào cản dữ liệu (data hazard):** nếu lệnh `B` cần đọc biến mà lệnh `A` vừa tính, CPU buộc phải đợi `A` xong trước.
 
 Tách một biến cộng dồn duy nhất (`total += s[i]`) thành hai biến cộng dồn độc lập (`a += s[i]; b += s[i+1]`) cắt đứt chuỗi chờ đọc-sau-ghi để nhân CPU chạy hai phép cộng song song:
@@ -772,7 +789,7 @@ Kích thước một struct trong Go thường lớn hơn tổng kích thước 
 
 <GoP16StructPadding />
 
-Kiểm tra trực tiếp bằng `unsafe.Sizeof` và `unsafe.Offsetof` trên Go 1.27.1 cho cặp struct `Unpadded` vs. `Padded`, cộng thêm struct `Todo` của Bài 10 khi đội ngũ thêm một cờ `Archived bool`:
+Kiểm tra trực tiếp bằng `unsafe.Sizeof` và `unsafe.Offsetof` (hàm của package `unsafe`, cho biết kích thước một kiểu tính bằng byte và vị trí byte của một trường trong struct; ở đây chúng chỉ đọc layout, không làm gì nguy hiểm) trên Go 1.27.1 cho cặp struct `Unpadded` vs. `Padded`, cộng thêm struct `Todo` của Bài 10 khi đội ngũ thêm một cờ `Archived bool`:
 
 ```go
 type Unpadded struct {
@@ -834,7 +851,7 @@ Chỉ nên đổi thứ tự trường trên những struct nóng hoặc lưu s�
 
 ## 3. Stack, Heap, Escape Analysis, Inlining và BCE
 
-Trong C hay C++, bạn tự tay phân biệt biến stack với `malloc`. Trong Go, bạn cứ viết `&x` hoặc truyền giá trị bình thường, còn trình biên dịch tự tính xem biến nào đặt ở đâu (`#95`):
+Trong Go, bạn cứ viết `&x` hoặc truyền giá trị bình thường, còn trình biên dịch tự tính xem biến nào đặt ở đâu (`#95`):
 
 - **Stack của goroutine:** mỗi goroutine giữ một vùng nhớ liên tiếp riêng (bắt đầu từ `2 KiB` trên Linux và macOS 64-bit) tự co giãn theo độ sâu hàm gọi. Cấp phát biến cục bộ chỉ là trừ con trỏ stack (`SP`), lúc `return` chỉ cần nhấc `SP` lên, không tốn khóa mutex, không phiền GC theo dõi, lại nằm sẵn rất ấm trên L1 cache.
 - **Heap dùng chung:** kho bộ nhớ toàn cục chia sẻ giữa mọi goroutine (`runtime.mallocgc`). Mọi biến sống qua thời điểm hàm kết thúc đều phải ra heap, buộc GC sau đó quét con trỏ và dọn dẹp lại.
@@ -864,6 +881,19 @@ Trình biên dịch Go tuân thủ hai bất biến rất gọn được ghi nga
 // reused across loop iterations for logically distinct variables).
 ```
 </GitHubCode>
+
+Đây là hai hàm nằm sau quy tắc đó. Dòng chú thích `//go:noinline` là chỉ thị cho trình biên dịch đừng chép thân hàm vào nơi gọi, để quyết định escape vẫn nhìn thấy được trong benchmark:
+
+```go
+//go:noinline
+func sumDown(x, y *int) int { return *x + *y } // con trỏ truyền xuống
+
+//go:noinline
+func sumUp(x, y int) *int { // con trỏ trả lên
+	z := x + y
+	return &z
+}
+```
 
 Quy tắc thực chiến dễ nhớ nhất là **truyền xuống thì ở stack; trả lên thì ra heap**. Truyền `&a` xuống cho `sumDown(&a, &b)` giữ `a` và `b` yên ổn trên stack của hàm gọi vì hàm gọi còn sống lâu hơn `sumDown`. Trả `&z` ngược lên từ `sumUp(a, b)` ép `z` nhảy ra heap, khiến `BenchmarkStackVsHeap_Ptr` tốn `8 B/op, 1 alloc/op` (`~8,6-11,2 ns/op` so với `~2,8-3,5 ns/op` khi trả thẳng `int` theo giá trị trên Apple M2).
 
@@ -926,7 +956,7 @@ func (m *Mutex) Lock() {
 ```
 </GitHubCode>
 
-Kèm thêm cờ `-d=ssa/check_bce/debug=1`, ta soi được luôn **Bounds Check Elimination (BCE)**. Go tự chèn lệnh kiểm tra an toàn trước khi đọc slice (`if idx >= len(s) { panic }`) trừ khi pha SSA chứng minh được chỉ số không thể vượt biên. Tạo cửa sổ 4 phần tử rồi chạm `_ = win[3]` một lần giúp trình biên dịch gỡ hết các bước kiểm tra bên dưới:
+Kèm thêm cờ `-d=ssa/check_bce/debug=1`, ta soi được luôn **Bounds Check Elimination (BCE)**. Go tự chèn lệnh kiểm tra an toàn trước khi đọc slice (`if idx >= len(s) { panic }`) trừ khi pha SSA (static single assignment, dạng biểu diễn trung gian của trình biên dịch) chứng minh được chỉ số không thể vượt biên. Tạo cửa sổ 4 phần tử rồi chạm `_ = win[3]` một lần giúp trình biên dịch gỡ hết các bước kiểm tra bên dưới:
 
 ```go
 package bce
@@ -1049,7 +1079,7 @@ Bấm từng bước qua ba màu Trắng-Xám-Đen, tình huống Write Barrier 
 
 <GoTricolorGcDemo />
 
-Chạy thử benchmark sinh rác trên Go 1.27.1 kèm `GODEBUG=gctrace=1` cho thấy hai pha dừng STW thực tế nhỏ tới mức nào:
+Chạy thử benchmark sinh rác trên Go 1.27.1 kèm `GODEBUG=gctrace=1` cho thấy hai pha dừng STW thực tế nhỏ tới mức nào. `BenchmarkAllocChurn` mỗi vòng cấp phát một `[]byte` `32 KiB` mới và gán vào biến cấp package nên bắt buộc nằm trên heap, còn `./p16check.test` là file test đã biên dịch bằng `go test -c`:
 
 <TerminalOutput command="GODEBUG=gctrace=1 ./p16check.test -test.run=^$ -test.bench=BenchmarkAllocChurn -test.benchtime=30ms" label="Apple M2 · Go 1.27.1" caption="Log GODEBUG=gctrace=1 thật trên Go 1.27.1: hai pha dừng STW ở vòng 4 chỉ tốn 0,16 ms và 0,024 ms, kéo heap từ 4 MB xuống còn 1 MB sống sót trên 8 P.">
 ```text
