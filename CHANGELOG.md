@@ -3,6 +3,31 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-23 — Series backend: lồng ví dụ FastAPI chạy thật vào bài 1–4
+
+- **Đã làm (branch `content/backend-fastapi-framing`):** spec v3 + plan recipe mục 1 ghi quy tắc mới; 4 agent Sonnet (mỗi bài 1 worktree cắt từ nhánh này) viết lại bài 1–4: FastAPI lồng trong bài, **ý nào đụng code thì có ví dụ FastAPI chạy được trong `demo/pNN_*.py` + capture thật**, phần chữ giải thích chính code đó (không có section "In FastAPI" riêng). File demo mới: `p01_raw_asgi.py`, `p02_idempotency.py`, `p02_versions.py`, `p03_boundary.py`, `p04_depends.py`, `p04_override.py` (đã thêm vào `demo/README.md`). Tiêu biểu: bài 2 dựng `Idempotency-Key` bằng `Header()` + `/v1` vs `/v2`; bài 3 handler 422 + `extra="forbid"` + trích `/openapi.json`; bài 4 `Depends` + `dependency_overrides`/`TestClient`.
+- **Controller review:** bài 1 output 422 bị cắt 3 header (`date`/`server`/`content-length`) → chạy lại thật và thay bản đầy đủ; bài 4 chạy lại `p04_override.py` khớp từng dòng; bài 3 kiểm nhãn Pydantic 2.14 đúng (2.14.4).
+- **Ai quyết:** user ("lồng ghép fastAPI vào trong nội dung… thay vì tách section riêng"; "phần nào đụng code thì cứ dựng ví dụ code bằng fastAPI và giải thích ra"). Lần chạy đầu (section "In FastAPI" riêng) user dừng giữa chừng, không commit gì.
+- **Kiểm tra:** build 68 pages + 47 test sạch; mọi fence python trong 4 bài có nguyên văn trong `demo/*.py`; `post-check.sh` cả 4 bài sạch (http=200).
+- **Chưa chốt:** bài 1 đã xuất bản nên merge là lên site ngay; bài 2–4 vẫn `draft: true` chờ user đọc; chưa chạy vision QA vì không thêm hình.
+
+## 2026-11-23 — Trang series: Mục lục dùng nhãn của sơ đồ, bỏ dòng mô tả lộ trình "Đọc hết", đổi tên series backend
+
+- **Đã làm (branch `fix/series-page-contents-topics`):** `SeriesContents.astro` lấy tiêu đề mỗi dòng từ `part.topic` (đúng nhãn ô trong sơ đồ đọc phía trên) thay vì title bài viết — áp dụng cho mọi series vì component dùng chung. Xoá `who` của path `full` ở cả 6 series (vd. "Từ byte đầu tiên của request tới bản deploy không downtime."); `SeriesPath.who` thành optional, `SeriesMap.astro` chỉ render dòng `who` khi có.
+- **Ai quyết:** user yêu cầu (title Mục lục khớp sơ đồ; xoá dòng mô tả, áp dụng mọi series). Mở rộng việc đổi tiêu đề Mục lục sang mọi series là AI quyết, vì component dùng chung.
+- **Đổi tên series backend:** "How backend actually works" → **"Backend with Python FastAPI"** / "Backend với Python FastAPI". Tagline, pitch đoạn 2 và credit viết lại: series dạy **cả** nền tảng backend **lẫn** FastAPI (trước đây ghi FastAPI "chỉ là demo"). User quyết; câu chữ tagline/pitch do AI viết.
+- **Kiểm tra:** build 68 pages + 47 test sạch.
+- **Chưa chốt:** spec `docs/superpowers/specs/2026-11-21-backend-series-design.md` vẫn dùng tên cũ và hướng "knowledge-first"; các bài draft 2–4 chưa rà lại theo hướng mới. Title bài viết (frontmatter) giữ nguyên, vẫn hiện ở trang bài, blog index, series card, pager.
+
+## 2026-11-23 — Wave A series backend: viết bài 2–4 (draft) theo công thức pilot
+
+- **Đã làm (branch `feat/backend-wave-a`, 3 agent song song mỗi bài 1 worktree):** viết 3 bài draft theo plan `docs/superpowers/plans/2026-11-23-backend-posts-2-12.md`. **Bài 2** `backend-rest-api-design`: 5 quyết định REST + audit 2 phút; demo `rest_api.py` (router `/v1/cases`, 201+Location, 404, 204, 405+allow); 6 sơ đồ `BeP02*`; cover Swagger /docs thật; 13 terminal block capture thật. **Bài 3** `backend-validation-schemas`: hook Heartbleed; **DDIA split rule khai báo đúng 1 lần ở intro** + link `/blog/encoding-and-schema-evolution/`, không dạy lại evolution; demo `schemas.py` (Pydantic v2 constraints, 422 có loc/type/msg, response_model filter) + minh chứng 422 sinh ra **trước** handler bằng log; 6 sơ đồ `BeP03*`; cover 422 Swagger thật; hero Ellis Island (NYPL, no known copyright). **Bài 4** `backend-layered-architecture`: fat router vs web→service→data; demo 5 file additive (`fat_router` + `layered_data/service/app/smoke`), log trace theo tầng, 409 byte-đôi giữa hai kiến trúc; 5 sơ đồ `BeP04*`; hero bếp nhà hàng 1942. Sách Lubanovic không còn trong repo → cite chapter theo map spec, nội dung bám primary docs (MDN/FastAPI/Pydantic/OWASP/12factor/Fowler). 2 icon mới theo convention flow (robot, swagger).
+- **Review của controller:** fact review tay từng bài bắt 4 lỗi thật — bài 2: caption log đếm sai (7 request / 4 status code, PATCH không nằm trong log) + typo VI "đố" + gloss "implementations change" dịch lệch; bài 4: wordmark FastAPI dính chữ "web" ở 2 hình (Direction, OneTrace); bài 3: icon scissors chìm nền tối thiếu đĩa sáng — tất cả đã fix trên nhánh wave. Vision review (claude-haiku, 3 ảnh sáng EN/VI + tối VI mỗi bài, figshot height đủ) PASS cả 17 sơ đồ + 5 ảnh cover/in-body/hero.
+- **Kèm theo:** dọn `demo/__pycache__/*.pyc` bị track nhầm từ pilot (untrack + `.gitignore`); các bài VI viết thuần Việt ngay từ đầu (không phải dịch), code trong bài khớp byte file demo (verify script), mọi số liệu là capture thật hôm nay (stack ghi trong nhãn).
+- **Ai quyết:** user chốt plan PR #42 ("merge luôn đi") → wave A chạy tự động theo plan; các lựa chọn nội dung từng bài do agent owning quyết theo brief.
+- **Kiểm tra:** build 68 pages + 47 test sạch trên nhánh wave; 3 trang draft render 200 trên dev.
+- **Chưa chốt:** 3 bài vẫn `draft: true` chờ user duyệt từng bài trên dev; wave B (bài 5–7) chỉ chạy sau khi user chốt wave A; 3 worktree agent giữ nguyên tới khi PR merge.
+
 ## 2026-11-23 — Xuất bản pilot backend: bài 1 series "How backend actually works" lên sóng
 
 - **Đã làm (branch `feat/publish-backend-pilot`, sau khi merge PR #40 vào main):** flip `draft: true` → `false` cho `backend-http-request-lifecycle` — bài đầu tiên của series backend lên production, deploy GitHub Pages tự chạy sau khi merge. Merge PR #40 trước đó cần resolve conflict `CHANGELOG.md` với PR #39 (cutover Go, main chạy trước) — giữ cả ba entry cùng ngày theo thứ tự thời gian. Build 63 → 68 pages (trang post + trang `/blog/category/backend/` build lần đầu; phần còn lại từ delta cutover Go đã theo merge vào nhánh), 47 test pass.
