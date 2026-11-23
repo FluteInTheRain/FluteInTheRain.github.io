@@ -103,7 +103,9 @@ Watching how `G`, `M`, and `P` react to I/O explains why a Go server handles ten
 | **`P1`'s local queue runs empty** | Checks global queue every `61` ticks to avoid starvation, then `netpoller` | **Work stealing**: `P1` steals half of `P0`'s local queue | Stolen goroutines run immediately on `P1`'s core |
 | **CPU-heavy loop hits ~`10 ms`** | Preemptive signal interrupts the running `G` (since Go 1.14) | Scheduler puts `G` back on the run queue | Other runnable goroutines get a fair turn |
 
-In Go's runtime source (`src/runtime/runtime2.go`), every logical processor transitions through explicit states so the background monitor (`sysmon`) knows when a thread is stuck in a syscall and can hand its `P` off to keep CPU cores busy:
+A few terms from that table: `EAGAIN` is the error code the OS returns when a non-blocking socket has no data yet ("try again later"), so the runtime parks the goroutine instead of blocking a thread; `epoll` (Linux) and `kqueue` (macOS/BSD) are the OS facilities that tell the runtime which sockets became ready; and Cgo is Go's way of calling C libraries, whose calls the scheduler cannot interrupt, so it treats them like a blocking syscall.
+
+In Go's runtime source (`src/runtime/runtime2.go`), every logical processor transitions through explicit states so the background monitor (`sysmon`) knows when a thread is stuck in a syscall and can hand its `P` off to keep CPU cores busy (the excerpt starts in the middle of a `const (` block, so you see only the tail of the state list):
 
 <GitHubCode repo="golang/go" path="src/runtime/runtime2.go" lines="L105-L175" url="https://github.com/golang/go/blob/074522c96ce70350453c164ecb17904881106b6a/src/runtime/runtime2.go#L105-L175" caption="Logical processor P states and runtime mutex struct in golang/go.">
 ```go
@@ -161,6 +163,8 @@ func parallelMergesortBounded(s []int) {
 	merge(s, mid)
 }
 ```
+
+`merge(s, mid)` is an ordinary helper (not shown) that merges the two sorted halves `s[:mid]` and `s[mid:]` back into `s`, and `sequentialMergesort` is the same recursion without goroutines. Each benchmark below copies the same 16,384 random ints into a work slice and sorts it inside a `for b.Loop()` body, the benchmark syntax from [Go memory](/blog/go-memory-data-types-slices-maps-strings/):
 
 <TerminalOutput command="go test -bench=BenchmarkMergeSort -benchmem" label="Apple M2 · Go 1.27.1 · 16,384 ints">
 ```text
@@ -443,7 +447,7 @@ For channel basics and `select` syntax, see [Goroutines and channels](/blog/go-g
 
 Unlike `switch`, which evaluates cases top-to-bottom, the [Go Language Specification](https://go.dev/ref/spec#Select_statements) guarantees that when multiple `select` cases can proceed at once, Go picks one via **uniform pseudo-random selection**. That prevents a busy upper branch from starving lower channels forever—but breaks any code assuming `case v := <-messageCh` always drains before `case <-disconnectCh`.
 
-Watch what happens when 10 buffered messages and a disconnect signal are already queued:
+Watch what happens when 10 buffered messages and a disconnect signal are already queued (`for i := range 10` is Go 1.22+ shorthand that counts `i` from `0` to `9`; `for range 15` later just repeats 15 times):
 
 ```go
 package main
@@ -879,7 +883,9 @@ Theo dõi `G`, `M` và `P` trong hai kiểu chờ I/O khác nhau sẽ lý giải
 | **Hàng đợi cục bộ của `P1` cạn sạch** | Kiểm tra hàng đợi toàn cục mỗi `61` nhịp để tránh bỏ đói, rồi hỏi `netpoller` | **Trộm việc (work stealing)**: `P1` lấy một nửa số `G` trong hàng đợi của `P0` | Các `G` vừa chuyển sang chạy ngay trên nhân của `P1` |
 | **Vòng lặp nặng CPU chạy quá ~`10 ms`** | Tín hiệu ngắt chủ động (preemption, từ Go 1.14) dừng tạm `G` | Bộ lập lịch đẩy `G` về hàng đợi chạy | Các goroutine khác có cơ hội chia sẻ CPU |
 
-Trong mã nguồn runtime của Go (`src/runtime/runtime2.go`), từng `P` mang trạng thái rõ ràng để luồng giám sát nền (`sysmon`) nhận biết khi nào một thread kẹt vào syscall và tách `P` sang thread khác cho CPU khỏi ngồi chơi:
+Vài thuật ngữ trong bảng trên: `EAGAIN` là mã lỗi OS trả về khi một socket không chặn (non-blocking) chưa có dữ liệu ("thử lại sau"), nên runtime cho goroutine ngủ thay vì chặn cả thread; `epoll` (Linux) và `kqueue` (macOS/BSD) là cơ chế của OS báo cho runtime biết socket nào đã sẵn sàng; còn Cgo là cách Go gọi thư viện C, và scheduler không ngắt được lời gọi C nên coi nó như một syscall chặn.
+
+Trong mã nguồn runtime của Go (`src/runtime/runtime2.go`), từng `P` mang trạng thái rõ ràng để luồng giám sát nền (`sysmon`) nhận biết khi nào một thread kẹt vào syscall và tách `P` sang thread khác cho CPU khỏi ngồi chơi (đoạn trích bắt đầu giữa một khối `const (`, nên bạn chỉ thấy phần đuôi của danh sách trạng thái):
 
 <GitHubCode repo="golang/go" path="src/runtime/runtime2.go" lines="L105-L175" url="https://github.com/golang/go/blob/074522c96ce70350453c164ecb17904881106b6a/src/runtime/runtime2.go#L105-L175" caption="Các trạng thái của bộ xử lý logic P và cấu trúc mutex trong golang/go.">
 ```go
@@ -937,6 +943,8 @@ func parallelMergesortBounded(s []int) {
 	merge(s, mid)
 }
 ```
+
+`merge(s, mid)` là một hàm phụ bình thường (không trình bày ở đây), gộp hai nửa đã sắp xếp `s[:mid]` và `s[mid:]` trở lại `s`; còn `sequentialMergesort` là cùng phép đệ quy nhưng không dùng goroutine. Mỗi benchmark bên dưới chép cùng 16.384 số nguyên ngẫu nhiên vào một slice làm việc rồi sắp xếp trong thân `for b.Loop()`, cú pháp benchmark đã giới thiệu ở bài [Go memory](/blog/go-memory-data-types-slices-maps-strings/):
 
 <TerminalOutput command="go test -bench=BenchmarkMergeSort -benchmem" label="Apple M2 · Go 1.27.1 · 16.384 số nguyên">
 ```text
@@ -1219,7 +1227,7 @@ Phần cơ bản về channel và `select` nằm ở bài [Goroutines and channe
 
 Khác với `switch` xét từ trên xuống dưới, [đặc tả ngôn ngữ Go](https://go.dev/ref/spec#Select_statements) quy định khi có nhiều nhánh `select` cùng chạy được một lúc, Go sẽ **chọn ngẫu nhiên đều** một nhánh. Cách này tránh cho một nhánh gửi nhanh bỏ đói vĩnh viễn các nhánh bên dưới — nhưng phá hỏng mọi đoạn code tưởng rằng đặt `case v := <-messageCh` lên trên `case <-disconnectCh` sẽ giúp xả hết tin nhắn trước khi thoát.
 
-Thử chạy kịch bản hàng đợi đã chứa sẵn 10 tin nhắn cùng một tín hiệu ngắt:
+Thử chạy kịch bản hàng đợi đã chứa sẵn 10 tin nhắn cùng một tín hiệu ngắt (`for i := range 10` là cú pháp Go 1.22+ đếm `i` từ `0` đến `9`; `for range 15` ở phần sau chỉ lặp 15 lần):
 
 ```go
 package main
