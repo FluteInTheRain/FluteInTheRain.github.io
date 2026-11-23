@@ -135,7 +135,7 @@ ok  	example.com/port	0.217s
 
 Writing one test function per case copies the same four steps again and again: call, expect, compare, report. Go's habit is to write that logic once and put the cases in a table, a slice where each element is one case. Adding a case then costs one line.
 
-Two pieces of syntax are used here. The table's element type is a struct (a bundle of named fields, covered in [Go structs, methods and interfaces](/blog/go-structs-methods-interfaces/)) declared inline without a name. And `t.Run(name, func(t *testing.T) { ... })` runs a subtest: the function literal is a closure, explained in [Go errors, defer and panic](/blog/go-errors-defer-panic/). All you need now is that each case runs as its own named test.
+Two pieces of syntax are used here. The table's element type is a struct (a bundle of named fields, covered in [Go structs, methods and interfaces](/blog/go-structs-methods-interfaces/)) declared inline without a name. And `t.Run(name, func(t *testing.T) { ... })` runs a subtest: the function literal is a closure, explained in [Go errors, defer and panic](/blog/go-errors-defer-panic/). All you need now is that each case runs as its own named test. Read `[]struct{...}{...}` as: a slice whose elements are an unnamed struct type, followed by the elements themselves.
 
 ```go
 package port
@@ -173,9 +173,11 @@ func TestParse(t *testing.T) {
 
 <GoTableTestDemo />
 
+The line `if (err != nil) != tc.wantErr` compares two true/false values: "did we get an error?" and "did we expect one?". It is true, and the test fails, only when the two disagree.
+
 Each case shows up as its own line in the output, named after its `name` field with spaces turned into underscores. That is why good case names matter: they are what you read when something breaks.
 
-<TerminalOutput command="go test -v" label="Go 1.27.1 · darwin/arm64" caption="One parent test, seven subtests. Each name comes straight from the table.">
+<TerminalOutput command="go test -v" label="Go 1.27.1 · darwin/arm64" caption="One parent test, seven subtests. Each name comes straight from the table. (Run with the table test alone in the package.)">
 ```text
 === RUN   TestParse
 === RUN   TestParse/normal_port
@@ -198,7 +200,7 @@ ok  	example.com/port	0.502s
 ```
 </TerminalOutput>
 
-If one case is wrong (here we changed the expected value of `highest port` to 65534), the failure points at that exact case and its line. You can also rerun just one subtest with `-run`, writing the parent and the subtest name joined by a slash.
+If one case is wrong (here we changed the expected value of `highest port` to 65534), the failure points at that exact case and its line. You can also rerun just one subtest with `-run`, writing the parent and the subtest name joined by a slash. Without `^` and `$`, `TestParse` is a substring match and would also run `TestParseValid`.
 
 <TerminalOutput command="go test" label="Go 1.27.1 · darwin/arm64 · one expected value changed to 65534" caption="The failing subtest is named, and the message shows the input, the result and the expectation.">
 ```text
@@ -211,7 +213,7 @@ FAIL	example.com/port	0.209s
 ```
 </TerminalOutput>
 
-<TerminalOutput command="go test -v -run 'TestParse/too_big'" label="Go 1.27.1 · darwin/arm64" caption="-run takes a pattern: TestParse, a slash, then the subtest name.">
+<TerminalOutput command="go test -v -run '^TestParse$/too_big'" label="Go 1.27.1 · darwin/arm64" caption="-run takes a pattern: TestParse, a slash, then the subtest name. ^ and $ anchor the first part, so TestParseValid does not match.">
 ```text
 === RUN   TestParse
 === RUN   TestParse/too_big
@@ -346,57 +348,11 @@ ok  	example.com/port	0.602s
 | `-v` | print every test and subtest | see what ran |
 | `-run <pattern>` | run only matching tests | iterate on one case |
 | `-count=1` | ignore the result cache | rerun tests that read files or the network |
-| `-shuffle=on` | run tests in random order | catch tests that depend on each other |
-| `-parallel N` | at most N parallel tests at once | tune speed |
+| `-short` | skip tests that call `testing.Short()` | fast loop (see "Slow tests") |
 
 When you run a list of packages such as `./...`, Go caches passing results, so an unchanged package prints `(cached)` the next time. Use `-count=1` when you want a real rerun.
 
-By default tests run one after another. Calling `t.Parallel()` at the top of a test or subtest tells Go it may run alongside other parallel tests. Go starts the test, pauses it at that line, and resumes all the paused ones together once the sequential part is done.
-
-```go
-for _, tc := range tests {
-	t.Run(tc.name, func(t *testing.T) {
-		t.Parallel() // this subtest may run alongside the others
-		got, err := Parse(tc.input)
-		// ...same checks as before
-	})
-}
-```
-
-<TerminalOutput command="go test -v -run TestParse/" label="Go 1.27.1 · darwin/arm64 · first lines, with t.Parallel() added" caption="Each subtest starts, pauses (PAUSE), and the paused ones resume (CONT) together afterwards.">
-```text
-=== RUN   TestParse
-=== RUN   TestParse/normal_port
-=== PAUSE TestParse/normal_port
-=== RUN   TestParse/lowest_port
-=== PAUSE TestParse/lowest_port
-=== RUN   TestParse/highest_port
-=== PAUSE TestParse/highest_port
-=== RUN   TestParse/zero
-=== PAUSE TestParse/zero
-=== RUN   TestParse/too_big
-=== PAUSE TestParse/too_big
-=== RUN   TestParse/not_a_number
-=== PAUSE TestParse/not_a_number
-=== RUN   TestParse/empty
-=== PAUSE TestParse/empty
-=== CONT  TestParse/normal_port
-=== CONT  TestParse/too_big
-=== CONT  TestParse/zero
-=== CONT  TestParse/lowest_port
-=== CONT  TestParse/empty
-```
-</TerminalOutput>
-
-Parallel tests only help when each one is independent: they must not share a file, a global variable or a database row. `-shuffle=on` is the cheap check for that. It runs the tests in random order and prints the seed, so you can replay the same order with `-shuffle=<seed>` when it finds a bug.
-
-<TerminalOutput command="go test -shuffle=on" label="Go 1.27.1 · darwin/arm64 · the seed number is different on every run" caption="The first line is the seed. If a shuffled run fails, run it again with that number.">
-```text
--test.shuffle 1795406312600362000
-PASS
-ok  	example.com/port	0.207s
-```
-</TerminalOutput>
+Two more flags, one line each. Calling `t.Parallel()` at the top of a test lets it run alongside other parallel tests; that is faster only when the tests share nothing (no file, global variable or database row). `-shuffle=on` runs tests in random order and prints the seed, so a failing order can be replayed with `-shuffle=<seed>`; it exposes tests that depend on each other. `-parallel N` caps how many parallel tests run at once.
 
 <Concepts>
 
@@ -410,7 +366,7 @@ ok  	example.com/port	0.207s
 
 ## Coverage
 
-Coverage tells you which lines of your code ran during the tests. Add `-cover` for one number, or write a profile with `-coverprofile` and read it per function with `go tool cover`. Below, the package has only one test, `Parse("8080")`, so two of the three statements in `Parse` never ran.
+Coverage tells you which lines of your code ran during the tests. Add `-cover` for one number, or write a profile with `-coverprofile` and read it per function with `go tool cover`. Below, the package has only one test, `Parse("8080")`, so two of the six statements in `Parse` (the two error returns) never ran.
 
 <TerminalOutput command="go test -cover" label="Go 1.27.1 · darwin/arm64 · only TestOnlyOne in the folder" caption="One test, one happy-path case: two thirds of the statements ran.">
 ```text
@@ -425,7 +381,7 @@ ok  	example.com/port	1.028s
 PASS
 coverage: 66.7% of statements
 ok  	example.com/port	0.914s
-example.com/port/port.go:9:	Parse		66.7%
+example.com/port/port.go:10:	Parse		66.7%
 total:				(statements)	66.7%
 ```
 </TerminalOutput>
@@ -489,7 +445,7 @@ ok  	example.com/session	2.812s
 <TerminalOutput command="go test -short -v" label="Go 1.27.1 · darwin/arm64 · last lines" caption="With -short the same test is skipped in milliseconds, and says why.">
 ```text
 === RUN   TestSlowDatabase
-    session_test.go:32: skipping in short mode
+    session_test.go:10: skipping in short mode
 --- SKIP: TestSlowDatabase (0.00s)
 PASS
 ok  	example.com/session	0.335s
@@ -690,21 +646,7 @@ The Go team added the race detector in 2012. Its announcement says it had found 
 The technology was integrated with Go in September 2012; since then it has detected 42 races in the standard library. It is now part of our continuous build process, where it continues to catch race conditions as they arise.
 </QuoteCard>
 
-Below is the start of a real report. The test behind it starts two goroutines that both add to one variable (you will write that code in post 7), and the plain `go test` run passes.
-
-<TerminalOutput command="go test -race" label="Go 1.27.1 · darwin/arm64 · first lines of the report" caption="Two accesses to the same address from two goroutines, with the file and line of each. Plain go test printed PASS for the same test.">
-```text
-==================
-WARNING: DATA RACE
-Read at 0x00c000094178 by goroutine 9:
-  example.com/r.TestCounter.func1()
-      r_test.go:16 +0x88
-
-Previous write at 0x00c000094178 by goroutine 8:
-  example.com/r.TestCounter.func1()
-      r_test.go:16 +0x98
-```
-</TerminalOutput>
+In a test where two goroutines (functions running at the same time as the rest of the program; post 7 explains them) both add to one counter, plain `go test` prints PASS, while `go test -race` prints `WARNING: DATA RACE`, then the read, the previous write, the goroutine for each and the file and line of each access.
 
 How the detector works, and how to fix a race, is in [Go concurrency: scheduler, channels, context and mutexes](/blog/go-concurrency-scheduler-channels-context-mutexes/).
 
@@ -748,7 +690,7 @@ Goroutines and channels, the code the race example hides, are in [Go goroutines,
 
 ### Test thỉnh thoảng đỏ vô cớ còn tệ hơn không có test
 
-Google đo chính bộ test của mình và thấy khoảng 1,5% lượt chạy test báo kết quả "flaky": cùng một đoạn code lúc pass lúc fail. Gần 16% số test của họ ít nhiều có tính flaky, và khoảng 84% lần build chuyển từ pass sang fail là do một test flaky. Người ta quen dần với test hay báo động giả, rồi bỏ qua luôn cả lỗi thật.
+Google đo chính bộ test của mình và thấy khoảng 1,5% lượt chạy test báo kết quả "flaky": cùng một đoạn code lúc pass lúc fail. Gần 16% số test của họ ít nhiều có tính flaky, và khoảng 84% lần build chuyển từ pass sang fail có liên quan tới một test flaky. Người ta quen dần với test hay báo động giả, rồi bỏ qua luôn cả lỗi thật.
 
 Cách Go giải quyết khá gọn. Công cụ test có sẵn trong ngôn ngữ: không cần cài framework, không cần thư viện assert, không cần cấu hình runner. Bạn viết Go bình thường trong file có đuôi `_test.go` rồi chạy `go test`. Bài này chỉ ra những thói quen giúp test nhanh, dễ đọc và không flaky.
 
@@ -844,7 +786,7 @@ ok  	example.com/port	0.217s
 
 Viết mỗi case một hàm test sẽ chép đi chép lại cùng bốn bước: gọi, đặt kỳ vọng, so sánh, báo lỗi. Thói quen của Go là viết logic đó một lần và để các case vào một bảng, tức một slice mà mỗi phần tử là một case. Thêm case chỉ tốn một dòng.
 
-Đoạn code dùng hai cú pháp. Kiểu phần tử của bảng là một struct (nhóm các field có tên, xem [Go structs, methods and interfaces](/blog/go-structs-methods-interfaces/)) khai báo ngay tại chỗ, không đặt tên. Và `t.Run(name, func(t *testing.T) { ... })` chạy một subtest: hàm literal đó là closure, giải thích trong [Go errors, defer and panic](/blog/go-errors-defer-panic/). Lúc này chỉ cần biết mỗi case chạy như một test riêng có tên.
+Đoạn code dùng hai cú pháp. Kiểu phần tử của bảng là một struct (nhóm các field có tên, xem [Go structs, methods and interfaces](/blog/go-structs-methods-interfaces/)) khai báo ngay tại chỗ, không đặt tên. Và `t.Run(name, func(t *testing.T) { ... })` chạy một subtest: hàm literal đó là closure, giải thích trong [Go errors, defer and panic](/blog/go-errors-defer-panic/). Lúc này chỉ cần biết mỗi case chạy như một test riêng có tên. Đọc `[]struct{...}{...}` như sau: một slice mà phần tử là struct không tên, theo sau là chính các phần tử đó.
 
 ```go
 package port
@@ -882,6 +824,8 @@ func TestParse(t *testing.T) {
 
 <GoTableTestDemo />
 
+Dòng `if (err != nil) != tc.wantErr` so sánh hai giá trị đúng/sai: "có nhận được lỗi không?" và "có mong đợi lỗi không?". Nó đúng, và test fail, chỉ khi hai giá trị này khác nhau.
+
 Mỗi case hiện thành một dòng riêng trong kết quả, lấy tên từ field `name` với dấu cách đổi thành gạch dưới. Vì vậy tên case rất quan trọng: đó là thứ bạn đọc khi có gì đó hỏng.
 
 <TerminalOutput command="go test -v" label="Go 1.27.1 · darwin/arm64" caption="Một test cha, bảy subtest. Mỗi tên lấy thẳng từ bảng.">
@@ -907,7 +851,7 @@ ok  	example.com/port	0.502s
 ```
 </TerminalOutput>
 
-Nếu một case sai (ở đây ta đổi giá trị mong đợi của `highest port` thành 65534), lỗi chỉ đúng case đó và đúng dòng. Bạn cũng có thể chạy lại riêng một subtest bằng `-run`, viết tên test cha và tên subtest nối với nhau bằng dấu gạch chéo.
+Nếu một case sai (ở đây ta đổi giá trị mong đợi của `highest port` thành 65534), lỗi chỉ đúng case đó và đúng dòng. Bạn cũng có thể chạy lại riêng một subtest bằng `-run`, viết tên test cha và tên subtest nối với nhau bằng dấu gạch chéo. Không có `^` và `$`, `TestParse` khớp theo chuỗi con và sẽ chạy luôn `TestParseValid`.
 
 <TerminalOutput command="go test" label="Go 1.27.1 · darwin/arm64 · một giá trị mong đợi đổi thành 65534" caption="Subtest fail được gọi đích danh, và thông báo cho thấy đầu vào, kết quả và giá trị mong đợi.">
 ```text
@@ -920,7 +864,7 @@ FAIL	example.com/port	0.209s
 ```
 </TerminalOutput>
 
-<TerminalOutput command="go test -v -run 'TestParse/too_big'" label="Go 1.27.1 · darwin/arm64" caption="-run nhận một pattern: TestParse, dấu gạch chéo, rồi tên subtest.">
+<TerminalOutput command="go test -v -run '^TestParse$/too_big'" label="Go 1.27.1 · darwin/arm64" caption="-run nhận một pattern: TestParse, dấu gạch chéo, rồi tên subtest. ^ và $ neo phần đầu, nên TestParseValid không khớp.">
 ```text
 === RUN   TestParse
 === RUN   TestParse/too_big
@@ -1055,57 +999,11 @@ ok  	example.com/port	0.602s
 | `-v` | in từng test và subtest | thấy cái gì đã chạy |
 | `-run <pattern>` | chỉ chạy test khớp | lặp nhanh trên một case |
 | `-count=1` | bỏ qua cache kết quả | chạy lại test đọc file hoặc mạng |
-| `-shuffle=on` | chạy test theo thứ tự ngẫu nhiên | bắt test phụ thuộc lẫn nhau |
-| `-parallel N` | tối đa N test song song | chỉnh tốc độ |
+| `-short` | bỏ qua test gọi `testing.Short()` | vòng lặp nhanh (xem "Test chậm") |
 
 Khi chạy một danh sách package như `./...`, Go cache kết quả pass, nên package không đổi sẽ in `(cached)` ở lần sau. Dùng `-count=1` khi bạn muốn chạy lại thật.
 
-Mặc định các test chạy lần lượt. Gọi `t.Parallel()` ở đầu một test hoặc subtest là báo Go rằng nó được phép chạy cùng các test song song khác. Go khởi động test, tạm dừng nó ở dòng đó, và cho tất cả test đang dừng chạy tiếp cùng lúc khi phần tuần tự xong.
-
-```go
-for _, tc := range tests {
-	t.Run(tc.name, func(t *testing.T) {
-		t.Parallel() // this subtest may run alongside the others
-		got, err := Parse(tc.input)
-		// ...same checks as before
-	})
-}
-```
-
-<TerminalOutput command="go test -v -run TestParse/" label="Go 1.27.1 · darwin/arm64 · những dòng đầu, đã thêm t.Parallel()" caption="Mỗi subtest bắt đầu rồi tạm dừng (PAUSE), sau đó các subtest đang dừng chạy tiếp (CONT) cùng nhau.">
-```text
-=== RUN   TestParse
-=== RUN   TestParse/normal_port
-=== PAUSE TestParse/normal_port
-=== RUN   TestParse/lowest_port
-=== PAUSE TestParse/lowest_port
-=== RUN   TestParse/highest_port
-=== PAUSE TestParse/highest_port
-=== RUN   TestParse/zero
-=== PAUSE TestParse/zero
-=== RUN   TestParse/too_big
-=== PAUSE TestParse/too_big
-=== RUN   TestParse/not_a_number
-=== PAUSE TestParse/not_a_number
-=== RUN   TestParse/empty
-=== PAUSE TestParse/empty
-=== CONT  TestParse/normal_port
-=== CONT  TestParse/too_big
-=== CONT  TestParse/zero
-=== CONT  TestParse/lowest_port
-=== CONT  TestParse/empty
-```
-</TerminalOutput>
-
-Test song song chỉ có ích khi từng test độc lập: không dùng chung file, biến toàn cục hay một dòng trong database. `-shuffle=on` là cách kiểm tra rẻ cho điều đó. Nó chạy test theo thứ tự ngẫu nhiên và in ra seed, để bạn chạy lại đúng thứ tự đó bằng `-shuffle=<seed>` khi nó tìm ra lỗi.
-
-<TerminalOutput command="go test -shuffle=on" label="Go 1.27.1 · darwin/arm64 · seed khác nhau ở mỗi lần chạy" caption="Dòng đầu là seed. Nếu lần chạy xáo trộn fail, hãy chạy lại với số đó.">
-```text
--test.shuffle 1795406312600362000
-PASS
-ok  	example.com/port	0.207s
-```
-</TerminalOutput>
+Thêm hai cờ nữa, mỗi cờ một dòng. Gọi `t.Parallel()` ở đầu một test cho phép nó chạy cùng các test song song khác; chỉ nhanh hơn khi các test không dùng chung gì (không file, biến toàn cục hay dòng database). `-shuffle=on` chạy test theo thứ tự ngẫu nhiên và in ra seed, để chạy lại đúng thứ tự gây lỗi bằng `-shuffle=<seed>`; nó lộ ra các test phụ thuộc lẫn nhau. `-parallel N` giới hạn số test song song chạy cùng lúc.
 
 <Concepts>
 
@@ -1119,7 +1017,7 @@ ok  	example.com/port	0.207s
 
 ## Coverage
 
-Coverage cho biết dòng code nào đã chạy trong lúc test. Thêm `-cover` để lấy một con số, hoặc ghi profile bằng `-coverprofile` rồi đọc theo từng hàm bằng `go tool cover`. Bên dưới, package chỉ có một test là `Parse("8080")`, nên hai trong ba câu lệnh của `Parse` chưa bao giờ chạy.
+Coverage cho biết dòng code nào đã chạy trong lúc test. Thêm `-cover` để lấy một con số, hoặc ghi profile bằng `-coverprofile` rồi đọc theo từng hàm bằng `go tool cover`. Bên dưới, package chỉ có một test là `Parse("8080")`, nên hai trong sáu câu lệnh của `Parse` (hai lệnh trả về lỗi) chưa bao giờ chạy.
 
 <TerminalOutput command="go test -cover" label="Go 1.27.1 · darwin/arm64 · trong thư mục chỉ có TestOnlyOne" caption="Một test, một case đường đi thuận lợi: hai phần ba số câu lệnh đã chạy.">
 ```text
@@ -1134,7 +1032,7 @@ ok  	example.com/port	1.028s
 PASS
 coverage: 66.7% of statements
 ok  	example.com/port	0.914s
-example.com/port/port.go:9:	Parse		66.7%
+example.com/port/port.go:10:	Parse		66.7%
 total:				(statements)	66.7%
 ```
 </TerminalOutput>
@@ -1198,7 +1096,7 @@ ok  	example.com/session	2.812s
 <TerminalOutput command="go test -short -v" label="Go 1.27.1 · darwin/arm64 · những dòng cuối" caption="Có -short, cùng test đó bị bỏ qua trong vài mili giây và nói rõ lý do.">
 ```text
 === RUN   TestSlowDatabase
-    session_test.go:32: skipping in short mode
+    session_test.go:10: skipping in short mode
 --- SKIP: TestSlowDatabase (0.00s)
 PASS
 ok  	example.com/session	0.335s
@@ -1399,21 +1297,7 @@ Nhóm Go thêm race detector năm 2012. Bài giới thiệu nói đến lúc đ�
 The technology was integrated with Go in September 2012; since then it has detected 42 races in the standard library. It is now part of our continuous build process, where it continues to catch race conditions as they arise.
 </QuoteCard>
 
-Bên dưới là phần đầu của một báo cáo thật. Test tạo ra nó khởi động hai goroutine cùng cộng vào một biến (bạn sẽ viết đoạn code đó ở bài 7), và lần chạy `go test` thường vẫn pass.
-
-<TerminalOutput command="go test -race" label="Go 1.27.1 · darwin/arm64 · những dòng đầu của báo cáo" caption="Hai lần truy cập cùng một địa chỉ từ hai goroutine, kèm file và dòng của mỗi lần. go test thường in PASS cho cùng test đó.">
-```text
-==================
-WARNING: DATA RACE
-Read at 0x00c000094178 by goroutine 9:
-  example.com/r.TestCounter.func1()
-      r_test.go:16 +0x88
-
-Previous write at 0x00c000094178 by goroutine 8:
-  example.com/r.TestCounter.func1()
-      r_test.go:16 +0x98
-```
-</TerminalOutput>
+Trong một test mà hai goroutine (hàm chạy cùng lúc với phần còn lại của chương trình; bài 7 giải thích) cùng cộng vào một biến đếm, `go test` thường in PASS, còn `go test -race` in `WARNING: DATA RACE`, rồi đến lần đọc, lần ghi trước đó, goroutine của từng lần và file cùng dòng của mỗi lần truy cập.
 
 Cách detector hoạt động và cách sửa một race nằm ở [Go concurrency: scheduler, channels, context and mutexes](/blog/go-concurrency-scheduler-channels-context-mutexes/).
 
