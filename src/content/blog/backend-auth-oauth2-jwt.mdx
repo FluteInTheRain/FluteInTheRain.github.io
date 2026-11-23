@@ -1,0 +1,902 @@
+---
+title: "Who are you, and whose is this"
+title_vi: "Bạn là ai, và cái này của ai"
+description: "Argon2 for passwords, a JWT guarded by one FastAPI dependency, scopes that answer 403, and the one-line ownership check a 60-million-account leak was missing."
+description_vi: "Hash mật khẩu bằng Argon2, JWT được chặn bởi một dependency, scope trả 403, và dòng kiểm tra chủ sở hữu mà vụ lộ 60 triệu tài khoản của USPS thiếu."
+date: 2026-11-23
+category: "backend"
+tags: ["backend", "python", "fastapi", "auth", "oauth2", "jwt", "security"]
+cover: "../../assets/blog/backend-auth-oauth2-jwt/authorize-dialog-cover.png"
+cover_alt: "Swagger UI Available authorizations dialog of the demo service: OAuth2 password flow with username and password fields and two scopes, cases:read and cases:write, both ticked"
+draft: true
+sources:
+  - { title: "FastAPI: Modern Python Web Development", author: "Bill Lubanovic", chapters: "Ch. 11", url: "https://www.oreilly.com/library/view/fastapi/9781098135091/" }
+  - { title: "USPS Site Exposed Data on 60 Million Users", author: "Brian Krebs, Krebs on Security, 21 Nov 2018", url: "https://krebsonsecurity.com/2018/11/usps-site-exposed-data-on-60-million-users/" }
+  - { title: "API1:2023 Broken Object Level Authorization", author: "OWASP API Security Top 10", url: "https://api-security.owasp.org/editions/2023/en/0xa1-broken-object-level-authorization" }
+  - { title: "Password Storage Cheat Sheet", author: "OWASP", url: "https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html" }
+  - { title: "Best Current Practice for OAuth 2.0 Security (RFC 9700)", author: "IETF, January 2025", url: "https://www.rfc-editor.org/rfc/rfc9700.html" }
+  - { title: "JSON Web Token Best Current Practices (RFC 8725)", author: "IETF", url: "https://datatracker.ietf.org/doc/html/rfc8725" }
+  - { title: "The Confused Deputy (or why capabilities might have been invented)", author: "Norman Hardy, ACM SIGOPS Operating Systems Review 22(4), 1988; overview on Wikipedia", url: "https://en.wikipedia.org/wiki/Confused_deputy_problem" }
+  - { title: "Security Intro and OAuth2 with Password, Bearer, JWT", author: "FastAPI docs", url: "https://fastapi.tiangolo.com/tutorial/security/oauth2-jwt/" }
+  - { title: "OAuth2 scopes", author: "FastAPI docs", url: "https://fastapi.tiangolo.com/advanced/security/oauth2-scopes/" }
+  - { title: "PyJWT documentation", author: "PyJWT", url: "https://pyjwt.readthedocs.io/en/stable/" }
+  - { title: "pwdlib", author: "François Voron", url: "https://frankie567.github.io/pwdlib/" }
+  - { title: "Purse checkroom at the swingshift dance, Buffalo, April 1943 (Public domain)", author: "Marjory Collins, Office of War Information", url: "https://commons.wikimedia.org/wiki/File:Purse_checkroom_at_the_swingshift_dance_held_weekly_8d28328v.jpg" }
+---
+
+import En from '../../components/mdx/En.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
+import BeP07PasswordHash from '../../components/mdx/BeP07PasswordHash.astro';
+import BeP07SessionVsJwt from '../../components/mdx/BeP07SessionVsJwt.astro';
+import BeP07Flows from '../../components/mdx/BeP07Flows.astro';
+import BeP07TokenFlow from '../../components/mdx/BeP07TokenFlow.astro';
+import BeP07ThreeGates from '../../components/mdx/BeP07ThreeGates.astro';
+import BeP07Bola from '../../components/mdx/BeP07Bola.astro';
+import heroCheckroom from '../../assets/blog/backend-auth-oauth2-jwt/purse-checkroom-1943.jpg';
+import swaggerAuth from '../../assets/blog/backend-auth-oauth2-jwt/authorize-dialog-cover.png';
+
+<En>
+
+<Figure src={heroCheckroom} alt="A woman handing a purse across the counter of a checkroom in a Buffalo ballroom in 1943, with rows of numbered purses on the shelves behind the counter" caption="A checkroom runs on tickets. The attendant never asks whose purse it is; the number on the ticket is enough. That is a fine design until someone hands over a ticket with another guest's number on it and the attendant fetches the purse without comparing faces. Your API is the attendant." sourceTitle="Wikimedia Commons: Purse checkroom at the swingshift dance, 1943" sourceUrl="https://commons.wikimedia.org/wiki/File:Purse_checkroom_at_the_swingshift_dance_held_weekly_8d28328v.jpg" />
+
+### The hook: sixty million accounts behind a login
+
+In November 2018 Brian Krebs reported that an API behind a USPS service called Informed Visibility had "let any logged-in usps.com user query the system for account details belonging to any other users" — some 60 million of them. The data included things like account numbers, street addresses and phone numbers. A researcher told Krebs he had reported the problem more than a year earlier and never got an answer; the Postal Service fixed the API on November 20, after Krebs got in touch.
+
+Read that sentence again. The user *was* logged in. The login worked. What was missing is a second question, asked on every request: **is this record yours?** That bug has a name, Broken Object Level Authorization, and it sits at number one in the OWASP API Security Top 10.
+
+This post follows one request through the three questions an API has to answer, and builds each answer in the series' running service:
+
+1. **Who are you?** Passwords you can store safely, and sessions versus tokens.
+2. **Can you prove it on every call?** A token endpoint and one FastAPI dependency that guards routes.
+3. **May you do this, to this record?** Scopes for the kind of action, and the ownership check for the record itself.
+
+Stack for every capture below: Python 3.13, FastAPI 0.165.0, PyJWT 2.15.1, pwdlib 0.4.2 (Argon2), uvicorn 0.54.0. Files are in `demo/`, prefixed `p07_`.
+
+---
+
+## 1. Passwords: store the slow thing
+
+The first job is to remember who someone is without keeping their password. The rule is old and simple: store a **hash** of the password, never the password. The part people get wrong is *which* hash. SHA-256 is a fine hash for file checksums, and a bad one for passwords, because it is fast. Fast is what an attacker with a stolen table wants.
+
+`demo/p07_hashing.py` hashes one password both ways, then times a guess:
+
+```python
+import hashlib
+import time
+
+from pwdlib import PasswordHash
+
+password = "correct horse battery staple"
+hasher = PasswordHash.recommended()  # Argon2id with sane default parameters
+
+# 1. The fast hash: what a leaked table looks like when someone "just used sha256".
+fast = hashlib.sha256(password.encode()).hexdigest()
+print("sha256        :", fast)
+print("same input    :", hashlib.sha256(password.encode()).hexdigest() == fast)
+
+# 2. The password hash: salted, slow on purpose, parameters stored inside the string.
+first = hasher.hash(password)
+second = hasher.hash(password)
+print("argon2 #1     :", first)
+print("argon2 #2     :", second)
+print("same input    :", first == second)
+print("verify right  :", hasher.verify(password, first))
+print("verify wrong  :", hasher.verify("hunter2", first))
+
+# 3. Why slow matters: what one guess costs the attacker.
+guesses = 200_000
+started = time.perf_counter()
+for i in range(guesses):
+    hashlib.sha256(f"guess{i}".encode()).digest()
+sha_per_guess = (time.perf_counter() - started) / guesses
+
+started = time.perf_counter()
+hasher.verify("guess", first)
+argon_per_guess = time.perf_counter() - started
+
+print(f"sha256 guess  : {sha_per_guess * 1e6:.2f} microseconds")
+print(f"argon2 guess  : {argon_per_guess * 1e3:.1f} milliseconds")
+print(f"ratio         : about {argon_per_guess / sha_per_guess:,.0f}x slower per guess")
+```
+
+<TerminalOutput command="uv run --python 3.13 --with 'pwdlib[argon2]' python p07_hashing.py" label="Python 3.13 · pwdlib 0.4.2 (argon2-cffi 25.1.0) · captured Nov 2026" caption="Same password, same sha256 every time. Same password, a different Argon2 string every time, because the salt is random. One guess against Argon2 cost 30 ms on this laptop; against sha256, 0.36 microseconds.">
+```text
+sha256        : c4bbcb1fbec99d65bf59d85c8cb62ee2db963f0fe106f483d9afa73bd4e39a8a
+same input    : True
+argon2 #1     : $argon2id$v=19$m=65536,t=3,p=4$qHgnyzVhNy8/ei98/P/xcA$yMi89BdFWG0Hj7vyV1wRVL7Eg8ZG2XydwGB/gQsvD3k
+argon2 #2     : $argon2id$v=19$m=65536,t=3,p=4$4b8tuF+2UQmJzRyHowR+ag$mYYFsUYopTZvUwCzDyxH/2ZHP7eqW2yrba+7m9qcLX4
+same input    : False
+verify right  : True
+verify wrong  : False
+sha256 guess  : 0.36 microseconds
+argon2 guess  : 30.0 milliseconds
+ratio         : about 84,174x slower per guess
+```
+</TerminalOutput>
+
+<BeP07PasswordHash />
+
+Three things are packed into that capture:
+
+- **The salt.** Two Argon2 hashes of one password differ, because each carries its own random salt. A thief cannot tell which users share a password, and cannot reuse one precomputed table against all of them.
+- **The cost lives in the string.** `m=65536,t=3,p=4` is the memory, passes and parallelism used to make this hash. `hasher.verify` reads them back from the string, so you can raise the cost for new hashes later and old ones still verify.
+- **The ratio.** About 84,000 times slower per guess is nothing for a login (one login, one hash) and everything for an attacker (millions of guesses). OWASP's password cheat sheet names Argon2id first and says fast hashes such as SHA-256 "are not suitable for password storage".
+
+`pwdlib` is the library the FastAPI docs reach for, and `PasswordHash.recommended()` picks Argon2id with defaults you do not have to tune by hand. The trap in AI-written code is the one-liner that looks equivalent: `hashlib.sha256(pw)` or `md5(pw)` compiles, passes the login test, and turns a database leak into a plaintext-password leak.
+
+<Concepts>
+- **Hash**: a one-way function. You can check a password against a hash, but you cannot run it backwards to get the password.
+- **Salt**: random bytes mixed in before hashing, so identical passwords give different hashes.
+- **Cost parameter**: how much time and memory one hash takes. You choose it, and you want it to hurt attackers more than users.
+</Concepts>
+
+---
+
+## 2. Session or token?
+
+Once someone is logged in, the server needs a way to recognise them on the next request. There are two answers, and they differ in who remembers.
+
+A **session** is a random id the server hands out and stores. The browser keeps the id in a cookie; the server keeps `id → user` in a store. A **token**, here a JWT, carries the claims itself (who, what scopes, when it expires) plus a signature. The server stores nothing; it only checks the signature.
+
+<BeP07SessionVsJwt />
+
+The difference shows when you want someone *out*. `demo/p07_revocation.py` builds both in a few lines. The session half is a dict, and logging out is deleting an entry:
+
+```python
+SESSIONS: dict[str, str] = {}  # session id -> username, kept on the server
+
+app = FastAPI()
+
+
+@app.post("/session/login")
+def session_login() -> dict:
+    sid = secrets.token_urlsafe(16)
+    SESSIONS[sid] = "alice"
+    return {"sid": sid}
+
+
+@app.post("/session/logout")
+def session_logout(x_session: str = Header()) -> dict:
+    SESSIONS.pop(x_session, None)  # revoking = deleting one dict entry
+    return {"ok": True}
+
+
+@app.get("/session/me")
+def session_me(x_session: str = Header()) -> dict:
+    user = SESSIONS.get(x_session)
+    if user is None:
+        raise HTTPException(401, "session unknown")
+    return {"user": user}
+
+
+@app.get("/jwt/me")
+def jwt_me(user: str = Depends(sec.get_current_user)) -> dict:
+    return {"user": user}
+```
+
+Then it runs the same story against both:
+
+```python
+client = TestClient(app)
+sid = client.post("/session/login").json()["sid"]
+token = sec.make_token("alice", [])
+
+print("before logout")
+print("  session :", client.get("/session/me", headers={"x-session": sid}).status_code)
+print("  jwt     :", client.get("/jwt/me", headers={"Authorization": f"Bearer {token}"}).status_code)
+
+client.post("/session/logout", headers={"x-session": sid})
+print("after logout (the server 'forgets' alice)")
+print("  session :", client.get("/session/me", headers={"x-session": sid}).status_code)
+print("  jwt     :", client.get("/jwt/me", headers={"Authorization": f"Bearer {token}"}).status_code)
+print("  jwt claims still say:", jwt.decode(token, options={"verify_signature": False})["sub"])
+```
+
+<TerminalOutput command="uv run --python 3.13 --with fastapi==0.165.0 --with PyJWT --with 'pwdlib[argon2]' --with python-multipart --with httpx python -W ignore p07_revocation.py" label="Python 3.13 · FastAPI 0.165.0 · PyJWT 2.15.1 · captured Nov 2026" caption="After logout the session answers 401 and the token answers 200. Nothing is broken: the token was never in any store that logout could touch.">
+```text
+before logout
+  session : 200
+  jwt     : 200
+after logout (the server 'forgets' alice)
+  session : 401
+  jwt     : 200
+  jwt claims still say: alice
+```
+</TerminalOutput>
+
+That is the whole trade, no more mysterious than that:
+
+| | Session | JWT |
+|---|---|---|
+| Cost per request | one lookup in a store | one signature check, no store |
+| Log a user out, or ban them now | delete the row | not possible until `exp` |
+| Scaling out | every server needs the store | any server with the key can verify |
+
+A JWT is the right default for short-lived access across several services, and a poor one for "kick this person out right now". The usual middle path is a short expiry (this demo uses 15 minutes) plus a refresh mechanism you *can* revoke. Notice also the last line of the capture: the claims are readable by anyone holding the token. A JWT is signed, not encrypted; keep secrets out of it.
+
+<Callout type="warning" title="The AI habit to break">
+Generated auth code picks JWT because the tutorials do, then bolts on a "logout" endpoint that does nothing the server can enforce. Before accepting it, ask: *what does this system do when I need one user out in the next minute?* If the answer is "wait 30 days for the token to expire", the design is wrong for that product.
+</Callout>
+
+---
+
+## 3. One token endpoint, one guard
+
+Before the code, one word about the vocabulary. OAuth2 is a set of **flows**, and which one you pick depends on who is allowed to see the password:
+
+<BeP07Flows />
+
+The demo uses the password flow because it is the shortest thing FastAPI can run and the one its tutorial shows. For a real product with third-party apps you want authorization code with PKCE, usually through an identity provider rather than code you write. RFC 9700, the current OAuth 2.0 security best practice, is blunt about the first: "The resource owner password credentials grant MUST NOT be used." So treat the next code as a way to learn the *shape* of token auth, which is the same in every flow: exchange credentials for a token once, then present the token.
+
+<BeP07TokenFlow />
+
+The setup and the token endpoint, from `demo/p07_security.py`:
+
+```python
+# Obviously fake default so the demo runs; real deploys inject it from the environment.
+SECRET_KEY = os.environ.get("CLUE_JWT_SECRET", "dev-only-not-a-real-secret-change-me-please")
+ALGORITHM = "HS256"
+TOKEN_MINUTES = 15
+
+hasher = PasswordHash.recommended()
+SCOPES = {"cases:read": "Read cases", "cases:write": "Close and purge cases"}
+
+# In-memory user store: the hash is stored, the password never is.
+USERS = {
+    "alice": {"hash": hasher.hash("alice-demo-pw"), "scopes": ["cases:read", "cases:write"]},
+    "bob": {"hash": hasher.hash("bob-demo-pw"), "scopes": ["cases:read"]},
+}
+DUMMY_HASH = hasher.hash("not-a-real-password")
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token", scopes=SCOPES)
+router = APIRouter()
+```
+
+```python
+def make_token(username: str, scopes: list[str], minutes: int = TOKEN_MINUTES) -> str:
+    claims = {
+        "sub": username,
+        "scopes": scopes,
+        "exp": datetime.now(timezone.utc) + timedelta(minutes=minutes),
+    }
+    return jwt.encode(claims, SECRET_KEY, algorithm=ALGORITHM)
+
+
+# Plain `def`: Argon2 takes ~30 ms of CPU, so FastAPI runs it in a worker thread
+# instead of freezing the event loop.
+@router.post("/token")
+def login(form: Annotated[OAuth2PasswordRequestForm, Depends()]) -> dict:
+    user = USERS.get(form.username)
+    # Verify against a dummy hash for unknown users so both paths cost the same time.
+    ok = hasher.verify(form.password, user["hash"] if user else DUMMY_HASH)
+    if not user or not ok:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "incorrect username or password")
+    # The client asks for scopes; the user's own allowance decides what it gets.
+    granted = [s for s in form.scopes if s in user["scopes"]]
+    return {"access_token": make_token(form.username, granted), "token_type": "bearer"}
+```
+
+Here is what each FastAPI piece does for the idea:
+
+- `OAuth2PasswordBearer(tokenUrl="token")` is a **security scheme**. It does two jobs: it pulls the `Authorization: Bearer …` header out of a request (answering 401 "Not authenticated" when it is absent), and it tells OpenAPI about the scheme, which is why Swagger shows an Authorize button.
+- `OAuth2PasswordRequestForm` reads the standard form fields `username`, `password` and `scope`. It needs `python-multipart` installed.
+- `login` is a plain `def`, on purpose. Argon2 spends about 30 ms of CPU, and in an `async def` that would freeze the event loop for every other request ([post 6](/blog/backend-async-concurrency-workers/) is about why). FastAPI runs a plain `def` in a worker thread.
+- The dummy hash: for an unknown username we still verify against a throwaway hash, so "no such user" and "wrong password" take the same time and look the same.
+- `granted = [s for s in form.scopes if s in user["scopes"]]` is the line AI code leaves out: the client *asks* for scopes, the server *decides*. Copying `form.scopes` straight into the token lets anyone ask for admin.
+
+Now the guard, one dependency every protected route can share:
+
+```python
+async def get_current_user(
+    security_scopes: SecurityScopes,
+    token: Annotated[str, Depends(oauth2_scheme)],
+) -> str:
+    try:
+        # algorithms is pinned: the token never gets to choose how it is verified.
+        claims = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED, "token expired", {"WWW-Authenticate": "Bearer"}
+        )
+    except jwt.InvalidTokenError:
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED, "invalid token", {"WWW-Authenticate": "Bearer"}
+        )
+    granted = claims.get("scopes", [])
+    for needed in security_scopes.scopes:
+        if needed not in granted:
+            # Identity is fine, permission is not: 403, not 401.
+            raise HTTPException(status.HTTP_403_FORBIDDEN, f"missing scope {needed}")
+    return claims["sub"]
+```
+
+`Depends(oauth2_scheme)` hands the guard the raw token. `jwt.decode` checks the signature and the `exp` claim in one call. Two details matter. First, `algorithms=[ALGORITHM]` is pinned: RFC 8725 says the application, not the token, decides which algorithms are allowed, and the classic forgery is a token whose header says `alg: none`. Second, the guard never prints or returns the token on failure.
+
+A protected route is then one parameter:
+
+```python
+@router.get("/me")
+async def me(user: Annotated[str, Depends(get_current_user)]) -> dict:
+    return {"user": user}
+```
+
+Now try to break it. `demo/p07_attacks.py` starts from a real token for alice, then builds the bad ones: an expired token, a payload edited after signing, and an `alg=none` token with no signature. The edits it makes are these:
+
+```python
+show("expired token", me(sec.make_token("alice", ["cases:read"], minutes=-1)))
+
+# Tamper: edit the payload (claim more scopes), keep the old signature.
+head, payload, sig = good.split(".")
+claims = json.loads(base64.urlsafe_b64decode(payload + "=="))
+claims["sub"] = "admin"
+forged = base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=").decode()
+show("tampered payload", me(f"{head}.{forged}.{sig}"))
+
+# alg=none: a token that claims it needs no signature at all.
+none_head = base64.urlsafe_b64encode(b'{"alg":"none","typ":"JWT"}').rstrip(b"=").decode()
+show("alg=none", me(f"{none_head}.{forged}."))
+```
+
+<TerminalOutput command="uvicorn p07_bola:app --port 4337 — then: python -W ignore p07_attacks.py" label="Python 3.13 · FastAPI 0.165.0 · PyJWT 2.15.1 · uvicorn 0.54.0 · captured Nov 2026" caption="One 200, five refusals. Each 401 is a different failure caught by the same dependency: missing header, expired exp, signature that no longer matches, a token claiming it needs no signature, and a wrong password at the token endpoint.">
+```text
+no token                     -> 401 {'detail': 'Not authenticated'}
+valid token                  -> 200 {'user': 'alice'}
+expired token                -> 401 {'detail': 'token expired'}
+tampered payload             -> 401 {'detail': 'invalid token'}
+alg=none                     -> 401 {'detail': 'invalid token'}
+wrong password               -> 401 {'detail': 'incorrect username or password'}
+```
+</TerminalOutput>
+
+Both forgeries come back `invalid token`, so the guard does not tell an attacker which part failed. The expired one is allowed to say `token expired`, because a legitimate client needs that to know it should log in again.
+
+<Concepts>
+- **Bearer token**: whoever holds (bears) the token is treated as the user. That is why it travels only over HTTPS and why it should expire soon.
+- **JWT**: three base64 chunks, `header.payload.signature`. The signature covers the first two, so changing the payload breaks it.
+- **401 vs 403**: 401 means "I do not know who you are". 403 means "I know who you are, and no".
+</Concepts>
+
+---
+
+## 4. Scopes: may you do this kind of thing?
+
+A valid token answers "who". It does not answer "what may they do". **Scopes** are the coarse answer: labels in the token like `cases:read` and `cases:write` that say which kind of action the token is good for. They are declared once:
+
+```python
+@router.get("/reports")
+async def reports(
+    user: Annotated[str, Security(get_current_user, scopes=["cases:read"])],
+) -> dict:
+    return {"user": user, "reports": ["weekly-summary"]}
+
+
+@router.post("/purge")
+async def purge(
+    user: Annotated[str, Security(get_current_user, scopes=["cases:write"])],
+) -> dict:
+    return {"user": user, "purged": True}
+```
+
+`Security(get_current_user, scopes=["cases:read"])` looks like `Depends`, and it is: `Security` is a subclass that adds the `scopes` argument. FastAPI collects the scopes of every dependency in the chain into the `SecurityScopes` object the guard asked for, and the guard compares them to the token's `scopes` claim (the loop at the end of `get_current_user`). The same declaration feeds OpenAPI, so Swagger builds this dialog from `SCOPES` without any extra code:
+
+<Figure src={swaggerAuth} alt="Swagger UI Available authorizations dialog: OAuth2 password flow, username bob, password field, and two scope checkboxes labelled cases:read Read cases and cases:write Close and purge cases" caption="What `OAuth2PasswordBearer(..., scopes=SCOPES)` produces in /docs: a login form and the scope checklist. The text comes from the SCOPES dict, nothing else." />
+
+`demo/p07_scopes.py` has both users ask for both scopes, then calls both routes:
+
+<TerminalOutput command="uvicorn p07_bola:app --port 4337 — then: python p07_scopes.py" label="Python 3.13 · FastAPI 0.165.0 · PyJWT 2.15.1 · uvicorn 0.54.0 · captured Nov 2026" caption="Bob asked for cases:write and was not given it. His token is valid, so /reports works; /purge needs a scope he does not hold, so 403, and the response says which one.">
+```text
+alice: granted ['cases:read', 'cases:write']
+  GET  /reports -> 200 {'user': 'alice', 'reports': ['weekly-summary']}
+  POST /purge   -> 200 {'user': 'alice', 'purged': True}
+bob: granted ['cases:read']
+  GET  /reports -> 200 {'user': 'bob', 'reports': ['weekly-summary']}
+  POST /purge   -> 403 {'detail': 'missing scope cases:write'}
+```
+</TerminalOutput>
+
+Two honest limits. First, FastAPI only *reads* the scopes; whether they mean something is the code in your guard. The docs say as much: you enforce them "however you need, in your code". Second, scopes describe a kind of action on everything of that kind. `cases:read` says Bob may read cases. It says nothing about *which* cases, and that is the next section.
+
+---
+
+## 5. The confused deputy, one level down
+
+A **confused deputy** is a program that holds more authority than its caller and uses it on the caller's behalf without checking that the caller is entitled to what they asked for. Your API is exactly that. It can read every case; the database lets it. Bob can only read his, but Bob sends the request, and the API does the reading.
+
+<BeP07ThreeGates />
+
+The first two gates are features you turn on. The third is a line you write, and code that stops at gate two is the most common shape of generated auth. `demo/p07_bola.py` holds both versions:
+
+```python
+# case_id -> who opened it. The owner is data, not a login detail.
+CASES = {
+    "C-1": {"owner": "alice", "title": "The missing gnome", "notes": "suspect: the neighbour"},
+    "C-2": {"owner": "bob", "title": "The squeaky stair", "notes": "witness: the cat"},
+}
+
+app = FastAPI(title="clue.api", version="0.7.1")
+app.include_router(sec.router)
+
+
+# BEFORE: checks "who are you" and "may you read cases", never "is this YOUR case".
+@app.get("/vulnerable/cases/{case_id}")
+async def read_case_vulnerable(
+    case_id: str,
+    user: Annotated[str, Security(sec.get_current_user, scopes=["cases:read"])],
+) -> dict:
+    case = CASES.get(case_id)
+    if case is None:
+        raise HTTPException(404, "no such case")
+    return case
+
+
+# AFTER: the object-level check. 404 (not 403) so other people's ids stay unguessable.
+@app.get("/cases/{case_id}")
+async def read_case(
+    case_id: str,
+    user: Annotated[str, Security(sec.get_current_user, scopes=["cases:read"])],
+) -> dict:
+    case = CASES.get(case_id)
+    if case is None or case["owner"] != user:
+        raise HTTPException(404, "no such case")
+    return case
+```
+
+`read_case_vulnerable` is the USPS bug in miniature: it asks "is there a valid token with `cases:read`?" and never asks whose case it is. Every id Bob can guess is one he can read.
+
+<BeP07Bola />
+
+<TerminalOutput command="uvicorn p07_bola:app --port 4337 — then: python p07_bola_check.py" label="Python 3.13 · FastAPI 0.165.0 · PyJWT 2.15.1 · uvicorn 0.54.0 · captured Nov 2026" caption="Bob holds a valid token the whole time. The vulnerable route hands him alice's notes. The fixed route compares the record's owner to the token's subject and answers 404, exactly as it does for an id that does not exist.">
+```text
+before: bob reads alice's case     /vulnerable/cases/C-1      -> 200 {'owner': 'alice', 'title': 'The missing gnome', 'notes': 'suspect: the neighbour'}
+after : bob reads alice's case     /cases/C-1                 -> 404 {'detail': 'no such case'}
+after : bob reads his own case     /cases/C-2                 -> 200 {'owner': 'bob', 'title': 'The squeaky stair', 'notes': 'witness: the cat'}
+after : alice reads her own case   /cases/C-1                 -> 200 {'owner': 'alice', 'title': 'The missing gnome', 'notes': 'suspect: the neighbour'}
+after : a case that does not exist /cases/C-9                 -> 404 {'detail': 'no such case'}
+```
+</TerminalOutput>
+
+Why 404 and not 403 for someone else's case? A 403 tells Bob that `C-1` exists and is not his, which is already information. OWASP's advice on this bug is to check, on every function that takes an id from the client, "if the logged-in user has access to perform the requested action", to prefer random, unpredictable ids, and to write tests for the authorization logic. Random ids slow down guessing, but they are not the fix: the owner check is.
+
+<Callout type="warning" title="The AI habit to break">
+Ask an assistant for a "secure endpoint to read a case" and it will add the login dependency and stop, because that is what the prompt mentioned. The review question for every route with an id in the path is: *where is the line that compares this record's owner to the caller?* If you cannot point at it, the route is open to every logged-in user. Then write the test that logs in as Bob and asks for Alice's case, because that is the test a leak like USPS's would have failed.
+</Callout>
+
+Put it together and the series' service now answers three different questions with three different codes: 401 when it does not know you, 403 when it knows you and you lack the scope, and 404 when it knows you, you have the scope, and the thing is not yours.
+
+</En>
+
+<Vi>
+
+<Figure src={heroCheckroom} alt="Một người phụ nữ đưa chiếc ví qua quầy gửi đồ của một vũ trường ở Buffalo năm 1943, phía sau quầy là những hàng ví được đánh số trên kệ" caption="Quầy gửi đồ chạy bằng vé. Người trông đồ không bao giờ hỏi chiếc ví này của ai; số trên vé là đủ. Thiết kế đó ổn, cho tới khi có người đưa vé mang số của một vị khách khác và người trông đồ lấy ví ra mà không so mặt. API của bạn chính là người trông đồ đó." sourceTitle="Wikimedia Commons: Purse checkroom at the swingshift dance, 1943" sourceUrl="https://commons.wikimedia.org/wiki/File:Purse_checkroom_at_the_swingshift_dance_held_weekly_8d28328v.jpg" />
+
+### Mở đầu: sáu mươi triệu tài khoản sau một màn đăng nhập
+
+Tháng 11/2018, Brian Krebs đưa tin một API đứng sau dịch vụ Informed Visibility của USPS đã "cho phép bất kỳ người dùng usps.com nào đã đăng nhập truy vấn thông tin tài khoản của bất kỳ người dùng nào khác" (nguyên văn tiếng Anh: "let any logged-in usps.com user query the system for account details belonging to any other users"), cỡ 60 triệu người. Dữ liệu gồm số tài khoản, địa chỉ nhà, số điện thoại và vài thứ tương tự. Nhà nghiên cứu phát hiện lỗi nói với Krebs rằng anh ta đã báo hơn một năm trước mà không nhận được hồi âm; Bưu điện Mỹ sửa API vào ngày 20/11, sau khi Krebs liên hệ.
+
+Đọc lại câu đó. Người dùng *đã* đăng nhập. Đăng nhập chạy đúng. Cái thiếu là câu hỏi thứ hai, phải hỏi ở mọi request: **bản ghi này có phải của bạn không?** Lỗi này có tên: Broken Object Level Authorization, đứng số một trong OWASP API Security Top 10.
+
+Bài này đi theo một request qua ba câu hỏi mà API phải trả lời, và dựng từng câu trả lời trong service chạy xuyên suốt series:
+
+1. **Bạn là ai?** Lưu mật khẩu sao cho an toàn, và session so với token.
+2. **Bạn chứng minh được ở mọi lời gọi không?** Một endpoint cấp token và một dependency của FastAPI để chặn route.
+3. **Bạn có được làm việc này, với bản ghi này không?** Scope cho loại hành động, và phép kiểm tra chủ sở hữu cho chính bản ghi.
+
+Stack cho mọi bản chụp bên dưới: Python 3.13, FastAPI 0.165.0, PyJWT 2.15.1, pwdlib 0.4.2 (Argon2), uvicorn 0.54.0. Code nằm trong `demo/`, tên bắt đầu bằng `p07_`.
+
+---
+
+## 1. Mật khẩu: lưu thứ chạy chậm
+
+Việc đầu tiên là nhớ ai là ai mà không giữ mật khẩu của họ. Quy tắc cũ và đơn giản: lưu **hash** của mật khẩu, không bao giờ lưu mật khẩu. Chỗ người ta hay sai là chọn *hash nào*. SHA-256 rất hợp để làm checksum file, và rất tệ cho mật khẩu, vì nó nhanh. Nhanh lại đúng là thứ kẻ trộm bảng user cần.
+
+`demo/p07_hashing.py` hash cùng một mật khẩu bằng cả hai cách, rồi đo một lần đoán:
+
+```python
+import hashlib
+import time
+
+from pwdlib import PasswordHash
+
+password = "correct horse battery staple"
+hasher = PasswordHash.recommended()  # Argon2id with sane default parameters
+
+# 1. The fast hash: what a leaked table looks like when someone "just used sha256".
+fast = hashlib.sha256(password.encode()).hexdigest()
+print("sha256        :", fast)
+print("same input    :", hashlib.sha256(password.encode()).hexdigest() == fast)
+
+# 2. The password hash: salted, slow on purpose, parameters stored inside the string.
+first = hasher.hash(password)
+second = hasher.hash(password)
+print("argon2 #1     :", first)
+print("argon2 #2     :", second)
+print("same input    :", first == second)
+print("verify right  :", hasher.verify(password, first))
+print("verify wrong  :", hasher.verify("hunter2", first))
+
+# 3. Why slow matters: what one guess costs the attacker.
+guesses = 200_000
+started = time.perf_counter()
+for i in range(guesses):
+    hashlib.sha256(f"guess{i}".encode()).digest()
+sha_per_guess = (time.perf_counter() - started) / guesses
+
+started = time.perf_counter()
+hasher.verify("guess", first)
+argon_per_guess = time.perf_counter() - started
+
+print(f"sha256 guess  : {sha_per_guess * 1e6:.2f} microseconds")
+print(f"argon2 guess  : {argon_per_guess * 1e3:.1f} milliseconds")
+print(f"ratio         : about {argon_per_guess / sha_per_guess:,.0f}x slower per guess")
+```
+
+<TerminalOutput command="uv run --python 3.13 --with 'pwdlib[argon2]' python p07_hashing.py" label="Python 3.13 · pwdlib 0.4.2 (argon2-cffi 25.1.0) · chụp tháng 11/2026" caption="Cùng mật khẩu thì sha256 luôn ra cùng một chuỗi. Cùng mật khẩu mà Argon2 mỗi lần ra một chuỗi khác, vì salt là ngẫu nhiên. Một lần đoán với Argon2 tốn 30 ms trên chiếc laptop này; với sha256 chỉ 0,36 micro giây.">
+```text
+sha256        : c4bbcb1fbec99d65bf59d85c8cb62ee2db963f0fe106f483d9afa73bd4e39a8a
+same input    : True
+argon2 #1     : $argon2id$v=19$m=65536,t=3,p=4$qHgnyzVhNy8/ei98/P/xcA$yMi89BdFWG0Hj7vyV1wRVL7Eg8ZG2XydwGB/gQsvD3k
+argon2 #2     : $argon2id$v=19$m=65536,t=3,p=4$4b8tuF+2UQmJzRyHowR+ag$mYYFsUYopTZvUwCzDyxH/2ZHP7eqW2yrba+7m9qcLX4
+same input    : False
+verify right  : True
+verify wrong  : False
+sha256 guess  : 0.36 microseconds
+argon2 guess  : 30.0 milliseconds
+ratio         : about 84,174x slower per guess
+```
+</TerminalOutput>
+
+<BeP07PasswordHash />
+
+Bản chụp trên nhồi ba thứ:
+
+- **Salt.** Hai hash Argon2 của cùng một mật khẩu khác nhau, vì mỗi cái mang salt ngẫu nhiên riêng. Kẻ trộm không biết user nào dùng chung mật khẩu, và không thể dùng một bảng tính sẵn cho tất cả.
+- **Độ tốn nằm ngay trong chuỗi.** `m=65536,t=3,p=4` là bộ nhớ, số lượt và độ song song đã dùng để tạo hash này. `hasher.verify` đọc ngược lại từ chuỗi, nên sau này bạn tăng độ tốn cho hash mới mà hash cũ vẫn kiểm được.
+- **Tỷ lệ.** Chậm hơn khoảng 84.000 lần mỗi lần đoán là chẳng đáng kể với một lần đăng nhập (một lần đăng nhập, một lần hash) nhưng là tất cả với kẻ tấn công (hàng triệu lần đoán). Cheat sheet lưu mật khẩu của OWASP nêu Argon2id đầu tiên và nói các hash nhanh như SHA-256 "không phù hợp để lưu mật khẩu".
+
+`pwdlib` là thư viện docs FastAPI dùng, và `PasswordHash.recommended()` chọn Argon2id với tham số mặc định bạn không cần tự chỉnh. Cái bẫy trong code do AI viết là dòng một-câu trông tương đương: `hashlib.sha256(pw)` hay `md5(pw)` vẫn chạy, qua được test đăng nhập, và biến một vụ lộ database thành vụ lộ mật khẩu gốc.
+
+<Concepts>
+- **Hash**: hàm một chiều. Bạn kiểm được mật khẩu với một hash, nhưng không chạy ngược từ hash ra mật khẩu được.
+- **Salt**: vài byte ngẫu nhiên trộn vào trước khi hash, để hai mật khẩu giống nhau cho ra hai hash khác nhau.
+- **Tham số độ tốn (cost)**: một lần hash tốn bao nhiêu thời gian và bộ nhớ. Bạn tự chọn, và muốn nó làm khó kẻ tấn công nhiều hơn làm khó người dùng.
+</Concepts>
+
+---
+
+## 2. Session hay token?
+
+Khi ai đó đã đăng nhập, server cần cách nhận ra họ ở request sau. Có hai cách, và khác nhau ở chỗ *ai nhớ*.
+
+**Session** là một id ngẫu nhiên server phát ra và lưu lại. Trình duyệt giữ id trong cookie; server giữ `id → user` trong một store. **Token**, ở đây là JWT, tự mang thông tin (ai, scope gì, hết hạn lúc nào) kèm chữ ký. Server không lưu gì; chỉ kiểm chữ ký.
+
+<BeP07SessionVsJwt />
+
+Khác biệt lộ ra khi bạn muốn đuổi ai đó *ra*. `demo/p07_revocation.py` dựng cả hai trong vài dòng. Nửa session là một cái dict, và logout là xóa một mục:
+
+```python
+SESSIONS: dict[str, str] = {}  # session id -> username, kept on the server
+
+app = FastAPI()
+
+
+@app.post("/session/login")
+def session_login() -> dict:
+    sid = secrets.token_urlsafe(16)
+    SESSIONS[sid] = "alice"
+    return {"sid": sid}
+
+
+@app.post("/session/logout")
+def session_logout(x_session: str = Header()) -> dict:
+    SESSIONS.pop(x_session, None)  # revoking = deleting one dict entry
+    return {"ok": True}
+
+
+@app.get("/session/me")
+def session_me(x_session: str = Header()) -> dict:
+    user = SESSIONS.get(x_session)
+    if user is None:
+        raise HTTPException(401, "session unknown")
+    return {"user": user}
+
+
+@app.get("/jwt/me")
+def jwt_me(user: str = Depends(sec.get_current_user)) -> dict:
+    return {"user": user}
+```
+
+Rồi chạy cùng một kịch bản với cả hai:
+
+```python
+client = TestClient(app)
+sid = client.post("/session/login").json()["sid"]
+token = sec.make_token("alice", [])
+
+print("before logout")
+print("  session :", client.get("/session/me", headers={"x-session": sid}).status_code)
+print("  jwt     :", client.get("/jwt/me", headers={"Authorization": f"Bearer {token}"}).status_code)
+
+client.post("/session/logout", headers={"x-session": sid})
+print("after logout (the server 'forgets' alice)")
+print("  session :", client.get("/session/me", headers={"x-session": sid}).status_code)
+print("  jwt     :", client.get("/jwt/me", headers={"Authorization": f"Bearer {token}"}).status_code)
+print("  jwt claims still say:", jwt.decode(token, options={"verify_signature": False})["sub"])
+```
+
+<TerminalOutput command="uv run --python 3.13 --with fastapi==0.165.0 --with PyJWT --with 'pwdlib[argon2]' --with python-multipart --with httpx python -W ignore p07_revocation.py" label="Python 3.13 · FastAPI 0.165.0 · PyJWT 2.15.1 · chụp tháng 11/2026" caption="Sau logout, session trả 401 còn token trả 200. Không có gì hỏng cả: token chưa bao giờ nằm trong store nào để logout chạm tới.">
+```text
+before logout
+  session : 200
+  jwt     : 200
+after logout (the server 'forgets' alice)
+  session : 401
+  jwt     : 200
+  jwt claims still say: alice
+```
+</TerminalOutput>
+
+Toàn bộ sự đánh đổi chỉ có vậy:
+
+| | Session | JWT |
+|---|---|---|
+| Chi phí mỗi request | một lần tra trong store | một lần kiểm chữ ký, không cần store |
+| Cho user logout, hoặc cấm ngay | xóa dòng | không làm được tới khi `exp` |
+| Scale ra nhiều server | server nào cũng cần store | server nào có key cũng kiểm được |
+
+JWT là lựa chọn mặc định hợp lý cho quyền truy cập ngắn hạn giữa nhiều service, và là lựa chọn tệ cho "đá người này ra ngay bây giờ". Đường giữa hay dùng là hạn ngắn (demo này đặt 15 phút) cộng một cơ chế refresh mà bạn *thu hồi được*. Để ý luôn dòng cuối của bản chụp: ai cầm token cũng đọc được claims. JWT là được ký, không phải được mã hóa; đừng nhét bí mật vào đó.
+
+<Callout type="warning" title="Thói quen AI cần bỏ">
+Code auth do AI sinh ra chọn JWT vì các tutorial chọn vậy, rồi gắn thêm endpoint "logout" mà server không thực thi được gì. Trước khi nhận, hãy hỏi: *khi cần đuổi một user trong vòng một phút, hệ thống này làm gì?* Nếu câu trả lời là "đợi 30 ngày cho token hết hạn" thì thiết kế đó sai cho sản phẩm này.
+</Callout>
+
+---
+
+## 3. Một endpoint cấp token, một người gác
+
+Trước khi vào code, nói nhanh về từ vựng. OAuth2 là một tập các **flow**, và chọn flow nào tùy vào ai được phép nhìn thấy mật khẩu:
+
+<BeP07Flows />
+
+Demo dùng password flow vì nó là thứ ngắn nhất FastAPI chạy được và là cái tutorial của FastAPI hiển thị. Với sản phẩm thật có app bên thứ ba, bạn cần authorization code kèm PKCE, thường qua một identity provider thay vì code bạn tự viết. RFC 9700, khuyến nghị bảo mật OAuth 2.0 hiện hành, nói thẳng về flow đầu: "The resource owner password credentials grant MUST NOT be used." Vậy hãy coi đoạn code dưới đây là cách học *hình dạng* của token auth, vốn giống nhau ở mọi flow: đổi thông tin đăng nhập lấy token một lần, rồi xuất trình token.
+
+<BeP07TokenFlow />
+
+Phần khởi tạo và endpoint cấp token, từ `demo/p07_security.py`:
+
+```python
+# Obviously fake default so the demo runs; real deploys inject it from the environment.
+SECRET_KEY = os.environ.get("CLUE_JWT_SECRET", "dev-only-not-a-real-secret-change-me-please")
+ALGORITHM = "HS256"
+TOKEN_MINUTES = 15
+
+hasher = PasswordHash.recommended()
+SCOPES = {"cases:read": "Read cases", "cases:write": "Close and purge cases"}
+
+# In-memory user store: the hash is stored, the password never is.
+USERS = {
+    "alice": {"hash": hasher.hash("alice-demo-pw"), "scopes": ["cases:read", "cases:write"]},
+    "bob": {"hash": hasher.hash("bob-demo-pw"), "scopes": ["cases:read"]},
+}
+DUMMY_HASH = hasher.hash("not-a-real-password")
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token", scopes=SCOPES)
+router = APIRouter()
+```
+
+```python
+def make_token(username: str, scopes: list[str], minutes: int = TOKEN_MINUTES) -> str:
+    claims = {
+        "sub": username,
+        "scopes": scopes,
+        "exp": datetime.now(timezone.utc) + timedelta(minutes=minutes),
+    }
+    return jwt.encode(claims, SECRET_KEY, algorithm=ALGORITHM)
+
+
+# Plain `def`: Argon2 takes ~30 ms of CPU, so FastAPI runs it in a worker thread
+# instead of freezing the event loop.
+@router.post("/token")
+def login(form: Annotated[OAuth2PasswordRequestForm, Depends()]) -> dict:
+    user = USERS.get(form.username)
+    # Verify against a dummy hash for unknown users so both paths cost the same time.
+    ok = hasher.verify(form.password, user["hash"] if user else DUMMY_HASH)
+    if not user or not ok:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "incorrect username or password")
+    # The client asks for scopes; the user's own allowance decides what it gets.
+    granted = [s for s in form.scopes if s in user["scopes"]]
+    return {"access_token": make_token(form.username, granted), "token_type": "bearer"}
+```
+
+Từng mảnh FastAPI ở đây làm gì cho ý tưởng này:
+
+- `OAuth2PasswordBearer(tokenUrl="token")` là một **security scheme**. Nó làm hai việc: lấy header `Authorization: Bearer …` ra khỏi request (trả 401 "Not authenticated" khi thiếu), và báo cho OpenAPI biết có scheme này, nên Swagger mới hiện nút Authorize.
+- `OAuth2PasswordRequestForm` đọc các field form chuẩn `username`, `password` và `scope`. Nó cần cài `python-multipart`.
+- `login` là `def` thường, có chủ ý. Argon2 ngốn khoảng 30 ms CPU, và nếu để trong `async def` thì nó đóng băng event loop của mọi request khác ([bài 6](/blog/backend-async-concurrency-workers/) nói vì sao). FastAPI chạy `def` thường trong một worker thread.
+- Hash giả: với username không tồn tại, mình vẫn verify với một hash bỏ đi, để "không có user" và "sai mật khẩu" tốn thời gian như nhau và nhìn như nhau.
+- `granted = [s for s in form.scopes if s in user["scopes"]]` là dòng code AI hay bỏ sót: client *xin* scope, server *quyết định*. Chép thẳng `form.scopes` vào token nghĩa là ai cũng xin được quyền admin.
+
+Giờ tới người gác, một dependency mà mọi route được bảo vệ dùng chung:
+
+```python
+async def get_current_user(
+    security_scopes: SecurityScopes,
+    token: Annotated[str, Depends(oauth2_scheme)],
+) -> str:
+    try:
+        # algorithms is pinned: the token never gets to choose how it is verified.
+        claims = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED, "token expired", {"WWW-Authenticate": "Bearer"}
+        )
+    except jwt.InvalidTokenError:
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED, "invalid token", {"WWW-Authenticate": "Bearer"}
+        )
+    granted = claims.get("scopes", [])
+    for needed in security_scopes.scopes:
+        if needed not in granted:
+            # Identity is fine, permission is not: 403, not 401.
+            raise HTTPException(status.HTTP_403_FORBIDDEN, f"missing scope {needed}")
+    return claims["sub"]
+```
+
+`Depends(oauth2_scheme)` đưa token thô cho người gác. `jwt.decode` kiểm chữ ký và claim `exp` trong một lệnh. Hai chi tiết đáng chú ý. Một: `algorithms=[ALGORITHM]` được ghim cứng: RFC 8725 nói chính ứng dụng, không phải token, quyết định thuật toán nào được dùng, và cách giả mạo kinh điển là token có header `alg: none`. Hai: người gác không bao giờ in hay trả lại token khi lỗi.
+
+Một route được bảo vệ khi đó chỉ là một tham số:
+
+```python
+@router.get("/me")
+async def me(user: Annotated[str, Depends(get_current_user)]) -> dict:
+    return {"user": user}
+```
+
+Giờ thử phá nó. `demo/p07_attacks.py` bắt đầu từ một token thật của alice, rồi dựng các token xấu: token hết hạn, payload bị sửa sau khi đã ký, và token `alg=none` không có chữ ký. Phần sửa như sau:
+
+```python
+show("expired token", me(sec.make_token("alice", ["cases:read"], minutes=-1)))
+
+# Tamper: edit the payload (claim more scopes), keep the old signature.
+head, payload, sig = good.split(".")
+claims = json.loads(base64.urlsafe_b64decode(payload + "=="))
+claims["sub"] = "admin"
+forged = base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=").decode()
+show("tampered payload", me(f"{head}.{forged}.{sig}"))
+
+# alg=none: a token that claims it needs no signature at all.
+none_head = base64.urlsafe_b64encode(b'{"alg":"none","typ":"JWT"}').rstrip(b"=").decode()
+show("alg=none", me(f"{none_head}.{forged}."))
+```
+
+<TerminalOutput command="uvicorn p07_bola:app --port 4337 — then: python -W ignore p07_attacks.py" label="Python 3.13 · FastAPI 0.165.0 · PyJWT 2.15.1 · uvicorn 0.54.0 · chụp tháng 11/2026" caption="Một 200, năm lần từ chối. Mỗi 401 là một lỗi khác nhau, bắt bởi cùng một dependency: thiếu header, exp hết hạn, chữ ký không còn khớp, token tự nhận không cần chữ ký, và sai mật khẩu ở endpoint cấp token.">
+```text
+no token                     -> 401 {'detail': 'Not authenticated'}
+valid token                  -> 200 {'user': 'alice'}
+expired token                -> 401 {'detail': 'token expired'}
+tampered payload             -> 401 {'detail': 'invalid token'}
+alg=none                     -> 401 {'detail': 'invalid token'}
+wrong password               -> 401 {'detail': 'incorrect username or password'}
+```
+</TerminalOutput>
+
+Cả hai token giả đều trả `invalid token`, nên người gác không cho kẻ tấn công biết phần nào sai. Token hết hạn được phép nói `token expired`, vì client hợp lệ cần biết để đăng nhập lại.
+
+<Concepts>
+- **Bearer token**: ai cầm (bear) token thì được coi là user đó. Vì thế nó chỉ đi qua HTTPS và nên hết hạn sớm.
+- **JWT**: ba khối base64, `header.payload.signature`. Chữ ký phủ hai khối đầu, nên sửa payload là hỏng chữ ký.
+- **401 vs 403**: 401 là "mình không biết bạn là ai". 403 là "mình biết bạn là ai, và không".
+</Concepts>
+
+---
+
+## 4. Scope: bạn có được làm loại việc này?
+
+Token hợp lệ trả lời "ai". Nó không trả lời "được làm gì". **Scope** là câu trả lời thô: các nhãn trong token như `cases:read` và `cases:write` cho biết token dùng được cho loại hành động nào. Khai báo một lần:
+
+```python
+@router.get("/reports")
+async def reports(
+    user: Annotated[str, Security(get_current_user, scopes=["cases:read"])],
+) -> dict:
+    return {"user": user, "reports": ["weekly-summary"]}
+
+
+@router.post("/purge")
+async def purge(
+    user: Annotated[str, Security(get_current_user, scopes=["cases:write"])],
+) -> dict:
+    return {"user": user, "purged": True}
+```
+
+`Security(get_current_user, scopes=["cases:read"])` trông như `Depends`, và đúng là vậy: `Security` là lớp con thêm tham số `scopes`. FastAPI gom scope của mọi dependency trong chuỗi vào object `SecurityScopes` mà người gác đã xin, và người gác so với claim `scopes` của token (vòng lặp ở cuối `get_current_user`). Cùng khai báo đó nuôi cả OpenAPI, nên Swagger tự dựng hộp thoại này từ `SCOPES`, không cần code thêm:
+
+<Figure src={swaggerAuth} alt="Hộp thoại Available authorizations của Swagger UI: OAuth2 password flow, username bob, ô password, và hai checkbox scope cases:read Read cases và cases:write Close and purge cases" caption="Thứ `OAuth2PasswordBearer(..., scopes=SCOPES)` tạo ra trong /docs: form đăng nhập và danh sách scope. Chữ lấy từ dict SCOPES, không từ đâu khác." />
+
+`demo/p07_scopes.py` cho cả hai user xin cả hai scope, rồi gọi cả hai route:
+
+<TerminalOutput command="uvicorn p07_bola:app --port 4337 — then: python p07_scopes.py" label="Python 3.13 · FastAPI 0.165.0 · PyJWT 2.15.1 · uvicorn 0.54.0 · chụp tháng 11/2026" caption="Bob xin cases:write và không được cấp. Token của anh hợp lệ nên /reports chạy; /purge cần scope anh không có, nên 403, và response nói rõ thiếu scope nào.">
+```text
+alice: granted ['cases:read', 'cases:write']
+  GET  /reports -> 200 {'user': 'alice', 'reports': ['weekly-summary']}
+  POST /purge   -> 200 {'user': 'alice', 'purged': True}
+bob: granted ['cases:read']
+  GET  /reports -> 200 {'user': 'bob', 'reports': ['weekly-summary']}
+  POST /purge   -> 403 {'detail': 'missing scope cases:write'}
+```
+</TerminalOutput>
+
+Hai giới hạn cần nói thật. Một: FastAPI chỉ *đọc* scope; scope có nghĩa gì là do code trong người gác của bạn. Docs cũng nói vậy: bạn thực thi chúng "however you need, in your code". Hai: scope mô tả một loại hành động trên mọi thứ thuộc loại đó. `cases:read` nói Bob được đọc case. Nó không nói *case nào*, và đó là phần tiếp theo.
+
+---
+
+## 5. Confused deputy, xuống một tầng
+
+**Confused deputy** là chương trình nắm quyền lớn hơn người gọi và dùng quyền đó thay cho người gọi mà không kiểm xem người gọi có đủ tư cách với thứ họ xin hay không. API của bạn chính là vậy. Nó đọc được mọi case; database cho phép. Bob chỉ được đọc case của mình, nhưng Bob là người gửi request, còn API là kẻ đi đọc.
+
+<BeP07ThreeGates />
+
+Hai cổng đầu là tính năng bạn bật lên. Cổng thứ ba là một dòng bạn tự viết, và code dừng ở cổng hai là hình dạng phổ biến nhất của auth do AI sinh ra. `demo/p07_bola.py` chứa cả hai phiên bản:
+
+```python
+# case_id -> who opened it. The owner is data, not a login detail.
+CASES = {
+    "C-1": {"owner": "alice", "title": "The missing gnome", "notes": "suspect: the neighbour"},
+    "C-2": {"owner": "bob", "title": "The squeaky stair", "notes": "witness: the cat"},
+}
+
+app = FastAPI(title="clue.api", version="0.7.1")
+app.include_router(sec.router)
+
+
+# BEFORE: checks "who are you" and "may you read cases", never "is this YOUR case".
+@app.get("/vulnerable/cases/{case_id}")
+async def read_case_vulnerable(
+    case_id: str,
+    user: Annotated[str, Security(sec.get_current_user, scopes=["cases:read"])],
+) -> dict:
+    case = CASES.get(case_id)
+    if case is None:
+        raise HTTPException(404, "no such case")
+    return case
+
+
+# AFTER: the object-level check. 404 (not 403) so other people's ids stay unguessable.
+@app.get("/cases/{case_id}")
+async def read_case(
+    case_id: str,
+    user: Annotated[str, Security(sec.get_current_user, scopes=["cases:read"])],
+) -> dict:
+    case = CASES.get(case_id)
+    if case is None or case["owner"] != user:
+        raise HTTPException(404, "no such case")
+    return case
+```
+
+`read_case_vulnerable` là lỗi của USPS thu nhỏ: nó hỏi "có token hợp lệ với `cases:read` không?" mà không bao giờ hỏi case này của ai. Mọi id Bob đoán được là một case Bob đọc được.
+
+<BeP07Bola />
+
+<TerminalOutput command="uvicorn p07_bola:app --port 4337 — then: python p07_bola_check.py" label="Python 3.13 · FastAPI 0.165.0 · PyJWT 2.15.1 · uvicorn 0.54.0 · chụp tháng 11/2026" caption="Bob cầm token hợp lệ suốt cả quá trình. Route lỗi đưa anh ta ghi chú của alice. Route đã sửa so owner của bản ghi với subject của token rồi trả 404, y hệt khi id không tồn tại.">
+```text
+before: bob reads alice's case     /vulnerable/cases/C-1      -> 200 {'owner': 'alice', 'title': 'The missing gnome', 'notes': 'suspect: the neighbour'}
+after : bob reads alice's case     /cases/C-1                 -> 404 {'detail': 'no such case'}
+after : bob reads his own case     /cases/C-2                 -> 200 {'owner': 'bob', 'title': 'The squeaky stair', 'notes': 'witness: the cat'}
+after : alice reads her own case   /cases/C-1                 -> 200 {'owner': 'alice', 'title': 'The missing gnome', 'notes': 'suspect: the neighbour'}
+after : a case that does not exist /cases/C-9                 -> 404 {'detail': 'no such case'}
+```
+</TerminalOutput>
+
+Vì sao 404 chứ không phải 403 cho case của người khác? 403 báo cho Bob biết `C-1` có tồn tại và không phải của anh ta, mà thế đã là thông tin. Lời khuyên của OWASP cho lỗi này là: ở mọi hàm nhận id từ client, kiểm "if the logged-in user has access to perform the requested action", ưu tiên id ngẫu nhiên khó đoán, và viết test cho logic phân quyền. Id ngẫu nhiên làm chậm việc đoán, nhưng không phải cách sửa: cách sửa là kiểm owner.
+
+<Callout type="warning" title="Thói quen AI cần bỏ">
+Nhờ một trợ lý viết "endpoint an toàn để đọc case", nó sẽ thêm dependency đăng nhập rồi dừng, vì đó là thứ prompt nhắc tới. Câu hỏi review cho mọi route có id trên đường dẫn là: *dòng nào so owner của bản ghi với người gọi?* Nếu bạn không chỉ ra được, route đó mở cho mọi user đã đăng nhập. Sau đó hãy viết test đăng nhập bằng Bob và xin case của Alice, vì đó chính là bài test mà một vụ lộ như của USPS sẽ trượt.
+</Callout>
+
+Gộp lại, service của series giờ trả lời ba câu hỏi khác nhau bằng ba mã khác nhau: 401 khi nó không biết bạn, 403 khi nó biết bạn và bạn thiếu scope, và 404 khi nó biết bạn, bạn có scope, và thứ đó không phải của bạn.
+
+</Vi>
