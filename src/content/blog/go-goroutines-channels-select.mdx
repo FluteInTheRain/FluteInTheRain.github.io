@@ -38,7 +38,7 @@ import heroBarista from '../../assets/blog/go-goroutines-channels-select/barista
 
 ### A service that kept growing, and goroutines that never left
 
-In 2022 Uber published how it hunts goroutine leaks in production. On one service its detector flagged 10 critical leaking goroutines, with 1 false positive. Fixing just 2 of them cut the service's peak memory by 2.5x and by 5x, and the owners lowered the container memory requirement by 25%. Nobody had written a loop that obviously ran forever. Each leak was a goroutine waiting for a channel that nobody would ever use again.
+In 2022 Uber published how it hunts goroutine leaks in production. Its detector flagged 10 critical leaking goroutines, with 1 false positive. Fixing just 2 of them cut the peak memory of the affected services by 2.5x and by 5x, and the owners lowered the container memory requirement by 25%. A leaked goroutine is one that waits forever, usually for a channel that nobody will ever use again, and keeps its memory the whole time.
 
 That story needs two words first. A goroutine is Go's unit of concurrent work: you start one with the keyword `go`, and it runs alongside the code that started it. A channel is a pipe that goroutines use to hand values to each other. This post teaches both, plus `select` (wait on several channels at once), and ends on the rule that would have prevented Uber's bug: every goroutine needs a way to stop.
 
@@ -91,7 +91,7 @@ func main() {
 }
 ```
 
-<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="The goroutine never printed. When main returns, the whole program exits, and it does not wait for goroutines that are still running. Three runs gave this same output.">
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="The goroutine usually does not get to print. When main returns, the whole program exits, and it does not wait for goroutines that are still running. In 300 test runs it printed once.">
 ```text
 main is done
 ```
@@ -121,7 +121,7 @@ func main() {
 }
 ```
 
-`go func() { ... }()` declares an anonymous function and calls it on the spot, which is how you start a goroutine from several lines of code ([post 5](/blog/go-errors-defer-panic/) covers this syntax under closures). `defer wg.Done()` runs when the goroutine returns, even on an early exit (`defer` is explained in [post 2](/blog/go-variables-types-pointers-functions/)). Since Go 1.22 each loop turn has its own `i`, so each worker prints its own number.
+`go func() { ... }()` declares an anonymous function and calls it on the spot, which is how you start a goroutine from several lines of code ([post 5](/blog/go-errors-defer-panic/) covers this syntax under closures). `defer wg.Done()` runs when the goroutine returns, even on an early exit (`defer` is explained in [post 2](/blog/go-variables-types-pointers-functions/)). Since Go 1.22 each loop turn has its own `i`, so each worker prints its own number. Before 1.22 all the goroutines shared one `i`, and they often all saw its last value.
 
 <TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="One real run. The order of the three workers is not fixed: two other runs printed 3, 2, 1 as well. Never write code that depends on the order goroutines run in.">
 ```text
@@ -136,7 +136,7 @@ Put `wg.Add(1)` before the `go` statement, not inside the goroutine. If it ran i
 
 ### Why a goroutine is cheap
 
-A Java thread reserves 1 MB of stack by default on Linux x64 (the `-Xss` default in Oracle's documentation). A goroutine starts with a stack of about 2 KB that grows when needed, so you can start many more of them. This program starts 100,000 goroutines that all wait on one channel, and measures what that costs:
+A Java thread reserves 1 MB of stack by default on Linux x64 (the `-Xss` default in Oracle's documentation). A goroutine starts with a stack of about 2 KB that grows when needed, so you can start many more of them. This program starts 100,000 goroutines that all wait on one channel, and measures what that costs. `runtime.ReadMemStats` fills a struct with the runtime's memory counters, and `StackInuse` is the number of bytes of stack in use. The program reads it before and after, then divides the difference by the goroutine count:
 
 ```go
 package main
@@ -181,7 +181,7 @@ stack bytes per goroutine: 2049
 ```
 </TerminalOutput>
 
-The extra goroutine is `main` itself. Small does not mean free: 100,000 goroutines held 200 MB of stack here, and a goroutine can also keep heap memory, connections and files alive. How the runtime schedules them onto threads is covered much later in the series, in the [scheduler post](/blog/go-concurrency-scheduler-channels-context-mutexes/).
+The extra goroutine is `main` itself. Small does not mean free: 100,000 goroutines held 200 MB of stack here. The [scheduler post](/blog/go-concurrency-scheduler-channels-context-mutexes/) covers how the runtime runs them on threads.
 
 ## Channels
 
@@ -412,9 +412,9 @@ main: worker has exited
 
 ## Every goroutine needs a way to stop
 
-Starting a goroutine costs one keyword, so it is easy to forget that something must also end it. A goroutine that never ends is a leak, like an unclosed file, with a stack and whatever it holds. The Go blog is blunt about it: "Goroutines are not garbage collected; they must exit on their own."
+Starting a goroutine costs one keyword, so it is easy to forget that something must also end it. A goroutine that never ends is a leak: it sits blocked forever, like an unclosed file, holding its stack and whatever else it references. The Go blog is blunt about it: "Goroutines are not garbage collected; they must exit on their own."
 
-Uber's leaks followed a few patterns. The one in the `select` example above is the "timeout leak": the caller gives up after the timer, returns, and the helper goroutine later tries to send its answer to a channel nobody reads. Here is that shape in a function we call 1,000 times:
+Uber's leaks followed a few patterns. One is the "timeout leak", and it builds on the `select` with `time.After` from the section above. Step by step: a function starts a helper goroutine to do slow work, then waits in a `select` for either the helper's answer or a timer. If the timer wins, the function returns. The helper finishes later and tries to send its answer on an unbuffered channel, and nobody is receiving. It waits there forever. Here is that shape in a function we call 1,000 times:
 
 ```go
 package main
@@ -469,7 +469,7 @@ goroutines: 1
 ```
 </TerminalOutput>
 
-This is the case where a buffer of 1 earns its place. Uber's post suggests the same fix for the "premature return" pattern. Other exits follow the same rule, and you have seen them already:
+This is the case where a buffer of 1 earns its place. Uber's post suggests the same fix for what it calls the "premature function return" pattern. Other exits follow the same rule, and you have seen them already:
 
 - The goroutine reads from a channel in a `range` loop, and something closes the channel.
 - The goroutine watches a `done` channel in a `select`, and someone closes it.
@@ -515,7 +515,7 @@ Cancellation and deadlines with `context`, and mutexes, come in [post 8](/blog/g
 
 ### Một service ngày càng phình, và những goroutine không bao giờ thoát
 
-Năm 2022 Uber công bố cách họ săn goroutine leak trên production. Ở một service, công cụ của họ báo 10 goroutine leak nghiêm trọng, trong đó có 1 báo nhầm. Chỉ sửa 2 trong số đó, bộ nhớ đỉnh của service giảm 2,5 lần và 5 lần, và chủ service hạ yêu cầu bộ nhớ container xuống 25%. Không ai viết một vòng lặp chạy mãi một cách lộ liễu. Mỗi chỗ leak là một goroutine đang chờ một channel mà không còn ai dùng đến.
+Năm 2022 Uber công bố cách họ săn goroutine leak trên production. Công cụ của họ báo 10 goroutine leak nghiêm trọng, trong đó có 1 báo nhầm. Chỉ sửa 2 trong số đó, bộ nhớ đỉnh của các service bị ảnh hưởng giảm 2,5 lần và 5 lần, và chủ service hạ yêu cầu bộ nhớ container xuống 25%. Goroutine bị leak là goroutine chờ mãi, thường là chờ một channel mà không còn ai dùng đến, và giữ bộ nhớ của nó suốt thời gian đó.
 
 Câu chuyện này cần hai từ trước đã. Goroutine là đơn vị công việc chạy đồng thời của Go: bạn bắt đầu nó bằng từ khóa `go`, và nó chạy song song với đoạn code đã khởi động nó. Channel là một đường ống để các goroutine trao giá trị cho nhau. Bài này dạy cả hai, thêm `select` (chờ nhiều channel cùng lúc), và kết bằng quy tắc lẽ ra đã ngăn được lỗi của Uber: mỗi goroutine phải có đường để dừng.
 
@@ -568,7 +568,7 @@ func main() {
 }
 ```
 
-<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Goroutine không in được gì. Khi main kết thúc, cả chương trình thoát, và nó không chờ các goroutine còn đang chạy. Ba lần chạy đều ra đúng kết quả này.">
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Thường thì goroutine không kịp in gì. Khi main kết thúc, cả chương trình thoát, và nó không chờ các goroutine còn đang chạy. Trong 300 lần chạy thử, có 1 lần nó kịp in.">
 ```text
 main is done
 ```
@@ -598,7 +598,7 @@ func main() {
 }
 ```
 
-`go func() { ... }()` khai báo một hàm ẩn danh và gọi ngay tại chỗ, đó là cách khởi động goroutine từ nhiều dòng code ([bài 5](/blog/go-errors-defer-panic/) giải thích cú pháp này ở phần closure). `defer wg.Done()` chạy khi goroutine trả về, kể cả khi thoát sớm (`defer` được giải thích ở [bài 2](/blog/go-variables-types-pointers-functions/)). Từ Go 1.22, mỗi vòng lặp có `i` riêng, nên mỗi worker in đúng số của mình.
+`go func() { ... }()` khai báo một hàm ẩn danh và gọi ngay tại chỗ, đó là cách khởi động goroutine từ nhiều dòng code ([bài 5](/blog/go-errors-defer-panic/) giải thích cú pháp này ở phần closure). `defer wg.Done()` chạy khi goroutine trả về, kể cả khi thoát sớm (`defer` được giải thích ở [bài 2](/blog/go-variables-types-pointers-functions/)). Từ Go 1.22, mỗi vòng lặp có `i` riêng, nên mỗi worker in đúng số của mình. Trước 1.22, mọi goroutine dùng chung một `i`, và thường đều thấy giá trị cuối cùng của nó.
 
 <TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Một lần chạy thật. Thứ tự ba worker không cố định: hai lần chạy khác cũng ra 3, 2, 1. Đừng viết code phụ thuộc vào thứ tự các goroutine chạy.">
 ```text
@@ -613,7 +613,7 @@ all workers finished
 
 ### Vì sao goroutine rẻ
 
-Một thread Java mặc định giữ chỗ 1 MB stack trên Linux x64 (giá trị mặc định của `-Xss` trong tài liệu Oracle). Goroutine bắt đầu với stack khoảng 2 KB và lớn thêm khi cần, nên bạn khởi động được nhiều hơn hẳn. Chương trình này khởi động 100.000 goroutine cùng chờ trên một channel, và đo chi phí:
+Một thread Java mặc định giữ chỗ 1 MB stack trên Linux x64 (giá trị mặc định của `-Xss` trong tài liệu Oracle). Goroutine bắt đầu với stack khoảng 2 KB và lớn thêm khi cần, nên bạn khởi động được nhiều hơn hẳn. Chương trình này khởi động 100.000 goroutine cùng chờ trên một channel, và đo chi phí. `runtime.ReadMemStats` điền vào một struct các bộ đếm bộ nhớ của runtime, và `StackInuse` là số byte stack đang dùng. Chương trình đọc nó trước và sau, rồi chia phần chênh cho số goroutine:
 
 ```go
 package main
@@ -658,7 +658,7 @@ stack bytes per goroutine: 2049
 ```
 </TerminalOutput>
 
-Goroutine thừa ra là chính `main`. Nhỏ không có nghĩa là miễn phí: 100.000 goroutine giữ 200 MB stack ở đây, và một goroutine còn có thể giữ bộ nhớ heap, kết nối và file. Cách runtime xếp chúng lên các thread được nói ở rất sau trong series, trong [bài về scheduler](/blog/go-concurrency-scheduler-channels-context-mutexes/).
+Goroutine thừa ra là chính `main`. Nhỏ không có nghĩa là miễn phí: 100.000 goroutine giữ 200 MB stack ở đây. [Bài về scheduler](/blog/go-concurrency-scheduler-channels-context-mutexes/) nói về cách runtime chạy chúng trên các thread.
 
 ## Channel
 
@@ -889,9 +889,9 @@ main: worker has exited
 
 ## Mỗi goroutine cần một đường để dừng
 
-Bắt đầu goroutine chỉ tốn một từ khóa, nên dễ quên rằng cũng phải có thứ kết thúc nó. Goroutine không bao giờ kết thúc là một leak, như file không đóng, với một stack và mọi thứ nó giữ. Blog Go nói thẳng: "Goroutines are not garbage collected; they must exit on their own." (Goroutine không bị dọn rác; chúng phải tự thoát.)
+Bắt đầu goroutine chỉ tốn một từ khóa, nên dễ quên rằng cũng phải có thứ kết thúc nó. Goroutine không bao giờ kết thúc là một leak: nó bị chặn mãi, như file không đóng, giữ stack và mọi thứ nó tham chiếu. Blog Go nói thẳng: "Goroutines are not garbage collected; they must exit on their own." (Goroutine không bị dọn rác; chúng phải tự thoát.)
 
-Các leak của Uber theo vài kiểu. Kiểu trong ví dụ `select` ở trên là "timeout leak": bên gọi bỏ cuộc sau bộ đếm giờ, trả về, rồi goroutine phụ về sau cố gửi câu trả lời vào một channel không ai đọc. Đây là hình dạng đó trong một hàm được gọi 1.000 lần:
+Các leak của Uber theo vài kiểu. Một kiểu là "timeout leak", dựa trên `select` với `time.After` ở phần trước. Từng bước: một hàm khởi động goroutine phụ làm việc chậm, rồi chờ trong `select` câu trả lời của nó hoặc một bộ đếm giờ. Nếu bộ đếm giờ thắng, hàm trả về. Goroutine phụ xong muộn hơn và cố gửi câu trả lời vào channel không có buffer, mà không ai nhận. Nó chờ ở đó mãi. Đây là hình dạng đó trong một hàm được gọi 1.000 lần:
 
 ```go
 package main
@@ -946,7 +946,7 @@ goroutines: 1
 ```
 </TerminalOutput>
 
-Đây là trường hợp buffer 1 xứng đáng có mặt. Bài của Uber đề xuất cùng cách sửa cho kiểu "return sớm". Các lối thoát khác theo cùng quy tắc, và bạn đã gặp chúng:
+Đây là trường hợp buffer 1 xứng đáng có mặt. Bài của Uber đề xuất cùng cách sửa cho kiểu mà nó gọi là "premature function return" (hàm return sớm). Các lối thoát khác theo cùng quy tắc, và bạn đã gặp chúng:
 
 - Goroutine đọc channel trong vòng `range`, và có thứ đóng channel đó.
 - Goroutine theo dõi channel `done` trong `select`, và có ai đó đóng nó.
