@@ -3,6 +3,12 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-23 — Thiết kế lại series Go: 20 bài, từ cơ bản đến phỏng vấn
+
+- **Đã làm:** spec `docs/superpowers/specs/2026-11-23-go-series-redesign-design.md` (nhánh `chore/go-series-redesign-spec`). Series `golang` 12 bài chia lại thành 20 bài, 5 cấp: Viết Go (1–6) → Chạy song song (7–10) → Bên trong & bẫy (11–14) → Đo & tối ưu (15–19) → Phỏng vấn (20). Mỗi chủ đề chỉ có một bài "nhà"; 100 lỗi của *100 Go Mistakes* được phân đủ, mỗi lỗi đúng một bài (kiểm bằng script).
+- **Ai quyết:** user — người đọc là dev đã biết ngôn ngữ khác nhưng chưa viết Go; chọn phương án A (một series, một lộ trình); bài được viết dài; sách là nguồn tham khảo chính; thêm 3 bài (concurrency patterns, HTTP service, phỏng vấn); dàn ý trong spec coi như đã duyệt, chỉ duyệt kỹ bài 1 (pilot). AI quyết: bài 11–19 giữ slug cũ và viết lại tại chỗ; 3 bài fundamentals cũ redirect khi cutover; thứ tự làm sao cho bài live không bao giờ link tới draft.
+- **Chưa chốt:** plan triển khai (bước tiếp theo). Hai cuốn *100 Go Mistakes* và *Efficient Go* chưa import bằng `/book-to-skill`.
+
 ## 2026-11-22 — Bài 1 series stocks-basics: "Cổ phiếu thật ra là gì"
 
 - **Đã làm:** publish bài 1 series `stocks-basics` (`/blog/what-is-a-stock-ownership-dividends/`, `draft: false`): body song ngữ EN/VI (5 mục + key takeaways + 5 câu ôn tập), hero chứng khoán 1863 (Wikimedia CC0), demo island "Your slice" (Task 3), quiz 8 bộ câu hỏi (`/quiz/`, Task 4), số liệu thật FPT/VNM tài chính 2025 từ 2 báo cáo thường niên đã kiểm toán + VSDC (cổ tức) + HOSE (ex-date) — đủ nguồn trong frontmatter `sources`. Bài publish khiến series card `stocks-basics` hiện trên blog index (thứ 4) và part 1 trên trang cover chuyển thành link "Bắt đầu từ Bài 1 →".
