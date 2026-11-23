@@ -1,18 +1,25 @@
 ---
 title: "Go benchmarking"
-title_vi: "Benchmark trong Go"
-description: "How Prometheus RED/USE metrics, RSS vs HeapInuse tracking, Go compiler dead-code traps, and benchstat p-values turn guesswork into reliable evidence."
-description_vi: "Cách dùng Prometheus RED/USE bắt độ trễ đuôi p99, phân biệt RSS với HeapInuse, né bẫy benchmark ảo do compiler xóa code và đọc xác suất p-value từ benchstat."
-date: 2026-11-20
+title_vi: "Benchmarking trong Go"
+description: "Measure Go without lying to yourself: RED and USE histograms, container vs heap memory, b.Loop() microbenchmarks, Mann-Whitney benchstat runs, and Todo service load tests."
+description_vi: "Đo hiệu năng Go sao cho đừng tự lừa mình: RED/USE histogram, đối chiếu RAM container với Go heap, microbenchmark dùng b.Loop(), lọc nhiễu bằng benchstat và macrobenchmark Todo service."
+date: 2026-11-23
 category: "backend"
-tags: ["golang", "efficient-go", "observability", "benchmarking", "prometheus", "benchstat"]
+tags: ["golang", "observability", "benchmarking", "prometheus", "benchstat", "100-go-mistakes"]
 cover: "../../assets/series/golang/go-gopher-pencil-megaphone.jpg"
 cover_alt: "Pencil drawing of the Go gopher shouting into a megaphone, drawn by Renee French"
 draft: false
 sources:
   - { title: "Efficient Go: Data-Driven Performance Optimization", author: "Bartłomiej Płotka", chapters: "Ch. 6, 7, 8", url: "https://www.efficientgo.dev/" }
-  - { title: "P99 CONF 2023 | The Art of Macro Benchmarking by Bartłomiej Płotka", author: "Bartłomiej Płotka (ScyllaDB P99 CONF)", url: "https://www.youtube.com/watch?v=wv97cPiqYSU" }
-  - { title: "Overview | Prometheus Architecture", author: "Prometheus Authors", url: "https://prometheus.io/docs/introduction/overview/" }
+  - { title: "100 Go Mistakes and How to Avoid Them", author: "Teiva Harsanyi", chapters: "Mistake #89", url: "https://100go.co/" }
+  - { title: "Go Issue #14813: cmd/compile: SSA compiler removes code in benchmarks", author: "The Go Authors & Community", url: "https://github.com/golang/go/issues/14813" }
+  - { title: "More predictable benchmarking with testing.B.Loop", author: "Junyang Shao (The Go Blog)", url: "https://go.dev/blog/testing-b-loop" }
+  - { title: "Go standard library: src/testing/benchmark.go (go1.27.1)", author: "The Go Authors", url: "https://github.com/golang/go/blob/go1.27.1/src/testing/benchmark.go#L475-L487" }
+  - { title: "Package runtime/metrics", author: "The Go Authors", url: "https://pkg.go.dev/runtime/metrics" }
+  - { title: "benchstat — statistical comparison of Go benchmarks", author: "The Go Authors", url: "https://pkg.go.dev/golang.org/x/perf/cmd/benchstat" }
+  - { title: "Overview & Histograms and Summaries", author: "Prometheus Authors", url: "https://prometheus.io/docs/practices/histograms/" }
+  - { title: "P99 CONF 2023 | The Art of Macro Benchmarking", author: "Bartłomiej Płotka (ScyllaDB P99 CONF)", url: "https://www.youtube.com/watch?v=wv97cPiqYSU" }
+  - { title: "Grafana k6 Load Testing Documentation", author: "Grafana Labs", url: "https://grafana.com/docs/k6/latest/" }
   - { title: "Analytical balance scale in glass case, London 1860-1880 (Wellcome Collection, CC BY 4.0)", author: "Wellcome Collection", url: "https://commons.wikimedia.org/wiki/File:Balance,_London,_England,_1860-1880_Wellcome_L0058879.jpg" }
   - { title: "Marine chronometer by Joseph Sewill, Liverpool c. 1870 (Rept0n1x, CC BY-SA 3.0)", author: "Rept0n1x", url: "https://commons.wikimedia.org/wiki/File:Marine_chronometer,_Joseph_Sewill,_Liverpool_(c._1870).JPG" }
   - { title: "Go gopher pencil megaphone (CC BY 3.0)", author: "Renee French", url: "https://commons.wikimedia.org/wiki/File:Go_gopher_pencil_megaphone.jpg" }
@@ -24,13 +31,12 @@ import En from '../../components/mdx/En.astro';
 import Figure from '../../components/mdx/Figure.astro';
 import GitHubCode from '../../components/mdx/GitHubCode.astro';
 import GoBenchmarkTrapsDemo from '../../components/mdx/GoBenchmarkTrapsDemo.astro';
-import GoEffBenchstatAndLevels from '../../components/mdx/GoEffBenchstatAndLevels.astro';
 import GoEffBenchstatSimulatorDemo from '../../components/mdx/GoEffBenchstatSimulatorDemo.astro';
-import GoEffBenchmarkTraps from '../../components/mdx/GoEffBenchmarkTraps.astro';
-import GoEffMemoryMetricsAnatomy from '../../components/mdx/GoEffMemoryMetricsAnatomy.astro';
-import GoEffObservabilitySignals from '../../components/mdx/GoEffObservabilitySignals.astro';
-import GoObsBenchLoopCode from '../../components/mdx/GoObsBenchLoopCode.astro';
-import GoObsFourSignalsMap from '../../components/mdx/GoObsFourSignalsMap.astro';
+import GoP17BenchTraps from '../../components/mdx/GoP17BenchTraps.astro';
+import GoP17BenchstatStats from '../../components/mdx/GoP17BenchstatStats.astro';
+import GoP17MemoryLayers from '../../components/mdx/GoP17MemoryLayers.astro';
+import GoP17MicroVsMacro from '../../components/mdx/GoP17MicroVsMacro.astro';
+import GoP17RedVsUse from '../../components/mdx/GoP17RedVsUse.astro';
 import QuoteCard from '../../components/mdx/QuoteCard.astro';
 import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
 import Vi from '../../components/mdx/Vi.astro';
@@ -41,260 +47,533 @@ import chronometerImg from '../../assets/blog/go-observability-metrics-microbenc
 
 <En>
 
-<Figure src={heroBalance} alt="Brass analytical two-pan laboratory balance enclosed in a glass draft shield" caption="A precision balance wears a glass case so room drafts cannot tip the needle—the exact isolation microbenchmarks and benchstat need before declaring a speedup." sourceTitle="Wikimedia Commons: Balance, London 1860–1880 (Wellcome)" sourceUrl="https://commons.wikimedia.org/wiki/File:Balance,_London,_England,_1860-1880_Wellcome_L0058879.jpg" />
+<Figure src={heroBalance} alt="Brass analytical two-pan laboratory balance enclosed in a glass draft shield" caption="A laboratory balance wears a glass case so room air currents cannot move the needle—the same isolation Go benchmarks need before you trust a speedup." sourceTitle="Wikimedia Commons: Balance, London 1860–1880 (Wellcome)" sourceUrl="https://commons.wikimedia.org/wiki/File:Balance,_London,_England,_1860-1880_Wellcome_L0058879.jpg" />
 
 > "Benchmarking is literally just testing—testing performance instead of functionality."
 > &mdash; *Bartłomiej Płotka*, *P99 CONF 2023*
 
-### Why fast-looking Go benchmarks still ship regressions
+### Why fast benchmarks still ship slow code
 
-Every Go engineer has seen a triumphant pull request comment: *"Refactored parser — 4x faster!"* accompanied by a single `-count=1` benchmark line pasted from a noisy laptop. Two days later, latency in Kubernetes climbs higher than before, or heap allocations double under real payloads.
+In [Go issue #14813](https://github.com/golang/go/issues/14813), a benchmark comparing two bit-counting (`popcnt`) implementations looked blazing fast: Go's Static Single Assignment (SSA) compiler inlined the pure helper, saw that nobody used its return value, and deleted the entire calculation. The loop still ran `1,000,000,000` times and printed `PASS`, except it was timing an empty loop counter. Years later, that same class of `b.N` compiler and timer mistakes pushed the Go team to design `testing.B.Loop` for Go 1.24.
 
-Measuring software performance accurately—building directly on the hardware cache and allocator mechanics just covered—is fundamentally harder than running unit tests: compiler optimizers silently delete unused loops, averages hide p99 stalls, OS page caches skew second runs, and single-function microbenchmarks ignore whole-system concurrency and network pools. This guide covers four skills to build trustworthy numbers in Go:
-
-1. **The four observability signals**: matching Logging, Tracing, Prometheus Histograms (RED/USE), and Profiling to each efficiency question.
-2. **Reading CPU &amp; memory metrics properly**: avoiding cumulative CPU counter traps and separating `HeapAlloc`, `HeapInuse`, `HeapSys`, and Container Working Set (`RSS`).
-3. **Writing Go microbenchmarks that don't lie**: beating setup contamination, dead-code elimination, and Big O assumptions.
-4. **Statistical proof &amp; Macrobenchmarks**: reading `benchstat` p-values and spinning up full Go `e2e` + `k6` environments.
+Functional tests give you a clear pass or fail because `2 + 2` returns `4` even if your laptop fan is spinning or Slack is syncing. Performance numbers have no such shield. Averages smear away p99 pauses, container OOM kills watch OS pages that Go's heap counters miss, CPU thermal boost swings single benchmark runs by double digits, and a microbenchmark of one isolated function sees zero TCP sockets or mutex contention.
 
 <Callout type="note" title="TL;DR">
-Watch **RED** (Rate, Errors, Duration) and **USE** (Utilization, Saturation, Errors) with Prometheus **Histograms**—never plain averages—to spot tail latency. Measure CPU time in seconds per interval via `rate()`, check **both** `go_memstats_heap_inuse_bytes` and container `working_set` RSS, always keep setup out of `testing.B` timers, assign outputs to package-level `Sink` variables (or `b.Loop()`), and demand `p &lt; 0.05` across `-count=6..10` runs in **`benchstat`**.
+Instrument services with **RED** (Rate, Errors, Duration histograms) and resources with **USE** (Utilization, Saturation, Errors), compare container `working_set` RAM against Go `runtime/metrics` heap counters, guard microbenchmarks against setup leaks, dead-code elimination, and cache warming with `for b.Loop()` (Go 1.24+), demand `p < 0.05` across `-count=10` runs in `benchstat`, and validate service-level tail latency with macrobenchmarks.
 </Callout>
 
-<Concepts>
+<Callout type="note" title="Recap from earlier posts">
 
-- **RED vs. USE methods**: **RED** tracks request-driven workloads (Rate, Errors, Duration), while **USE** monitors hardware/resource bottlenecks (Utilization, Saturation queue depth, Errors).
-- **Histogram (`le` buckets)**: metric counting how many requests fell below each duration bucket threshold (`0.01s`, `0.05s`, `0.5s`), letting Prometheus estimate p90/p99 percentiles accurately.
-- **Big O complexity**: worst-case growth rate relative to input size `N` (`O(1)`, `O(N)`, `O(N log N)`), useful for eliminating catastrophic scaling yet insufficient alone due to constant-factor hardware costs.
-- **Dead-code elimination**: compiler pass that drops computations whose results are never read—making broken microbenchmarks report sub-nanosecond speeds falsely.
-- **Statistical p-value (`benchstat`)**: probability that an observed before/after difference happened purely by random noise (`p &lt; 0.05` marks genuine change; `~` means noisy uncertainty).
+This post builds directly on three earlier parts of the series:
 
-</Concepts>
+- [Go testing](/blog/go-testing-table-tests/): `go test`, `_test.go` files, table-driven subtests, and `httptest` in-memory HTTP tests.
+- [Go efficiency workflow](/blog/go-efficiency-workflow-raer-tfbo-hardware-memory/): RAER performance budgets, the TFBO (Test, Fix, Benchmark, Optimize) cycle, and stack vs. heap cost.
+- [Go hardware and GC](/blog/go-hardware-cpu-caches-virtual-memory-gc-allocator/): CPU cache lines, `VSS` vs. `RSS`, `madvise(MADV_DONTNEED)`, and `GOGC` / `GOMEMLIMIT`.
+
+</Callout>
 
 ---
 
-## 1. Efficiency observability: Logs, Traces, Metrics &amp; RED/USE
+## Efficiency signals: RED, USE and histograms
 
-Newcomers often reach straight for heavyweight debug logging on every request, then wonder why logging JSON serialization itself consumes 30% of service CPU. Observability relies on four complementary signals ordered by collection overhead:
+Before touching a benchmark file, you need to know what is slow in the running service. Watching a server by printing a debug log line on every HTTP call often creates the very bottleneck you are hunting, because formatting and shipping strings steals CPU and heap allocations on every request.
 
-<Figure src={promArch} alt="Official Prometheus architecture showing target discovery, metrics pulling, TSDB storage, PromQL querying, and Grafana/Alertmanager outputs" caption="Pull-based Metrics pipelines like Prometheus aggregate millions of fast counters locally in RAM, turning costly per-request telemetry into cheap time-series scrapes." sourceTitle="Prometheus Documentation — Overview" sourceUrl="https://prometheus.io/docs/introduction/overview/" />
+Think of observability signals like instruments in a car compared with a dashcam. A speedometer and fuel gauge (**metrics**) update cheap numbers continuously; a trip timeline (**tracing**) records one journey across turns; **logging** keeps rare incident snapshots; and **continuous profiling** (covered in [Go profiling](/blog/go-profiling-pprof-flamegraphs-off-cpu-continuous/)) inspects which engine part is burning fuel line by line.
 
-- **Metrics (Prometheus)** collect tiny aggregated atomic counters per process at minimal CPU cost—always start here with **RED** for APIs/workers and **USE** for CPU/RAM/disk pools. Crucially, replace raw sums/averages with **Prometheus Histograms** (`histogram_quantile(0.99, ...)`), because 99 fast 5 ms calls plus 1 stalled 705 ms call averages to a deceptive "12 ms"!
-- **Tracing** records single-request span timelines across HTTP, gRPC, and SQL boundaries (sampled via head or tail sampling so trace exports do not saturate network bandwidth).
-- **Logging** belongs strictly to low-volume errors or startup events; calling `log.Debug` inside tight request paths burns CPU allocations even when formatted conditionally unless guarded properly.
-- **Continuous Profiling** attributes CPU nanoseconds and Heap allocations straight down to exact Go function lines (covered in Part 11).
-- And track latency distribution accurately via Prometheus Histogram:
+<Figure src={promArch} alt="Official Prometheus architecture showing target discovery, metrics pulling, TSDB storage, PromQL querying, and Grafana/Alertmanager outputs" caption="Prometheus scrapes pre-aggregated atomic counters from a Go process over HTTP instead of forcing the service to ship raw per-request logs." sourceTitle="Prometheus Documentation — Overview" sourceUrl="https://prometheus.io/docs/introduction/overview/" />
+
+For Go services, two small checklists keep dashboards consistent without drowning in metrics:
+
+- **RED** (Tom Wilkie's method for request-driven APIs): track **R**ate (requests/s), **E**rrors (failed requests/s), and **D**uration (request latency distribution). In the [Todo HTTP service](/blog/go-http-service-net-http-json-middleware/), you wrap `statusRecorder` inside a middleware right next to `logging` so every route records its status code and elapsed seconds.
+- **USE** (Brendan Gregg's method for hardware and runtime pools): for CPU cores, memory, disks, or connection pools, watch **U**tilization (% busy), **S**aturation (work queued waiting for a turn), and **E**rrors (dropped packets, OOM kills).
+
+<GoP17RedVsUse />
+
+Notice why **Duration** must be a **Histogram**, never a plain average or a Prometheus **Summary**. Suppose 99 `GET /todos` calls finish in `5 ms` and 1 call stalls for `705 ms` waiting on a lock: the arithmetic mean reports a calm `12 ms`, hiding the outlier completely. Worse, a `Summary` computes percentiles locally inside each pod—averaging `p99 = 12 ms` from a busy pod and `p99 = 820 ms` from an idle pod gives nonsense (`416 ms`), whereas a classic **Histogram** (`_bucket{le="..."}`)—or modern Prometheus native histograms—counts bucket hits per pod so PromQL can sum them cleanly across your cluster:
 
 ```go
-// Track latency distribution accurately via Prometheus Histogram
+// Add RED middleware alongside statusRecorder from the Todo service (Post 10).
 httpDur := prometheus.NewHistogramVec(prometheus.HistogramOpts{
 	Name:    "http_request_duration_seconds",
-	Help:    "Request duration broken down cleanly into p90/p99 quantiles.",
-	Buckets: []float64{0.005, 0.01, 0.025, 0.1, 0.5, 2.0},
+	Help:    "Request duration per route pattern and status class.",
+	Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.5, 2.0},
 }, []string{"route", "code"})
 
-// Measure inside middleware without adding heavy JSON debug logs per call:
-start := time.Now()
-next.ServeHTTP(w, r)
-httpDur.WithLabelValues(route, status).Observe(time.Since(start).Seconds())
-```
-
-<GoEffObservabilitySignals />
-
-<GoObsFourSignalsMap />
-
-Also beware Prometheus label **cardinality explosions**: attaching high-cardinality fields such as `user_id`, `request_id`, or unnormalized raw paths (`GET /users/991823/profile`) turns one harmless metric into millions of active time-series inside memory and TSDB indexes, frequently OOM-killing either your Go exporter or Prometheus itself! Always bucket dynamic parameters into clean route patterns (`/users/:id/profile`).
-
-| Metric Type | Cumulative / Snapshot | Safe Across Scrapes? | Go Benchmark / Prometheus Choice |
-| :--- | :--- | :--- | :--- |
-| **`Counter`** | Monotonically rising (`+1`) | Always wrap with `rate()` | HTTP request counts, 5xx errors, bytes sent |
-| **`Gauge`** | Current instant value (`+1 / -1`) | Read directly | Active goroutines, queue depth, `HeapInuse` |
-| **`Histogram`** | Cumulative buckets (`le="..."`) | **Mergeable across replicas!** | Aggregating cluster-wide `histogram_quantile(0.99, ...)` |
-| **`Summary`** | Client-computed quantiles | Never average across pods! | Single-node summaries only; prefer Histograms |
-
-<Concepts>
-
-- **Tail latency (p90 / p99)**: duration below which 90% or 99% of requests finish—what users actually experience during traffic bursts rather than smoothed means.
-- **Head vs. tail sampling**: deciding at request start (e.g., trace 1% randomly) versus keeping all traces after a slow `p99` outlier or `500` error finishes.
-
-</Concepts>
-
----
-
-## 2. Reading CPU time and Container vs. Go Memory metrics cleanly
-
-Once Grafana graphs load, engineers frequently misread two standard metrics:
-
-1. **CPU seconds vs. percentage**: Linux and Go runtime expose **cumulative CPU seconds** consumed (`process_cpu_seconds_total` and `container_cpu_usage_seconds_total`), never instant percentages. Apply `rate(metric[1m])` to turn cumulative counters into fractional CPU cores actively used, and compare against Kubernetes cgroup throttled time (`container_cpu_cfs_throttled_seconds_total`) when requests stall despite low average utilization!
-2. **Container RAM (`RSS` / `WorkingSet`) vs. Go Heap (`MemStats`)**: Kubernetes enforces OOM kills against container `working_set` (which combines Go Heap, Goroutine stacks, Cgo/explicit `mmap`, and un-reclaimed OS buffers). Meanwhile, `runtime.ReadMemStats` splits Go's heap into `HeapSys` (virtual arenas requested), `HeapInuse` (active 8 KB spans), and `HeapAlloc` (live reachable bytes).
-
-```go
-// Read internal Go heap vs. idle spans inside /metrics or diagnostics:
-var m runtime.MemStats
-runtime.ReadMemStats(&m)
-fmt.Printf("HeapAlloc=%dMB HeapInuse=%dMB HeapSys=%dMB HeapReleased=%dMB\n",
-	m.HeapAlloc>>20, m.HeapInuse>>20, m.HeapSys>>20, m.HeapReleased>>20)
-```
-
-<GoEffMemoryMetricsAnatomy />
-
-Notice why checking both layers saves hours during incidents: if container `working_set` hits 950 MB while `HeapAlloc` reads only 40 MB, hunting inside Go structs misses the leak—the memory sits in leaked goroutine stacks, Cgo libraries, `mmap` files, or OS page cache!
-
-| Memory Metric | Source | What It Actually Measures | When It Exposes a Production Bug |
-| :--- | :--- | :--- | :--- |
-| **`HeapAlloc`** | `runtime.MemStats` | Live reachable Go heap objects | Grows continuously across GC cycles -> genuine live Go leak |
-| **`HeapInuse`** | `runtime.MemStats` | All active 8 KB runtime spans holding objects | Much larger than `HeapAlloc` -> heavy span fragmentation |
-| **`HeapSys`** | `runtime.MemStats` | Virtual address spans reserved from OS | Stays high briefly; watch `HeapSys - HeapReleased` instead |
-| **`container_memory_working_set_bytes`** | Linux cgroup (cAdvisor) | Active anonymous RSS + un-reclaimed OS file cache | Approaching pod RAM limit triggers kernel **OOMKill** regardless of GC! |
-
-When paging through an incident, keep these four PromQL queries handy so Kubernetes CPU throttling or fragmented spans never masquerade as healthy dashboards:
-
-```text
-# 1. Catch micro-bursts hitting Linux CFS 100ms CPU quotas despite low 1m average
-rate(container_cpu_cfs_throttled_seconds_total{pod=~"api-.*"}[1m])
-
-# 2. Compute genuine request p99 latency across pods (requires histograms, never summaries!)
-histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))
-
-# 3. Measure Go allocator span fragmentation gap waiting for scvg release
-go_memstats_heap_inuse_bytes - go_memstats_heap_alloc_bytes
-```
-
-Think of Linux CFS throttling like a highway toll booth giving you **40 milliseconds of green light out of every 100 ms**: a sudden GC mark phase or JSON batch finishes in 40 ms cleanly, gets paused for 60 ms at the cgroup kernel boundary, and adds an inexplicable +60–180 ms tail spike even though average CPU sits calmly at `35%`.
-
-<Concepts>
-
-- **Cumulative Counter + `rate()`**: monotonically increasing total (`cpu_seconds_total`) requiring `rate()` per second so restarts or scrape intervals never corrupt metrics.
-- **`HeapInuse` vs. `HeapAlloc`**: `HeapAlloc` sums live Go object bytes, whereas `HeapInuse` tracks whole 8 KB allocator spans—showing hidden memory fragmentation gaps.
-
-</Concepts>
-
----
-
-## 3. Writing Go microbenchmarks that don't lie
-
-Functional unit tests ask a binary pass/fail question, whereas **microbenchmarks (`func BenchmarkX(b *testing.B)`)** act like high-precision marine chronometers trying to measure nanosecond physics through changing OS loads, CPU thermal throttling, and compiler tricks:
-
-<Figure src={chronometerImg} alt="Brass marine chronometer preserved inside its gimbaled wooden box" caption="Harrison-era marine chronometers suspended brass escapements inside gimbaled cases to stay level on rolling seas—just as microbenchmarks require ResetTimer and exported sinks to resist compiler and OS noise." sourceTitle="Wikimedia Commons: Marine chronometer, Joseph Sewill (Liverpool, c. 1870)" sourceUrl="https://commons.wikimedia.org/wiki/File:Marine_chronometer,_Joseph_Sewill,_Liverpool_(c._1870).JPG" />
-
-Three everyday traps turn Go benchmarks into fiction:
-
-1. **Setup code inside the `b.N` timer**: creating temporary files or parsing inputs before setting `b.ResetTimer()` hides the cost of your algorithm behind I/O fixture setup (and pair with `b.StopTimer()` / `b.StartTimer()` sparingly, as excessive timer toggles add skew).
-2. **Compiler dead-code elimination**: if an inlineable pure helper's output is ignored (`_ = fn(i)`), Go compiles away the body completely! Let's prove this live on Apple M2 Go 1.27—notice how discarding `computeMask` drops time to a single ~0.31 ns cycle:
-
-<TerminalOutput command="go test -run '^$' -bench 'BenchmarkMask' -benchmem" label="Apple M2 · Go 1.27" caption="Live proof of compiler dead-code elimination: dropping the return value shrinks runtime artificially from 0.61 ns/op to 0.31 ns/op.">
-```text
-goos: darwin
-goarch: arm64
-pkg: effgobench
-cpu: Apple M2
-BenchmarkMaskEliminated-8   	1000000000	         0.3119 ns/op	       0 B/op	       0 allocs/op
-BenchmarkMaskObserved-8     	1000000000	         0.6080 ns/op	       0 B/op	       0 allocs/op
-```
-</TerminalOutput>
-
-3. **Unchecked assertions &amp; missing `-benchmem`**: never run benchmarks on broken functions that return errors silently (`b.Fatal(err)` on errors!), always enable `-benchmem` or `b.ReportAllocs()`, test multiple input sizes via sub-benchmarks (`for _, n := range sizes { b.Run(...) }`), and upgrade to Go 1.24's **`for b.Loop()`** when available so Go prevents dead-code elimination automatically.
-
-```go
-var globalResult uint64 // package-level sink blocks dead-code elimination
-
-func BenchmarkComputeObserved(b *testing.B) {
-	input := buildFixture(b, 100_000)
-	b.ReportAllocs()
-	b.ResetTimer() // ignore setup time above!
-	var acc uint64
-	for i := 0; i < b.N; i++ {
-		acc += computeMask(input, uint64(i))
-	}
-	globalResult = acc
+func metricsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		start := time.Now()
+		next.ServeHTTP(rec, r)
+		// Normalize route ("GET /todos/{id}"), never raw "/todos/98123", to prevent cardinality explosion.
+		httpDur.WithLabelValues(r.Pattern, strconv.Itoa(rec.status)).Observe(time.Since(start).Seconds())
+	})
 }
 ```
 
-<GoEffBenchmarkTraps />
+Watch the label trap inside `metricsMiddleware` above: never stick raw IDs, user emails, or unconstrained error strings into metric labels. Every unique label combination creates a separate time series in both your Go process memory and Prometheus TSDB—turning one route metric into millions of series if traffic hits random `/todos/991823` URLs. Use `r.Pattern` (added on Go 1.22+ `ServeMux`) and keep raw request IDs in logs or sampled traces.
 
-<GoObsBenchLoopCode />
+| Metric type | What it stores | Safe across pods? | Where it fits in Go |
+| :--- | :--- | :--- | :--- |
+| **`Counter`** | Monotonically rising total (`+1`) | Wrap with `rate()` | Request counts, 5xx errors, allocated bytes total |
+| **`Gauge`** | Current point-in-time level (`+1 / -1`) | Read `max` or `avg` | Active goroutines, queue depth, `HeapInuse` |
+| **`Histogram`** | Cumulative `le` bucket counts (or native sparse buckets) | Yes, `sum by (le)` | Cluster-wide `histogram_quantile(0.99, ...)` |
+| **`Summary`** | Client-side sliding quantiles | Never average across pods | Single-process local stats only |
 
-Look straight into Go's standard library (`src/testing/benchmark.go`) to see why **Go 1.24's `b.Loop()`** closes compiler and timer pitfalls cleanly by signaling termination state directly to both runtime timers and the SSA compiler:
+<Concepts>
 
-<GitHubCode repo="golang/go" path="src/testing/benchmark.go" lines="L220-L234" url="https://github.com/golang/go/blob/master/src/testing/benchmark.go#L220-L234" caption="Inside Go's testing package: b.Loop() stops the benchmark timer cleanly after execution completes and verifies zero early break/return bugs corrupted timing.">
+- **RED vs. USE**: RED measures what callers experience on an API boundary (**R**ate, **E**rrors, **D**uration); USE measures pressure inside a resource (**U**tilization, **S**aturation, **E**rrors).
+- **Tail latency (`p90` / `p99`)**: the latency ceiling below which 90% or 99% of requests complete, exposing slow outliers that averages erase.
+- **Prometheus Histogram (`le` buckets)**: counters tracking how many observations fell at or below each threshold (`le="0.01"`), allowing valid cluster-wide quantiles via PromQL.
+- **Label cardinality**: the number of distinct time series produced by label combinations; unbounded IDs as labels can OOM-kill exporters and Prometheus.
+
+</Concepts>
+
+---
+
+## Container vs runtime CPU and memory
+
+Grafana panels routinely fool Go engineers in two places: cumulative CPU counters and the gap between what Go thinks its heap uses versus what the Linux kernel counts before killing the pod.
+
+First, Linux cgroups and Go runtime exporters publish **cumulative CPU seconds** consumed since process start (`process_cpu_seconds_total` and `container_cpu_usage_seconds_total`), never instant CPU percentages. Wrapping them in `rate(container_cpu_usage_seconds_total[1m])` gives the average CPU cores used per second—and pairing that with `rate(container_cpu_cfs_throttled_seconds_total[1m])` catches Linux CFS quota throttling even when 1-minute average CPU looks low (see [Go in production](/blog/go-production-stdlib-cpu-cache-gc-kubernetes/#the-kubernetes-cfs-throttling-trap-100) for how cgroup 100 ms quota windows and container-aware `GOMAXPROCS` interact).
+
+Second, Kubernetes OOM-kills pods based on `container_memory_working_set_bytes` (cAdvisor's estimate of active anonymous RSS plus non-inactive OS page cache), not Go's `HeapAlloc`. Think of it like your monthly apartment bill versus the furniture inside one bedroom: Go only weighs the furniture (`HeapAlloc`), while Kubernetes adds the empty crates waiting for pickup (`HeapInuse` / un-released spans), hallway clutter (goroutine stacks, Cgo/`mmap`), and kitchen deliveries cached by the building (OS page cache).
+
+<GoP17MemoryLayers />
+
+Inside Go itself, prefer the `runtime/metrics` package (introduced in Go 1.16) over `runtime.ReadMemStats` in hot diagnostic paths: `runtime.ReadMemStats` triggers a brief Stop-The-World pause to snapshot every stat at once, whereas `runtime/metrics` reads individual runtime counters cheaply. Here is a real Go 1.27.1 comparison after allocating `20 MiB` of live byte slices and running one `runtime.GC()`:
+
 ```go
-	b.StopTimer()
-	b.previousN = n
-	b.previousDuration = b.duration
+package main
 
-	if b.loop.n > 0 && !b.loop.done && !b.failed {
-		b.Error("benchmark function returned without B.Loop() == false (break or return in loop?)")
+import (
+	"fmt"
+	"runtime"
+	"runtime/metrics"
+)
+
+var hold [][]byte
+
+func main() {
+	for range 20 {
+		hold = append(hold, make([]byte, 1<<20)) // allocate 20 MiB live
 	}
+	runtime.GC()
+
+	samples := []metrics.Sample{
+		{Name: "/gc/heap/allocs:bytes"},
+		{Name: "/memory/classes/heap/objects:bytes"},
+		{Name: "/memory/classes/heap/free:bytes"},
+		{Name: "/memory/classes/heap/released:bytes"},
+	}
+	metrics.Read(samples)
+
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+
+	fmt.Printf("runtime/metrics allocs=%d MiB objects=%d MiB free=%d MiB released=%d MiB\n",
+		samples[0].Value.Uint64()>>20,
+		samples[1].Value.Uint64()>>20,
+		samples[2].Value.Uint64()>>20,
+		samples[3].Value.Uint64()>>20,
+	)
+	fmt.Printf("MemStats        HeapAlloc=%d MiB HeapInuse=%d MiB HeapSys=%d MiB HeapReleased=%d MiB\n",
+		m.HeapAlloc>>20, m.HeapInuse>>20, m.HeapSys>>20, m.HeapReleased>>20,
+	)
+}
+```
+
+<TerminalOutput command="go run ./cmd/memcheck" label="Apple M2 · Go 1.27.1" caption="Live Go 1.27.1 memory inspection: 20 MiB of live objects sit inside 27 MiB of HeapSys, with 6 MiB already released back to the OS.">
+```text
+runtime/metrics allocs=20 MiB objects=20 MiB free=0 MiB released=6 MiB
+MemStats        HeapAlloc=20 MiB HeapInuse=20 MiB HeapSys=27 MiB HeapReleased=6 MiB
+```
+</TerminalOutput>
+
+Notice how checking both layers saves hours during an outage. If `container_memory_working_set_bytes` climbs past `900 MiB` while `go_memstats_heap_alloc_bytes` reads `40 MiB`, hunting through your Go structs wastes time: the RAM sits off-heap in leaked goroutine stacks, Cgo buffers, explicit `mmap` files, or OS file page cache. Conversely, if `HeapInuse` is far larger than `HeapAlloc`, objects fragmented across many 8 KiB spans are pinning memory until those spans empty and the background scavenger calls `madvise` (covered in [Go hardware and GC](/blog/go-hardware-cpu-caches-virtual-memory-gc-allocator/), alongside sizing `GOMEMLIMIT` below the container ceiling).
+
+| Memory metric | Source | What it measures | Production signal |
+| :--- | :--- | :--- | :--- |
+| **`HeapAlloc`** / `heap/objects` | `MemStats` / `runtime/metrics` | Live reachable heap objects | Rising floor across GC cycles means a live Go leak |
+| **`HeapInuse`** | `runtime.MemStats` | Active 8 KiB runtime spans | Much higher than `HeapAlloc` exposes span fragmentation |
+| **`HeapSys - HeapReleased`** | `runtime.MemStats` | Virtual heap spans currently backed by RAM | Shrinks lazily as the background scavenger runs |
+| **`container_memory_working_set_bytes`** | Linux cgroup (cAdvisor) | Active RSS + non-inactive OS page cache | Reaching pod limit triggers kernel OOMKill |
+
+Keep these three PromQL queries ready when triaging a pod under memory or latency pressure:
+
+```text
+# 1. Catch CPU throttling over 100 ms cgroup windows even when average CPU looks idle
+rate(container_cpu_cfs_throttled_seconds_total{pod=~"todo-api-.*"}[1m])
+
+# 2. Compute cluster-wide p99 duration from Histogram buckets (never average Summaries)
+histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))
+
+# 3. Spot span fragmentation inside Go's heap vs off-heap growth in container RSS
+go_memstats_heap_inuse_bytes - go_memstats_heap_alloc_bytes
+```
+
+<Concepts>
+
+- **`rate()` on cumulative counters**: converts monotonically increasing totals (`cpu_seconds_total`) into per-second rates so restarts and scrape intervals stay accurate.
+- **`runtime/metrics`**: Go's modern, non-STW telemetry API (`metrics.Read`) exposing granular heap, GC, and scheduler metrics without pausing all goroutines.
+- **Working set vs. `HeapInuse`**: `working_set` is the container-level RAM cAdvisor tracks for OOM eviction (including stacks, Cgo, and file cache), whereas `HeapInuse` measures only Go's active 8 KiB heap spans.
+
+</Concepts>
+
+---
+
+## Microbenchmarks that do not lie
+
+Unit tests check correctness on edge cases; **microbenchmarks** (`func BenchmarkX(b *testing.B)`) measure how fast and how much heap memory a single isolated function spends on typical inputs. Measuring nanoseconds on a live laptop is like timing a mechanical watch escapement on a moving ship: background OS tasks, CPU frequency scaling, warm L1 caches, and compiler optimizations all tilt the reading unless you isolate them.
+
+<Figure src={chronometerImg} alt="Brass marine chronometer suspended inside its gimbaled wooden box" caption="Marine chronometers rode inside gimbaled rings to stay level against rolling seas—microbenchmarks need the same discipline around timers, sinks, and machine stability." sourceTitle="Wikimedia Commons: Marine chronometer, Joseph Sewill (Liverpool, c. 1870)" sourceUrl="https://commons.wikimedia.org/wiki/File:Marine_chronometer,_Joseph_Sewill,_Liverpool_(c._1870).JPG" />
+
+Every Go microbenchmark lives in a `*_test.go` file, takes `*testing.B`, and runs via `go test`. Always pass `-run '^$'` so functional unit tests do not run and pollute output, and pass `-benchmem` (or call `b.ReportAllocs()`) so heap bytes (`B/op`) and allocation counts (`allocs/op`) print beside latency (`ns/op`). Just as importantly, check errors inside your benchmark (`if err != nil { b.Fatal(err) }`): benchmarking an error path that returns early in 20 ns because a fixture path was misspelled is a fast way to celebrate a fake speedup.
+
+Even with `-benchmem` on and errors checked, four classic mistakes (`#89` in *100 Go Mistakes*) silently turn `go test -bench` into fiction.
+
+<GoP17BenchTraps />
+
+### 1. Letting setup leak into the timer
+
+Suppose you want to measure how fast a single lookup in a 100,000-entry `Todo` index runs. Building that index inside the benchmark without resetting the clock mixes 3 milliseconds of map allocation into early calibration iterations:
+
+```go
+var LookupSink string
+
+func BenchmarkLookupNoReset(b *testing.B) {
+	b.ReportAllocs()
+	idx := buildTodoIndex(100_000) // counted in timer and allocs!
+	var v string
+	for i := 0; i < b.N; i++ {
+		v = idx[i%100_000]
+	}
+	LookupSink = v
+}
+
+func BenchmarkLookupResetTimer(b *testing.B) {
+	b.ReportAllocs()
+	idx := buildTodoIndex(100_000)
+	b.ResetTimer() // clears setup elapsed time and alloc counters
+	var v string
+	for i := 0; i < b.N; i++ {
+		v = idx[i%100_000]
+	}
+	LookupSink = v
+}
+
+func BenchmarkLookupBLoop(b *testing.B) {
+	b.ReportAllocs()
+	idx := buildTodoIndex(100_000)
+	i := 0
+	for b.Loop() { // Go 1.24+: automatically resets timer on iteration 0
+		_ = idx[i%100_000]
+		i++
+	}
+}
+```
+
+<TerminalOutput command="go test -run '^$' -bench '^BenchmarkLookup' -benchtime=20ms -count=3" label="Apple M2 · Go 1.27.1" caption="Real Go 1.27.1 run: missing b.ResetTimer() distorted Run 1's calibration down to b.N=874, inflating latency 2,000x to 25,382 ns/op and leaking 6,736 B/op from map setup.">
+```text
+goos: darwin
+goarch: arm64
+pkg: example.com/benchdemo
+cpu: Apple M2
+BenchmarkLookupNoReset-8      	     874	     25382 ns/op	    6736 B/op	     228 allocs/op
+BenchmarkLookupNoReset-8      	 1061332	        20.37 ns/op	       5 B/op	       0 allocs/op
+BenchmarkLookupNoReset-8      	  995023	        28.69 ns/op	       5 B/op	       0 allocs/op
+BenchmarkLookupResetTimer-8   	 2077831	        12.14 ns/op	       0 B/op	       0 allocs/op
+BenchmarkLookupResetTimer-8   	 1927878	        14.71 ns/op	       0 B/op	       0 allocs/op
+BenchmarkLookupResetTimer-8   	 1978724	        11.78 ns/op	       0 B/op	       0 allocs/op
+BenchmarkLookupBLoop-8        	 2045366	        11.48 ns/op	       0 B/op	       0 allocs/op
+BenchmarkLookupBLoop-8        	 1668147	        13.27 ns/op	       0 B/op	       0 allocs/op
+BenchmarkLookupBLoop-8        	 2266502	        10.38 ns/op	       0 B/op	       0 allocs/op
+```
+</TerminalOutput>
+
+Look at Run 1 of `BenchmarkLookupNoReset-8`: Go first calls the benchmark with `b.N=1` to guess how many iterations fit in `-benchtime`. Because `buildTodoIndex` ran inside the active timer, Go thought one lookup took milliseconds, picked `b.N=874`, and reported `25,382 ns/op` and `6,736 B/op` instead of `12 ns/op` and `0 B/op`.
+
+What if setup must happen on *every* iteration? You can wrap per-iteration setup with `b.StopTimer()` and `b.StartTimer()`, as long as the measured work takes far longer than the ~30–50 ns timer toggle overhead—otherwise wall-clock runtime stretches well past `-benchtime` while timer overhead swamps fast functions.
+
+### 2. Compiler dead-code elimination vs `for b.Loop()`
+
+Come back to Go issue #14813's `popcnt` bit-counter. Under `for i := 0; i < b.N; i++`, calling a pure inlineable function without using its result lets Go's SSA compiler prove the loop body has zero observable side effects and strip it down to an empty loop counter:
+
+```go
+var GlobalSink uint64
+
+func BenchmarkPopcntIgnored(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		popcnt(uint64(i)) // result unused -> compiler deletes call
+	}
+}
+
+func BenchmarkPopcntSink(b *testing.B) {
+	var acc uint64
+	for i := 0; i < b.N; i++ {
+		acc += popcnt(uint64(i))
+	}
+	GlobalSink = acc // one package-level write after the loop
+}
+
+func BenchmarkPopcntBLoop(b *testing.B) {
+	x := uint64(0xdeadbeefcafebabe)
+	for b.Loop() { // Go 1.24+: compiler keeps arguments and results alive
+		popcnt(x)
+		x++
+	}
+}
+```
+
+<TerminalOutput command="go test -run '^$' -bench 'BenchmarkPopcnt' -benchtime=500ms -count=3 -benchmem" label="Apple M2 · Go 1.27.1" caption="Real Go 1.27.1 run: BenchmarkPopcntIgnored hits the 1,000,000,000 iteration cap at 0.34 ns/op (empty loop); both GlobalSink and b.Loop() keep the bitwise computation alive.">
+```text
+goos: darwin
+goarch: arm64
+pkg: example.com/benchdemo
+cpu: Apple M2
+BenchmarkPopcntIgnored-8   	1000000000	         0.3390 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPopcntIgnored-8   	1000000000	         0.3790 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPopcntIgnored-8   	1000000000	         0.3437 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPopcntSink-8      	610681322	         0.9804 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPopcntSink-8      	624847309	         1.009 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPopcntSink-8      	591722295	         1.030 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPopcntBLoop-8     	252322328	         2.424 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPopcntBLoop-8     	271442343	         2.499 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPopcntBLoop-8     	227317034	         2.548 ns/op	       0 B/op	       0 allocs/op
+```
+</TerminalOutput>
+
+Inspecting ARM64 assembly (`go test -c -gcflags='-S'`) confirms what happened: `BenchmarkPopcntIgnored` compiled down to `ADD $1; CMP; BLT`—zero `LSR`/`AND`/`MUL` instructions—and hit Go's `1,000,000,000` maximum iteration cap, a red flag that a benchmark is measuring empty loop overhead. Meanwhile, `BenchmarkPopcntSink` kept the work alive via one post-loop write to `GlobalSink` (never write to a package global on every iteration, which adds memory store cost inside the hot loop).
+
+Go 1.24's **`for b.Loop()`** replaces both `b.ResetTimer()` and manual sink boilerplate for almost all benchmarks. Look straight into Go 1.27.1's `src/testing/benchmark.go` to see its contract:
+
+<GitHubCode repo="golang/go" path="src/testing/benchmark.go" lines="L475-L487" url="https://github.com/golang/go/blob/go1.27.1/src/testing/benchmark.go#L475-L487" caption="Inside Go 1.27.1's testing package: b.Loop() resets the timer on entry, stops it at exit, and wraps body variables in runtime.KeepAlive intrinsics.">
+```go
+// Loop resets the benchmark timer the first time it is called in a benchmark,
+// so any setup performed prior to starting the benchmark loop does not count
+// toward the benchmark measurement. Likewise, when it returns false, it stops
+// the timer so cleanup code is not measured.
+//
+// Within the body of a "for b.Loop() { ... }" loop, arguments to and
+// results from function calls and assigned variables within the loop are kept
+// alive, preventing the compiler from fully optimizing away the loop body.
+// Currently, this is implemented as a compiler transformation that wraps such
+// variables with a runtime.KeepAlive intrinsic call. This applies only to
+// statements syntactically between the curly braces of the loop, and the loop
+// condition must be written exactly as "b.Loop()".
 ```
 </GitHubCode>
 
-Step interactively through all four benchmark distortion patterns (`Dead-Code Elimination`, `Setup Time Pollution`, `Legacy b.N vs b.Loop()`, and `benchstat Noise Filtering`) right here:
+Two details in Go 1.27.1 are worth noticing in the numbers above. First, `b.Loop()` adds ~1.4 ns of stack spill and loop-check overhead compared with `GlobalSink` on sub-nanosecond functions, which vanishes once a benchmarked operation takes tens of nanoseconds or more. Second, `for b.Loop()` blocks dead-code elimination of the call's *result*, yet if you pass a local constant right above the loop (`x := 0xdeadbeef; for b.Loop() { popcnt(x) }`), Go's SSA pass can still constant-fold `popcnt(x)` to `46` before `runtime.KeepAlive` runs; vary the input (`x++`) or read it from a package variable when testing pure arithmetic.
+
+### 3. Observer effect and CPU cache warming
+
+Observing a function in a tight loop can change the hardware state itself. Suppose you compare summing the first 8 columns of two 1,000-row matrices (`calculateSum512` with `[][512]int64` vs `calculateSum513` with `[][513]int64`, from `#89`). When a benchmark allocates the matrix once and reuses it across thousands of iterations, the active columns stay warm inside CPU L1/L2 cache:
+
+<TerminalOutput command="go test -run '^$' -bench 'BenchmarkSum51' -benchtime=200x -count=3 -benchmem" label="Apple M2 · Go 1.27.1" caption="Real Go 1.27.1 matrix stride test: reusing the same matrix keeps active columns warm in cache (~4.1–7.4 µs/op), roughly twice as fast as reading freshly allocated cold matrices (~6.1–12.8 µs/op).">
+```text
+BenchmarkSum512Reuse-8   	     200	      4149 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSum512Reuse-8   	     200	      4916 ns/op	       1 B/op	       0 allocs/op
+BenchmarkSum512Reuse-8   	     200	      7413 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSum513Reuse-8   	     200	      5305 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSum513Reuse-8   	     200	      6238 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSum513Reuse-8   	     200	      5780 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSum512Fresh-8   	     200	      9175 ns/op	       1 B/op	       0 allocs/op
+BenchmarkSum512Fresh-8   	     200	      8116 ns/op	       2 B/op	       0 allocs/op
+BenchmarkSum512Fresh-8   	     200	     12784 ns/op	       4 B/op	       0 allocs/op
+BenchmarkSum513Fresh-8   	     200	      8362 ns/op	       1 B/op	       0 allocs/op
+```
+</TerminalOutput>
+
+Look at two lessons hidden in that output. Reusing one matrix halved runtime (`~4.5 µs` vs `~9 µs`) compared with reading a freshly allocated matrix (`b.StopTimer()` / create matrix / `b.StartTimer()`). And unlike older 8-way 64-byte-line Intel CPUs where a 512-column power-of-two stride (`4096 B`) triggered heavy L1 cache-set conflicts against 513 columns (`4104 B`), Apple M2's different cache geometry erased that 2x gap—proving why you should never treat cache behavior measured on a developer laptop as universal truth on production x86 servers (see [Go hardware and GC](/blog/go-hardware-cpu-caches-virtual-memory-gc-allocator/) for cache-line mechanics).
+
+### 4. Machine noise, run order, and input scaling
+
+Power-saving modes, CPU thermal throttling, background browser tabs, and noisy cloud neighbors (or shared CI runners) routinely move nanosecond benchmarks by 10–30%, and simply swapping the order of two benchmarks in a file can flip which one looks faster. Before running serious numbers: plug the laptop into wall power, close heavy apps, use sub-benchmarks (`b.Run`) across realistic input sizes to check how scaling behaves ([Go efficiency workflow](/blog/go-efficiency-workflow-raer-tfbo-hardware-memory/) contrasts Big-O growth vs. constant factors), lengthen noisy runs with `-benchtime=2s` or `-cpu=4`, and repeat every run with `-count=10`.
+
+Step interactively through all four microbenchmark distortion modes (`Dead-Code Elimination`, `Setup Time Pollution`, `Legacy b.N vs b.Loop()`, and `benchstat Noise Filtering`) below:
 
 <GoBenchmarkTrapsDemo />
 
 <Concepts>
 
-- **`b.ResetTimer()` &amp; `b.ReportAllocs()`**: built-in `testing.B` methods discarding fixture initialization time and reporting average heap bytes + allocation counts alongside `ns/op`.
-- **`b.Loop()` (Go 1.24+)**: modern benchmark loop (`for b.Loop()`) that auto-resets setup timers before iteration 0 and blocks compiler elimination of the loop body cleanly.
+- **`for b.Loop()` (Go 1.24+)**: benchmark loop condition that automatically resets setup timers on iteration 0, stops before cleanup, runs a single calibration pass, and keeps loop variables alive via `runtime.KeepAlive`.
+- **Dead-code elimination**: SSA compiler pass that deletes computations whose results have no observable side effect, making broken microbenchmarks report `0.3 ns/op` empty loops.
+- **Observer effect**: repeating the exact same small input in a benchmark loop warms CPU caches and branch predictors unrealistically compared with varied production traffic.
 
 </Concepts>
 
 ---
 
-## 4. Statistical rigor with `benchstat` and `e2e` macrobenchmarks
+## Statistical proof with benchstat
 
-Bartłomiej Płotka highlights a golden rule in his P99 CONF talk: **a single benchmark run proves almost nothing**. Even on a quiet machine, background daemons, CPU frequency scaling, and memory layout randomization create swings between runs:
+A single `-count=1` benchmark number tells you almost nothing, because a background OS task or CPU clock boost can shift any single sample by 15%. Collecting `-count=10` samples into text files (`old.txt` and `new.txt`) and feeding them to Go's **`benchstat`** CLI turns raw runs into statistical evidence.
 
-<YouTube id="wv97cPiqYSU" title="P99 CONF 2023 | The Art of Macro Benchmarking by Bartłomiej Płotka" start={382} end={450} caption="From 6:22 to 7:30, Bartłomiej Płotka contrasts micro, macro, and production benchmarks and why environment realism matters alongside functional testing." sourceTitle="ScyllaDB P99 CONF — Bartłomiej Płotka" />
+Under the hood, `benchstat` computes each benchmark's **median** and **95% confidence interval** (`± X%`) rather than assuming a clean bell curve. When comparing two files, it runs a two-sample **Mann-Whitney U test** (non-parametric rank comparison) to compute a `p-value`—the probability that the gap between `old` and `new` appeared purely by chance. If `p >= 0.05` (the default `-alpha`), `benchstat` refuses to declare a delta and prints `~` (noisy / inconclusive). When a suite contains multiple sub-benchmarks, the bottom **`geomean`** row summarizes proportional change across the set so one slow case does not skew an arithmetic average.
 
-Follow this repeatable protocol from `efficientgo/examples`:
+Look at two real Go 1.27.1 comparisons on Apple M2. First, comparing `atomic.StoreInt32` vs `atomic.StoreInt64` (the example from `#89`) across `-count=10` runs:
 
-1. Run `-count=6` to `-count=10` iterations into versioned output files (`go test -run '^$' -bench '^BenchmarkSum$' -benchtime=5s -count=6 -cpu=4 -benchmem | tee v4.txt`).
-2. Compare two runs with **`benchstat old.txt new.txt`** (the Mann-Whitney U statistical test). Look at a real Apple M2 Go 1.27 run comparing `Sum4` vs. streaming `Sum6`:
-
-<TerminalOutput command="go run golang.org/x/perf/cmd/benchstat@latest v4.txt v6.txt" label="Apple M2 · Go 1.27" caption="Real benchstat output: ~ (p=0.240) honestly warns latency variance (±69%) is noisy, while p=0.002 proves a 99.98% heap cut.">
+<TerminalOutput command="go run golang.org/x/perf/cmd/benchstat@latest a32.txt a64.txt" label="Apple M2 · Go 1.27.1" caption="Real benchstat output on AtomicStore32 vs AtomicStore64: despite ±12% jitter on individual runs, benchstat prints ~ (p=0.853) because the medians are indistinguishable.">
 ```text
-      │    v4.txt    │            v6.txt             │
-      │    sec/op    │    sec/op     vs base         │
-Sum-8   1.801m ± 69%   2.089m ± 48%  ~ (p=0.240 n=6)
-
-      │     v4.txt     │              v6.txt               │
-      │      B/op      │    B/op     vs base               │
-Sum-8   1401263.5 ± 0%   216.0 ± 0%  -99.98% (p=0.002 n=6)
-
-      │   v4.txt   │              v6.txt               │
-      │ allocs/op  │ allocs/op   vs base               │
-Sum-8   5.000 ± 0%   3.000 ± 0%  -40.00% (p=0.002 n=6)
+goos: darwin
+goarch: arm64
+pkg: example.com/benchdemo
+cpu: Apple M2
+              │   a32.txt   │            a64.txt             │
+              │   sec/op    │    sec/op     vs base          │
+AtomicStore-8   2.107n ± 3%   2.103n ± 12%  ~ (p=0.853 n=10)
 ```
 </TerminalOutput>
 
-Look closely at that `~ (p=0.240 n=6)` line above—that tilde is your shield against false optimizations:
+Now compare an actual code change in our [Todo HTTP service](/blog/go-http-service-net-http-json-middleware/): replacing `json.NewEncoder` reflection in `encodeTodosEncoder` (`v1.txt`) with a pre-sized `[]byte` JSON builder using `strconv.AppendInt` / `strconv.AppendQuote` / `strconv.AppendBool` (`v2.txt`) across `items=10` and `items=200` sub-benchmarks:
 
-- Notice how `B/op` dropped `-99.98%` with zero variance (`± 0%`, `p=0.002`), proving the memory cut is rock-solid.
-- Meanwhile `sec/op` jumped `± 69%` on laptop battery/background noise, so `benchstat` rightly refuses to crown a CPU winner (`p=0.240 > 0.05`). Increasing sample duration (`-benchtime=2s`), pinning GOMAXPROCS (`-cpu=4`), running `-count=10`, and closing background browsers tightens variance down under `± 5%` before deciding CPU impact.
+```go
+func BenchmarkEncodeTodos(b *testing.B) {
+	for _, n := range []int{10, 200} {
+		items := newSeededStore(n).listRecent(n)
+		b.Run(fmt.Sprintf("items=%d", n), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				out, err := encodeTodos(items) // v1: json.NewEncoder; v2: pre-sized []byte
+				if err != nil {
+					b.Fatal(err)
+				}
+				_ = out
+			}
+		})
+	}
+}
+```
+
+<TerminalOutput command="go run golang.org/x/perf/cmd/benchstat@latest v1.txt v2.txt" label="Apple M2 · Go 1.27.1" caption="Real benchstat A/B output: v2 cuts geomean latency -28.24% and allocs -75.00% (p=0.000), while exposing an +11.86% B/op increase at items=200 from over-sizing the initial slice.">
+```text
+goos: darwin
+goarch: arm64
+pkg: example.com/benchdemo
+cpu: Apple M2
+                        │   v1.txt    │               v2.txt                │
+                        │   sec/op    │   sec/op     vs base                │
+EncodeTodos/items=10-8    1.628µ ± 5%   1.020µ ± 4%  -37.30% (p=0.000 n=10)
+EncodeTodos/items=200-8   26.82µ ± 8%   22.03µ ± 3%  -17.87% (p=0.000 n=10)
+geomean                   6.607µ        4.741µ       -28.24%
+
+                        │    v1.txt    │                v2.txt                │
+                        │     B/op     │     B/op      vs base                │
+EncodeTodos/items=10-8      608.0 ± 0%     576.0 ± 0%   -5.26% (p=0.000 n=10)
+EncodeTodos/items=200-8   10.73Ki ± 0%   12.00Ki ± 0%  +11.86% (p=0.000 n=10)
+geomean                   2.524Ki        2.598Ki        +2.94%
+
+                        │   v1.txt   │               v2.txt               │
+                        │ allocs/op  │ allocs/op   vs base                │
+EncodeTodos/items=10-8    4.000 ± 0%   1.000 ± 0%  -75.00% (p=0.000 n=10)
+EncodeTodos/items=200-8   4.000 ± 0%   1.000 ± 0%  -75.00% (p=0.000 n=10)
+geomean                   4.000        1.000       -75.00%
+```
+</TerminalOutput>
+
+Look at what reading all three `benchstat` tables reveals immediately: `sec/op` dropped (`geomean -28.24%`, `p=0.000`) and `allocs/op` fell from `4` to `1` (`-75.00%`), *yet* `B/op` actually rose `+11.86%` at 200 items because estimating `56` bytes per item (`11,202 B`) rounded up into Go's `12 KiB` allocator size class! Also note a subtle trap mentioned in `benchstat`'s own docs: *statistically significant* (`p < 0.05`) means unlikely to be random noise, not automatically *important*—when `± 0%` noise is tiny, even a negligible `3%` byte difference prints `p=0.000`.
+
+<GoP17BenchstatStats />
 
 <QuoteCard author="Bartłomiej Płotka" role="Prometheus Maintainer & Author of Efficient Go" sourceTitle="P99 CONF 2023 | The Art of Macro Benchmarking" sourceUrl="https://www.youtube.com/watch?v=wv97cPiqYSU">
 If you want to evaluate latency or memory optimizations reliably, stop trusting single microbenchmark runs on noisy developer laptops—automate reproducible multi-sample runs and macrobenchmarks that mirror real garbage collection, caches, and OS limits.
 </QuoteCard>
 
-3. Validate whole-system interactions with **Macrobenchmarks** (`efficientgo/e2e` + `k6`): spin up your real Go service container paired with Prometheus, databases, and load generators (`k6`), because real GC cycles, TCP connection churn, and Kubernetes CFS limits never appear inside single-function microbenchmarks.
-
-```go
-// Always capture both before/after benchmarks into versioned text files
-// export ver=v6 && go test -run '^$' -bench '^BenchmarkSum$' -count=6 -cpu=4 -benchmem | tee ${ver}.txt
-// benchstat v4.txt v6.txt
-```
-
-<GoEffBenchstatAndLevels />
-
-Explore compiler dead-code elimination, noisy runs, and live `benchstat` output interactively in the lab below:
+Explore compiler dead-code lies, noisy variance, and an archived `Sum4` vs streaming `Sum6` `benchstat` comparison interactively below:
 
 <GoEffBenchstatSimulatorDemo />
 
 <Concepts>
 
-- **`benchstat` (`~` vs. percentage delta)**: official Go perf statistics CLI checking Mann-Whitney U significance across multiple `-count` runs so noisy laptop swings don't fake wins.
-- **Macrobenchmarking (`e2e` + `k6`)**: running full multi-process containers under scripted load with Prometheus + Parca attached to test production-scale behavior before canary rollout.
+- **Mann-Whitney U test**: non-parametric rank test used by `benchstat` that checks whether one run set consistently outperforms another without assuming a normal distribution.
+- **`p-value` and `~`**: `p < 0.05` marks a statistically significant shift across `-count` runs; `~` means the difference cannot be separated from run-to-run noise.
+- **`geomean`**: geometric mean summarizing proportional speedup or memory change across multiple sub-benchmarks without letting one slow case dominate.
+
+</Concepts>
+
+---
+
+## Macrobenchmarks: testing the whole service
+
+Even a flawless `benchstat` win on one function can disappoint in production. A microbenchmark runs inside `go test` on one goroutine with zero network sockets, no concurrent mutex lock contention, and no sustained heap pressure triggering GC cycles.
+
+<YouTube id="wv97cPiqYSU" title="P99 CONF 2023 | The Art of Macro Benchmarking by Bartłomiej Płotka" start={382} end={450} caption="From 6:22 to 7:30, Bartłomiej Płotka contrasts microbenchmarks, macrobenchmarks, and production benchmarking—and why end-to-end realism exposes bottlenecks unit benchmarks miss." sourceTitle="ScyllaDB P99 CONF — Bartłomiej Płotka" />
+
+**Macrobenchmarks** treat the entire compiled service binary (ideally inside a container with realistic cgroup CPU/RAM limits and dependencies, the model behind `efficientgo/e2e`) as a closed system and drive HTTP or gRPC traffic from outside:
+
+- **`k6` (Grafana Labs)**: Go-powered load generator scripted in JavaScript, ideal for multi-step flows (`POST /todos` -> `GET /todos` -> `GET /todos/{id}`), warmup stages, status assertions, and CI p99 thresholds.
+- **`vegeta`**: Go CLI and library focused on constant arrival-rate (`RPS`) HTTP attacks so server stalls cannot slow down the client's sending pace (avoiding *coordinated omission* in closed-loop VU tests).
+- **`ghz`**: purpose-built Go CLI for gRPC load testing with protobuf reflection and gRPC status histograms.
+
+<GoP17MicroVsMacro />
+
+To prove how much a macrobenchmark reveals on code you already know, let's fire a 4,000-request mixed workload (`10% POST /todos`, `20% GET /todos`, `70% GET /todos/{id}`) from 8 concurrent HTTP workers against Post 10's `Todo` mux on Go 1.27.1 after a 200-request warmup:
+
+```go
+// Snippet of the loopback load driver against Post 10's Todo routes (full run: 8 workers x 500 reqs)
+for i := range perWorker {
+	t0 := time.Now()
+	switch i % 10 {
+	case 0:
+		resp, err = client.Post(srv.URL+"/todos", "application/json", bytes.NewReader(payload))
+	case 1, 2:
+		resp, err = client.Get(srv.URL + "/todos")
+	default:
+		resp, err = client.Get(fmt.Sprintf("%s/todos/%d", srv.URL, (i%200)+1))
+	}
+	// Always drain body, close it to reuse TCP keep-alive, and assert HTTP < 400!
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		badStatus.Add(1)
+	}
+	lats = append(lats, time.Since(t0))
+}
+```
+
+<TerminalOutput command="go run ./cmd/todoload" label="Apple M2 · Go 1.27.1" caption="Real Go 1.27.1 loopback run on the Post 10 Todo service: while encodeTodos microbenchmarked at 26.8 µs, full-service load exposes 95 GC cycles, 3,704 KiB HeapInuse vs 1,377 KiB live objects, and a 6.9x p50-to-p99 spread.">
+```text
+reqs=4000 dur=110ms rps=36503 errors=0 p50=131µs p95=653µs p99=898µs gc_cycles=95 heap_objects=1377 KiB heap_inuse=3704 KiB
+```
+</TerminalOutput>
+
+Look at what that single end-to-end run uncovered that `BenchmarkEncodeTodos` missed completely: `p50` sat at `131 µs`, while `p99` jumped **6.9x** to `898 µs` because `POST /todos` holds `store.mu.Lock()` across writes while `GET` readers wait, and 95 concurrent GC cycles ran across `3,704 KiB` of active heap spans (`2.7x` the `1,377 KiB` of live objects).
+
+When running `k6` or `vegeta` against containers in staging, enforce five habits so your macrobenchmark stays honest:
+
+```javascript
+// todo-load.js — minimal k6 script with warmup, realistic read/write mix, and status checks
+import http from 'k6/http';
+import { check } from 'k6';
+
+export const options = {
+  scenarios: {
+    steady: {
+      executor: 'constant-arrival-rate',
+      rate: 200, timeUnit: '1s', duration: '3m', preAllocatedVUs: 20,
+    },
+  },
+  thresholds: { http_req_duration: ['p(99)<50'], http_req_failed: ['rate<0.01'] },
+};
+
+export default function () {
+  const res = http.get('http://todo-api:8080/todos');
+  check(res, { 'status 200': (r) => r.status === 200, 'json array': (r) => r.body.startsWith('[') });
+}
+```
+
+1. **Warm up first, measure second**: exclude connection handshakes, initial cache fills, and span growth before recording percentiles.
+2. **Use realistic traffic mix and arrival rate**: open-loop (`constant-arrival-rate` in `k6`, or `vegeta -rate`) keeps firing at target RPS even when the server slows down, exposing real queue buildup.
+3. **Assert status codes and payload shape**: `check()` ensures an endpoint returning `500` in `0.2 ms` never looks like a throughput record.
+4. **Watch the load generator itself**: check client CPU, file descriptors (`ulimit -n`), and ephemeral ports so you do not benchmark a starved client.
+5. **Run long enough for GC and Prometheus scrapes**: run multi-minute tests rather than milliseconds so `15s` scrapes and steady-state GC cycles appear in your RED/USE dashboards.
+
+Once a microbenchmark or macrobenchmark proves *which* path violates your budget, the next step is finding the exact lines burning CPU or heap—covered next in [Go profiling](/blog/go-profiling-pprof-flamegraphs-off-cpu-continuous/).
+
+<Concepts>
+
+- **Closed-loop vs. open-loop load**: closed-loop VUs wait for each reply before sending the next (hiding queueing stalls); open-loop constant arrival rate (`vegeta`, `k6` `constant-arrival-rate`) keeps sending at target RPS even during stalls.
+- **Warmup window**: an unmeasured ramp period letting TCP pools, OS caches, and Go heap spans settle before collecting percentiles.
+- **Coordinated omission**: load-test bias where slow server replies cause the test client to pause sending, under-reporting tail latency.
 
 </Concepts>
 
@@ -302,278 +581,553 @@ Explore compiler dead-code elimination, noisy runs, and live `benchstat` output 
 
 ## Key takeaways
 
-- **Lead with Histograms and RED/USE metrics**: track request `Rate`, `Errors`, and `Duration` percentiles via Prometheus buckets rather than logs in hot loops or misleading means.
-- **Monitor both OS RSS and Go Heap internals**: apply `rate()` to cumulative CPU counters and compare container `working_set` against `HeapInuse` to spot off-heap memory growth.
-- **Guard `testing.B` against silent falsehoods**: assert correctness, call `b.ResetTimer()`, pass outputs into exported sinks (or use `b.Loop()`), and always inspect `-benchmem`.
-- **Insist on `benchstat` before claiming speedup**: run `-count=6..10` under steady CPU limits and ignore gains flagged `~` (`p >= 0.05`).
-- **Promote major changes to Macrobenchmarks**: use containerized `e2e` + `k6` pipelines to catch real GC pacing, socket churn, and pooling regressions invisible in microbenchmarks.
+- **Measure services with RED and resources with USE**: capture HTTP `Rate`, `Errors`, and `Duration` with Prometheus Histograms (`sum by (le)`), never raw averages or cross-pod Summaries, and keep dynamic IDs out of label values.
+- **Watch both OS working set and Go runtime heap**: apply `rate()` to cumulative CPU counters and compare `container_memory_working_set_bytes` against `runtime/metrics` (`HeapAlloc`, `HeapInuse`, `HeapReleased`) to tell Go leaks and span fragmentation apart from off-heap growth.
+- **Guard `testing.B` with `for b.Loop()` (Go 1.24+)**: prefer `for b.Loop()` to auto-reset setup timers and block dead-code elimination, assert non-nil errors with `b.Fatal`, vary constant inputs, and beware warm-cache observer effects.
+- **Require `benchstat` `p < 0.05` across `-count=10` runs**: ignore single `-count=1` wins and anything flagged `~`, inspect all three tables (`sec/op`, `B/op`, `allocs/op`), and read `geomean` across input sizes.
+- **Close the loop with macrobenchmarks**: drive realistic, warmed-up traffic with status checks (`k6`, `vegeta`, `ghz`) to expose mutex contention, GC cycles, TCP churn, and cgroup limits invisible to microbenchmarks.
 
 ---
 
 ## Review questions
 
-1. How can an HTTP service report a healthy `12 ms` average latency on Grafana while 1% of users suffer 700 ms timeouts, and how do Prometheus Histograms reveal the issue? *(See Section 1)*
-2. During an OOM incident in Kubernetes, `go_memstats_heap_alloc_bytes` reports only `45 MiB` while container `working_set` climbs past `1.2 GiB`. Name three places outside the Go Heap where that RAM can live. *(See Section 2)*
-3. Why did `BenchmarkMaskEliminated` report `0.31 ns/op` on Apple M2 while the exact same logic stored into `globalSink` measured `0.61 ns/op`? *(See Section 3)*
-4. Looking at the real `benchstat v4.txt v6.txt` output above, why did `benchstat` print `~ (p=0.240)` on latency even though `B/op` dropped `-99.98% (p=0.002)`? *(See Section 4)*
-5. What runtime risks (GC pauses, `sync.Pool` overhead, CFS throttling) can a `k6` containerized macrobenchmark expose that a `testing.B` microbenchmark misses? *(See Section 4)*
+1. Why does averaging Prometheus `Summary` `p99` values across two Kubernetes pods give the wrong answer, and how do `Histogram` `le` buckets fix it? *(See "Efficiency signals: RED, USE and histograms")*
+2. During an incident, `container_memory_working_set_bytes` nears `900 MiB` while `HeapAlloc` stays at `40 MiB`. Where can the missing RAM sit, and how would you distinguish an off-heap leak from heap span fragmentation? *(See "Container vs runtime CPU and memory")*
+3. Why did `BenchmarkLookupNoReset` report `25,382 ns/op` and `6,736 B/op` on Run 1 while `BenchmarkPopcntIgnored` ran `1,000,000,000` times at `0.34 ns/op`—and how does `for b.Loop()` change both? *(See "Microbenchmarks that do not lie")*
+4. In the real `EncodeTodos` `benchstat` output above, `v2` improved `sec/op` by `-28.24% geomean` and `allocs/op` by `-75.00%`, yet `B/op` went up `+11.86%` at `200` items. What caused that, and why does `AtomicStore32` vs `AtomicStore64` print `~ (p=0.853)`? *(See "Statistical proof with benchstat")*
+5. Why did a macrobenchmark of Post 10's `Todo` service show a `6.9x` gap between `p50` (`131 µs`) and `p99` (`898 µs`) plus `95` GC cycles when `encodeTodos` microbenchmarked cleanly in isolation? *(See "Macrobenchmarks: testing the whole service")*
 
 </En>
 
 <Vi>
 
-<Figure src={heroBalance} alt="Cân tiểu ly hai đĩa bằng đồng đặt trong tủ kính chống gió từ thế kỷ 19" caption="Chiếc cân chính xác phải đặt trong lồng kính để gió phòng không làm lệch kim — cũng giống như chạy benchmark cần tách nhiễu nền và kiểm chứng qua benchstat trước khi chốt đã tối ưu xong." sourceTitle="Wikimedia Commons: Balance, London 1860–1880 (Wellcome)" sourceUrl="https://commons.wikimedia.org/wiki/File:Balance,_London,_England,_1860-1880_Wellcome_L0058879.jpg" />
+<Figure src={heroBalance} alt="Cân tiểu ly hai đĩa bằng đồng đặt trong tủ kính chống gió từ thế kỷ 19" caption="Cân phân tích trong phòng thí nghiệm phải đặt trong tủ kính để gió phòng không làm lệch kim — chạy benchmark Go cũng cần cô lập nhiễu như vậy trước khi tin một con số nhanh hơn." sourceTitle="Wikimedia Commons: Balance, London 1860–1880 (Wellcome)" sourceUrl="https://commons.wikimedia.org/wiki/File:Balance,_London,_England,_1860-1880_Wellcome_L0058879.jpg" />
 
 > "Chạy benchmark bản chất cũng chỉ là viết test — nhưng là test hiệu năng chứ không phải test đúng sai."
 > &mdash; *Bartłomiej Płotka*, *P99 CONF 2023*
 
-### Vì sao benchmark thấy "nhanh gấp 4 lần" mà đẩy lên server vẫn chậm?
+### Vì sao benchmark nhìn nhanh mà lên server vẫn chậm?
 
-Anh em làm Go chắc chắn từng thấy ít nhất một PR ghi gọn lỏn: *"Đã tối ưu parser — chạy nhanh hơn 4x!"* kèm đúng một dòng `go test -bench` chạy thử một lần trên laptop đang mở Slack với Chrome. Hai ngày sau đưa lên Kubernetes, độ trễ p99 còn vọt cao hơn lúc chưa sửa.
+Trong [Go issue #14813](https://github.com/golang/go/issues/14813), một bài benchmark so sánh hai hàm đếm bit (`popcnt`) cho ra tốc độ nhanh đến mức khó tin: trình biên dịch SSA của Go đã nội tuyến (inline) hàm thuần túy đó, thấy chẳng ai dùng giá trị trả về, và cắt phăng toàn bộ phép tính. Vòng lặp vẫn chạy đủ `1.000.000.000` lượt rồi báo `PASS`, chỉ có điều nó đang đo... một vòng lặp rỗng. Chính những cái bẫy compiler và timer kiểu đó với `b.N` đã khiến đội ngũ Go thiết kế `testing.B.Loop` từ bản Go 1.24.
 
-Nối tiếp kiến thức phần cứng và GC vừa nắm ở bài trước, việc đo hiệu năng chuẩn xác vẫn khó hơn chạy unit test rất nhiều: trình biên dịch thấy hàm không dùng kết quả thì âm thầm xóa luôn cho ra `0,3 ns`, số trung bình che giấu sạch độ trễ đuôi p99, còn microbenchmark lẻ một hàm lại bỏ qua hoàn toàn GC, connection pool với mạng thật. Bài này gom lại bốn kỹ năng cốt lõi để lấy được số đo đáng tin:
-
-1. **Bốn tín hiệu Observability**: biết lúc nào dùng Logs, Tracing, Metrics (RED/USE + Histogram) hay Profiling.
-2. **Đọc đúng chỉ số CPU &amp; RAM**: cách biến bộ đếm tích lũy thành số core thật và phân biệt `HeapAlloc`, `HeapInuse`, `HeapSys` với `RSS` của container.
-3. **Viết Go microbenchmark không ra số ảo**: né thời gian setup, né bẫy compiler xóa mất hàm (dead-code elimination) và hiểu đúng ý nghĩa `-benchmem`.
-4. **Kiểm chứng thống kê với `benchstat` &amp; Macrobenchmark**: đọc chỉ số tin cậy `p-value` và dựng bài test tải thực tế (`e2e` + `k6`).
+Unit test rất sòng phẳng vì `2 + 2` luôn ra `4` bất kể máy đang bật Slack hay quạt CPU quay ầm ầm. Số đo hiệu năng thì không dễ tính như vậy. Trung bình cộng làm mờ độ trễ đuôi `p99`, Kubernetes OOMKill đếm cả RAM ngoài Go heap, xung nhiệt làm kết quả chạy đơn lẻ dao động hàng chục phần trăm, còn microbenchmark lẻ một hàm thì hoàn toàn không thấy TCP socket hay tranh chấp khóa mutex.
 
 <Callout type="note" title="Tóm tắt nhanh (TL;DR)">
-Theo dõi hệ thống bằng bộ chỉ số **RED** (Rate, Errors, Duration) và **USE** (Utilization, Saturation, Errors) qua **Prometheus Histogram** — đừng bao giờ tin con số trung bình. Đổi bộ đếm CPU bằng hàm `rate()`, đối chiếu **cả** `HeapInuse` trong Go lẫn `working_set` RSS của container, tách phần khởi tạo khỏi `b.ResetTimer()`, gán kết quả vào biến `Sink` (hoặc dùng `b.Loop()`), và luôn kiểm chứng `p &lt; 0,05` qua 6–10 lần chạy bằng **`benchstat`**.
+Đo service bằng **RED** (Rate, Errors, Duration histogram) và tài nguyên bằng **USE** (Utilization, Saturation, Errors), đối chiếu `working_set` của container với `runtime/metrics` của Go, chống rò setup, xóa code chết và cache ảo bằng `for b.Loop()` (Go 1.24+), đòi `p < 0,05` qua `-count=10` lượt trên `benchstat`, rồi kiểm chứng độ trễ đuôi toàn luồng bằng macrobenchmark.
 </Callout>
 
-<Concepts title="Giải thích nhanh mấy thuật ngữ cho người mới">
+<Callout type="note" title="Nhắc nhanh từ các bài trước">
 
-- **Mô hình RED vs. USE**: **RED** đo luồng xử lý request (*Rate* tần suất, *Errors* lỗi, *Duration* độ trễ); **USE** soi sức khỏe tài nguyên phần cứng (*Utilization* % bận, *Saturation* hàng đợi nghẽn, *Errors*).
-- **Histogram (`le` buckets)**: bộ đếm phân loại thời gian xử lý vào từng ngưỡng (`0.01s`, `0.05s`, `0.5s`), giúp Prometheus tính chuẩn độ trễ p90/p99 thay vì lấy trung bình cộng.
-- **Độ phức tạp Big O**: tốc độ phình tài nguyên theo kích thước đầu vào `N` (`O(1)`, `O(N)`, `O(N log N)`), cần để né thảm họa thuật toán nhưng chưa đủ nếu bỏ qua chi phí phần cứng trên mỗi bước.
-- **Dead-code elimination**: tối ưu của compiler tự cắt bỏ đoạn tính toán không ai đọc kết quả — làm benchmark hỏng báo ảo chỉ tốn 1 chu kỳ CPU.
-- **Độ tin cậy p-value (`benchstat`)**: xác suất chênh lệch giữa hai lần đo chỉ là do may rủi/nhiễu (`p &lt; 0,05` mới đáng tin; dấu `~` nghĩa là quá nhiễu chưa chốt được).
+Bài này nối tiếp trực tiếp ba bài nền tảng trước đó trong series:
 
-</Concepts>
+- [Test trong Go](/blog/go-testing-table-tests/): `go test`, file `_test.go`, table-driven subtest và `httptest`.
+- [Quy trình tối ưu Go](/blog/go-efficiency-workflow-raer-tfbo-hardware-memory/): ngân sách RAER, vòng lặp TFBO (Test, Fix, Benchmark, Optimize) và chi phí stack vs. heap.
+- [Phần cứng và GC trong Go](/blog/go-hardware-cpu-caches-virtual-memory-gc-allocator/): CPU cache line, `VSS` vs. `RSS`, `madvise(MADV_DONTNEED)` và tinh chỉnh `GOGC` / `GOMEMLIMIT`.
+
+</Callout>
 
 ---
 
-## 1. Bốn tín hiệu đo lường: Logs, Traces, Metrics &amp; RED/USE
+## Tín hiệu đo lường: RED, USE và histogram
 
-Người mới làm hệ thống hay nhét `log.Debug` ở mọi bước xử lý để đo thời gian, rồi chính phần ép chuỗi JSON đi in log lại ngốn 30% CPU của toàn service. Observability có bốn tín hiệu đi từ nhẹ tới chi tiết:
+Trước khi viết bất kỳ file benchmark nào, mình cần nhìn thấy chỗ chậm thật trên service đang chạy. Kiểu đo hay gặp của người mới là nhét `log.Debug` ở mọi bước xử lý request, rồi chính tiền ép chuỗi JSON và đẩy log đi lại ngốn sạch CPU của service.
 
-<Figure src={promArch} alt="Sơ đồ kiến trúc Prometheus gồm phát hiện target, kéo metrics, lưu TSDB, truy vấn PromQL và xuất Grafana" caption="Hệ thống Metrics dạng kéo như Prometheus gộp hàng triệu bộ đếm siêu nhẹ ngay trên RAM process thay vì đẩy dòng log đắt đỏ qua mạng ở mọi request." sourceTitle="Tài liệu chính thức Prometheus — Overview" sourceUrl="https://prometheus.io/docs/introduction/overview/" />
+Hãy hình dung bốn tín hiệu quan sát hệ thống (observability signals) như đồng hồ táp-lô trên xe và camera hành trình. Đồng hồ tốc độ hay mức xăng (**metrics**) chỉ là mấy con số đếm cực nhẹ cập nhật liên tục; lịch sử một chuyến đi (**tracing**) ghi lại dòng thời gian qua từng ngã rẽ; **logging** giữ lại vài sự cố hiếm; còn **continuous profiling** (xem kỹ ở [Profiling trong Go](/blog/go-profiling-pprof-flamegraphs-off-cpu-continuous/)) soi từng chi tiết máy đang đốt xăng ở dòng code nào.
 
-- **Metrics (Prometheus)** là bộ đếm nhẹ nhất để bật chạy 24/7: gắn bộ **RED** lên các endpoint API/worker và bộ **USE** lên CPU, RAM, pool kết nối. Nhớ dùng **Histogram** (`histogram_quantile(0.99, ...)`) chứ đừng chia `sum/count`: 99 request nhanh 5 ms cộng 1 request treo 705 ms vẫn tính ra trung bình êm ru "12 ms" dù 1% khách đang bị rớt!
-- **Distributed Tracing** vẽ dòng thời gian từng hop của một request cụ thể (nhớ lấy mẫu bằng head/tail sampling kẻo lưu hết mọi request sẽ nghẽn mạng).
-- **Logging** giữ cho các lỗi hiếm gặp hoặc sự kiện nghiệp vụ quan trọng, tránh in debug tràn lan trong vòng lặp.
-- **Continuous Profiling** chỉ đích danh từng dòng code Go đang tiêu CPU và Heap (mình đi sâu ở Bài 11).
+<Figure src={promArch} alt="Sơ đồ kiến trúc Prometheus gồm phát hiện target, kéo metrics, lưu TSDB, truy vấn PromQL và xuất Grafana" caption="Prometheus kéo các bộ đếm tổng hợp cực nhẹ qua HTTP từ process Go, thay vì bắt app phải đẩy log thô cho từng request." sourceTitle="Tài liệu chính thức Prometheus — Overview" sourceUrl="https://prometheus.io/docs/introduction/overview/" />
+
+Với backend Go, hai bộ câu hỏi ngắn giúp dashboard gọn và trúng đích:
+
+- **RED** (phương pháp của Tom Wilkie cho dịch vụ theo request): đo **R**ate (tần suất request/giây), **E**rrors (lỗi/giây) và **D**uration (phân bố độ trễ). Với [Todo HTTP service](/blog/go-http-service-net-http-json-middleware/), mình bọc `statusRecorder` trong một middleware ngay cạnh `logging` để ghi nhận mã HTTP và thời gian xử lý của mọi route.
+- **USE** (phương pháp của Brendan Gregg cho tài nguyên phần cứng/pool): với CPU, RAM, ổ đĩa hay connection pool, soi **U**tilization (% thời gian bận), **S**aturation (hàng đợi đang nghẽn) và **E**rrors (rớt gói, OOMKill).
+
+<GoP17RedVsUse />
+
+Chỗ dễ sập bẫy nhất là cách đo **Duration**: luôn phải dùng **Histogram**, tuyệt đối đừng dùng trung bình cộng hay Prometheus **Summary**. Giả sử 99 request `GET /todos` chạy hết `5 ms` và 1 request kẹt khóa mất `705 ms`: trung bình cộng vẫn báo đẹp `12 ms`, che sạch cú khựng của khách. Tệ hơn nữa, `Summary` tự tính phân vị cục bộ trên từng pod — đem `p99 = 12 ms` ở pod bận cộng chia trung bình với `p99 = 820 ms` ở pod rảnh ra `416 ms` là sai bét. Ngược lại, **Histogram** (`_bucket{le="..."}` — hoặc native histogram mới của Prometheus) đếm số request lọt vào từng xô theo từng pod nên PromQL cộng gộp chuẩn trên cả cụm:
 
 ```go
-// Đo phân bố độ trễ chuẩn bằng Prometheus Histogram thay cho tính trung bình
+// Gắn middleware RED cùng statusRecorder từ Todo service (Bài 10).
 httpDur := prometheus.NewHistogramVec(prometheus.HistogramOpts{
 	Name:    "http_request_duration_seconds",
-	Help:    "Đo thời gian xử lý request để tính chuẩn phân vị p90/p99.",
-	Buckets: []float64{0.005, 0.01, 0.025, 0.1, 0.5, 2.0},
+	Help:    "Đo độ trễ theo pattern route và mã HTTP.",
+	Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.5, 2.0},
 }, []string{"route", "code"})
 
-start := time.Now()
-next.ServeHTTP(w, r)
-httpDur.WithLabelValues(route, status).Observe(time.Since(start).Seconds())
-```
-
-<GoEffObservabilitySignals />
-
-<GoObsFourSignalsMap />
-
-Cẩn thận thêm một tai họa rất hay đánh sập Grafana/Prometheus là **bùng nổ cardinality của label**: tuyệt đối không nhét `user_id`, `request_id` hay URL thô (`/users/991823/profile`) làm label metric! Chỉ vài trăm nghìn user truy cập là Prometheus exporter đẻ ra hàng triệu chuỗi time-series mới, ngốn hết RAM của chính app Go lẫn server Prometheus. Luôn gom path về route mẫu (`/users/:id/profile`).
-
-| Kiểu Metric | Bản chất | Có cộng gộp qua nhiều Pod được? | Dùng chuẩn khi nào? |
-| :--- | :--- | :--- | :--- |
-| **`Counter`** | Chỉ tăng đều (`+1`) | Luôn bọc `rate()` | Tổng số HTTP request, số lỗi 5xx, tổng byte mạng |
-| **`Gauge`** | Giá trị tức thời (`+1 / -1`) | Đọc trung bình/max | Số goroutine đang sống, hàng đợi hiện tại, `HeapInuse` |
-| **`Histogram`** | Các xô đếm tích lũy (`le="..."`) | **Gộp chuẩn trên toàn cụm Pod!** | Tính phân vị cụm bằng `histogram_quantile(0.99, ...)` |
-| **`Summary`** | Client tự tính sẵn phân vị | Tuyệt đối không lấy trung bình! | Chỉ dùng cho máy lẻ; API cụm luôn chọn Histogram |
-
-<Concepts title="Mấy khái niệm ở mục này">
-
-- **Tail latency (độ trễ đuôi p90 / p99)**: mốc thời gian mà 90% hoặc 99% request hoàn thành dưới mức đó — phản ánh đúng cảm nhận của nhóm người dùng gặp chậm thay vì con số trung bình bị làm mịn.
-- **Head vs. Tail sampling**: chọn lọc lưu trace ngay từ lúc request mới tới (VD 1% ngẫu nhiên) so với đợi request chạy xong thấy lỗi `500` hoặc chậm p99 mới giữ lại.
-
-</Concepts>
-
----
-
-## 2. Đọc đúng chỉ số CPU và RAM của Container vs. Go Runtime
-
-Tới lúc mở dashboard Grafana lên điều tra sự cố, có hai chỗ cực kỳ hay bị đọc nhầm:
-
-1. **Bộ đếm CPU luôn là số cộng dồn (cumulative)**: Linux và Go chỉ xuất tổng số *giây CPU* đã chạy từ lúc bật (`process_cpu_seconds_total`, `container_cpu_usage_seconds_total`), chứ không xuất phần trăm tức thời. Phải bọc hàm `rate(metric[1m])` để biết trung bình một giây app đang ăn bao nhiêu nhân CPU — và nhớ nhìn kèm `container_cpu_cfs_throttled_seconds_total` để phát hiện pod bị bóp CPU dù tải trung bình nhìn còn rảnh!
-2. **RAM Container (`RSS` / `WorkingSet`) khác Heap của Go (`MemStats`)**: Kubernetes giết pod (OOMKill) theo `working_set` tổng hợp của cả tiến trình (gồm Go Heap + stack các goroutine + thư viện Cgo / `mmap` riêng + buffer OS chưa nhả). Trong khi `runtime.ReadMemStats` chia riêng phần Heap của Go thành `HeapSys` (tổng vùng đã xin OS), `HeapInuse` (các span 8 KB đang chứa object) và `HeapAlloc` (số byte object còn sống thật sự).
-
-```go
-// Đọc nhanh chỉ số Heap bên trong Go runtime cho trang chẩn đoán / metrics:
-var m runtime.MemStats
-runtime.ReadMemStats(&m)
-fmt.Printf("HeapAlloc=%dMB HeapInuse=%dMB HeapSys=%dMB HeapReleased=%dMB\n",
-	m.HeapAlloc>>20, m.HeapInuse>>20, m.HeapSys>>20, m.HeapReleased>>20)
-```
-
-<GoEffMemoryMetricsAnatomy />
-
-Đối chiếu hai lớp này tiết kiệm hàng giờ mò kim đáy bể: nếu container `working_set` vọt tới 950 MB trong lúc `HeapAlloc` chỉ báo 40 MB thì chắc chắn RAM không rò trong struct Go — thủ phạm nằm ở đống goroutine bị kẹt không thoát, `mmap` hoặc Cgo bên ngoài!
-
-| Chỉ số RAM | Nguồn lấy | Ý nghĩa thật sự | Dấu hiệu bệnh production |
-| :--- | :--- | :--- | :--- |
-| **`HeapAlloc`** | `runtime.MemStats` | Tổng byte object Go đang sống | Tăng đều qua nhiều vòng GC -> rò rỉ biến Go thật sự |
-| **`HeapInuse`** | `runtime.MemStats` | Các trang span 8 KB đang chứa ít nhất 1 object | Cao vượt `HeapAlloc` nhiều -> Heap bị phân mảnh nặng |
-| **`HeapSys`** | `runtime.MemStats` | Dải bộ nhớ ảo đã xin OS | Cao sau đợt tải nhọn; theo dõi `HeapSys - HeapReleased` |
-| **`container_memory_working_set_bytes`** | Linux cgroup (cAdvisor) | RAM vật lý RSS + OS file cache đang giữ | Chạm trần limit Kubernetes là nổ **OOMKill** ngay lập tức |
-
-Lúc trực sự cố thực tế, cứ thủ sẵn ba câu query PromQL này để bắt ngay bệnh bóp CPU ngầm hoặc phân mảnh Heap mà biểu đồ trung bình hay che giấu:
-
-```text
-# 1. Bắt tình trạng pod bị bóp CFS từng nhịp 100ms dù tải trung bình còn thấp
-rate(container_cpu_cfs_throttled_seconds_total{pod=~"api-.*"}[1m])
-
-# 2. Tính độ trễ p99 chuẩn toàn cụm pod (bắt buộc dùng Histogram, cấm cộng Summary!)
-histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))
-
-# 3. Đo độ rỗng phân mảnh trong các span 8 KB đang chờ scvg trả OS
-go_memstats_heap_inuse_bytes - go_memstats_heap_alloc_bytes
-```
-
-Hãy tưởng tượng Linux CFS quota giống trạm gác cho xe qua **40 ms trong mỗi chu kỳ 100 ms**: khi một đợt GC hoặc parse JSON cần 45 ms liên tục, pod bị kernel nhấn nút tạm dừng hết 60 ms còn lại của chu kỳ đó, đẻ ra cú giật đuôi p99 `+60–180 ms` ngay cả khi đồ thị CPU trung bình mới báo `35%`.
-
-<Concepts title="Mấy khái niệm ở mục này">
-
-- **Cumulative counter + `rate()`**: bộ đếm chỉ tăng đều theo thời gian (`cpu_seconds_total`), buộc phải tính đạo hàm theo giây qua `rate()` mới thành mức tải hiện tại.
-- **`HeapInuse` vs. `HeapAlloc`**: `HeapAlloc` chỉ đếm byte object đang sống, còn `HeapInuse` đếm trọn vẹn các span 8 KB đang giữ chỗ — giúp nhìn ra hiện tượng phân mảnh bộ nhớ.
-
-</Concepts>
-
----
-
-## 3. Viết Go Microbenchmark sao cho không ra số ảo
-
-Unit test trả lời Đúng hay Sai rạch ròi, còn **microbenchmark (`func BenchmarkX(b *testing.B)`)** giống như đem chiếc đồng hồ cơ hàng hải ra đo tới phần tỷ giây giữa lúc nền máy thay đổi nhiệt độ, chạy app ngầm và trình biên dịch tìm cách tối ưu bớt lệnh thừa:
-
-<Figure src={chronometerImg} alt="Đồng hồ cơ hàng hải Joseph Sewill thế kỷ 19 treo trong hộp cân bằng hai trục" caption="Đồng hồ hàng hải ngày xưa cần hộp treo chống lắc để giữ nhịp đo chuẩn giữa sóng biển — cũng giống microbenchmark Go cần b.ResetTimer và biến Sink để không bị nhiễu hệ thống và compiler đánh lừa." sourceTitle="Wikimedia Commons: Marine chronometer, Joseph Sewill (Liverpool, c. 1870)" sourceUrl="https://commons.wikimedia.org/wiki/File:Marine_chronometer,_Joseph_Sewill,_Liverpool_(c._1870).JPG" />
-
-Ba cái bẫy hay làm microbenchmark mất sạch giá trị:
-
-1. **Để đoạn chuẩn bị dữ liệu lọt vào thời gian tính giờ**: tạo file test hoặc build map mẫu mà quên gọi `b.ResetTimer()` sau đó sẽ trộn lẫn tốc độ ổ cứng với thuật toán cần đo.
-2. **Compiler xóa luôn đoạn code cần đo (Dead-Code Elimination)**: hễ bạn viết một hàm thuần túy không có tác dụng phụ và quên dùng kết quả trả về (`_ = fn(i)`), trình biên dịch Go thông minh tới mức cắt phăng lời gọi đó đi! Chạy thử ngay trên Apple M2 Go 1.27 cho thấy rõ độ vênh:
-
-<TerminalOutput command="go test -run '^$' -bench 'BenchmarkMask' -benchmem" label="Apple M2 · Go 1.27" caption="Chứng minh compiler xóa code chết trên Go 1.27: bỏ không gán biến kết quả khiến tốc độ rớt ảo từ 0,61 ns/op còn 0,31 ns/op.">
-```text
-goos: darwin
-goarch: arm64
-pkg: effgobench
-cpu: Apple M2
-BenchmarkMaskEliminated-8   	1000000000	         0.3119 ns/op	       0 B/op	       0 allocs/op
-BenchmarkMaskObserved-8     	1000000000	         0.6080 ns/op	       0 B/op	       0 allocs/op
-```
-</TerminalOutput>
-
-3. **Chạy hàm lỗi ngầm &amp; thiếu `-benchmem`**: luôn kiểm tra `err != nil` trong benchmark (gặp lỗi phải gọi `b.Fatal`), bật `b.ReportAllocs()` để theo dõi từng byte heap đẻ ra, test theo nhiều kích thước input qua `b.Run`, và từ Go 1.24+ có thể dùng thẳng vòng **`for b.Loop()`** để compiler không xóa nhầm thân vòng lặp.
-
-```go
-var globalResult uint64 // Biến package ngăn compiler xóa mất phép tính
-
-func BenchmarkComputeObserved(b *testing.B) {
-	input := buildFixture(b, 100_000)
-	b.ReportAllocs()
-	b.ResetTimer() // Bỏ qua thời gian tạo fixture phía trên!
-	var acc uint64
-	for i := 0; i < b.N; i++ {
-		acc += computeMask(input, uint64(i))
-	}
-	globalResult = acc
+func metricsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		start := time.Now()
+		next.ServeHTTP(rec, r)
+		// Dùng r.Pattern ("GET /todos/{id}"), cấm gắn path thô "/todos/98123" kẻo nổ cardinality.
+		httpDur.WithLabelValues(r.Pattern, strconv.Itoa(rec.status)).Observe(time.Since(start).Seconds())
+	})
 }
 ```
 
-<GoEffBenchmarkTraps />
+Để ý dòng `r.Pattern` ở trên: tuyệt đối đừng nhét ID ngẫu nhiên, email hay chuỗi lỗi thô làm nhãn (label) cho metric. Mỗi giá trị label mới đẻ ra một chuỗi time-series mới nằm lì trong RAM của cả app Go lẫn Prometheus TSDB — đủ để kéo sập exporter nếu traffic gọi hàng triệu `/todos/991823` khác nhau. Hãy gom theo `r.Pattern` (có từ `ServeMux` Go 1.22+) và để ID chi tiết cho log hoặc trace đã lấy mẫu.
 
-<GoObsBenchLoopCode />
+| Kiểu metric | Bản chất lưu trữ | Cộng gộp nhiều pod? | Dùng chuẩn ở đâu |
+| :--- | :--- | :--- | :--- |
+| **`Counter`** | Chỉ tăng cộng dồn (`+1`) | Luôn bọc `rate()` | Số request, số lỗi 5xx, tổng byte cấp phát |
+| **`Gauge`** | Giá trị tức thời (`+1 / -1`) | Đọc `max` hoặc `avg` | Số goroutine đang chạy, độ dài queue, `HeapInuse` |
+| **`Histogram`** | Các xô đếm `le` (hoặc native bucket) | Có, `sum by (le)` | Tính `histogram_quantile(0.99, ...)` toàn cụm |
+| **`Summary`** | Client tự tính phân vị sẵn | Cấm lấy trung bình giữa pod | Chỉ dùng nội bộ một máy lẻ |
 
-Nhìn thẳng vào mã nguồn thư viện chuẩn (`src/testing/benchmark.go`) để thấy vì sao cú pháp **`for b.Loop()` từ Go 1.24+** khép lại hầu hết bẫy compiler xóa code và lỗi quên reset đồng hồ:
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
 
-<GitHubCode repo="golang/go" path="src/testing/benchmark.go" lines="L220-L234" url="https://github.com/golang/go/blob/master/src/testing/benchmark.go#L220-L234" caption="Bên trong gói testing của Go: b.Loop() tự dừng đồng hồ sau khi đo xong và báo lỗi nếu thân vòng lặp lỡ break hoặc return sớm.">
-```go
-	b.StopTimer()
-	b.previousN = n
-	b.previousDuration = b.duration
-
-	if b.loop.n > 0 && !b.loop.done && !b.failed {
-		b.Error("benchmark function returned without B.Loop() == false (break or return in loop?)")
-	}
-```
-</GitHubCode>
-
-Bấm qua từng bước trong trình mô phỏng 4 cái bẫy Microbenchmark phổ biến nhất (xóa code chết, dính thời gian setup, `b.Loop()`, và lọc nhiễu `benchstat`) ngay dưới đây:
-
-<GoBenchmarkTrapsDemo />
-
-<Concepts title="Mấy khái niệm ở mục này">
-
-- **`b.ResetTimer()` &amp; `b.ReportAllocs()`**: hai hàm chuẩn trong `testing.B` giúp trừ bỏ phần chuẩn bị dữ liệu và in kèm số byte cấp phát (`B/op`, `allocs/op`).
-- **`b.Loop()` (Go 1.24+)**: cú pháp vòng lặp benchmark mới tự động bỏ thời gian setup và khóa không cho compiler xóa code bên trong.
+- **RED vs. USE**: RED soi trải nghiệm người gọi ngay ở cửa API (**R**ate, **E**rrors, **D**uration); USE soi độ căng thẳng tài nguyên bên trong (**U**tilization, **S**aturation, **E**rrors).
+- **Tail latency (độ trễ đuôi `p90` / `p99`)**: ngưỡng thời gian mà 90% hoặc 99% request hoàn thành dưới mức đó, phơi bày những cú chậm hiếm gặp bị số trung bình che khuất.
+- **Prometheus Histogram (xô `le`)**: bộ đếm số lần đo nhỏ hơn hoặc bằng từng mốc (`le="0.01"`), cho phép cộng dồn chuẩn xác qua nhiều pod trước khi tính phân vị.
+- **Label cardinality**: số chuỗi time-series phân biệt sinh ra từ các tổ hợp label; gắn ID không giới hạn dễ làm OOMKill cả exporter lẫn Prometheus.
 
 </Concepts>
 
 ---
 
-## 4. Kiểm chứng thống kê bằng `benchstat` và Macrobenchmark
+## Đọc đúng CPU và RAM: container và Go runtime
 
-Bartłomiej nhấn mạnh một nguyên tắc sống còn trong bài nói ở P99 CONF 2023: **một lần đo benchmark đơn lẻ hầu như không chứng minh được gì**. Ngay cả khi tắt hết app, xung nhịp CPU nhảy lên xuống và bố cục bộ nhớ ngẫu nhiên vẫn làm số đo xê dịch qua lại:
+Mở Grafana lên soi sự cố, anh em hay vấp ngay hai chỗ: bộ đếm CPU cộng dồn và độ vênh giữa RAM mà Go báo với RAM mà Linux đếm để OOMKill pod.
 
-<YouTube id="wv97cPiqYSU" title="P99 CONF 2023 | The Art of Macro Benchmarking — Bartłomiej Płotka" start={382} end={450} caption="Từ 6:22 đến 7:30, Bartłomiej Płotka phân biệt microbenchmark, macrobenchmark và production benchmark — vì sao đo đúng môi trường thật lại quyết định." sourceTitle="ScyllaDB P99 CONF — Bartłomiej Płotka" />
+Thứ nhất, cả cgroup Linux lẫn Go runtime đều xuất **tổng số giây CPU cộng dồn** từ lúc khởi động (`process_cpu_seconds_total` và `container_cpu_usage_seconds_total`), chứ không phải % CPU tức thời. Phải bọc `rate(container_cpu_usage_seconds_total[1m])` mới ra số nhân CPU trung bình đang ăn mỗi giây — và phải nhìn kèm `rate(container_cpu_cfs_throttled_seconds_total[1m])` để bắt pod bị Linux CFS bóp nhịp 100 ms dù tải trung bình nhìn rất nhàn (chi tiết về cơ chế bóp quota và `GOMAXPROCS` theo cgroup mình đã tách riêng ở [Go trong production](/blog/go-production-stdlib-cpu-cache-gc-kubernetes/#c%C3%A1i-b%E1%BA%ABy-cfs-throttling-tr%C3%AAn-kubernetes-100)).
 
-Quy trình chuẩn từ bộ ví dụ `efficientgo/examples` gồm ba bước rõ ràng:
+Thứ hai, Kubernetes giết pod (OOMKill) dựa trên `container_memory_working_set_bytes` (ước lượng RAM vật lý RSS cộng page cache còn dùng của cAdvisor), chứ không dựa vào `HeapAlloc` của Go. Hãy ví nó như tiền hóa đơn chung cư so với cân nặng đồ đạc trong một phòng ngủ: Go chỉ cân số đồ đạc (`HeapAlloc`), còn Kubernetes tính luôn đống thùng rỗng chưa kịp dọn (`HeapInuse` / span chờ trả OS), đồ ngoài hành lang (stack goroutine, Cgo/`mmap`) và hàng giao tạm ở sảnh (OS page cache).
 
-1. Chạy lặp `-count=6` tới `-count=10` lượt và xuất thẳng ra file theo từng phiên bản (`go test -run '^$' -bench '^BenchmarkSum$' -benchtime=5s -count=6 -cpu=4 -benchmem | tee v4.txt`).
-2. So sánh hai bản đo bằng công cụ chính chủ **`benchstat old.txt new.txt`** (dùng kiểm định Mann-Whitney U). Nhìn thử số đo thật trên máy Apple M2 Go 1.27 khi so `Sum4` với bản streaming `Sum6`:
+<GoP17MemoryLayers />
 
-<TerminalOutput command="go run golang.org/x/perf/cmd/benchstat@latest v4.txt v6.txt" label="Apple M2 · Go 1.27" caption="Kết quả benchstat thật: ký hiệu ~ (p=0.240) cảnh báo biến động tốc độ quá ồn (±69%) chưa chốt được, nhưng p=0.002 xác nhận giảm 99,98% RAM Heap.">
+Bên trong Go, hãy ưu tiên gói `runtime/metrics` (có từ Go 1.16) thay vì gọi `runtime.ReadMemStats` ở đường nóng: `ReadMemStats` buộc dừng mọi goroutine (STW) một nhịp ngắn để chụp ảnh toàn bộ thống kê, còn `runtime/metrics` đọc từng chỉ số rất nhẹ. Đây là kết quả chạy thật trên Go 1.27.1 sau khi cấp phát `20 MiB` byte slice sống và gọi một lượt `runtime.GC()`:
+
+```go
+package main
+
+import (
+	"fmt"
+	"runtime"
+	"runtime/metrics"
+)
+
+var hold [][]byte
+
+func main() {
+	for range 20 {
+		hold = append(hold, make([]byte, 1<<20)) // giữ 20 MiB đang sống
+	}
+	runtime.GC()
+
+	samples := []metrics.Sample{
+		{Name: "/gc/heap/allocs:bytes"},
+		{Name: "/memory/classes/heap/objects:bytes"},
+		{Name: "/memory/classes/heap/free:bytes"},
+		{Name: "/memory/classes/heap/released:bytes"},
+	}
+	metrics.Read(samples)
+
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+
+	fmt.Printf("runtime/metrics allocs=%d MiB objects=%d MiB free=%d MiB released=%d MiB\n",
+		samples[0].Value.Uint64()>>20,
+		samples[1].Value.Uint64()>>20,
+		samples[2].Value.Uint64()>>20,
+		samples[3].Value.Uint64()>>20,
+	)
+	fmt.Printf("MemStats        HeapAlloc=%d MiB HeapInuse=%d MiB HeapSys=%d MiB HeapReleased=%d MiB\n",
+		m.HeapAlloc>>20, m.HeapInuse>>20, m.HeapSys>>20, m.HeapReleased>>20,
+	)
+}
+```
+
+<TerminalOutput command="go run ./cmd/memcheck" label="Apple M2 · Go 1.27.1" caption="Kết quả đo thật trên Go 1.27.1: 20 MiB object sống nằm trong 27 MiB HeapSys, với 6 MiB đã được trả lại cho hệ điều hành.">
 ```text
-      │    v4.txt    │            v6.txt             │
-      │    sec/op    │    sec/op     vs base         │
-Sum-8   1.801m ± 69%   2.089m ± 48%  ~ (p=0.240 n=6)
-
-      │     v4.txt     │              v6.txt               │
-      │      B/op      │    B/op     vs base               │
-Sum-8   1401263.5 ± 0%   216.0 ± 0%  -99.98% (p=0.002 n=6)
-
-      │   v4.txt   │              v6.txt               │
-      │ allocs/op  │ allocs/op   vs base               │
-Sum-8   5.000 ± 0%   3.000 ± 0%  -40.00% (p=0.002 n=6)
+runtime/metrics allocs=20 MiB objects=20 MiB free=0 MiB released=6 MiB
+MemStats        HeapAlloc=20 MiB HeapInuse=20 MiB HeapSys=27 MiB HeapReleased=6 MiB
 ```
 </TerminalOutput>
 
-Để ý kỹ dòng `~ (p=0.240 n=6)` phía trên — ký hiệu ngã đó là chốt chặn cứu bạn khỏi kết luận bừa:
+Đối chiếu cả hai lớp giúp mình khỏi tìm sai hướng khi trực sự cố. Nếu `container_memory_working_set_bytes` vọt qua `900 MiB` trong khi `go_memstats_heap_alloc_bytes` chỉ quanh quẩn `40 MiB`, đừng mất công soi struct Go — thủ phạm đang nằm ngoài heap ở stack các goroutine bị rò, buffer Cgo, `mmap` hoặc OS page cache. Ngược lại, khi `HeapInuse` lớn hơn hẳn `HeapAlloc`, các object nằm rải rác đang ghim nhiều span 8 KiB khiến RAM chưa giải phóng được tới khi scavenger gọi `madvise` (xem cơ chế trả RAM và đặt ngưỡng `GOMEMLIMIT` ở [Phần cứng và GC trong Go](/blog/go-hardware-cpu-caches-virtual-memory-gc-allocator/)).
 
-- Chỉ số `B/op` giảm `-99.98%` với độ lệch `± 0%` (`p=0.002`) nên phần tiết kiệm RAM Heap đã chắc nịch.
-- Riêng `sec/op` nhảy loạn `± 69%` do xung nhiệt laptop hoặc tiến trình nền, nên `benchstat` lịch sự báo `~` (`p=0.240 > 0.05` — chưa đủ tin cậy để chốt nhanh hay chậm). Muốn khép độ lệch xuống dưới `± 5%`, cần nâng thời gian mỗi vòng (`-benchtime=2s`), ghim `-cpu=4`, chạy `-count=10` và đóng bớt ứng dụng nền trước khi so `sec/op`.
+| Chỉ số RAM | Nguồn lấy | Đo cái gì thật sự | Dấu hiệu bệnh production |
+| :--- | :--- | :--- | :--- |
+| **`HeapAlloc`** / `heap/objects` | `MemStats` / `runtime/metrics` | Object Go đang còn sống | Đáy sau mỗi vòng GC tăng dần là rò heap thật |
+| **`HeapInuse`** | `runtime.MemStats` | Các span 8 KiB đang mở | Cao hơn nhiều so với `HeapAlloc` là phân mảnh span |
+| **`HeapSys - HeapReleased`** | `runtime.MemStats` | Span ảo còn giữ trang RAM vật lý | Co lại từ từ khi scavenger chạy nền |
+| **`container_memory_working_set_bytes`** | Linux cgroup (cAdvisor) | RSS đang dùng + OS page cache nóng | Chạm limit pod là bị kernel OOMKill ngay |
+
+Thủ sẵn ba câu truy vấn PromQL này khi điều tra một pod đang phình RAM hoặc giật độ trễ:
+
+```text
+# 1. Bắt pod bị bóp CFS theo chu kỳ 100 ms dù CPU trung bình trông còn rảnh
+rate(container_cpu_cfs_throttled_seconds_total{pod=~"todo-api-.*"}[1m])
+
+# 2. Tính p99 toàn cụm từ Histogram (tuyệt đối không cộng trung bình Summary)
+histogram_quantile(0.99, sum by (le) (rate(http_request_duration_seconds_bucket[5m])))
+
+# 3. Soi khoảng trống phân mảnh span trong Go heap vs phần ngoài heap trên container RSS
+go_memstats_heap_inuse_bytes - go_memstats_heap_alloc_bytes
+```
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **`rate()` trên bộ đếm cộng dồn**: biến tổng giây CPU chỉ tăng đều (`cpu_seconds_total`) thành tốc độ ăn nhân CPU mỗi giây, không bị hỏng khi pod restart.
+- **`runtime/metrics`**: API đo lường hiện đại của Go (`metrics.Read`), đọc số liệu heap, GC và scheduler mà không phải dừng toàn bộ goroutine như `ReadMemStats`.
+- **`working_set` vs. `HeapInuse`**: `working_set` là phần RAM cấp container cAdvisor tính để OOMKill (gồm cả stack, Cgo, file cache), còn `HeapInuse` chỉ đếm các span 8 KiB của Go heap.
+
+</Concepts>
+
+---
+
+## Viết microbenchmark sao cho không tự lừa mình
+
+Unit test trả lời hàm có chạy đúng với các ca biên hay không; **microbenchmark** (`func BenchmarkX(b *testing.B)`) đo xem một hàm đơn lẻ mất bao nhiêu nano-giây và cấp phát bao nhiêu byte trên dữ liệu tiêu biểu. Đo tới từng nano-giây trên laptop cũng giống canh nhịp đồng hồ cơ hàng hải trên boong tàu đang lắc: tiến trình nền, hạ xung nhiệt, L1 cache ấm sẵn và các pha tối ưu của trình biên dịch đều làm kim đo lệch nếu bạn không giữ thăng bằng.
+
+<Figure src={chronometerImg} alt="Đồng hồ cơ hàng hải Joseph Sewill thế kỷ 19 treo trong hộp cân bằng hai trục" caption="Đồng hồ hàng hải phải đặt trong vòng treo chống lắc để giữ mặt phẳng đo chuẩn — microbenchmark Go cũng cần kỷ luật về timer, sink và độ tĩnh của máy đo." sourceTitle="Wikimedia Commons: Marine chronometer, Joseph Sewill (Liverpool, c. 1870)" sourceUrl="https://commons.wikimedia.org/wiki/File:Marine_chronometer,_Joseph_Sewill,_Liverpool_(c._1870).JPG" />
+
+Microbenchmark nằm trong file `*_test.go`, nhận tham số `*testing.B` và chạy bằng `go test`. Luôn thêm `-run '^$'` để không chạy nhầm unit test bình thường làm nhiễu đầu ra, và bật `-benchmem` (hoặc gọi `b.ReportAllocs()`) để thấy luôn `B/op` và `allocs/op` cạnh `ns/op`. Một thói quen nữa hay bị bỏ quên: luôn kiểm tra lỗi ngay trong benchmark (`if err != nil { b.Fatal(err) }`), kẻo gõ nhầm đường dẫn file khiến hàm trả lỗi sớm trong 20 ns rồi hí hửng tưởng mình vừa tối ưu xong!
+
+Ngay cả khi đã bật `-benchmem` và kiểm tra lỗi, bốn cái bẫy kinh điển (`#89` trong *100 Go Mistakes*) vẫn âm thầm bẻ cong kết quả đo.
+
+<GoP17BenchTraps />
+
+### 1. Để phần chuẩn bị dữ liệu lọt vào đồng hồ đo
+
+Giả sử mình muốn đo tốc độ tra cứu 1 khóa trong bảng chỉ mục 100.000 mục `Todo`. Nếu dựng bảng chỉ mục trước vòng lặp mà quên reset đồng hồ, 3 mili-giây dựng map sẽ tràn thẳng vào các lượt đo đầu tiên:
+
+```go
+var LookupSink string
+
+func BenchmarkLookupNoReset(b *testing.B) {
+	b.ReportAllocs()
+	idx := buildTodoIndex(100_000) // bị tính cả vào đồng hồ và B/op!
+	var v string
+	for i := 0; i < b.N; i++ {
+		v = idx[i%100_000]
+	}
+	LookupSink = v
+}
+
+func BenchmarkLookupResetTimer(b *testing.B) {
+	b.ReportAllocs()
+	idx := buildTodoIndex(100_000)
+	b.ResetTimer() // xóa thời gian và bộ đếm alloc của đoạn setup phía trên
+	var v string
+	for i := 0; i < b.N; i++ {
+		v = idx[i%100_000]
+	}
+	LookupSink = v
+}
+
+func BenchmarkLookupBLoop(b *testing.B) {
+	b.ReportAllocs()
+	idx := buildTodoIndex(100_000)
+	i := 0
+	for b.Loop() { // Go 1.24+: tự reset timer ngay vòng lặp đầu tiên
+		_ = idx[i%100_000]
+		i++
+	}
+}
+```
+
+<TerminalOutput command="go test -run '^$' -bench '^BenchmarkLookup' -benchtime=20ms -count=3" label="Apple M2 · Go 1.27.1" caption="Đo thật trên Go 1.27.1: quên b.ResetTimer() làm lượt 1 ước lượng sai thành b.N=874, thổi phồng độ trễ 2.000 lần lên 25.382 ns/op và dính 6.736 B/op từ map setup.">
+```text
+goos: darwin
+goarch: arm64
+pkg: example.com/benchdemo
+cpu: Apple M2
+BenchmarkLookupNoReset-8      	     874	     25382 ns/op	    6736 B/op	     228 allocs/op
+BenchmarkLookupNoReset-8      	 1061332	        20.37 ns/op	       5 B/op	       0 allocs/op
+BenchmarkLookupNoReset-8      	  995023	        28.69 ns/op	       5 B/op	       0 allocs/op
+BenchmarkLookupResetTimer-8   	 2077831	        12.14 ns/op	       0 B/op	       0 allocs/op
+BenchmarkLookupResetTimer-8   	 1927878	        14.71 ns/op	       0 B/op	       0 allocs/op
+BenchmarkLookupResetTimer-8   	 1978724	        11.78 ns/op	       0 B/op	       0 allocs/op
+BenchmarkLookupBLoop-8        	 2045366	        11.48 ns/op	       0 B/op	       0 allocs/op
+BenchmarkLookupBLoop-8        	 1668147	        13.27 ns/op	       0 B/op	       0 allocs/op
+BenchmarkLookupBLoop-8        	 2266502	        10.38 ns/op	       0 B/op	       0 allocs/op
+```
+</TerminalOutput>
+
+Để ý lượt đầu của `BenchmarkLookupNoReset-8`: Go chạy thử `b.N=1` để ước lượng cần bao nhiêu lượt cho đủ `-benchtime`. Vì `buildTodoIndex` nằm khi đồng hồ đang bật, Go tưởng mỗi lần tra map mất cả mili-giây, chốt `b.N=874`, rồi in ra `25.382 ns/op` và `6.736 B/op` thay vì `12 ns/op` và `0 B/op` thật sự.
+
+Nếu đoạn setup bắt buộc phải chạy *trong mỗi vòng lặp* thì sao? Bạn có thể bọc nó bằng `b.StopTimer()` và `b.StartTimer()`, nhưng chỉ làm vậy khi phần code cần đo chậm hơn hẳn chi phí ~30–50 ns của cặp gọi dừng/bật timer — nếu không, toàn bộ bài benchmark sẽ chạy kéo dài vượt xa `-benchtime` và bị nhiễu ngược bởi chính thao tác bật tắt đồng hồ.
+
+### 2. Trình biên dịch xóa code chết (dead-code elimination) vs `for b.Loop()`
+
+Quay lại ví dụ `popcnt` của issue #14813. Với vòng lặp kiểu cũ `for i := 0; i < b.N; i++`, hễ hàm thuần túy được inline mà kết quả không ai đọc, pha tối ưu SSA kết luận thân vòng lặp không có tác dụng phụ và xóa sạch toàn bộ phép tính:
+
+```go
+var GlobalSink uint64
+
+func BenchmarkPopcntIgnored(b *testing.B) {
+	for i := 0; i < b.N; i++ {
+		popcnt(uint64(i)) // bỏ quên giá trị trả về -> compiler xóa mất
+	}
+}
+
+func BenchmarkPopcntSink(b *testing.B) {
+	var acc uint64
+	for i := 0; i < b.N; i++ {
+		acc += popcnt(uint64(i))
+	}
+	GlobalSink = acc // ghi đúng một lần ra biến package sau vòng lặp
+}
+
+func BenchmarkPopcntBLoop(b *testing.B) {
+	x := uint64(0xdeadbeefcafebabe)
+	for b.Loop() { // Go 1.24+: compiler tự giữ tham số và kết quả còn sống
+		popcnt(x)
+		x++
+	}
+}
+```
+
+<TerminalOutput command="go test -run '^$' -bench 'BenchmarkPopcnt' -benchtime=500ms -count=3 -benchmem" label="Apple M2 · Go 1.27.1" caption="Đo thật trên Go 1.27.1: BenchmarkPopcntIgnored chạm trần 1.000.000.000 lượt với 0,34 ns/op (vòng lặp rỗng); cả GlobalSink lẫn b.Loop() đều giữ nguyên phép tính bit.">
+```text
+goos: darwin
+goarch: arm64
+pkg: example.com/benchdemo
+cpu: Apple M2
+BenchmarkPopcntIgnored-8   	1000000000	         0.3390 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPopcntIgnored-8   	1000000000	         0.3790 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPopcntIgnored-8   	1000000000	         0.3437 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPopcntSink-8      	610681322	         0.9804 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPopcntSink-8      	624847309	         1.009 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPopcntSink-8      	591722295	         1.030 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPopcntBLoop-8     	252322328	         2.424 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPopcntBLoop-8     	271442343	         2.499 ns/op	       0 B/op	       0 allocs/op
+BenchmarkPopcntBLoop-8     	227317034	         2.548 ns/op	       0 B/op	       0 allocs/op
+```
+</TerminalOutput>
+
+Soi mã assembly ARM64 (`go test -c -gcflags='-S'`) thấy rõ rành rành: `BenchmarkPopcntIgnored` chỉ còn đúng ba lệnh `ADD $1; CMP; BLT` — không còn một lệnh dịch bit hay nhân nào — và chạm trần tối đa `1.000.000.000` lượt của `go test` (dấu hiệu kinh điển của benchmark rỗng!). Trong khi đó `BenchmarkPopcntSink` giữ được phép tính nhờ dồn vào biến cục bộ rồi mới gán ra `GlobalSink` một lần sau vòng lặp (đừng gán thẳng ra biến toàn cục mỗi vòng lặp kẻo tốn thêm chi phí ghi bộ nhớ vào điểm nóng).
+
+Từ Go 1.24+, **`for b.Loop()`** giải quyết gọn cả hai chuyện `b.ResetTimer()` lẫn bẫy xóa code chết. Nhìn thẳng vào cam kết của nó trong mã nguồn chuẩn Go 1.27.1 (`src/testing/benchmark.go`):
+
+<GitHubCode repo="golang/go" path="src/testing/benchmark.go" lines="L475-L487" url="https://github.com/golang/go/blob/go1.27.1/src/testing/benchmark.go#L475-L487" caption="Bên trong gói testing của Go 1.27.1: b.Loop() tự reset đồng hồ ở đầu, dừng trước cleanup và bọc các biến trong thân vòng lặp bằng intrinsic runtime.KeepAlive.">
+```go
+// Loop resets the benchmark timer the first time it is called in a benchmark,
+// so any setup performed prior to starting the benchmark loop does not count
+// toward the benchmark measurement. Likewise, when it returns false, it stops
+// the timer so cleanup code is not measured.
+//
+// Within the body of a "for b.Loop() { ... }" loop, arguments to and
+// results from function calls and assigned variables within the loop are kept
+// alive, preventing the compiler from fully optimizing away the loop body.
+// Currently, this is implemented as a compiler transformation that wraps such
+// variables with a runtime.KeepAlive intrinsic call. This applies only to
+// statements syntactically between the curly braces of the loop, and the loop
+// condition must be written exactly as "b.Loop()".
+```
+</GitHubCode>
+
+Có hai chi tiết nhỏ trên Go 1.27.1 đáng lưu ý từ bảng đo trên. Thứ nhất, `b.Loop()` thêm khoảng ~1,4 ns chi phí spill stack và kiểm tra điều kiện lặp so với `GlobalSink` trên các hàm siêu nhỏ dưới 5 ns — với hàm thực tế vài chục nano-giây trở lên thì mức này không đáng kể. Thứ hai, `for b.Loop()` bảo vệ *kết quả* không bị xóa, nhưng nếu bạn truyền hẳn một hằng số cục bộ ngay trước vòng lặp (`x := 0xdeadbeef; for b.Loop() { popcnt(x) }`), compiler vẫn có thể tính gộp trước `popcnt(x)` thành `46` (constant folding) trước khi `KeepAlive` giữ số `46` đó lại; hãy cho biến đầu vào thay đổi (`x++`) hoặc đọc từ biến package khi đo các hàm số học thuần túy.
+
+### 3. Hiệu ứng người quan sát (observer effect) và CPU cache ấm ảo
+
+Đo một hàm lặp đi lặp lại trong vòng kín có thể tự làm thay đổi trạng thái phần cứng. Chẳng hạn bài toán kinh điển từ `#89`: cộng 8 cột đầu tiên của hai ma trận 1.000 hàng (`calculateSum512` dùng `[][512]int64` vs `calculateSum513` dùng `[][513]int64`). Nếu bạn chỉ tạo ma trận một lần rồi dùng lại suốt hàng nghìn lượt, 8 cột đầu sẽ nằm gọn trong L1/L2 cache của CPU:
+
+<TerminalOutput command="go test -run '^$' -bench 'BenchmarkSum51' -benchtime=200x -count=3 -benchmem" label="Apple M2 · Go 1.27.1" caption="Đo thật trên Go 1.27.1: dùng lại cùng một ma trận giữ dữ liệu nóng trong cache (~4,1–7,4 µs/op), nhanh gần gấp đôi so với đọc ma trận mới cấp phát (~6,1–12,8 µs/op).">
+```text
+BenchmarkSum512Reuse-8   	     200	      4149 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSum512Reuse-8   	     200	      4916 ns/op	       1 B/op	       0 allocs/op
+BenchmarkSum512Reuse-8   	     200	      7413 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSum513Reuse-8   	     200	      5305 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSum513Reuse-8   	     200	      6238 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSum513Reuse-8   	     200	      5780 ns/op	       0 B/op	       0 allocs/op
+BenchmarkSum512Fresh-8   	     200	      9175 ns/op	       1 B/op	       0 allocs/op
+BenchmarkSum512Fresh-8   	     200	      8116 ns/op	       2 B/op	       0 allocs/op
+BenchmarkSum512Fresh-8   	     200	     12784 ns/op	       4 B/op	       0 allocs/op
+BenchmarkSum513Fresh-8   	     200	      8362 ns/op	       1 B/op	       0 allocs/op
+```
+</TerminalOutput>
+
+Kết quả này dạy hai bài học rõ ràng. Một là tái sử dụng cùng một vùng dữ liệu nhỏ làm tốc độ đo nhanh giả gấp đôi (`~4,5 µs` so với `~9 µs` khi cấp ma trận mới qua `StopTimer`/`StartTimer`). Hai là khác với các chip Intel x86 L1 8-way cache line 64 byte (nơi bước nhảy lũy thừa 2 của 512 cột hay đụng cache-set conflict nặng hơn 513 cột), kiến trúc cache trên Apple M2 gần như xóa sạch chênh lệch 512 vs 513 — nhắc mình rằng đặc tính phần cứng đo trên laptop không thể tự suy ra y hệt cho server x86 ngoài production (xem thêm về cache line ở [Phần cứng và GC trong Go](/blog/go-hardware-cpu-caches-virtual-memory-gc-allocator/)).
+
+### 4. Nhiễu máy đo, thứ tự chạy và thử theo kích thước input
+
+Chế độ tiết kiệm pin, hạ xung do nóng máy, tab trình duyệt chạy ngầm hay máy ảo chia sẻ (CI runner) dễ làm benchmark lệch 10–30%, thậm chí chỉ đảo thứ tự hai hàm trong file cũng đủ đổi chiều thắng thua. Trước khi lấy số nghiêm túc: cắm sạc laptop, tắt bớt app nặng, viết table sub-benchmark (`b.Run`) theo nhiều kích thước input để xem tốc độ phình ra sao ([Quy trình tối ưu Go](/blog/go-efficiency-workflow-raer-tfbo-hardware-memory/) phân tích Big-O và hằng số chi phí), kéo dài `-benchtime=2s` hoặc ghim `-cpu=4` nếu số còn nhảy, và luôn lặp `-count=10`.
+
+Bấm thử từng bước qua cả bốn cái bẫy trong trình mô phỏng tương tác ngay dưới đây:
+
+<GoBenchmarkTrapsDemo />
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **`for b.Loop()` (Go 1.24+)**: cú pháp vòng lặp benchmark mới tự động reset timer sau phần setup, dừng trước cleanup, chạy cân chỉnh một lượt và giữ biến trong vòng lặp bằng `runtime.KeepAlive`.
+- **Dead-code elimination (xóa code chết)**: bước tối ưu của SSA cắt bỏ đoạn tính toán không có tác dụng phụ quan sát được, làm benchmark hỏng báo ảo `0,3 ns/op`.
+- **Observer effect (hiệu ứng người quan sát)**: việc chạy lặp lại cùng một dữ liệu nhỏ khiến CPU cache và branch predictor ấm giả so với dữ liệu thực tế luôn biến đổi.
+
+</Concepts>
+
+---
+
+## Chứng minh bằng thống kê với benchstat
+
+Chạy benchmark đúng một lần (`-count=1`) gần như không chứng minh được gì vì chỉ một tác vụ nền hay nhịp đổi xung CPU là kết quả đã lệch 15%. Gom `-count=10` lượt vào hai file (`old.txt` và `new.txt`) rồi so bằng **`benchstat`** mới biến cảm giác thành bằng chứng thống kê.
+
+Phiên bản `benchstat` hiện đại tính **số trung vị (median)** kèm **khoảng tin cậy 95%** (`± X%`) cho từng bản, không giả định số liệu phải tuân theo phân phối chuẩn hình chuông. Khi so sánh hai file, nó chạy kiểm định phi tham số **Mann-Whitney U** để tính giá trị **`p-value`** (xác suất chênh lệch giữa bản cũ và mới chỉ do hên xui/nhiễu nền). Nếu `p >= 0.05` (ngưỡng mặc định `-alpha`), `benchstat` từ chối kết luận và in dấu `~`. Khi có từ hai sub-benchmark trở lên, dòng **`geomean`** (trung bình nhân) ở cuối bảng tổng hợp tỷ lệ thay đổi chung mà không bị một ca quá chậm kéo lệch toàn bảng.
+
+Xem thử hai lần chạy thật trên Go 1.27.1 (Apple M2). Trước tiên là so `atomic.StoreInt32` với `atomic.StoreInt64` (từ `#89`) qua `-count=10` lượt:
+
+<TerminalOutput command="go run golang.org/x/perf/cmd/benchstat@latest a32.txt a64.txt" label="Apple M2 · Go 1.27.1" caption="Kết quả benchstat thật giữa AtomicStore32 và AtomicStore64: dù có lượt dao động ±12%, benchstat in dấu ~ (p=0.853) vì hai phân bố trùng nhau.">
+```text
+goos: darwin
+goarch: arm64
+pkg: example.com/benchdemo
+cpu: Apple M2
+              │   a32.txt   │            a64.txt             │
+              │   sec/op    │    sec/op     vs base          │
+AtomicStore-8   2.107n ± 3%   2.103n ± 12%  ~ (p=0.853 n=10)
+```
+</TerminalOutput>
+
+Giờ thử một tối ưu thật trên [Todo HTTP service](/blog/go-http-service-net-http-json-middleware/): thay `json.NewEncoder` dùng reflection ở `encodeTodosEncoder` (`v1.txt`) bằng hàm tự ghép byte JSON trên slice cấp phát sẵn dung lượng qua `strconv.AppendInt` / `strconv.AppendQuote` / `strconv.AppendBool` (`v2.txt`) cho `items=10` và `items=200`:
+
+```go
+func BenchmarkEncodeTodos(b *testing.B) {
+	for _, n := range []int{10, 200} {
+		items := newSeededStore(n).listRecent(n)
+		b.Run(fmt.Sprintf("items=%d", n), func(b *testing.B) {
+			b.ReportAllocs()
+			for b.Loop() {
+				out, err := encodeTodos(items) // v1: json.NewEncoder; v2: slice []byte cấp sẵn
+				if err != nil {
+					b.Fatal(err)
+				}
+				_ = out
+			}
+		})
+	}
+}
+```
+
+<TerminalOutput command="go run golang.org/x/perf/cmd/benchstat@latest v1.txt v2.txt" label="Apple M2 · Go 1.27.1" caption="Bảng benchstat thật: v2 giảm geomean độ trễ -28,24% và giảm số lần alloc -75,00% (p=0.000), nhưng đồng thời phanh phui B/op tăng +11,86% ở 200 phần tử do ước lượng dung lượng hơi dư.">
+```text
+goos: darwin
+goarch: arm64
+pkg: example.com/benchdemo
+cpu: Apple M2
+                        │   v1.txt    │               v2.txt                │
+                        │   sec/op    │   sec/op     vs base                │
+EncodeTodos/items=10-8    1.628µ ± 5%   1.020µ ± 4%  -37.30% (p=0.000 n=10)
+EncodeTodos/items=200-8   26.82µ ± 8%   22.03µ ± 3%  -17.87% (p=0.000 n=10)
+geomean                   6.607µ        4.741µ       -28.24%
+
+                        │    v1.txt    │                v2.txt                │
+                        │     B/op     │     B/op      vs base                │
+EncodeTodos/items=10-8      608.0 ± 0%     576.0 ± 0%   -5.26% (p=0.000 n=10)
+EncodeTodos/items=200-8   10.73Ki ± 0%   12.00Ki ± 0%  +11.86% (p=0.000 n=10)
+geomean                   2.524Ki        2.598Ki        +2.94%
+
+                        │   v1.txt   │               v2.txt               │
+                        │ allocs/op  │ allocs/op   vs base                │
+EncodeTodos/items=10-8    4.000 ± 0%   1.000 ± 0%  -75.00% (p=0.000 n=10)
+EncodeTodos/items=200-8   4.000 ± 0%   1.000 ± 0%  -75.00% (p=0.000 n=10)
+geomean                   4.000        1.000       -75.00%
+```
+</TerminalOutput>
+
+Đọc đủ cả ba bảng của `benchstat` giúp mình nhìn thấy ngay sự đánh đổi: `sec/op` nhanh hơn (`geomean -28,24%`, `p=0.000`) và `allocs/op` giảm từ `4` xuống `1` (`-75,00%`), *nhưng* `B/op` ở mức 200 phần tử lại nhích lên `+11,86%` vì công thức ước lượng `56` byte/phần tử (`11.202 B`) làm tròn lên size class `12 KiB` của Go allocator. Cũng nhớ một điểm tinh tế mà tài liệu `benchstat` nhắc thẳng: *có ý nghĩa thống kê* (`p < 0,05`) chỉ có nghĩa là không phải nhiễu ngẫu nhiên chứ chưa chắc mức chênh lệch đó *đáng bận tâm* — khi độ lệch bằng `± 0%`, chỉ cần lệch 3% bộ nhớ thôi `benchstat` vẫn báo `p=0.000`.
+
+<GoP17BenchstatStats />
 
 <QuoteCard author="Bartłomiej Płotka" role="Maintainer Prometheus & Tác giả Efficient Go" sourceTitle="P99 CONF 2023 | The Art of Macro Benchmarking" sourceUrl="https://www.youtube.com/watch?v=wv97cPiqYSU">
 Muốn đánh giá trung thực hiệu năng độ trễ hay bộ nhớ, đừng tin một lần chạy microbenchmark lẻ trên laptop đang ồn — hãy tự động hóa các loạt đo nhiều mẫu kèm macrobenchmark sát điều kiện thật của GC, cache và giới hạn hệ điều hành.
 </QuoteCard>
 
-3. Với các thay đổi ảnh hưởng tới GC, kết nối mạng hay cache nhiều luồng, kiểm chứng thêm bằng **Macrobenchmark** (`efficientgo/e2e` + `k6`): dựng container Go chạy thật cạnh Prometheus và trình bắn tải `k6` ngay trên máy trước khi rollout lên Kubernetes.
-
-```go
-// Lưu kết quả từng mốc ra file riêng rồi chạy benchstat so sánh
-// export ver=v6 && go test -run '^$' -bench '^BenchmarkSum$' -count=6 -cpu=4 -benchmem | tee ${ver}.txt
-// benchstat v4.txt v6.txt
-```
-
-<GoEffBenchstatAndLevels />
-
-Bạn có thể thử chuyển qua lại ba tình huống đo sai số ảo và đọc kết quả `benchstat` ngay ở phần mô phỏng dưới đây:
+Bạn có thể thử lại các tình huống xóa code chết, nhiễu máy và bảng đối chiếu `Sum4` vs `Sum6` trong mô phỏng tương tác dưới đây:
 
 <GoEffBenchstatSimulatorDemo />
 
-<Concepts title="Mấy khái niệm ở mục này">
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
 
-- **`benchstat` (dấu `~` vs % chênh lệch)**: công cụ thống kê chính thức của Go kiểm tra xác suất p-value qua nhiều lần lặp để khỏi tự đánh lừa bởi nhiễu máy cá nhân.
-- **Macrobenchmarking (`e2e` + `k6`)**: bài đo tải toàn cụm container thật (có app Go + DB/Prometheus + `k6`) để bắt trọn tác động của GC, mạng và thread pool mà microbenchmark bỏ sót.
+- **Kiểm định Mann-Whitney U**: phép kiểm tra thứ hạng phi tham số mà `benchstat` dùng mặc định để xác định hai tập kết quả có khác biệt thật sự hay không mà không cần giả định phân phối chuẩn.
+- **`p-value` và ký hiệu `~`**: `p < 0,05` xác nhận thay đổi có cơ sở thống kê; dấu `~` báo hai lần đo chưa tách khỏi nhiễu ngẫu nhiên.
+- **`geomean` (trung bình nhân)**: chỉ số tổng hợp tỷ lệ thay đổi xuyên suốt nhiều sub-benchmark, tránh để một trường hợp lớn kéo méo toàn bộ đánh giá.
+
+</Concepts>
+
+---
+
+## Macrobenchmark: đo toàn bộ service khi chạy thật
+
+Ngay cả khi `benchstat` xanh rì trên một hàm, đẩy lên server vẫn có thể chậm. Microbenchmark chạy trong `go test` trên một goroutine lẻ, không có TCP socket, không có tranh chấp khóa giữa các request đồng thời, và không phản ánh đúng nhịp GC khi heap giữ dữ liệu sống thật.
+
+<YouTube id="wv97cPiqYSU" title="P99 CONF 2023 | The Art of Macro Benchmarking — Bartłomiej Płotka" start={382} end={450} caption="Từ 6:22 đến 7:30, Bartłomiej Płotka phân biệt microbenchmark, macrobenchmark và production benchmark — vì sao thử nghiệm toàn hệ thống mới lộ ra những điểm nghẽn mà microbenchmark bỏ sót." sourceTitle="ScyllaDB P99 CONF — Bartłomiej Płotka" />
+
+**Macrobenchmark** chạy nguyên binary service hoàn chỉnh (tốt nhất nằm trong container có giới hạn CPU/RAM giống thật, như tư duy của bộ `efficientgo/e2e`) rồi bắn tải HTTP hoặc gRPC từ bên ngoài vào:
+
+- **`k6` (Grafana Labs)**: công cụ viết bằng Go cho phép kịch bản tải bằng JavaScript, rất hợp kiểm tra luồng nhiều bước (`POST /todos` -> `GET /todos` -> `GET /todos/{id}`), chia pha warmup, kiểm tra nội dung trả về và gắn ngưỡng fail cho CI.
+- **`vegeta`**: công cụ CLI/thư viện Go chuyên bắn tải HTTP ở tốc độ RPS cố định, giúp giữ nhịp bắn ngay cả khi server bị chậm (tránh lỗi sai số *coordinated omission* của tải vòng kín).
+- **`ghz`**: phiên bản chuyên trị gRPC viết bằng Go, hỗ trợ protobuf reflection và xuất phân bố độ trễ theo mã trạng thái gRPC.
+
+<GoP17MicroVsMacro />
+
+Để thấy rõ macrobenchmark phơi bày được những gì mà microbenchmark bó tay, mình bắn thử 4.000 request trộn (`10% POST /todos`, `20% GET /todos`, `70% GET /todos/{id}`) từ 8 luồng HTTP đồng thời vào bộ router `Todo` của Bài 10 trên Go 1.27.1 sau một nhịp warmup 200 request:
+
+```go
+// Đoạn driver bắn tải qua loopback vào các route Todo của Bài 10 (8 luồng x 500 request)
+for i := range perWorker {
+	t0 := time.Now()
+	switch i % 10 {
+	case 0:
+		resp, err = client.Post(srv.URL+"/todos", "application/json", bytes.NewReader(payload))
+	case 1, 2:
+		resp, err = client.Get(srv.URL + "/todos")
+	default:
+		resp, err = client.Get(fmt.Sprintf("%s/todos/%d", srv.URL, (i%200)+1))
+	}
+	// Luôn đọc hết body và Close để tái sử dụng kết nối TCP keep-alive, đồng thời kiểm tra HTTP < 400!
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		badStatus.Add(1)
+	}
+	lats = append(lats, time.Since(t0))
+}
+```
+
+<TerminalOutput command="go run ./cmd/todoload" label="Apple M2 · Go 1.27.1" caption="Kết quả chạy thật trên Go 1.27.1 vào Todo service Bài 10: trong khi hàm encodeTodos đo lẻ hết 26,8 µs, chạy cả pipeline lộ ra 95 vòng GC, HeapInuse 3.704 KiB so với 1.377 KiB object sống, và p99 vọt gấp 6,9 lần p50.">
+```text
+reqs=4000 dur=110ms rps=36503 errors=0 p50=131µs p95=653µs p99=898µs gc_cycles=95 heap_objects=1377 KiB heap_inuse=3704 KiB
+```
+</TerminalOutput>
+
+Nhìn con số thật đó sẽ thấy ngay những điều `BenchmarkEncodeTodos` hoàn toàn mù tịt: `p50` chỉ mất `131 µs`, nhưng `p99` nhảy vọt **6,9 lần** lên `898 µs` do `POST /todos` giữ `store.mu.Lock()` khiến các luồng `GET` phải xếp hàng đợi, kèm theo `95` chu kỳ GC chạy nền trên `3.704 KiB` heap span (`gấp 2,7 lần` lượng `1.377 KiB` object sống).
+
+Khi dựng bài bắn tải `k6` hoặc `vegeta` trong container staging, giữ năm thói quen sau để số liệu đừng đánh lừa bạn:
+
+```javascript
+// todo-load.js — kịch bản k6 tối thiểu có bắn tốc độ đều và kiểm tra phản hồi
+import http from 'k6/http';
+import { check } from 'k6';
+
+export const options = {
+  scenarios: {
+    steady: {
+      executor: 'constant-arrival-rate',
+      rate: 200, timeUnit: '1s', duration: '3m', preAllocatedVUs: 20,
+    },
+  },
+  thresholds: { http_req_duration: ['p(99)<50'], http_req_failed: ['rate<0.01'] },
+};
+
+export default function () {
+  const res = http.get('http://todo-api:8080/todos');
+  check(res, { 'status 200': (r) => r.status === 200, 'json array': (r) => r.body.startsWith('[') });
+}
+```
+
+1. **Làm ấm (warmup) trước, tính số liệu sau**: loại bỏ pha mở pool TCP, làm đầy cache và nở span ban đầu khỏi bảng phân vị.
+2. **Dùng tải vòng hở (open-loop) theo RPS mục tiêu**: dùng `constant-arrival-rate` trong `k6` hoặc `vegeta -rate` để client tiếp tục gửi đúng nhịp ngay cả khi server bị khựng, lộ đúng độ dồn hàng đợi.
+3. **Bắt buộc kiểm tra mã HTTP và payload**: không có `check()`, một endpoint lỗi `500` trả lời trong `0,2 ms` sẽ trông như kỷ lục tốc độ!
+4. **Đừng để chính máy bắn tải bị nghẽn**: kiểm tra CPU máy bắn tải, giới hạn file descriptor (`ulimit -n`) và cổng ephemeral trước khi đổ lỗi cho server.
+5. **Chạy đủ lâu để GC và Prometheus kịp ghi nhận**: chạy vài phút thay vì vài trăm mili-giây để quét qua nhiều chu kỳ scrape `15s` và nhìn thấy nhịp GC ổn định trên biểu đồ RED/USE.
+
+Một khi microbenchmark hoặc macrobenchmark đã chứng minh rõ luồng nào đang vượt ngân sách hiệu năng, bước tiếp theo là soi thẳng tới đúng dòng code đốt CPU hay cấp phát heap — mình sẽ đi chi tiết ở bài sau [Profiling trong Go](/blog/go-profiling-pprof-flamegraphs-off-cpu-continuous/).
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Tải vòng kín (closed-loop) vs. vòng hở (open-loop)**: tải vòng kín bắt mỗi user ảo đợi phản hồi xong mới gửi tiếp (vô tình che bớt độ trễ xếp hàng); tải vòng hở bắn theo RPS cố định bất kể server chậm đi.
+- **Warmup window (pha làm ấm)**: khoảng chạy khởi động không tính vào số đo cuối để kết nối TCP, cache và heap span ổn định.
+- **Coordinated omission**: sai số thống kê kinh điển khi máy bắn tải bị chậm lây theo server, làm kết quả phân vị đuôi thấp hơn thực tế.
 
 </Concepts>
 
@@ -581,20 +1135,20 @@ Bạn có thể thử chuyển qua lại ba tình huống đo sai số ảo và 
 
 ## Điểm rút ra (Key takeaways)
 
-- **Dùng Histogram và bộ chỉ số RED/USE**: theo dõi `Rate`, `Errors` và phân vị `Duration` (p90/p99) bằng bucket Prometheus thay vì tin con số trung bình hay in debug log tràn lan.
-- **Đối chiếu cả OS RSS lẫn `HeapInuse` của Go**: biến bộ đếm CPU thành mức tải bằng `rate()` và soi song song `working_set` với `MemStats` để không tìm nhầm chỗ rò RAM.
-- **Khóa chặt `testing.B` chống số ảo**: kiểm tra lỗi trước, tách setup qua `b.ResetTimer()`, đẩy kết quả ra biến `Sink` (hoặc `b.Loop()`) và bật `-benchmem`.
-- **Chỉ tin `benchstat` có `p &lt; 0,05`**: lặp tối thiểu `-count=6..10` trên môi trường yên tĩnh, bỏ qua mọi "cải thiện" vẫn gắn dấu ngã `~`.
-- **Dùng Macrobenchmark khi tối ưu cấp hệ thống**: `e2e` + `k6` phơi bày rõ ảnh hưởng thật của GC, connection churn và pool tài nguyên dưới tải nhiều người dùng.
+- **Đo service bằng RED và tài nguyên bằng USE**: dùng Prometheus Histogram (`sum by (le)`) để tính chuẩn độ trễ đuôi cụm pod, tuyệt đối tránh dùng trung bình cộng hay Summary liên pod, và giữ label route sạch không nhét ID động.
+- **Soi song song `working_set` container với Go heap**: bọc `rate()` quanh bộ đếm CPU cộng dồn và đối chiếu `container_memory_working_set_bytes` với `runtime/metrics` (`HeapAlloc`, `HeapInuse`, `HeapReleased`) để phân biệt rò Go heap, phân mảnh span và rò bộ nhớ ngoài heap.
+- **Viết benchmark chống số ảo bằng `for b.Loop()` (Go 1.24+)**: tận dụng `b.Loop()` để tự reset timer và giữ biến qua `runtime.KeepAlive`, kiểm tra lỗi bằng `b.Fatal`, thay đổi đầu vào hằng số, và để ý hiệu ứng cache ấm ảo.
+- **Luôn kiểm định qua `benchstat` với `-count=10` và `p < 0,05`**: bỏ qua số đo 1 lần hoặc kết quả gắn dấu `~`, đọc đủ cả ba bảng (`sec/op`, `B/op`, `allocs/op`) cùng dòng `geomean`.
+- **Khép vòng kiểm chứng bằng macrobenchmark**: bắn tải có kiểm tra phản hồi bằng `k6`, `vegeta` hoặc `ghz` để bắt tranh chấp mutex, chu kỳ GC, nghẽn socket và giới hạn cgroup mà microbenchmark không thấy.
 
 ---
 
-## Câu hỏi tự kiểm tra
+## Câu hỏi ôn tập (Review questions)
 
-1. Làm thế nào một service báo thời gian xử lý trung bình rất đẹp (`12 ms`) trên Grafana nhưng 1% người dùng vẫn gặp timeout 700 ms, và Prometheus Histogram giải quyết chỗ mù đó như thế nào? *(Xem Mục 1)*
-2. Khi một pod Go sắp bị OOMKill ở `1,2 GiB`, `go_memstats_heap_alloc_bytes` lại chỉ báo `45 MiB`. Hãy kể ba chỗ nằm ngoài Go Heap có thể đang ngốn phần RAM còn lại. *(Xem Mục 2)*
-3. Tại sao ở kết quả chạy thật trên Apple M2, hàm `BenchmarkMaskEliminated` đo ra `0,31 ns/op` trong khi lưu kết quả qua biến `globalSink` lại ra `0,61 ns/op`? *(Xem Mục 3)*
-4. Nhìn vào bảng `benchstat v4.txt v6.txt` thực tế ở trên, tại sao `benchstat` in dấu `~ (p=0.240)` ở dòng tốc độ `sec/op` nhưng vẫn kết luận chắc nịch giảm `-99,98% (p=0.002)` ở dòng bộ nhớ `B/op`? *(Xem Mục 4)*
-5. Những vấn đề thực tế nào (nhịp GC, tác dụng ngược của `sync.Pool`, bóp CPU container) mà macrobenchmark `k6` phát hiện được còn microbenchmark đơn lẻ thì chịu thua? *(Xem Mục 4)*
+1. Tại sao lấy trung bình cộng `p99` từ Prometheus `Summary` giữa hai pod Kubernetes lại cho ra con số sai, và các xô `le` của `Histogram` giải quyết chuyện đó thế nào? *(Xem mục "Tín hiệu đo lường: RED, USE và histogram")*
+2. Khi `container_memory_working_set_bytes` chạm `900 MiB` trong lúc `HeapAlloc` đứng yên ở `40 MiB`, phần RAM kia có thể đang nằm ở đâu, và bạn dựa vào đâu để phân biệt rò ngoài heap với phân mảnh span bên trong Go heap? *(Xem mục "Đọc đúng CPU và RAM: container và Go runtime")*
+3. Vì sao `BenchmarkLookupNoReset` báo tới `25.382 ns/op` và `6.736 B/op` ở lượt đầu tiên trong khi `BenchmarkPopcntIgnored` lại chạy `1.000.000.000` lần với `0,34 ns/op` — và `for b.Loop()` xử lý cả hai lỗi đó ra sao? *(Xem mục "Viết microbenchmark sao cho không tự lừa mình")*
+4. Nhìn vào kết quả `benchstat` thật của `EncodeTodos`, bản `v2` giảm `sec/op` tới `-28,24% geomean` và `-75,00% allocs/op`, vậy vì sao `B/op` ở mức `200` phần tử lại tăng `+11,86%`? Còn giữa `AtomicStore32` và `AtomicStore64`, vì sao `benchstat` lại in `~ (p=0.853)`? *(Xem mục "Chứng minh bằng thống kê với benchstat")*
+5. Vì sao chạy macrobenchmark trên `Todo` service của Bài 10 lại lộ độ chênh `6,9x` giữa `p50` (`131 µs`) và `p99` (`898 µs`) cùng `95` vòng GC dù microbenchmark hàm `encodeTodos` trông rất gọn? *(Xem mục "Macrobenchmark: đo toàn bộ service khi chạy thật")*
 
 </Vi>
