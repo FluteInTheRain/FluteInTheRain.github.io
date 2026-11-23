@@ -1198,13 +1198,13 @@ const B = {
 const backend: Series = {
   id: 'backend',
   title: {
-    en: 'How backend actually works',
-    vi: 'Hiểu đúng bản chất Backend',
+    en: 'Backend with Python FastAPI',
+    vi: 'Backend với Python FastAPI',
   },
   kicker: { en: 'A 12-part series', vi: 'Series 12 bài' },
   tagline: {
-    en: 'Backend knowledge first, with Python and FastAPI as the running demo — the judgment AI still can’t write for you.',
-    vi: 'Kiến thức backend là chính, Python và FastAPI chỉ là bài demo chạy suốt — phần phán đoán mà AI chưa viết hộ được.',
+    en: 'Backend foundations and FastAPI, learned together: each idea, then how FastAPI does it — the judgment AI still can’t write for you.',
+    vi: 'Nền tảng backend và FastAPI học cùng lúc: hiểu ý tưởng, rồi xem FastAPI làm nó thế nào — phần phán đoán mà AI chưa viết hộ được.',
   },
   pitch: [
     {
@@ -1212,13 +1212,13 @@ const backend: Series = {
       vi: 'AI dựng service FastAPI chỉ trong vài giây. Nhưng nó vẫn POST hết mọi thứ, nhét SQL ngay trong router, chặn event loop bằng lời gọi sync, và không kèm test, log hay timeout — vì backend là phán đoán, không phải cú pháp.',
     },
     {
-      en: 'Each post takes one competence — the request lifecycle, API design, layering, data access, async, auth, caching, testing, observability, performance, deploys — explains the idea, then demonstrates it on a small running Python service you can rebuild yourself.',
-      vi: 'Mỗi bài đi gọn một năng lực — vòng đời request, thiết kế API, phân tầng, truy cập dữ liệu, async, auth, caching, testing, observability, hiệu năng, triển khai — nói rõ ý, rồi demo ngay trên một service Python nhỏ mà bạn có thể tự dựng lại.',
+      en: 'Each post takes one competence — the request lifecycle, API design, layering, data access, async, auth, caching, testing, observability, performance, deploys — explains the backend idea, then builds it with FastAPI on a small running Python service you can rebuild yourself.',
+      vi: 'Mỗi bài đi gọn một năng lực — vòng đời request, thiết kế API, phân tầng, truy cập dữ liệu, async, auth, caching, testing, observability, hiệu năng, triển khai — nói rõ ý tưởng backend, rồi dựng nó bằng FastAPI trên một service Python nhỏ mà bạn có thể tự dựng lại.',
     },
   ],
   credit: {
-    en: 'Backend knowledge demonstrated in Python with FastAPI. FastAPI: Modern Python Web Development (Bill Lubanovic, O’Reilly 2023) is one of the references, alongside MDN, OWASP, the 12-factor app, and official docs.',
-    vi: 'Kiến thức backend minh họa bằng Python với FastAPI. FastAPI: Modern Python Web Development (Bill Lubanovic, O’Reilly 2023) là một trong các tài liệu tham khảo, bên cạnh MDN, OWASP, 12-factor app và tài liệu chính thức.',
+    en: 'Backend foundations and FastAPI, taught side by side. FastAPI: Modern Python Web Development (Bill Lubanovic, O’Reilly 2023) is one of the references, alongside MDN, OWASP, the 12-factor app, and official docs.',
+    vi: 'Nền tảng backend và FastAPI, dạy song song. FastAPI: Modern Python Web Development (Bill Lubanovic, O’Reilly 2023) là một trong các tài liệu tham khảo, bên cạnh MDN, OWASP, 12-factor app và tài liệu chính thức.',
   },
   // The plate is the series' own demo service: the page every FastAPI app gives you for free.
   cover: {

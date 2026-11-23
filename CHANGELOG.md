@@ -3,12 +3,13 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
-## 2026-11-23 — Trang series: Mục lục dùng nhãn của sơ đồ, bỏ dòng mô tả lộ trình "Đọc hết"
+## 2026-11-23 — Trang series: Mục lục dùng nhãn của sơ đồ, bỏ dòng mô tả lộ trình "Đọc hết", đổi tên series backend
 
 - **Đã làm (branch `fix/series-page-contents-topics`):** `SeriesContents.astro` lấy tiêu đề mỗi dòng từ `part.topic` (đúng nhãn ô trong sơ đồ đọc phía trên) thay vì title bài viết — áp dụng cho mọi series vì component dùng chung. Xoá `who` của path `full` ở cả 6 series (vd. "Từ byte đầu tiên của request tới bản deploy không downtime."); `SeriesPath.who` thành optional, `SeriesMap.astro` chỉ render dòng `who` khi có.
 - **Ai quyết:** user yêu cầu (title Mục lục khớp sơ đồ; xoá dòng mô tả, áp dụng mọi series). Mở rộng việc đổi tiêu đề Mục lục sang mọi series là AI quyết, vì component dùng chung.
+- **Đổi tên series backend:** "How backend actually works" → **"Backend with Python FastAPI"** / "Backend với Python FastAPI". Tagline, pitch đoạn 2 và credit viết lại: series dạy **cả** nền tảng backend **lẫn** FastAPI (trước đây ghi FastAPI "chỉ là demo"). User quyết; câu chữ tagline/pitch do AI viết.
 - **Kiểm tra:** build 68 pages + 47 test sạch.
-- **Chưa chốt:** title bài viết (frontmatter) giữ nguyên, vẫn hiện ở trang bài, blog index, series card, pager.
+- **Chưa chốt:** spec `docs/superpowers/specs/2026-11-21-backend-series-design.md` vẫn dùng tên cũ và hướng "knowledge-first"; các bài draft 2–4 chưa rà lại theo hướng mới. Title bài viết (frontmatter) giữ nguyên, vẫn hiện ở trang bài, blog index, series card, pager.
 
 ## 2026-11-23 — Wave A series backend: viết bài 2–4 (draft) theo công thức pilot
 
