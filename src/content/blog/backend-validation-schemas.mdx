@@ -1,0 +1,629 @@
+---
+title: "The checkpoint before your code"
+title_vi: "Trạm kiểm soát trước code của bạn"
+description: "Every request is a stranger until a model says otherwise: Pydantic v2 at the boundary, FastAPI's 422 before your handler runs, and a response that never leaks a field."
+description_vi: "Request nào tới cũng là người lạ, cho tới khi một model chịu nhận: Pydantic canh ngay cửa API, 422 sinh ra trước khi handler chạy, response chỉ chứa field trong hợp đồng."
+date: 2026-11-23
+category: "backend"
+tags: ["backend", "python", "fastapi", "pydantic", "validation"]
+cover: "../../assets/blog/backend-validation-schemas/swagger-422-cover.png"
+cover_alt: "Swagger UI of clue.api with POST /cases executed on bad input: the live response 422 Unprocessable Content with the structured error body — type, loc and msg per broken rule"
+draft: true
+sources:
+  - { title: "FastAPI: Modern Python Web Development", author: "Bill Lubanovic", chapters: "Ch. 5", url: "https://www.oreilly.com/library/view/fastapi/9781098135091/" }
+  - { title: "Pydantic documentation", author: "Pydantic Services SAS", url: "https://docs.pydantic.dev/latest/" }
+  - { title: "Request Body", author: "FastAPI documentation", url: "https://fastapi.tiangolo.com/tutorial/body/" }
+  - { title: "Handling Errors", author: "FastAPI documentation", url: "https://fastapi.tiangolo.com/tutorial/handling-errors/" }
+  - { title: "Response Model - Return Type", author: "FastAPI documentation", url: "https://fastapi.tiangolo.com/tutorial/response-model/" }
+  - { title: "422 Unprocessable Content", author: "MDN Web Docs", url: "https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/status/422" }
+  - { title: "Input Validation Cheat Sheet", author: "OWASP Cheat Sheet Series", url: "https://cheatsheetseries.owasp.org/cheatsheets/Input_Validation_Cheat_Sheet.html" }
+  - { title: "The Heartbleed Bug", author: "Codenomicon", url: "https://heartbleed.com/" }
+  - { title: "Immigrants seated on long benches, Main Hall, U.S. Immigration Station, Ellis Island, ca. 1907-1912 (No known copyright restrictions)", author: "New York Public Library", url: "https://commons.wikimedia.org/wiki/File:Immigrants_seated_on_long_benches,_Main_Hall,_U.S._Immigrati..._(3110152392).jpg" }
+---
+
+import En from '../../components/mdx/En.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
+import BeP03TrustWall from '../../components/mdx/BeP03TrustWall.astro';
+import BeP03FailFast from '../../components/mdx/BeP03FailFast.astro';
+import BeP03Anatomy422 from '../../components/mdx/BeP03Anatomy422.astro';
+import BeP03ModelOnce from '../../components/mdx/BeP03ModelOnce.astro';
+import BeP03ResponseMask from '../../components/mdx/BeP03ResponseMask.astro';
+import BeP03ReviewHabit from '../../components/mdx/BeP03ReviewHabit.astro';
+import heroInspectionFloor from '../../assets/blog/backend-validation-schemas/ellis-island-inspection-floor.jpg';
+import swaggerSchema from '../../assets/blog/backend-validation-schemas/swagger-casecreate-schema.png';
+
+<En>
+
+<Figure src={heroInspectionFloor} alt="The Main Hall of the Ellis Island immigration station around 1907-1912: long wooden benches in rows across a tall hall, a few arrivals seated, a large American flag hanging from the balcony" caption="The inspection floor at Ellis Island, around 1907-1912. Arrivals waited on these benches for the desks behind the railing, and the registry on the other side only ever recorded people a clerk had actually checked. Nothing entered the ledger unexamined — and nothing left the desks in a shape the ledger didn't define. Your API is that hall." sourceTitle="New York Public Library — Immigrants seated on long benches, Main Hall, U.S. Immigration Station" sourceUrl="https://commons.wikimedia.org/wiki/File:Immigrants_seated_on_long_benches,_Main_Hall,_U.S._Immigrati..._(3110152392).jpg" />
+
+> "An internal transport does not establish that a value meets the receiving component's rules."
+> &mdash; *OWASP, Input Validation Cheat Sheet*
+
+### The hook: the request that lied about its length
+
+In April 2014 the internet learned that a two-year-old mistake had been letting strangers read server memory. TLS has a heartbeat extension (RFC 6520): one end of a connection asks the other to echo a short payload, just to prove the line is alive. The request carries the payload *and a declared length* — and the vulnerable OpenSSL versions believed the declared length. They read that many bytes and sent them back without ever checking the claim against the payload that actually arrived. Send one byte, claim 64 kilobytes, receive 64 kilobytes of whatever sat in the buffer — on a busy server, private keys, session tickets, passwords ([Codenomicon, heartbleed.com](https://heartbleed.com/)). It had been in the wild since March 2012, and exploitation "does not leave any trace of anything abnormal happening to the logs."
+
+That is the purest form of the problem this post is about: a request arrived making a claim, and the boundary believed it. Every API you ship has the same shape. Requests arrive saying "this is a title, three to a hundred and twenty characters" — but bytes get truncated by proxies, written by half-finished scripts, and crafted on purpose. Somewhere between the socket and your handler, someone has to decide whether to believe them. Where that decision lives, and what it costs, is backend judgment — the part that stays yours even when a model writes the endpoint in seconds.
+
+This post walks one endpoint, clue.api's case intake, through four questions:
+
+1. **Where trust ends**: the untyped dict endpoint and the typed model, live, side by side.
+2. **Fail fast**: where FastAPI's 422 is actually born — before your handler runs — and why that beats rotting later.
+3. **The contract**: the same model publishes itself to `/docs` and filters what goes back out, so internal fields can't leak.
+4. **The habit**: what AI-generated endpoints get wrong here, and the three-minute check that catches it.
+
+One scope line before we walk in: this post is about **runtime input validation at one API boundary** — what a request must prove to get in. How schemas evolve across versions without breaking old callers is a different problem, and it lives on the data-systems side: [Encoding and schema evolution](/blog/encoding-and-schema-evolution/) has it.
+
+---
+
+## 1. Where trust ends
+
+Everything the network hands you is a stranger's claim. The check can happen anywhere along the road: scattered through the handler, halfway into storage, deep in a nightly job. OWASP's rule for where it must happen is blunt — data crosses a **trust boundary** even when it arrives from your own queue, your own partner feed, or your own database, and "an internal transport does not establish that a value meets the receiving component's rules" ([Input Validation Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/Input_Validation_Cheat_Sheet.html)).
+
+The cheapest place to put the check is the first thing the request touches. Here is the demo service at this post's stage — `demo/schemas.py`, case intake for clue.api, written both ways on purpose:
+
+```python
+"""The backend series' tiny demo service — post 3 stage: typed boundaries.
+
+clue.api grows case intake. The endpoint takes a Pydantic v2 model, so input
+is checked at the boundary — FastAPI answers bad JSON with a structured 422
+before the handler runs — and answers with a response_model, so internal
+fields cannot leak back out. POST /cases/raw is the untyped twin: it takes
+any dict, which is exactly what AI-generated endpoints usually do.
+
+Run it with the stack the series posts are captured on:
+
+    cd demo
+    uv run --python 3.13 --with 'fastapi==0.165.0' --with 'uvicorn[standard]' \
+        uvicorn schemas:app --port 4327
+
+Then, from another terminal:
+
+    curl -s -X POST http://127.0.0.1:4327/cases/raw \
+        -H 'content-type: application/json' -d '{"title": "???"}'
+    curl -s -X POST http://127.0.0.1:4327/cases \
+        -H 'content-type: application/json' -d '{"title": "???"}'
+"""
+
+from datetime import datetime, timezone
+from uuid import uuid4
+
+from fastapi import FastAPI
+from pydantic import BaseModel, Field
+
+app = FastAPI(title="clue.api", version="0.2.0")
+
+
+class CaseCreate(BaseModel):
+    """What a new case must prove at the door to be let in."""
+
+    title: str = Field(min_length=3, max_length=120)
+    case_code: str = Field(pattern=r"^CLUE-[0-9]{4}$")
+    priority: int = Field(ge=1, le=5, description="1 = someday, 5 = drop everything")
+    reward: float = Field(ge=0, le=100_000)
+
+
+class CaseOut(BaseModel):
+    """The contract callers see: no reporter IP, no triage score."""
+
+    case_id: str
+    title: str
+    case_code: str
+    priority: int
+    reward: float
+    status: str
+    opened_at: datetime
+
+
+@app.post("/cases/raw")
+async def create_case_raw(payload: dict) -> dict:
+    """The untyped version: anything that parses as JSON is 'valid' here."""
+    return {"accepted": payload}
+
+
+@app.post("/cases", response_model=CaseOut, status_code=201)
+async def create_case(case: CaseCreate) -> dict:
+    # Proof in the captures: this line never runs when validation fails —
+    # the 422 is emitted before the handler is called.
+    print(f"handler running: {case.case_code}")
+    # The boundary already did its job: every field of `case` is in range
+    # and the code matches the pattern. The handler only builds the record.
+    record = {
+        "case_id": uuid4().hex[:8],
+        **case.model_dump(),
+        "status": "open",
+        "opened_at": datetime.now(timezone.utc),
+        # Two fields no caller should ever see:
+        "reporter_ip": "203.0.113.7",
+        "triage_score": 87,
+    }
+    return record
+```
+
+Two doors, one wall apart. `POST /cases/raw` takes `payload: dict` — the way generated code usually writes it; anything that parses as JSON is valid here. `POST /cases` takes a `CaseCreate`: a title of 3 to 120 characters, a `case_code` matching `^CLUE-[0-9]{4}$`, a priority from 1 to 5, a reward from 0 to 100,000.
+
+Send the same junk to both doors:
+
+<TerminalOutput command={"curl -si -X POST http://127.0.0.1:4327/cases/raw -H 'content-type: application/json' -d '{\"title\": \"??\", \"priority\": 9}'"} label="Python 3.13 · FastAPI 0.165 · Pydantic 2.14 · captured Nov 2026" caption="The untyped door. A two-character title and a priority of 9 walk straight in, and the server politely echoes the junk back.">
+```text
+HTTP/1.1 200 OK
+date: Mon, 23 Nov 2026 07:41:58 GMT
+server: uvicorn
+content-length: 40
+content-type: application/json
+
+{"accepted":{"title":"??","priority":9}}
+```
+</TerminalOutput>
+
+<TerminalOutput command={"curl -si -X POST http://127.0.0.1:4327/cases -H 'content-type: application/json' -d '{\"title\": \"??\", \"case_code\": \"clue-42!\", \"priority\": 9, \"reward\": -50}'"} label="Python 3.13 · FastAPI 0.165 · Pydantic 2.14 · captured Nov 2026" caption="The typed door. Same junk, four broken rules — and the response says which four, field by field.">
+```text
+HTTP/1.1 422 Unprocessable Content
+date: Mon, 23 Nov 2026 07:41:58 GMT
+server: uvicorn
+content-length: 579
+content-type: application/json
+
+{"detail":[{"type":"string_too_short","loc":["body","title"],"msg":"String should have at least 3 characters","input":"??","ctx":{"min_length":3}},{"type":"string_pattern_mismatch","loc":["body","case_code"],"msg":"String should match pattern '^CLUE-[0-9]{4}$'","input":"clue-42!","ctx":{"pattern":"^CLUE-[0-9]{4}$"}},{"type":"less_than_equal","loc":["body","priority"],"msg":"Input should be less than or equal to 5","input":9,"ctx":{"le":5}},{"type":"greater_than_equal","loc":["body","reward"],"msg":"Input should be greater than or equal to 0","input":-50,"ctx":{"ge":0.0}}]}
+```
+</TerminalOutput>
+
+The untyped door answered 200 OK and echoed the junk. The typed door answered 422 with four errors — one per broken rule — and your handler never ran:
+
+<BeP03TrustWall />
+
+That wall is the whole idea. The model is the door; your code lives behind it and only ever meets checked values. Notice also what the rules themselves are: OWASP's field table reads like a description of `CaseCreate` — strings get length limits and a required shape, numbers get a type plus minimum and maximum, objects get required fields. And the strategy is **allow-list, not deny-list**: define what you accept and reject everything outside it; do not try to recognize every malicious string. `Field(pattern=r"^CLUE-[0-9]{4}$")` accepts exactly one shape. A denylist that strips "suspicious characters" would reject legitimate names and still not make the database query safe — that's a different control, parameterization, not validation.
+
+<Concepts>
+- **Trust boundary**: the line where data crosses from "not ours" to "ours". A request crosses one — and so does a message off your own queue, or a row read back from your own database.
+- **Pydantic model**: a `BaseModel` class that describes data with types and constraints. Pydantic checks every field against it while building the instance — here, the instance is built at the API door.
+- **422 Unprocessable Content**: "I understood the content type, and the JSON was well-formed, but I can't process this." RFC 9110 renamed it from "Unprocessable Entity", which is why the status line above doesn't say what older docs quote.
+- **Allow-list validation**: declare what is accepted — lengths, ranges, shapes — and reject the rest. The opposite, deny-listing, chases every bad input you can imagine and misses the ones you can't.
+</Concepts>
+
+---
+
+## 2. Fail fast, at the door
+
+Where does that 422 come from? Not from your code. FastAPI routes the request, reads and parses the body — even undecodable JSON dies at this step, with error type `json_invalid` — runs the whole `CaseCreate` validation, and only then calls your handler with a checked instance ([Request Body](https://fastapi.tiangolo.com/tutorial/body/)).
+
+The proof is a print. The first line of `create_case` logs `handler running: ...` — watch the server's own log for one bad request and one valid one:
+
+<TerminalOutput command="uvicorn schemas:app — then two curls: bad input, valid input" label="uvicorn server log · Python 3.13 · FastAPI 0.165 · captured Nov 2026" caption="Read it twice. The 422 line has no 'handler running' above it — the request died at the boundary. The 201 does.">
+```text
+INFO:     Started server process [59766]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:4327 (Press CTRL+C to quit)
+INFO:     127.0.0.1:65002 - "POST /cases HTTP/1.1" 422 Unprocessable Content
+handler running: CLUE-1902
+INFO:     127.0.0.1:65003 - "POST /cases HTTP/1.1" 201 Created
+```
+</TerminalOutput>
+
+That is **fail fast**: bad input stops at the door, costs one round trip, and leaves nothing behind for anyone downstream to clean up. The other option is rot-later — accept the dict, let the handler assume "priority will be a number", let the junk travel:
+
+<BeP03FailFast />
+
+The comparison is not hypothetical. Junk that reaches storage stops being "a bad request someone made" and becomes "a row someone else reads" — the nightly job, the analytics consumer, the next service over. Heartbleed is the extreme case of rot: the boundary believed a claim, and for two years nothing abnormal ever showed up in a single log ([heartbleed.com](https://heartbleed.com/)).
+
+Now the rejection itself. It is not a string — it's a list of error objects, and each one is meant to be read by a different reader. Pull the first out of the capture above:
+
+<BeP03Anatomy422 />
+
+- `loc` — where in the request the problem sits: `["body", "title"]` is body → title. A frontend can scroll to that field, highlight it, put the message next to it.
+- `type` — which rule failed, machine-readable: `string_too_short`, `string_pattern_mismatch`, `less_than_equal`. Your client code can branch on it without parsing any sentence.
+- `msg` — a human sentence, safe to show as-is.
+- `input` and `ctx` — the offending value and the constraint it broke, echoed back so the caller can see their own mistake.
+
+Why 422 and not 400? MDN draws the line: the server "understood the content type of the request content, and the syntax of the request content was correct, but it was unable to process the contained instructions" ([422 Unprocessable Content](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/status/422)). The JSON parsed fine; the rules said no. And the whole structured body is just FastAPI's default handler for `RequestValidationError` — if your API owes callers a different error shape, you can override that one handler and keep everything else ([Handling Errors](https://fastapi.tiangolo.com/tutorial/handling-errors/)).
+
+<Concepts>
+- **Fail fast**: reject invalid input as close to the door as possible. The further junk travels — handler, storage, downstream jobs — the more of your system it touches and the harder the cleanup.
+- **json_invalid**: the error type when the body can't even be parsed as JSON. Same 422, emitted before Pydantic looks at a single field.
+- **RequestValidationError**: the exception FastAPI raises internally when request validation fails. Its default handler produces the structured 422 body; register your own `@app.exception_handler(RequestValidationError)` to change the shape.
+</Concepts>
+
+---
+
+## 3. The model is a contract
+
+The class you wrote for the door has two more jobs, and neither costs a line of extra code.
+
+First, it documents itself. FastAPI derives a JSON Schema from `CaseCreate` and publishes it in `openapi.json` — the rules, generated from the same class the boundary enforces:
+
+<TerminalOutput command="curl -s http://127.0.0.1:4327/openapi.json | jq .components.schemas.CaseCreate" label="Python 3.13 · FastAPI 0.165 · Pydantic 2.14 · captured Nov 2026" caption="Every Field constraint from the code — lengths, pattern, ranges — plus the required list, plus the docstring as the description. Nobody maintains this page by hand.">
+```text
+{
+  "properties": {
+    "title": {
+      "type": "string",
+      "maxLength": 120,
+      "minLength": 3,
+      "title": "Title"
+    },
+    "case_code": {
+      "type": "string",
+      "pattern": "^CLUE-[0-9]{4}$",
+      "title": "Case Code"
+    },
+    "priority": {
+      "type": "integer",
+      "maximum": 5.0,
+      "minimum": 1.0,
+      "title": "Priority",
+      "description": "1 = someday, 5 = drop everything"
+    },
+    "reward": {
+      "type": "number",
+      "maximum": 100000.0,
+      "minimum": 0.0,
+      "title": "Reward"
+    }
+  },
+  "type": "object",
+  "required": [
+    "title",
+    "case_code",
+    "priority",
+    "reward"
+  ],
+  "title": "CaseCreate",
+  "description": "What a new case must prove at the door to be let in."
+}
+```
+</TerminalOutput>
+
+The same file feeds Swagger UI at `/docs`, so callers read the rules before ever sending anything. This is the live page of this service — a real capture, not a mock:
+
+<Figure src={swaggerSchema} alt="Swagger UI's Schemas section for clue.api with the CaseCreate model expanded: title is a string of 3 to 120 characters, case_code matches the CLUE pattern, priority is an integer from 1 to 5, reward is a number from 0 to 100000" caption="The CaseCreate section of /docs. FastAPI even synthesized an example body that satisfies the pattern — CLUE-8987 — because the example generator reads the same constraints the validator does. The docs aren't prose someone keeps updated; they're derived." />
+
+One class, three jobs:
+
+<BeP03ModelOnce />
+
+Second, the model filters what leaves. Look back at the handler: the record it builds has nine fields, two of which nobody should ever see — the reporter's IP and the internal triage score. But the decorator says `response_model=CaseOut`, and `CaseOut` declares seven fields. Send a valid case:
+
+<TerminalOutput command={"curl -si -X POST http://127.0.0.1:4327/cases -H 'content-type: application/json' -d '{\"title\": \"The case of the stolen schema\", \"case_code\": \"CLUE-1902\", \"priority\": 3, \"reward\": 5000}'"} label="Python 3.13 · FastAPI 0.165 · Pydantic 2.14 · captured Nov 2026" caption="201 Created, and exactly the seven fields CaseOut declares. The reporter's IP and the triage score never left the building.">
+```text
+HTTP/1.1 201 Created
+date: Mon, 23 Nov 2026 07:41:58 GMT
+server: uvicorn
+content-length: 173
+content-type: application/json
+
+{"case_id":"1b68a63a","title":"The case of the stolen schema","case_code":"CLUE-1902","priority":3,"reward":5000.0,"status":"open","opened_at":"2026-11-23T07:41:58.139868Z"}
+```
+</TerminalOutput>
+
+<BeP03ResponseMask />
+
+The FastAPI docs make the same point with a scarier example: a sign-up endpoint that returns its own input model, and the plaintext password rides back out in the response ([Response Model - Return Type](https://fastapi.tiangolo.com/tutorial/response-model/)). Declare a separate output model and "FastAPI will take care of filtering out all the data that is not declared in the output model". The handler's dict is not the contract — `CaseOut` is. The mask also runs the other way: FastAPI validates the outgoing data against `CaseOut`, so a handler bug that returns garbage becomes a server error, not a payload your callers have to survive.
+
+<Concepts>
+- **JSON Schema**: a JSON document describing data — which fields exist, their types, their constraints. Pydantic generates one from each model; FastAPI collects them into `openapi.json`.
+- **OpenAPI**: the machine-readable description of a whole API — paths, parameters, schemas. `/docs` is just one viewer for it; client generators are another.
+- **response_model**: the decorator parameter that declares the shape of what goes back out. FastAPI validates, serializes and **filters** the return value through it — undeclared fields never reach the caller.
+</Concepts>
+
+---
+
+## 4. Never meet a stranger
+
+This is the part the machine still gets wrong. An AI writes a working endpoint in seconds — and writes it trusting the caller, because each habit below *looks* like working code, and does work, until the first stranger arrives:
+
+<Callout type="warning" title="The AI habit to break">
+Generated endpoints trust client input. Three tells: `payload: dict` at the top of the handler — no door at all; manual `if "title" not in payload` checks scattered through the body — the rules exist, but they drift and junk still gets in; and a hand-built `return {...}` — the response is whatever the last refactor happened to leave in the dict. All three pass review when the tests only ever send valid input.
+</Callout>
+
+So when you review an endpoint — yours, a teammate's, or a model's — three checks, three minutes, in this order:
+
+1. **Read the signature.** What type goes in, what comes out? `dict` in, `dict` out means the boundary is a hope, not a door.
+2. **Curl some garbage.** Wrong type, out of range, missing field. A structured 422 with `loc` and `type` is a pass; a 200 echo, a 500, or a stack trace is the finding.
+3. **Read the response body.** Add an internal field to the handler's result and re-run. If it reaches the caller, there is no mask.
+
+<BeP03ReviewHabit />
+
+Heartbleed's missing bounds check and the dict-shaped endpoint are the same species of bug: a boundary that believed a claim. The fix is also the same — one place that checks every claim, before the code behind the door ever runs. **The network is full of strangers. A typed boundary is how your handler never has to meet one.**
+
+</En>
+
+<Vi>
+
+<Figure src={heroInspectionFloor} alt="Sảnh chính (Main Hall) của trạm nhập cư Ellis Island khoảng 1907-1912: những hàng ghế gỗ dài đặt trong khối nhà cao rộng, vài người nhập cư đang ngồi, lá cờ Mỹ lớn treo từ ban công" caption="Sàn kiểm tra ở Ellis Island, khoảng 1907-1912. Người đến xếp hàng trên những hàng ghế này, chờ tới các bàn kiểm tra sau lan can, và phía bên kia sổ đăng ký chỉ ghi lại những người đã qua kiểm tra. Không có ai vào sổ mà chưa được soi — và không có dòng nào rời bàn kiểm tra theo hình dạng ngoài quy định sổ sách. API của bạn cũng là sảnh ấy." sourceTitle="New York Public Library — Immigrants seated on long benches, Main Hall, U.S. Immigration Station" sourceUrl="https://commons.wikimedia.org/wiki/File:Immigrants_seated_on_long_benches,_Main_Hall,_U.S._Immigrati..._(3110152392).jpg" />
+
+> "Một đường truyền nội bộ không chứng minh được rằng giá trị đáp ứng quy tắc của bên nhận."
+> &mdash; *OWASP, Input Validation Cheat Sheet*
+
+### Mở đầu: lời khai sai về độ dài
+
+Tháng 4 năm 2014, cả internet mới biết một lỗi hai năm tuổi đã để người lạ đọc được bộ nhớ của server. TLS có phần mở rộng heartbeat (RFC 6520): một đầu connection nhờ đầu kia đọc lại một đoạn dữ liệu ngắn, chỉ để chứng minh đường truyền còn sống. Request mang theo payload *kèm một độ dài tự khai* — và các bản OpenSSL dính lỗi tin ngay độ dài tự khai đó. Chúng đọc bấy nhiêu byte và gửi trả lại, không bao giờ đối chiếu lời khai với payload thực sự nhận được. Gửi một byte, khai 64 kilobyte, nhận lại 64 kilobyte của bất cứ gì đang nằm cạnh trong buffer — trên một server bận rộn, đó là private key, session ticket, mật khẩu ([Codenomicon, heartbleed.com](https://heartbleed.com/)). Lỗi nằm ngoài đời từ tháng 3/2012, và khai thác nó "không để lại dấu vết gì bất thường trong log".
+
+Đó chính là hình dạng thuần nhất của vấn đề mình nói trong bài này: một request tới kèm lời khẳng định, và biên giới tin lời. Mọi API bạn viết ra đều có cấu trúc y hệt. Request tới và khai "đây là title, dài từ 3 đến 120 ký tự" — nhưng byte bị proxy cắt cụt, script viết dở, có khi bị bơm có chủ đích. Ở đâu đó giữa socket và handler của bạn, phải có một nơi ra quyết định tin hay không. Chỗ đặt quyết định đó, và giá của nó, mới là phần phán đoán của backend — phần vẫn là của bạn dù AI viết endpoint chỉ trong vài giây.
+
+Bài này đi theo một endpoint duy nhất, lối nhận case của clue.api, qua bốn câu:
+
+1. **Nơi niềm tin kết thúc**: endpoint nhận dict và endpoint nhận model, chạy thật, đặt cạnh nhau.
+2. **Chết sớm**: 422 của FastAPI sinh ra ở đâu — trước khi handler chạy — và vì sao điều đó tốt hơn để rác thối dần.
+3. **Bản hợp đồng**: chính model đó tự xuất bản lên `/docs` và lọc phần gửi ra, để field nội bộ không lọt nổi.
+4. **Thói quen**: endpoint do AI viết hay sai ở đâu, và ba phút kiểm tra bắt được nó.
+
+Một dòng giới hạn trước khi bước vào: bài này nói về **runtime input validation tại một biên API** — request phải chứng minh gì mới được vào. Còn chuyện schema tiến hoá qua các phiên bản mà không làm vỡ caller cũ là một bài toán khác, thuộc về mảng hệ thống dữ liệu: [Encoding and schema evolution](/blog/encoding-and-schema-evolution/) đã viết riêng.
+
+---
+
+## 1. Nơi niềm tin kết thúc
+
+Mọi thứ mạng đẩy vào tay bạn đều là lời khai của người lạ. Kiểm tra có thể đặt ở bất kỳ đâu trên đường đi: rải rác trong handler, nửa chừng vào kho dữ liệu, sâu trong job chạy đêm. OWASP nói thẳng chỗ bắt buộc phải có — dữ liệu đi qua **ranh giới niềm tin (trust boundary)** kể cả khi nó đến từ queue của chính bạn, feed của partner, hay database của chính bạn, và "một đường truyền nội bộ không chứng minh được rằng giá trị đáp ứng quy tắc của bên nhận".
+
+Chỗ rẻ nhất để đặt kiểm tra là điểm chạm đầu tiên của request. Đây là demo service ở giai đoạn bài này — `demo/schemas.py`, lối nhận case của clue.api, cố tình viết cả hai kiểu:
+
+```python
+"""The backend series' tiny demo service — post 3 stage: typed boundaries.
+
+clue.api grows case intake. The endpoint takes a Pydantic v2 model, so input
+is checked at the boundary — FastAPI answers bad JSON with a structured 422
+before the handler runs — and answers with a response_model, so internal
+fields cannot leak back out. POST /cases/raw is the untyped twin: it takes
+any dict, which is exactly what AI-generated endpoints usually do.
+
+Run it with the stack the series posts are captured on:
+
+    cd demo
+    uv run --python 3.13 --with 'fastapi==0.165.0' --with 'uvicorn[standard]' \
+        uvicorn schemas:app --port 4327
+
+Then, from another terminal:
+
+    curl -s -X POST http://127.0.0.1:4327/cases/raw \
+        -H 'content-type: application/json' -d '{"title": "???"}'
+    curl -s -X POST http://127.0.0.1:4327/cases \
+        -H 'content-type: application/json' -d '{"title": "???"}'
+"""
+
+from datetime import datetime, timezone
+from uuid import uuid4
+
+from fastapi import FastAPI
+from pydantic import BaseModel, Field
+
+app = FastAPI(title="clue.api", version="0.2.0")
+
+
+class CaseCreate(BaseModel):
+    """What a new case must prove at the door to be let in."""
+
+    title: str = Field(min_length=3, max_length=120)
+    case_code: str = Field(pattern=r"^CLUE-[0-9]{4}$")
+    priority: int = Field(ge=1, le=5, description="1 = someday, 5 = drop everything")
+    reward: float = Field(ge=0, le=100_000)
+
+
+class CaseOut(BaseModel):
+    """The contract callers see: no reporter IP, no triage score."""
+
+    case_id: str
+    title: str
+    case_code: str
+    priority: int
+    reward: float
+    status: str
+    opened_at: datetime
+
+
+@app.post("/cases/raw")
+async def create_case_raw(payload: dict) -> dict:
+    """The untyped version: anything that parses as JSON is 'valid' here."""
+    return {"accepted": payload}
+
+
+@app.post("/cases", response_model=CaseOut, status_code=201)
+async def create_case(case: CaseCreate) -> dict:
+    # Proof in the captures: this line never runs when validation fails —
+    # the 422 is emitted before the handler is called.
+    print(f"handler running: {case.case_code}")
+    # The boundary already did its job: every field of `case` is in range
+    # and the code matches the pattern. The handler only builds the record.
+    record = {
+        "case_id": uuid4().hex[:8],
+        **case.model_dump(),
+        "status": "open",
+        "opened_at": datetime.now(timezone.utc),
+        # Two fields no caller should ever see:
+        "reporter_ip": "203.0.113.7",
+        "triage_score": 87,
+    }
+    return record
+```
+
+Hai cửa, cách nhau đúng một bức tường. `POST /cases/raw` nhận `payload: dict` — kiểu code AI hay viết nhất; cái gì parse thành JSON thì ở đây đều "hợp lệ". `POST /cases` nhận `CaseCreate`: title từ 3 đến 120 ký tự, `case_code` khớp `^CLUE-[0-9]{4}$`, priority từ 1 đến 5, reward từ 0 đến 100.000.
+
+Thử cùng một đống rác vào cả hai cửa:
+
+<TerminalOutput command={"curl -si -X POST http://127.0.0.1:4327/cases/raw -H 'content-type: application/json' -d '{\"title\": \"??\", \"priority\": 9}'"} label="Python 3.13 · FastAPI 0.165 · Pydantic 2.14 · chụp tháng 11/2026" caption="Cửa không kiểu. Title hai ký tự và priority 9 đi thẳng vào, server còn lễ phép đưa nguyên đống rác ra lại.">
+```text
+HTTP/1.1 200 OK
+date: Mon, 23 Nov 2026 07:41:58 GMT
+server: uvicorn
+content-length: 40
+content-type: application/json
+
+{"accepted":{"title":"??","priority":9}}
+```
+</TerminalOutput>
+
+<TerminalOutput command={"curl -si -X POST http://127.0.0.1:4327/cases -H 'content-type: application/json' -d '{\"title\": \"??\", \"case_code\": \"clue-42!\", \"priority\": 9, \"reward\": -50}'"} label="Python 3.13 · FastAPI 0.165 · Pydantic 2.14 · chụp tháng 11/2026" caption="Cửa có kiểu. Cùng đống rác, bốn luật bị vi phạm — và response chỉ đúng từng luật đó, field nào ra field đấy.">
+```text
+HTTP/1.1 422 Unprocessable Content
+date: Mon, 23 Nov 2026 07:41:58 GMT
+server: uvicorn
+content-length: 579
+content-type: application/json
+
+{"detail":[{"type":"string_too_short","loc":["body","title"],"msg":"String should have at least 3 characters","input":"??","ctx":{"min_length":3}},{"type":"string_pattern_mismatch","loc":["body","case_code"],"msg":"String should match pattern '^CLUE-[0-9]{4}$'","input":"clue-42!","ctx":{"pattern":"^CLUE-[0-9]{4}$"}},{"type":"less_than_equal","loc":["body","priority"],"msg":"Input should be less than or equal to 5","input":9,"ctx":{"le":5}},{"type":"greater_than_equal","loc":["body","reward"],"msg":"Input should be greater than or equal to 0","input":-50,"ctx":{"ge":0.0}}]}
+```
+</TerminalOutput>
+
+Cửa không kiểu trả 200 OK và nhả rác ra lại. Cửa có kiểu trả 422 kèm bốn lỗi — mỗi lỗi một luật bị vi phạm — và handler của bạn chưa hề chạy:
+
+<BeP03TrustWall />
+
+Bức tường đó là toàn bộ ý tưởng. Model là cánh cửa; code của bạn ở phía sau và chỉ gặp dữ liệu đã qua kiểm tra. Để ý cả bản thân các luật: bảng quy tắc của OWASP đọc như mô tả `CaseCreate` — string thì giới hạn độ dài và hình dạng, số thì khai type kèm min/max, object thì khai rõ field nào bắt buộc. Và chiến lược là **allow-list, không phải deny-list**: khai báo nhận cái gì, từ chối mọi thứ ngoài nó; đừng cố gắng nhận diện từng chuỗi độc hại. `Field(pattern=r"^CLUE-[0-9]{4}$")` chấp nhận đúng một hình dạng. Còn danh sách đen gột "ký tự khả nghi" thì chặn cả tên hợp lệ mà vẫn không làm truy vấn database an toàn thêm chút nào — đó là một cơ chế khác (parameterization), không phải validation.
+
+<Concepts title="Mấy thuật ngữ phía trên, nói dễ hiểu">
+- **Trust boundary (ranh giới niềm tin)**: đường ranh nơi dữ liệu chuyển từ "không phải của mình" sang "của mình". Request đi qua nó — và message từ queue của chính bạn, hay dòng đọc lại từ database của chính bạn, cũng vậy.
+- **Pydantic model**: một class `BaseModel` mô tả dữ liệu bằng type và ràng buộc. Pydantic kiểm từng field theo nó ngay lúc dựng instance — ở đây, instance được dựng ngay tại cửa API.
+- **422 Unprocessable Content**: "tôi hiểu content type, JSON cũng parse được, nhưng nội dung này tôi không xử lý nổi." RFC 9110 đổi tên từ "Unprocessable Entity", nên dòng status phía trên không in cái tên cũ mà nhiều tài liệu vẫn trích.
+- **Allow-list validation (kiểm theo danh sách cho phép)**: khai rõ chấp nhận gì — độ dài, khoảng giá trị, hình dạng — rồi từ chối phần còn lại. Ngược lại, deny-list chạy theo từng input xấu bạn tưởng tượng ra và bỏ sót những input bạn không tưởng tượng nổi.
+</Concepts>
+
+---
+
+## 2. Chết ngay tại cửa
+
+422 đó sinh ra từ đâu? Không phải từ code của bạn. FastAPI tìm route, đọc và parse body — JSON hỏng ngay từ bước này cũng chết luôn, với error type `json_invalid` — chạy trọn bộ validation của `CaseCreate`, rồi mới gọi handler với một instance đã kiểm ([Request Body](https://fastapi.tiangolo.com/tutorial/body/)).
+
+Bằng chứng là một dòng print. Dòng đầu của `create_case` in `handler running: ...` — nhìn log phía server cho một request xấu và một request tốt:
+
+<TerminalOutput command="uvicorn schemas:app — rồi hai cú curl: input xấu, input hợp lệ" label="uvicorn server log · Python 3.13 · FastAPI 0.165 · chụp tháng 11/2026" caption="Đọc kỹ nhé. Dòng 422 không có 'handler running' phía trên — request chết ngay tại cửa. Dòng 201 thì có.">
+```text
+INFO:     Started server process [59766]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:4327 (Press CTRL+C to quit)
+INFO:     127.0.0.1:65002 - "POST /cases HTTP/1.1" 422 Unprocessable Content
+handler running: CLUE-1902
+INFO:     127.0.0.1:65003 - "POST /cases HTTP/1.1" 201 Created
+```
+</TerminalOutput>
+
+Đó là **fail fast (chết sớm)**: input xấu dừng ở cửa, tốn đúng một round trip, và không để lại gì trong kho dữ liệu hay log của bạn sau này. Còn lựa chọn kia là để rác đi tiếp — nhận dict, handler tự cho là "priority chắc là số", cứ thế mà rác trôi:
+
+<BeP03FailFast />
+
+So sánh này không hề mang tính giả định. Rác đi tới được kho dữ liệu thì không còn là "một request dở của ai đó" nữa, nó thành "một dòng mà người khác đọc" — job chạy đêm, bên analytics, service kế bên. Heartbleed là bản cực đoan của chuyện để thối: biên giới tin lời khai, và suốt hai năm không một dòng log nào báo có gì bất thường ([heartbleed.com](https://heartbleed.com/)).
+
+Giờ tới chính lời từ chối. Nó không phải một chuỗi — nó là một danh sách các object lỗi, và mỗi object sinh ra cho một người đọc khác nhau. Bỏ object đầu tiên ra khỏi capture phía trên:
+
+<BeP03Anatomy422 />
+
+- `loc` — lỗi nằm ở đâu trong request: `["body", "title"]` nghĩa là body → field title. Frontend có thể cuộn tới field đó, tô đỏ nó, đặt câu báo lỗi cạnh nó.
+- `type` — luật nào bị vi phạm, viết cho máy đọc: `string_too_short`, `string_pattern_mismatch`, `less_than_equal`. Code client có thể rẽ nhánh theo nó, không phải parse câu chữ.
+- `msg` — câu viết cho người đọc, cứ đưa thẳng ra màn hình.
+- `input` và `ctx` — giá trị gây lỗi và ràng buộc nó vi phạm, trả lại để caller tự nhìn thấy sai của mình.
+
+Vì sao là 422 mà không phải 400? MDN vạch ranh: server "hiểu content type của request, cú pháp cũng đúng, nhưng không xử lý được phần chỉ dẫn bên trong" ([422 Unprocessable Content](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/status/422)). JSON parse tốt đẹp; luật mới nói không. Còn toàn bộ body có cấu trúc đó chỉ là handler mặc định của FastAPI cho `RequestValidationError` — nếu API của bạn nợ caller một hình dạng lỗi khác, override đúng handler đó là được, giữ nguyên mọi thứ còn lại ([Handling Errors](https://fastapi.tiangolo.com/tutorial/handling-errors/)).
+
+<Concepts title="Mấy thuật ngữ phía trên, nói dễ hiểu">
+- **Fail fast (chết sớm)**: từ chối input xấu càng gần cửa càng tốt. Rác đi càng xa — handler, kho dữ liệu, job downstream — thì chạm càng nhiều bộ phận và dọn càng khó.
+- **json_invalid**: error type khi body thậm chí không parse được thành JSON. Cũng là 422, phát ra trước khi Pydantic nhìn tới một field nào.
+- **RequestValidationError**: exception FastAPI raise ở tầng trong khi request validation fail. Handler mặc định của nó sinh body 422 có cấu trúc; đăng ký `@app.exception_handler(RequestValidationError)` riêng nếu muốn đổi hình dạng.
+</Concepts>
+
+---
+
+## 3. Model là một bản hợp đồng
+
+Class bạn viết cho cánh cửa còn có hai nhiệm vụ nữa, và không tốn thêm một dòng code nào.
+
+Thứ nhất, nó tự xuất bản. FastAPI sinh JSON Schema từ `CaseCreate` và đưa vào `openapi.json` — bộ luật, sinh ra từ đúng class mà cửa đang dùng:
+
+<TerminalOutput command="curl -s http://127.0.0.1:4327/openapi.json | jq .components.schemas.CaseCreate" label="Python 3.13 · FastAPI 0.165 · Pydantic 2.14 · chụp tháng 11/2026" caption="Mọi ràng buộc khai trong Field — độ dài, pattern, khoảng giá trị — cộng danh sách required, cộng docstring làm description. Không ai phải giữ trang này bằng tay.">
+```text
+{
+  "properties": {
+    "title": {
+      "type": "string",
+      "maxLength": 120,
+      "minLength": 3,
+      "title": "Title"
+    },
+    "case_code": {
+      "type": "string",
+      "pattern": "^CLUE-[0-9]{4}$",
+      "title": "Case Code"
+    },
+    "priority": {
+      "type": "integer",
+      "maximum": 5.0,
+      "minimum": 1.0,
+      "title": "Priority",
+      "description": "1 = someday, 5 = drop everything"
+    },
+    "reward": {
+      "type": "number",
+      "maximum": 100000.0,
+      "minimum": 0.0,
+      "title": "Reward"
+    }
+  },
+  "type": "object",
+  "required": [
+    "title",
+    "case_code",
+    "priority",
+    "reward"
+  ],
+  "title": "CaseCreate",
+  "description": "What a new case must prove at the door to be let in."
+}
+```
+</TerminalOutput>
+
+Chính file đó nuôi trang Swagger UI tại `/docs`, nên caller đọc luật trước khi gửi bất cứ thứ gì. Đây là trang thật của service này — capture thật, không phải mock:
+
+<Figure src={swaggerSchema} alt="Mục Schemas trong Swagger UI của clue.api với model CaseCreate mở ra: title là string dài 3 đến 120 ký tự, case_code khớp pattern CLUE, priority là integer từ 1 đến 5, reward là number từ 0 đến 100000" caption="Phần CaseCreate trên /docs. FastAPI còn tự sinh được body mẫu khớp pattern — CLUE-8987 — vì bộ sinh example đọc đúng những ràng buộc mà validator dùng. Tài liệu này không phải đoạn văn ai đó phải nhớ cập nhật; nó được sinh ra." />
+
+Một class, ba nhiệm vụ:
+
+<BeP03ModelOnce />
+
+Thứ hai, model lọc phần gửi ra. Nhìn lại handler: bản ghi nó dựng có chín field, trong đó hai field không ai được thấy — IP của người báo và điểm phân loại nội bộ. Nhưng decorator khai `response_model=CaseOut`, và `CaseOut` chỉ khai bảy field. Gửi một case hợp lệ:
+
+<TerminalOutput command={"curl -si -X POST http://127.0.0.1:4327/cases -H 'content-type: application/json' -d '{\"title\": \"The case of the stolen schema\", \"case_code\": \"CLUE-1902\", \"priority\": 3, \"reward\": 5000}'"} label="Python 3.13 · FastAPI 0.165 · Pydantic 2.14 · chụp tháng 11/2026" caption="201 Created, và đúng bảy field CaseOut khai báo. IP của người báo và điểm phân loại nội bộ không bao giờ rời khỏi tòa nhà.">
+```text
+HTTP/1.1 201 Created
+date: Mon, 23 Nov 2026 07:41:58 GMT
+server: uvicorn
+content-length: 173
+content-type: application/json
+
+{"case_id":"1b68a63a","title":"The case of the stolen schema","case_code":"CLUE-1902","priority":3,"reward":5000.0,"status":"open","opened_at":"2026-11-23T07:41:58.139868Z"}
+```
+</TerminalOutput>
+
+<BeP03ResponseMask />
+
+Tài liệu FastAPI lấy một ví dụ đáng sợ hơn cho cùng luận điểm: endpoint đăng ký trả về đúng input model của nó, và mật khẩu dạng plaintext bay ngược ra trong response ([Response Model - Return Type](https://fastapi.tiangolo.com/tutorial/response-model/)). Khai một output model riêng, thì "FastAPI sẽ lọc ra mọi dữ liệu không được khai báo trong output model". Dict trong handler không phải contract — `CaseOut` mới là. Tấm mặt nạ còn chạy ngược chiều nữa: FastAPI validate dữ liệu gửi ra theo `CaseOut`, nên một bug trả rác trong handler sẽ thành server error, không phải một payload mà caller phải gánh.
+
+<Concepts title="Mấy thuật ngữ phía trên, nói dễ hiểu">
+- **JSON Schema**: một tài liệu JSON mô tả dữ liệu — field nào tồn tại, type gì, ràng buộc ra sao. Pydantic sinh nó từ model; FastAPI gom lại thành `openapi.json`.
+- **OpenAPI**: bản mô tả đọc bằng máy của cả một API — path, tham số, schema. `/docs` chỉ là một trình xem cho nó; bộ sinh client code là một trình xem khác.
+- **response_model**: tham số trên decorator khai báo hình dạng phần gửi ra. FastAPI validate, serialize và **lọc** giá trị trả về theo nó — field không khai báo thì không bao giờ tới tay caller.
+</Concepts>
+
+---
+
+## 4. Không gặp người lạ
+
+Đây là phần máy vẫn hay viết sai. AI dựng một endpoint chạy được trong vài giây — và dựng nó theo thói quen tin client, vì ba thói quen dưới đây *trông* đều là code chạy được, và chạy thật, cho tới khi người lạ đầu tiên gõ cửa:
+
+<Callout type="warning" title="Thói quen AI cần bỏ">
+Code sinh sẵn tin input của client. Ba dấu hiệu: `payload: dict` ngay đầu handler — không có cửa; mấy dòng `if "title" not in payload` rải rác trong thân hàm — luật có đấy, nhưng chúng trôi dạt và rác vẫn lọt; và `return {...}` dựng tay — response là cái gì thì phụ thuộc vào lần refactor gần nhất để lại gì trong dict. Cả ba đều qua review, nếu test chỉ toàn gửi input hợp lệ.
+</Callout>
+
+Nên khi bạn review một endpoint — của mình, của đồng nghiệp, hay của model — ba phép kiểm, ba phút, theo đúng thứ tự:
+
+1. **Đọc chữ ký.** Nhận type gì, trả type gì? `dict` vào, `dict` ra nghĩa là ran giới chỉ là mong muốn, chưa phải cánh cửa.
+2. **Curl thử dữ liệu rác.** Sai type, sai khoảng, thiếu field. Một 422 có cấu trúc với `loc` và `type` là đạt; 200 nhả rác ra lại, 500, hay stack trace mới là phát hiện.
+3. **Đọc thân response.** Thêm một field nội bộ vào kết quả handler rồi chạy lại. Nó mà lọt tới caller, tức là chưa có mặt nạ.
+
+<BeP03ReviewHabit />
+
+Cái kiểm tra độ dài bị thiếu của Heartbleed và endpoint hình con dict là cùng một loài lỗi: biên giới tin lời khai. Cách vá cũng giống hệt — một nơi duy nhất soi từng lời khai, trước khi code sau cánh cửa kịp chạy. **Mạng đầy người lạ. Biên có kiểu là cách handler của bạn không bao giờ phải gặp một ai trong số họ.**
+
+</Vi>
