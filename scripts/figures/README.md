@@ -23,3 +23,13 @@ These rules come from the DDIA series run (Nov 2026). It used 60 Sonnet agents, 
 7. **Stay under the usage cap.** Run waves of at most about 8 to 10 agents. A 5-hour usage cap stopped 14 agents mid-run in one go.
 
 SVG figures in `src/assets/blog/**` are rasterized to PNG in place with a plain sharp call, at double the SVG's logical size: `node -e "require('sharp')('src/assets/blog/<post>/<fig>.svg',{density:144}).png().toFile('src/assets/blog/<post>/<fig>.png')"` (sharp's default SVG density is 72 dpi = 1x; 144 dpi = 2x).
+
+## Icons and motion in SVG figures (Go series kit, 2026-11-23)
+
+- **Icons:** `<DiagramIcon name="gopher" x={cx} y={cy} size={22} />` inside the `<svg>` (x, y = icon centre). Names and meanings: `src/data/diagram-icons.ts`; never reference `/icons/sys/*.svg` by path. Give an icon to every box that stands for a thing (goroutine, channel, CPU, heap, server, file…); not to labels, numbers or captions. Use a product logo only when the box is that product. Keep icons 18–26 units and clear of text (getBBox check).
+- **Motion:** classes from `src/styles/fig-motion.css` (loaded on every page). Everything is still unless the reader allows motion (`prefers-reduced-motion: no-preference`).
+  - `fm-flow` / `fm-flow-slow`: on the main arrow `<line>/<path>/<polyline>`; dashes travel start → end, so draw the path in the direction data moves.
+  - `fm-pulse`: the one key element (gold fix or red failure). `fm-glow`: a stroked rect outline that breathes.
+  - `fm-bob`: a running goroutine/worker icon (wrap the `DiagramIcon` in `<g class="fm-bob">`). `fm-spin`: a turning gear/broom.
+  - `fm-dot`: a `<circle class="fm-dot" r="4">` with `<animateMotion dur="2s" repeatCount="indefinite" path="M…"/>` inside; hidden when motion is reduced.
+  - At most 2 moving accents per figure. Motion must show direction or the key element, never decoration. Arrowheads stay plain `<polygon>`s.
