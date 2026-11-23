@@ -3,6 +3,14 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-23 — Mang fix EPS mồ côi từ phiên 22/11 lên main
+
+- **Bối cảnh:** sau khi bài 1 đã publish (entry 2026-11-22), nhánh local `feat/stocks-basics-post1` còn sót 1 commit fix `8eb3869` (23:06 ngày 22/11) chưa lên main — server restart giữa phiên nên không kịp push. Fix sửa: giải thích EPS kiểm toán (EN+VI) — thấp hơn phép chia đơn giản vì tính trên lợi nhuận sau khi trích quỹ khen thưởng/phúc lợi + weighted-average share count nhỏ hơn (bản cũ chỉ nêu weighted-average + cổ tức 15%, thiếu trích quỹ); bổ sung chú thích cùng loại cho EPS kiểm toán của Vinamilk; chỉnh framing độ lớn số trong quiz set-01/set-03.
+- **Đã làm (nhánh `fix/stocks-post1-eps-framing`, cherry-pick `8eb3869` → `5e9eccb`):** cherry-pick sạch, không conflict với các commit review đã merge.
+- **Ai quyết:** AI (AGENTS flow: công việc đã commit nhưng chưa merge → đưa lên PR, đợi user merge).
+- **Kiểm tra:** `npm run build` 60 pages sạch, `node --test` 47/47 pass, fix xuất hiện trong trang build (2 chỗ EN/VI).
+- **Chưa chốt:** viết tiếp bài 2 `vietnam-stock-market-venues-open-account`.
+
 ## 2026-11-22 — Bài 1 series stocks-basics: "Cổ phiếu thật ra là gì"
 
 - **Đã làm:** publish bài 1 series `stocks-basics` (`/blog/what-is-a-stock-ownership-dividends/`, `draft: false`): body song ngữ EN/VI (5 mục + key takeaways + 5 câu ôn tập), hero chứng khoán 1863 (Wikimedia CC0), demo island "Your slice" (Task 3), quiz 8 bộ câu hỏi (`/quiz/`, Task 4), số liệu thật FPT/VNM tài chính 2025 từ 2 báo cáo thường niên đã kiểm toán + VSDC (cổ tức) + HOSE (ex-date) — đủ nguồn trong frontmatter `sources`. Bài publish khiến series card `stocks-basics` hiện trên blog index (thứ 4) và part 1 trên trang cover chuyển thành link "Bắt đầu từ Bài 1 →".
