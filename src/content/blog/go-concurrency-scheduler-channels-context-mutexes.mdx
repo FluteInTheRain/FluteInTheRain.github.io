@@ -559,7 +559,7 @@ func main() {
 
 <GoP13NilChannelSelect />
 
-Step through how `r.Context()` detachment, `nil` channels in `select`, and non-reentrant `String()` locks interact in this live execution tracer:
+The tracer below has three scenarios. The first replays the `r.Context()` detachment from [Context and locks](/blog/go-context-timeouts-mutexes/) as a refresher, the second is the `nil`-channel trick you just saw, and the third previews the `String()` self-deadlock covered a little further down, under *Side effects of `fmt.Sprintf` and `String()`*:
 
 <GoConcSelectLifecycleDemo />
 
@@ -645,15 +645,30 @@ Before diving into `append` races, remember two habits covered earlier: [Go memo
 Calling `append` on a slice looks functional—it returns a new slice header `s1` without changing `s`'s `len`. Yet whether `append` is safe across goroutines depends silently on spare capacity:
 
 ```go
-// Case 1: len=1, cap=1 (full) -> each goroutine allocates its own backing array
-s := make([]int, 1)
-go func() { s1 := append(s, 10); fmt.Println("g1:", s1) }()
-go func() { s2 := append(s, 20); fmt.Println("g2:", s2) }()
+// race_spare.go (safe_full.go is the same file with s := make([]int, 1), i.e. len=1, cap=1, full)
+package main
 
-// Case 2: len=0, cap=1 (spare capacity) -> BOTH write backing[0] at once!
-s := make([]int, 0, 1)
-go func() { s1 := append(s, 10); fmt.Println("g1:", s1) }()
-go func() { s2 := append(s, 20); fmt.Println("g2:", s2) }()
+import (
+	"fmt"
+	"sync"
+)
+
+func main() {
+	s := make([]int, 0, 1) // len=0, cap=1: one spare slot
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		s1 := append(s, 10) // writes backing[0]
+		fmt.Println("g1:", s1)
+	}()
+	go func() {
+		defer wg.Done()
+		s2 := append(s, 20) // also writes backing[0]
+		fmt.Println("g2:", s2)
+	}()
+	wg.Wait()
+}
 ```
 
 <TerminalOutput command="go run -race safe_full.go && go run -race race_spare.go" label="Go 1.27.1">
@@ -765,7 +780,7 @@ Similarly, in `etcd-io/etcd#10492`, `lessor.Renew` stopped holding `le.mu.Lock()
 | Synchronization tool | Best fit | Main trap to check in review |
 | :--- | :--- | :--- |
 | **`sync.Mutex`** | Protecting shared structs/maps with frequent writes | Holding lock across `fmt.Sprintf`, Raft/RPC waits, or blocking queues |
-| **`sync.RWMutex`** | Read-heavy state (rare writes) | Calling `RLock()` twice on the same goroutine while a writer waits (deadlocks!) |
+| **`sync.RWMutex`** | Read-heavy state (rare writes) | Calling `RLock()` twice on the same goroutine: if a writer queues between the two calls, the second `RLock()` waits behind the writer, which waits for the first `RLock()` (deadlock) |
 | **`sync.Cond`** | Repeated 1-to-many broadcasts on changing state | Forgetting the `for !cond` loop or missing wakeups sent before `Wait()` |
 | **`sync/atomic`** | Single counters, flags, or pointer swaps | Splitting invariants across *two* independent atomic variables |
 | **Channels / `nil` `select`** | Ownership transfer, orchestration, merging streams | Leaving closed channels non-`nil` in `select` (100% CPU spin) |
@@ -1320,7 +1335,7 @@ func main() {
 
 <GoP13NilChannelSelect />
 
-Bạn có thể tự bấm bước qua ba kịch bản — tách `r.Context()`, tắt nhánh với `nil` channel và khóa tự treo `String()` — trong trình mô phỏng tương tác dưới đây:
+Trình mô phỏng dưới đây có ba kịch bản. Kịch bản đầu chiếu lại cách tách `r.Context()` ở bài [Context and locks](/blog/go-context-timeouts-mutexes/) để bạn ôn, kịch bản hai là mẹo `nil` channel vừa xem, còn kịch bản ba xem trước lỗi tự khóa chết qua `String()` ở mục *Tác dụng phụ của `fmt.Sprintf` và `String()`* bên dưới:
 
 <GoConcSelectLifecycleDemo />
 
@@ -1406,15 +1421,30 @@ Trước khi đi vào các ca lỗi dưới đây, nhớ lại hai nền tảng 
 Gọi `append` trên một slice nhìn rất vô hại vì nó trả về header slice mới mà không sửa `len` của biến `s` gốc. Nhưng thao tác này có race khi chạy đồng thời hay không lại phụ thuộc ngầm vào việc mảng nền còn chỗ trống hay đã đầy:
 
 ```go
-// Trường hợp 1: len=1, cap=1 (đầy) -> mỗi goroutine tự cấp phát mảng nền mới
-s := make([]int, 1)
-go func() { s1 := append(s, 10); fmt.Println("g1:", s1) }()
-go func() { s2 := append(s, 20); fmt.Println("g2:", s2) }()
+// race_spare.go (safe_full.go giống hệt, chỉ đổi thành s := make([]int, 1), tức len=1, cap=1, đã đầy)
+package main
 
-// Trường hợp 2: len=0, cap=1 (còn chỗ trống) -> CẢ HAI ghi đè vào backing[0]!
-s := make([]int, 0, 1)
-go func() { s1 := append(s, 10); fmt.Println("g1:", s1) }()
-go func() { s2 := append(s, 20); fmt.Println("g2:", s2) }()
+import (
+	"fmt"
+	"sync"
+)
+
+func main() {
+	s := make([]int, 0, 1) // len=0, cap=1: còn dư một ô
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		s1 := append(s, 10) // ghi vào backing[0]
+		fmt.Println("g1:", s1)
+	}()
+	go func() {
+		defer wg.Done()
+		s2 := append(s, 20) // cũng ghi vào backing[0]
+		fmt.Println("g2:", s2)
+	}()
+	wg.Wait()
+}
 ```
 
 <TerminalOutput command="go run -race safe_full.go && go run -race race_spare.go" label="Go 1.27.1">
@@ -1526,7 +1556,7 @@ Tương tự trong `etcd-io/etcd#10492`, hàm `lessor.Renew` phải nhả `le.mu
 | Công cụ đồng bộ | Hợp nhất cho bài toán | Cái bẫy cần soi khi review code |
 | :--- | :--- | :--- |
 | **`sync.Mutex`** | Bảo vệ struct/map dùng chung có tần suất ghi cao | Giữ khóa khi gọi `fmt.Sprintf`, chờ RPC/Raft hoặc chờ hàng đợi worker |
-| **`sync.RWMutex`** | Bảng trạng thái đọc nhiều, ít ghi | Gọi lồng `RLock()` hai lần trên cùng goroutine khi có writer đang xếp hàng chờ (gây deadlock) |
+| **`sync.RWMutex`** | Bảng trạng thái đọc nhiều, ít ghi | Gọi lồng `RLock()` hai lần trên cùng goroutine: nếu có writer xếp hàng giữa hai lần gọi, `RLock()` thứ hai phải chờ sau writer, còn writer lại chờ `RLock()` thứ nhất nhả ra (deadlock) |
 | **`sync.Cond`** | Phát thông báo lặp lại tới nhiều bên chờ trạng thái đổi | Quên đặt `Wait()` trong vòng `for !cond` hoặc gửi tín hiệu trước khi bên nghe vào `Wait()` |
 | **`sync/atomic`** | Bộ đếm đơn, cờ boolean hoặc tráo con trỏ | Tách một bất biến chung ra *hai* biến atomic riêng lẻ |
 | **Channel / `nil` `select`** | Chuyển quyền sở hữu, điều phối luồng, gộp stream | Để nguyên channel đã đóng trong `select` khiến vòng lặp quay đốt 100% CPU |
