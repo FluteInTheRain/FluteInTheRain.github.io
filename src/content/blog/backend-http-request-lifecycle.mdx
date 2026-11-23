@@ -15,6 +15,9 @@ sources:
   - { title: "What is DNS?", author: "Cloudflare Learning Center", url: "https://www.cloudflare.com/learning/dns/what-is-dns/" }
   - { title: "More details about the October 4 outage", author: "Santosh Janardhan (Meta Engineering)", url: "https://engineering.fb.com/2021/10/05/networking-traffic-outage-and-details/" }
   - { title: "ASGI Specification", author: "ASGI maintainers", url: "https://asgi.readthedocs.io/en/latest/specs/main.html" }
+  - { title: "First Steps", author: "FastAPI documentation", url: "https://fastapi.tiangolo.com/tutorial/first-steps/" }
+  - { title: "Path Parameters", author: "FastAPI documentation", url: "https://fastapi.tiangolo.com/tutorial/path-params/" }
+  - { title: "Middleware", author: "FastAPI documentation", url: "https://fastapi.tiangolo.com/tutorial/middleware/" }
   - { title: "Uvicorn documentation", author: "Encode", url: "https://www.uvicorn.org/" }
   - { title: "Appareil pneumatique postal Fortin-Hermann à Paris-Central en 1987 (CC BY-SA 4.0)", author: "Jérome Ferri", url: "https://commons.wikimedia.org/wiki/File:Appareil_pneumatique_postal_Fortin-Hermann_%C3%A0_Paris-Central_en_1987.jpg" }
   - { title: "Réseau pneumatique de Paris, Figuier (Public domain)", author: "Louis Figuier", url: "https://commons.wikimedia.org/wiki/File:T5-_d520_-_Fig._425._%E2%80%94_R%C3%A9seau_pneumatique_de_Paris.png" }
@@ -188,7 +191,57 @@ Everything above happens before your process is involved. What does "running the
 
 uvicorn owns the socket. It parses bytes, closes handshakes, decodes HTTP — and calls one thing of yours: an ASGI app. The whole ASGI contract is one callable: `async def app(scope, receive, send)`. A request arrives as a `scope` dict; you read the body by awaiting `receive()`; you push the response by awaiting `send()`. FastAPI is a very large, very organized version of that callable, with routing, validation and docs riding on top.
 
-Here is the series' tiny demo service with one middleware printing what it sees:
+To see how small that contract is, here is an app with no framework at all (`demo/p01_raw_asgi.py`). uvicorn calls it once per request, and it answers with two `send()` calls: one for the status line and headers, one for the body.
+
+```python
+async def app(scope, receive, send):
+    if scope["type"] != "http":
+        return  # lifespan etc.: this toy app only speaks HTTP
+    print("scope keys:", sorted(scope))
+    body = f"{scope['method']} {scope['path']}".encode()
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [(b"content-type", b"text/plain")],
+        }
+    )
+    await send({"type": "http.response.body", "body": body})
+```
+
+<TerminalOutput command="uvicorn p01_raw_asgi:app --port 4331 — then: curl http://127.0.0.1:4331/cases/42?x=1" label="Python 3.13 · uvicorn · captured Nov 2026" caption="The scope dict is everything uvicorn parsed for you: method, path, query_string, headers, client address. Your function never touches a socket.">
+```text
+INFO:     Started server process [2048]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:4331 (Press CTRL+C to quit)
+scope keys: ['asgi', 'client', 'headers', 'http_version', 'method', 'path', 'query_string', 'raw_path', 'root_path', 'scheme', 'server', 'state', 'type']
+INFO:     127.0.0.1:53919 - "GET /cases/42?x=1 HTTP/1.1" 200 OK
+```
+</TerminalOutput>
+
+Nothing here routes `/cases/42` anywhere, parses `?x=1`, or checks types. You would have to write all of that by hand, for every endpoint. FastAPI is the same callable with that work done for you. Two lines of the demo service (`demo/trace_demo.py`) show how: `app = FastAPI(title="clue.api", version="0.1.0")` creates the ASGI callable uvicorn will call, and a decorator registers a path operation on it:
+
+```python
+@app.get("/cases/{case_id}")
+async def get_case(case_id: int) -> dict:
+    return {"case_id": case_id, "status": "open"}
+```
+
+`@app.get("/cases/{case_id}")` tells the router "GET requests to this path come here", and the `{case_id}` piece of the path is captured. The annotation `case_id: int` is not decoration: FastAPI reads it, converts the text `"42"` to the integer `42` before your function runs, and rejects anything else. Send `/cases/abc` and your function is never called:
+
+<TerminalOutput command="curl -si http://127.0.0.1:4331/cases/abc" label="Python 3.13 · FastAPI 0.165 · captured Nov 2026" caption="The 422 comes from FastAPI, before the endpoint body. `loc` says which part of the request was wrong (path, then case_id).">
+```text
+HTTP/1.1 422 Unprocessable Content
+content-type: application/json
+
+{"detail":[{"type":"int_parsing","loc":["path","case_id"],"msg":"Input should be a valid integer, unable to parse string as an integer","input":"abc"}]}
+```
+</TerminalOutput>
+
+The trap here is typing the parameter as `str` (or leaving it untyped) and calling `int(case_id)` by hand. A bad id then raises `ValueError` inside your code and the client gets a 500 for what was its own mistake. Let the annotation do the checking: bad input is a 4xx, a 500 means your code broke.
+
+The service also registers one middleware with `@app.middleware("http")`. A middleware wraps every request: the code before `await call_next(request)` runs on the way in, the code after it runs on the way out, so it is the natural place to trace a request. Here it prints what it sees:
 
 ```python
 @app.middleware("http")
@@ -239,7 +292,7 @@ Generated code starts measuring at the endpoint and treats the network as instan
 
 The response rides the same TCP connection back: your code hands bytes to `send()`, uvicorn writes them to the socket, TLS encrypts, TCP carries them. There is no second magic pipe.
 
-But look at the last line of the curl trace: `Connection #0 ... left intact`. The expensive part — DNS, TCP, TLS — is connection setup, and it is reusable. A second request on that connection skips the handshake stations almost entirely. That is what keep-alive buys, and why:
+But look at the last line of the curl trace: `Connection #0 ... left intact`. The expensive part — DNS, TCP, TLS — is connection setup, and it is reusable. A second request on that connection skips the handshake stations almost entirely. That is what keep-alive buys. On the server side it is a uvicorn setting: `--timeout-keep-alive` (default 5 seconds) is how long uvicorn holds an idle connection open waiting for the next request, so a client that pauses longer pays the handshake again. It is also why:
 
 - A **benchmark of one request** measures mostly setup. Six stations of tax, one request of value.
 - A **load test** that reuses connections and one that doesn't can disagree wildly about the same service.
@@ -456,7 +509,57 @@ Tất cả những gì phía trên diễn ra khi process của bạn còn chưa 
 
 uvicorn nắm socket. Nó parse byte, đóng các handshake, giải mã HTTP — rồi gọi đúng một thứ của bạn thôi: một app ASGI. Cả giao diện ASGI gói gọn trong một callable: `async def app(scope, receive, send)`. Request tới dưới dạng dict `scope`; muốn đọc body thì await `receive()`; muốn đẩy response thì await `send()`. FastAPI, suy cho cùng, cũng chỉ là một phiên bản cực lớn và cực có tổ chức của đúng callable đó — routing, validation, docs cài sẵn phía trên.
 
-Dưới đây là demo service của series với một middleware in ra những gì nó nhìn thấy:
+Để thấy hợp đồng đó nhỏ đến đâu, đây là một app không dùng framework nào (`demo/p01_raw_asgi.py`). uvicorn gọi nó một lần cho mỗi request, và nó trả lời bằng hai lần `send()`: một cho status line cùng header, một cho body.
+
+```python
+async def app(scope, receive, send):
+    if scope["type"] != "http":
+        return  # lifespan etc.: this toy app only speaks HTTP
+    print("scope keys:", sorted(scope))
+    body = f"{scope['method']} {scope['path']}".encode()
+    await send(
+        {
+            "type": "http.response.start",
+            "status": 200,
+            "headers": [(b"content-type", b"text/plain")],
+        }
+    )
+    await send({"type": "http.response.body", "body": body})
+```
+
+<TerminalOutput command="uvicorn p01_raw_asgi:app --port 4331 — rồi: curl http://127.0.0.1:4331/cases/42?x=1" label="Python 3.13 · uvicorn · chụp tháng 11/2026" caption="Dict scope là mọi thứ uvicorn đã parse hộ bạn: method, path, query_string, header, địa chỉ client. Hàm của bạn không hề đụng tới socket.">
+```text
+INFO:     Started server process [2048]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:4331 (Press CTRL+C to quit)
+scope keys: ['asgi', 'client', 'headers', 'http_version', 'method', 'path', 'query_string', 'raw_path', 'root_path', 'scheme', 'server', 'state', 'type']
+INFO:     127.0.0.1:53919 - "GET /cases/42?x=1 HTTP/1.1" 200 OK
+```
+</TerminalOutput>
+
+Ở đây không có gì định tuyến `/cases/42` đi đâu, parse `?x=1` hay kiểm kiểu cả. Muốn có thì bạn tự viết tay, cho từng endpoint. FastAPI là đúng callable ấy nhưng đã làm sẵn phần việc đó. Hai dòng trong demo service (`demo/trace_demo.py`) cho thấy cách: `app = FastAPI(title="clue.api", version="0.1.0")` tạo ra callable ASGI mà uvicorn sẽ gọi, còn một decorator đăng ký một path operation lên nó:
+
+```python
+@app.get("/cases/{case_id}")
+async def get_case(case_id: int) -> dict:
+    return {"case_id": case_id, "status": "open"}
+```
+
+`@app.get("/cases/{case_id}")` nói với router "request GET tới path này thì vào đây", và phần `{case_id}` của path được bắt lại. Annotation `case_id: int` không phải để trang trí: FastAPI đọc nó, đổi chuỗi `"42"` thành số nguyên `42` trước khi hàm của bạn chạy, và từ chối mọi giá trị khác. Gửi `/cases/abc` thì hàm của bạn không bao giờ được gọi:
+
+<TerminalOutput command="curl -si http://127.0.0.1:4331/cases/abc" label="Python 3.13 · FastAPI 0.165 · chụp tháng 11/2026" caption="Mã 422 do FastAPI trả, trước cả thân endpoint. `loc` cho biết phần nào của request sai (path, rồi case_id).">
+```text
+HTTP/1.1 422 Unprocessable Content
+content-type: application/json
+
+{"detail":[{"type":"int_parsing","loc":["path","case_id"],"msg":"Input should be a valid integer, unable to parse string as an integer","input":"abc"}]}
+```
+</TerminalOutput>
+
+Cái bẫy: khai báo tham số là `str` (hoặc không khai báo kiểu) rồi tự gọi `int(case_id)`. Khi đó id sai làm code bạn ném `ValueError`, và client nhận 500 cho lỗi do chính nó gây ra. Hãy để annotation kiểm tra: đầu vào sai là 4xx, còn 500 nghĩa là code của bạn hỏng.
+
+Service còn đăng ký một middleware bằng `@app.middleware("http")`. Middleware bọc mọi request: code trước `await call_next(request)` chạy lúc request đi vào, code sau nó chạy lúc response đi ra, nên đây là chỗ tự nhiên để truy vết một request. Ở đây nó in ra những gì nó nhìn thấy:
 
 ```python
 @app.middleware("http")
@@ -507,7 +610,7 @@ Code do AI sinh có thói quen đo từ endpoint trở đi và coi mạng như t
 
 Response đi ngược lại đúng connection đó: code bạn đưa byte cho `send()`, uvicorn ghi vào socket, TLS mã hoá, TCP chở đi. Không có con ống thần kỳ thứ hai.
 
-Nhưng nhìn dòng cuối của trace curl: `Connection #0 ... left intact`. Phần đắt đỏ — DNS, TCP, TLS — là chi phí mở kết nối, và nó dùng lại được. Request thứ hai trên cùng connection gần như bỏ qua các trạm handshake. Đó là thứ keep-alive mua cho bạn, và cũng là vì sao:
+Nhưng nhìn dòng cuối của trace curl: `Connection #0 ... left intact`. Phần đắt đỏ — DNS, TCP, TLS — là chi phí mở kết nối, và nó dùng lại được. Request thứ hai trên cùng connection gần như bỏ qua các trạm handshake. Đó là thứ keep-alive mua cho bạn. Phía server, nó là một setting của uvicorn: `--timeout-keep-alive` (mặc định 5 giây) là thời gian uvicorn giữ một connection rảnh để chờ request kế tiếp, nên client nghỉ lâu hơn mức đó sẽ phải trả lại chi phí handshake. Đó cũng là vì sao:
 
 - Một **benchmark chạy đúng một request** đo toàn tiền setup. Sáu trạm thuế, một request giá trị.
 - Một **load test** tái dùng connection và một load test không tái dùng có thể chênh nhau xa trên cùng một service.
