@@ -1,0 +1,904 @@
+---
+title: "The layer between the handler and the database"
+title_vi: "Tầng nằm giữa handler và database"
+description: "Pools, a transaction per request, migrations and the N+1 you feel in p99: a SQLAlchemy layer under post 4's service, with a real pool timeout and query counts."
+description_vi: "Pool cạn thì request xếp hàng rồi lỗi cùng lúc, commit chạy sau khi client đã nhận 200, 21 query cho 20 dòng. Dựng tầng SQLAlchemy dưới service bài 4, đo thật từng lựa chọn."
+date: 2026-11-23
+category: "backend"
+tags: ["backend", "python", "fastapi", "sqlalchemy", "database", "migrations"]
+cover: "../../assets/blog/backend-database-access-layer/n-plus-one-swagger-cover.png"
+cover_alt: "Swagger UI page of the clue.api demo service listing its two endpoints, GET /lazy and GET /eager, which return the same summary of cases with 21 queries and 2 queries"
+draft: true
+sources:
+  - { title: "FastAPI: Modern Python Web Development", author: "Bill Lubanovic", chapters: "Ch. 10", url: "https://www.oreilly.com/library/view/fastapi/9781098135091/" }
+  - { title: "Post-mortem: Exhausted Host Connection Pool", author: "Max McDonnell, Val Town", url: "https://blog.val.town/blog/post-mortem-exhausted-host-connection-pool" }
+  - { title: "Connection Pooling", author: "SQLAlchemy 2.0 docs", url: "https://docs.sqlalchemy.org/en/20/core/pooling.html" }
+  - { title: "Session Basics", author: "SQLAlchemy 2.0 docs", url: "https://docs.sqlalchemy.org/en/20/orm/session_basics.html" }
+  - { title: "Relationship Loading Techniques", author: "SQLAlchemy 2.0 docs", url: "https://docs.sqlalchemy.org/en/20/orm/queryguide/relationships.html" }
+  - { title: "SQL (Relational) Databases", author: "FastAPI docs", url: "https://fastapi.tiangolo.com/tutorial/sql-databases/" }
+  - { title: "Dependencies with yield (early exit and scope)", author: "FastAPI docs", url: "https://fastapi.tiangolo.com/tutorial/dependencies/dependencies-with-yield/" }
+  - { title: "Alembic Tutorial", author: "Alembic docs", url: "https://alembic.sqlalchemy.org/en/latest/tutorial.html" }
+  - { title: "Connections and Authentication (max_connections)", author: "PostgreSQL docs", url: "https://www.postgresql.org/docs/current/runtime-config-connection.html" }
+  - { title: "\"A Telephone Operator\" (Public domain)", author: "Library of Congress, 1911, via Wikimedia Commons", url: "https://commons.wikimedia.org/wiki/File:%22A_Telephone_Operator%22_LCCN2006681181.tif" }
+---
+
+import En from '../../components/mdx/En.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import Callout from '../../components/mdx/Callout.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
+import BeP05Seam from '../../components/mdx/BeP05Seam.astro';
+import BeP05Transaction from '../../components/mdx/BeP05Transaction.astro';
+import BeP05CommitOrder from '../../components/mdx/BeP05CommitOrder.astro';
+import BeP05Pool from '../../components/mdx/BeP05Pool.astro';
+import BeP05NPlus1 from '../../components/mdx/BeP05NPlus1.astro';
+import BeP05Migration from '../../components/mdx/BeP05Migration.astro';
+import heroOperator from '../../assets/blog/backend-database-access-layer/telephone-operator-1911.jpg';
+
+<En>
+
+<Figure src={heroOperator} alt="A 1911 telephone operator seated at a switchboard, headset on, plugging cords into a panel of numbered jacks" caption="A switchboard has a fixed number of cords. Every call that connects holds one until somebody hangs up; the callers beyond that wait, then get a busy signal. A connection pool is that panel: a handful of already-open lines to the database, lent out and handed back, and nobody to blame but the panel when all of them are busy." sourceTitle="Wikimedia Commons: &quot;A Telephone Operator&quot;, Library of Congress, 1911" sourceUrl="https://commons.wikimedia.org/wiki/File:%22A_Telephone_Operator%22_LCCN2006681181.tif" />
+
+### The hook: a server that stopped answering and looked healthy
+
+In a post-mortem published on 31 December 2024, Val Town described a night when many parallel edits to a single Val made database queries deadlock. The locked connections never gave their slot back, because the pool had no query timeouts: Val Town's post-mortem says "these locked connections permanently occupied slots in our connection pool". One host ran out of database connections and stalled on most requests, in and out. Its health checks did not test the database, so it kept looking healthy. It stayed that way for about 6 hours 49 minutes, from 12:15 to 7:04 ET, until engineers terminated it after a user reported the problem.
+
+Nothing in that story is an exotic database bug. It is the plumbing between a web handler and a database: a pool of connections that is small on purpose, queries that were allowed to wait forever, and a health check that never touched either. The code AI writes for you tends to skip exactly this layer. Ask for "add a database to clue.api" and you get `create_engine`, a `SessionLocal`, a `Depends(get_db)` copied from a tutorial, and `Base.metadata.create_all()` at import time. It runs on the first request. It says nothing about what happens on the thousandth.
+
+This post builds that layer under the service from [the last post](/blog/backend-layered-architecture/), and measures what each choice does:
+
+1. **The seam gets its implementation** — a SQLAlchemy repository behind post 4's `CaseRepository`, and a service that does not change.
+2. **One session, one transaction, one request** — commit on success, roll back on error, in a FastAPI dependency.
+3. **When the commit happens** — the default timing of `yield` dependencies surprises people.
+4. **The pool** — what `pool_size`, `max_overflow` and `pool_timeout` do, and the capture of an exhausted one.
+5. **N+1** — counting queries, and the one-word fix.
+6. **Migrations** — why `create_all` is not one.
+7. **SQLite to Postgres** — what changes, and what I will not pretend to have measured.
+
+One split to state up front. "Transaction" here means the plain plumbing: a `BEGIN`, then either a `COMMIT` or a `ROLLBACK`, around one request. What happens when two transactions overlap — isolation levels, lost updates, write skew, serializability — belongs to the DDIA post, [Transactions: ACID, isolation levels, anomalies, serializability](/blog/transactions-acid-isolation-anomalies-serializability/). Nothing below re-teaches it.
+
+---
+
+## 1. The seam gets its implementation
+
+Post 4 left one promise in `demo/layered_data.py`: the service depends on a `CaseRepository` shape, "so any implementation of that shape plugs in underneath". Today the promise is collected. Here is the whole stack under the service, in three small pieces. First the engine and session factory — `demo/p05_db.py`, lines 28–30:
+
+```python
+connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
+engine = create_engine(DATABASE_URL, echo=ECHO, connect_args=connect_args)
+SessionLocal = sessionmaker(engine, expire_on_commit=False)
+```
+
+Three things happen here. `create_engine` builds the **engine**: it owns the connection pool and knows which database dialect to speak. The URL comes from `DATABASE_URL`, so the same code points at SQLite today and Postgres later; the `check_same_thread` flag is SQLite-only because FastAPI runs plain `def` endpoints in a threadpool, and SQLite refuses to hand a connection across threads by default. `sessionmaker` is a factory for **sessions**: a session is the short-lived workspace that tracks which rows you touched and talks to the pool when it needs a connection. And `expire_on_commit=False` keeps loaded objects readable after the commit.
+
+Then the repository — `demo/p05_db.py`, lines 59–83:
+
+```python
+class SqlCaseRepository:
+    """Same three methods as InMemoryCaseRepository; the session is borrowed."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def add(self, record: CaseRecord) -> None:
+        self._session.add(CaseRow(**vars(record)))
+        self._session.flush()  # send the INSERT now; commit is not ours to do
+
+    def get(self, case_id: str) -> CaseRecord | None:
+        row = self._session.get(CaseRow, case_id)
+        if row is None:
+            return None
+        return CaseRecord(
+            row.case_id, row.title, row.status, row.detective, row.resolution
+        )
+
+    def save(self, record: CaseRecord) -> None:
+        row = self._session.get(CaseRow, record.case_id)
+        row.status = record.status
+        row.detective = record.detective
+        row.resolution = record.resolution
+        self._session.flush()
+
+```
+
+`SqlCaseRepository` has exactly the three methods `CaseRepository` asks for, so the service accepts it without an import or a base class. Two choices carry weight. It maps between `CaseRow` (the table, an SQLAlchemy type) and `CaseRecord` (the plain dataclass the service speaks). If you returned the ORM row itself, a lazy attribute read in the service would quietly run SQL from the middle layer, and the rules would depend on a live session. And it calls `flush()`, never `commit()`: it sends the `INSERT` now, so errors surface here, but who decides that the whole request is final is not its call. An AI-written repository usually ends every method with `session.commit()`. Remember that line; section 2 shows what it costs.
+
+<BeP05Seam />
+
+The service is unchanged — `git diff main -- demo/layered_service.py` is empty — but one thing in it does break. `CaseService` hands out ids from a counter in its own memory, and post 4's wiring built one service per request. In memory that was invisible; on a table with a primary key, it is not. Here is the same app without the fix, one `curl` twice:
+
+<TerminalOutput command="p05_app.py without the seed line — curl POST /cases?title=one, then ?title=two" label="Python 3.13 · FastAPI 0.165 · SQLAlchemy 2.0.58 · SQLite · captured Nov 2026" caption="The second request builds a fresh service, whose counter starts at 1 again. The database, unlike a dict, refuses to overwrite C-1 and the user sees a 500.">
+```text
+service | open_case: the id and the open status are ours to set
+INFO:     127.0.0.1:59194 - "POST /cases?title=one HTTP/1.1" 201 Created
+service | open_case: the id and the open status are ours to set
+INFO:     127.0.0.1:59196 - "POST /cases?title=two HTTP/1.1" 500 Internal Server Error
+sqlalchemy.exc.IntegrityError: (sqlite3.IntegrityError) UNIQUE constraint failed: cases.case_id
+```
+</TerminalOutput>
+
+The wiring, `demo/p05_app.py` lines 21–28, seeds the counter from the table:
+
+```python
+def get_service(
+    session: Session = Depends(get_session, scope="function"),
+) -> CaseService:
+    service = CaseService(SqlCaseRepository(session))
+    # The service counts ids in memory, and this service lives one request.
+    # Seed the counter from the table or the second request reuses C-1.
+    service._next_id = session.scalar(select(func.count()).select_from(CaseRow)) + 1
+    return service
+```
+
+`Depends(get_session)` asks FastAPI for a session, builds the repository on it, and hands the service to the endpoint — that is post 4's `get_service`, with a real repo inside. Reaching into `_next_id` is a patch, and I would say so in a code review: the clean fix is to let the database assign ids, which is a service change for another day. Counting rows also breaks the day you delete one. It is here to make the point that a swapped storage layer can still reach upward, and that tests with a fake repository will not tell you.
+
+---
+
+## 2. One session, one transaction, one request
+
+A transaction is a group of writes that become visible together or not at all. The simplest rule that gets this right for a web service: **one request, one transaction.** Open it when the request starts, commit when the request succeeds, roll back when anything raises. The place that sees the start and end of a request is not the repository or the service, it is the dependency that hands out the session — `demo/p05_db.py`, lines 85–95:
+
+```python
+def get_session() -> Iterator[Session]:
+    """One session per request: commit if the request succeeds, else roll back."""
+    session = SessionLocal()
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+```
+
+A dependency with `yield` has two halves. Everything before `yield` runs before the endpoint and its value is what the endpoint receives; everything after runs when the endpoint is done. If the endpoint raised, FastAPI throws the exception into the generator at the `yield`, so `except` fires, we roll back and re-raise, and the user still gets their error. `finally` always returns the connection to the pool — forgetting that is how pools leak.
+
+Watch it work on two requests. The first creates a case. The second opens three cases in one call, and the third title is blank — `demo/p05_app.py`, lines 53–60:
+
+```python
+@app.post("/cases/batch", status_code=201)
+def open_batch(titles: list[str], service: CaseService = Depends(get_service)) -> dict:
+    """Open several cases in one request: all of them, or none."""
+    for title in titles:
+        if not title.strip():
+            raise ValueError("blank title")
+        service.open_case(title=title)
+    return {"opened": len(titles)}
+```
+
+Two `service.open_case` calls have already sent their `INSERT`. Then `ValueError`:
+
+<TerminalOutput command="SQL_ECHO=1 uvicorn p05_app:app --port 4335 — curl POST /cases, POST /cases/batch with a blank third title, GET /stats" label="Python 3.13 · FastAPI 0.165 · SQLAlchemy 2.0.58 · SQLite · captured Nov 2026" caption="The batch printed two INSERTs, then ROLLBACK. GET /stats still counts one case, not three. The log is SQLAlchemy's own echo, with its timestamps and parameter lines trimmed.">
+```text
+POST /cases -> HTTP 201
+POST /cases/batch -> HTTP 500
+GET /stats -> {"cases":1}
+--- POST /cases, server log ---
+BEGIN (implicit)
+SELECT count(*) AS count_1 
+FROM cases
+service | open_case: the id and the open status are ours to set
+INSERT INTO cases (case_id, title, status, detective, resolution) VALUES (?, ?, ?, ?, ?)
+COMMIT
+INFO:     127.0.0.1:59430 - "POST /cases?title=Missing+ring HTTP/1.1" 201 Created
+--- POST /cases/batch, server log ---
+BEGIN (implicit)
+SELECT count(*) AS count_1 
+FROM cases
+service | open_case: the id and the open status are ours to set
+INSERT INTO cases (case_id, title, status, detective, resolution) VALUES (?, ?, ?, ?, ?)
+service | open_case: the id and the open status are ours to set
+INSERT INTO cases (case_id, title, status, detective, resolution) VALUES (?, ?, ?, ?, ?)
+ROLLBACK
+INFO:     127.0.0.1:59432 - "POST /cases/batch HTTP/1.1" 500 Internal Server Error
+ValueError: blank title
+```
+</TerminalOutput>
+
+<BeP05Transaction />
+
+Now the trap. If `SqlCaseRepository.add` ended with `self._session.commit()`, the batch would have committed `a` and `b` before it noticed the blank title: two cases written, an error returned, and a client that retries the call gets duplicates. The same goes for a module-level `session = SessionLocal()` shared by every request: it never rolls back after an error, and it is shared across threads. Tutorials write it that way because it is shorter. The session is the transaction's lifetime, so it has to be exactly one request long.
+
+A related habit: running a long call to someone else's API, or `time.sleep`, inside the endpoint while the session is open. The transaction stays open the whole time and so does the connection. That connects to the pool, which is section 4.
+
+---
+
+## 3. When the commit happens
+
+The post-yield code in `get_session` runs after the endpoint returns. But *before or after the client receives its response?* In current FastAPI, by default it is **after** the response is sent. The docs call this the `"request"` scope. A different setting, `scope="function"`, ends the dependency right after the endpoint function and before the response goes out.
+
+Why it matters: with the default, the client already has `200 OK` when `COMMIT` runs. If the commit fails — a constraint, a full disk, a dropped connection — the client has been told yes about something that did not happen. Here are both endpoints, with a deliberately slow commit (a one-second sleep) so you can read the order off a stopwatch — `demo/p05_commit_order.py`, lines 30–41:
+
+```python
+@app.post("/default")
+def default(session: Session = Depends(get_session)) -> dict:
+    session.execute(text("INSERT INTO cases VALUES ('d', 't', 'open', NULL, NULL)"))
+    print("web     | endpoint returns")
+    return {"ok": True}
+
+
+@app.post("/early")
+def early(session: Session = Depends(get_session, scope="function")) -> dict:
+    session.execute(text("INSERT INTO cases VALUES ('e', 't', 'open', NULL, NULL)"))
+    print("web     | endpoint returns")
+    return {"ok": True}
+```
+
+<TerminalOutput command="uvicorn p05_commit_order:app --port 4335 — curl -w time_total for each endpoint" label="Python 3.13 · FastAPI 0.165 · SQLAlchemy 2.0.58 · SQLite · captured Nov 2026" caption="/default answers in 15 ms and the one-second COMMIT happens afterwards, as the log order shows. /early answers after the commit. The two requests were two seconds apart so the first commit did not hold SQLite's write lock for the second.">
+```text
+POST /default -> HTTP 200 after 0.015303s
+POST /early -> HTTP 200 after 1.006159s
+--- server log ---
+web     | endpoint returns
+INFO:     127.0.0.1:59440 - "POST /default HTTP/1.1" 200 OK
+db      | COMMIT starts (1 s)
+web     | endpoint returns
+db      | COMMIT starts (1 s)
+INFO:     127.0.0.1:59442 - "POST /early HTTP/1.1" 200 OK
+```
+</TerminalOutput>
+
+<BeP05CommitOrder />
+
+Which is right depends on what the endpoint promises. For a write whose success the client must trust, commit before responding: `Depends(get_session, scope="function")`, which is what `get_service` in section 1 does. For a read, the default is fine and slightly faster. The AI habit here is not a bug in either choice. It is copying a `get_db` dependency from a tutorial and assuming the commit lands before the answer goes out. Measure it the way the capture above does.
+
+---
+
+## 4. The pool
+
+Opening a database connection is expensive: TCP, authentication, sometimes TLS, session setup. So the engine keeps a **pool** of open connections and lends them out. A session asks the pool for one on its first query, and gives it back at `commit`, `rollback` or `close`. Three settings decide how it behaves under load:
+
+| Setting | Default | What it does |
+|---|---|---|
+| `pool_size` | 5 | Connections kept open and ready |
+| `max_overflow` | 10 | Extra connections allowed beyond `pool_size` under load, closed again afterwards |
+| `pool_timeout` | 30 | Seconds a request waits for a free connection before it fails |
+
+The defaults allow 15 connections at once and a 30-second wait. A tiny pool makes the failure easy to see — `demo/p05_pool.py`, lines 13–20 and 31–35:
+
+```python
+engine = create_engine(
+    "sqlite:///pool_demo.db",
+    connect_args={"check_same_thread": False},
+    pool_size=2,  # connections kept open
+    max_overflow=0,  # extra connections allowed under load: none
+    pool_timeout=1,  # seconds a request waits for a free connection
+)
+SessionLocal = sessionmaker(engine)
+```
+
+```python
+@app.get("/slow")
+def slow(session: Session = Depends(get_session)) -> dict:
+    session.execute(text("SELECT 1"))  # first query: the connection is checked out here
+    time.sleep(3)  # stands in for a slow call made while still holding it
+    return {"pool": engine.pool.status()}
+```
+
+The endpoint runs one query, so the session checks a connection out of the pool, and then it sleeps three seconds, standing in for any slow call made while holding it. Three requests at once, against a pool of two:
+
+<TerminalOutput command="uvicorn p05_pool:app --port 4335 — three concurrent curl GET /slow" label="Python 3.13 · FastAPI 0.165 · SQLAlchemy 2.0.58 · SQLite · captured Nov 2026" caption="Two requests get a connection and take 3 s. The third waits exactly pool_timeout, one second, then fails. The error names all three numbers.">
+```text
+request 1: HTTP 200 after 3.019988s
+request 2: HTTP 200 after 3.003494s
+request 3: HTTP 500 after 1.005221s
+--- server log ---
+INFO:     127.0.0.1:59449 - "GET /slow HTTP/1.1" 500 Internal Server Error
+sqlalchemy.exc.TimeoutError: QueuePool limit of size 2 overflow 0 reached, connection timed out, timeout 1.00 (Background on this error at: https://sqlalche.me/e/20/3o7r)
+INFO:     127.0.0.1:59445 - "GET /slow HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59447 - "GET /slow HTTP/1.1" 200 OK
+```
+</TerminalOutput>
+
+<BeP05Pool />
+
+The shape of this failure is the Val Town hook in miniature. The database is not slow; the requests are holding connections while they do something else. Look at what a pool-exhaustion incident does to your latency: requests do not slow down gradually. They queue for `pool_timeout` seconds and then fail all at once, which is why p99 jumps toward the timeout value. Two practical rules follow:
+
+- **Hold a connection only as long as the query needs it.** Do slow work (an HTTP call, a file upload) before opening the session or after closing it, not inside it.
+- **Size the pool from the budget, not from the default.** Postgres allows `max_connections` connections in total, 100 by default. Each uvicorn worker process has its own pool, so the arithmetic is `workers × (pool_size + max_overflow)` plus your migrations, your admin tools and your replicas' share, against that limit. Also remember FastAPI runs plain `def` endpoints in a threadpool whose default limit is about 40; a pool of 15 behind 40 threads means threads queue for connections, not for CPU. And if you write `async def` endpoints with a synchronous session, you block the event loop on every query — that is the subject of [the async post](/blog/backend-async-concurrency-workers/).
+
+---
+
+## 5. N+1: the query you cannot see in the code
+
+The N+1 pattern: one query loads a list of N rows, then code touches a related collection on each row, and the ORM fires one more query per row. SQLAlchemy relationships are lazy by default — the related rows load when you first read the attribute, not when you load the parent. Nothing in the endpoint says "query"; a loop does.
+
+`CaseRow` has an `evidence` relationship (three rows per case in the demo). Two endpoints build the same summary, and `before_cursor_execute` counts every statement sent to the database — `demo/p05_nplus1.py`, lines 39–58:
+
+```python
+def measure(query, session: Session) -> dict:
+    statements.clear()
+    started = time.perf_counter()
+    cases = summarize(session.scalars(query))
+    return {
+        "cases": len(cases),
+        "queries": len(statements),
+        "ms": round((time.perf_counter() - started) * 1000, 1),
+    }
+
+
+@app.get("/lazy")
+def lazy(limit: int = 20, session: Session = Depends(get_session)) -> dict:
+    return measure(select(CaseRow).limit(limit), session)
+
+
+@app.get("/eager")
+def eager(limit: int = 20, session: Session = Depends(get_session)) -> dict:
+    query = select(CaseRow).options(selectinload(CaseRow.evidence)).limit(limit)
+    return measure(query, session)
+```
+
+`/lazy` does `select(CaseRow)` and then reads `c.evidence` inside `summarize`, which sits in the list comprehension. `/eager` adds `selectinload(CaseRow.evidence)` to the query: SQLAlchemy loads all the parents, then runs one more query for all their children, using `WHERE case_id IN (…)`. With three cases, SQLAlchemy's own echo shows the difference:
+
+<TerminalOutput command="SQL_ECHO=1 uvicorn p05_nplus1:app --port 4335 — curl 'GET /lazy?limit=3' then 'GET /eager?limit=3'" label="Python 3.13 · FastAPI 0.165 · SQLAlchemy 2.0.58 · SQLite · captured Nov 2026" caption="Lazy: the case query, then the same evidence query once per case, 4 statements. Eager: 2 statements. The log lines are SQLAlchemy's echo with timestamps and parameter lines trimmed.">
+```text
+GET /lazy?limit=3 -> {"cases":3,"queries":4,"ms":4.3}
+GET /eager?limit=3 -> {"cases":3,"queries":2,"ms":3.3}
+--- /lazy?limit=3 ---
+SELECT cases.case_id, cases.title, cases.status, cases.detective, cases.resolution 
+FROM cases
+ LIMIT ? OFFSET ?
+SELECT evidence.id AS evidence_id, evidence.case_id AS evidence_case_id, evidence.label AS evidence_label 
+FROM evidence 
+WHERE ? = evidence.case_id
+SELECT evidence.id AS evidence_id, evidence.case_id AS evidence_case_id, evidence.label AS evidence_label 
+FROM evidence 
+WHERE ? = evidence.case_id
+SELECT evidence.id AS evidence_id, evidence.case_id AS evidence_case_id, evidence.label AS evidence_label 
+FROM evidence 
+WHERE ? = evidence.case_id
+--- /eager?limit=3 ---
+SELECT cases.case_id, cases.title, cases.status, cases.detective, cases.resolution 
+FROM cases
+ LIMIT ? OFFSET ?
+SELECT evidence.case_id AS evidence_case_id, evidence.id AS evidence_id, evidence.label AS evidence_label 
+FROM evidence 
+WHERE evidence.case_id IN (?, ?, ?)
+```
+</TerminalOutput>
+
+Same endpoint with more rows — the count grows with N, the eager count does not:
+
+<TerminalOutput command="curl each endpoint with limit=20 and limit=200" label="Python 3.13 · FastAPI 0.165 · SQLAlchemy 2.0.58 · SQLite · captured Nov 2026" caption="Query counts are exact and repeat on every run; the milliseconds are one run and vary. SQLite lives inside the process, so a query costs microseconds. Against a database across a network, each of the 200 extra queries adds a round trip on top.">
+```text
+GET /lazy?limit=20 -> {"cases":20,"queries":21,"ms":4.0}
+GET /eager?limit=20 -> {"cases":20,"queries":2,"ms":1.5}
+GET /lazy?limit=200 -> {"cases":200,"queries":201,"ms":31.7}
+GET /eager?limit=200 -> {"cases":200,"queries":2,"ms":4.3}
+```
+</TerminalOutput>
+
+<BeP05NPlus1 />
+
+Why this is the problem that hides until production: on a dev laptop with a dozen rows and an in-process database, 21 queries is 4 ms and nobody notices. In production the page size is 100 or 1,000, the database is a network hop away, and the slowest requests are the ones with the most children. The count never shows in the diff, which is why you count queries in a test instead. `selectinload` is the default I reach for with one-to-many; a joined load suits many-to-one. Count first, then pick.
+
+---
+
+## 6. Migrations: change a schema that already has data
+
+Everything so far called `Base.metadata.create_all(engine)` at import. It creates tables that are **missing**. It never alters one that exists. So the day after you ship, you add a column to the model, deploy, and `create_all` quietly does nothing. `demo/p05_migrate.py` reproduces it with two versions of the same model — lines 41–50:
+
+```python
+def create_all_demo() -> None:
+    V1.metadata.create_all(engine)  # first deploy
+    V2.metadata.create_all(engine)  # next deploy: the table exists, so: nothing
+    print("create_all: no error, no change")
+    try:
+        with Session(engine) as session:
+            session.add(CaseV2(case_id="C-1", title="Missing ring"))
+            session.commit()
+    except OperationalError as exc:
+        print("first insert:", exc.orig)
+```
+
+<TerminalOutput command="python p05_migrate.py create_all" label="Python 3.13 · SQLAlchemy 2.0.58 · SQLite · captured Nov 2026" caption="create_all raised nothing. The first INSERT using the new column is where production finds out.">
+```text
+create_all: no error, no change
+first insert: table cases has no column named priority
+```
+</TerminalOutput>
+
+A **migration** is a change to the schema written as an ordered, numbered step, recorded in the database itself so it runs exactly once. The smallest working version of that idea is a list and a table — `demo/p05_migrate.py`, lines 53–73:
+
+```python
+MIGRATIONS = [
+    (1, "create cases", "CREATE TABLE cases (case_id TEXT PRIMARY KEY, title TEXT NOT NULL)"),
+    (2, "add priority", "ALTER TABLE cases ADD COLUMN priority INTEGER NOT NULL DEFAULT 3"),
+]
+
+```
+
+```python
+def migrate() -> None:
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY)"))
+    for version, name, sql in MIGRATIONS:
+        with engine.begin() as conn:  # one transaction per migration
+            done = conn.execute(
+                text("SELECT 1 FROM schema_migrations WHERE version = :v"), {"v": version}
+            ).first()
+            if done:
+                print(f"{version} {name}: already applied")
+                continue
+            conn.execute(text(sql))
+            conn.execute(text("INSERT INTO schema_migrations VALUES (:v)"), {"v": version})
+            print(f"{version} {name}: applied")
+
+```
+
+Each migration runs in its own `engine.begin()` block together with the row in `schema_migrations` that records it. On Postgres, schema changes are transactional, so a step that fails leaves neither the change nor the record. I did not test a failing step here. Run it twice:
+
+<TerminalOutput command="python p05_migrate.py migrate — twice" label="Python 3.13 · SQLAlchemy 2.0.58 · SQLite · captured Nov 2026" caption="The first run applies both steps. The second run reads schema_migrations and skips them.">
+```text
+1 create cases: applied
+2 add priority: applied
+(run again)
+1 create cases: already applied
+2 add priority: already applied
+(run again)
+```
+</TerminalOutput>
+
+<BeP05Migration />
+
+This runner is a teaching size. In a real project you use **Alembic**, SQLAlchemy's migration tool: the same numbered-and-recorded idea, plus generating a migration by comparing your models to the database, a `downgrade` step, and branching when two developers add migrations at the same time. I did not run Alembic here, so the capture above is of the explicit runner and nothing else. Whichever you use, the AI habits to catch are the same: `create_all` at import in production; editing an old migration instead of adding a new one; a migration that adds a `NOT NULL` column with no default to a table that already has rows (the `DEFAULT 3` above is what makes step 2 legal in SQLite); and autogenerate output merged without reading it.
+
+---
+
+## 7. SQLite to Postgres: what changes
+
+All the output above is SQLite, because it needs nothing installed and every run is reproducible. I did not run Postgres for this post, so there are no Postgres numbers here. The code mostly carries over; the behaviour does not entirely:
+
+| What | SQLite (this post) | Postgres |
+|---|---|---|
+| URL and driver | `sqlite:///clue.db`, built in | `postgresql+psycopg://user:password@host/db`, plus the `psycopg` package |
+| `connect_args` | `check_same_thread=False` needed | not used; `p05_db.py` already skips it |
+| Pool | a file database gets a pool, but there is no network and no server limit | the pool is the thing that protects `max_connections`; each worker has its own |
+| Dead connections | the file is always there | a firewall or a restart can drop an idle connection; `pool_pre_ping=True` tests one on checkout |
+| N+1 cost | microseconds per query | one network round trip per query |
+| Writers | one writer at a time per database file | many concurrent writers; they lock rows, not the whole database |
+| Column types | loose: a column accepts almost anything | strict: wrong types fail at the database |
+| Migrations | limited `ALTER TABLE` | richer `ALTER TABLE`; larger tables need care about locks |
+
+Nothing in `layered_service.py` changes, and nothing in `SqlCaseRepository`: the first line to touch is `DATABASE_URL`, the second is the pool settings you tune against Postgres's own limit, and the third is a load test against a database you actually run in production — which is what the performance post is for.
+
+<Callout type="note" title="What to review in AI-written data access">
+Five questions, in order. Is the session created per request and closed in `finally`? Does exactly one place commit? Is a pool size chosen, and does `workers × (pool_size + max_overflow)` fit the database's limit? Does a list endpoint count its queries in a test? Does a schema change come with a migration file, and is `create_all` out of production startup? Each one is a line you can find in a diff.
+</Callout>
+
+</En>
+
+<Vi>
+
+<Figure src={heroOperator} alt="Một nữ tổng đài viên điện thoại năm 1911 ngồi trước bảng tổng đài, đeo tai nghe, cắm dây vào các lỗ đánh số" caption="Tổng đài chỉ có một số dây cố định. Cuộc gọi nào đã nối là giữ một dây tới khi cúp máy; người gọi sau phải đợi, rồi nhận tín hiệu bận. Connection pool chính là cái bảng đó: vài đường dây đã mở sẵn tới database, cho mượn rồi trả lại, và khi tất cả đều bận thì chẳng ai để đổ lỗi ngoài cái bảng." sourceTitle="Wikimedia Commons: &quot;A Telephone Operator&quot;, Library of Congress, 1911" sourceUrl="https://commons.wikimedia.org/wiki/File:%22A_Telephone_Operator%22_LCCN2006681181.tif" />
+
+### Mở đầu: con server ngừng trả lời mà trông vẫn khỏe
+
+Trong một post-mortem đăng ngày 31/12/2024, Val Town kể lại một đêm mà hàng loạt chỉnh sửa song song lên cùng một Val làm các query database bị deadlock. Những connection bị khóa không bao giờ trả lại slot, vì pool không có query timeout: nguyên văn post-mortem là "these locked connections permanently occupied slots in our connection pool". Một host hết sạch connection tới database và kẹt gần hết request, cả vào lẫn ra. Health check của nó không kiểm tra database, nên nó vẫn trông khỏe. Tình trạng kéo dài khoảng 6 giờ 49 phút, từ 12:15 đến 7:04 giờ ET, tới khi kỹ sư tắt hẳn con host đó sau khi có người dùng báo.
+
+Không có gì ở đây là một bug database kỳ quặc. Đó là phần ống nước giữa handler web và database: một pool connection cố tình nhỏ, những query được phép chờ vô hạn, và một health check không nhìn tới cả hai. Code AI viết hay bỏ qua đúng tầng này. Bảo "thêm database cho clue.api" là bạn nhận về `create_engine`, một `SessionLocal`, đoạn `Depends(get_db)` chép từ tutorial, và `Base.metadata.create_all()` chạy ngay lúc import. Request đầu tiên chạy ngon. Còn request thứ một nghìn thì nó chẳng nói gì.
+
+Bài này dựng tầng đó dưới service của [bài trước](/blog/backend-layered-architecture/), rồi đo xem từng lựa chọn làm gì:
+
+1. **Seam có implementation thật** — một repository SQLAlchemy sau `CaseRepository` của bài 4, và service không phải sửa.
+2. **Một session, một transaction, một request** — thành công thì commit, lỗi thì rollback, làm trong dependency của FastAPI.
+3. **Commit xảy ra lúc nào** — mặc định của dependency có `yield` làm nhiều người bất ngờ.
+4. **Pool** — `pool_size`, `max_overflow`, `pool_timeout` làm gì, và capture thật của một pool cạn.
+5. **N+1** — đếm query, và cách sửa bằng một từ.
+6. **Migration** — vì sao `create_all` không phải migration.
+7. **SQLite sang Postgres** — cái gì đổi, và cái gì mình sẽ không giả vờ là đã đo.
+
+Nói trước một ranh giới. "Transaction" ở đây chỉ là phần ống nước: một `BEGIN`, rồi `COMMIT` hoặc `ROLLBACK`, bao quanh một request. Chuyện hai transaction chồng lên nhau — isolation level, lost update, write skew, serializability — thuộc về bài DDIA [Transactions: ACID, isolation levels, anomalies, serializability](/blog/transactions-acid-isolation-anomalies-serializability/). Phần dưới không dạy lại.
+
+---
+
+## 1. Seam có implementation thật
+
+Bài 4 để lại một lời hứa trong `demo/layered_data.py`: service chỉ phụ thuộc hình dạng `CaseRepository`, "so any implementation of that shape plugs in underneath". Hôm nay lời hứa được thực hiện. Toàn bộ tầng dưới service gồm ba mảnh nhỏ. Đầu tiên là engine và session factory — `demo/p05_db.py`, dòng 28–30:
+
+```python
+connect_args = {"check_same_thread": False} if DATABASE_URL.startswith("sqlite") else {}
+engine = create_engine(DATABASE_URL, echo=ECHO, connect_args=connect_args)
+SessionLocal = sessionmaker(engine, expire_on_commit=False)
+```
+
+Có ba việc xảy ra ở đây. `create_engine` dựng **engine**: nó giữ connection pool và biết nói phương ngữ SQL của database nào. URL lấy từ `DATABASE_URL`, nên cùng đoạn code trỏ vào SQLite hôm nay và Postgres sau này; cờ `check_same_thread` chỉ dành cho SQLite vì FastAPI chạy endpoint `def` thường trong threadpool, mà SQLite mặc định không cho chuyền connection qua thread khác. `sessionmaker` là nhà máy sản xuất **session**: session là không gian làm việc ngắn hạn, nhớ những dòng bạn đã đụng tới và hỏi pool khi cần connection. Còn `expire_on_commit=False` giữ cho object đã load vẫn đọc được sau commit.
+
+Tiếp theo là repository — `demo/p05_db.py`, dòng 59–83:
+
+```python
+class SqlCaseRepository:
+    """Same three methods as InMemoryCaseRepository; the session is borrowed."""
+
+    def __init__(self, session: Session) -> None:
+        self._session = session
+
+    def add(self, record: CaseRecord) -> None:
+        self._session.add(CaseRow(**vars(record)))
+        self._session.flush()  # send the INSERT now; commit is not ours to do
+
+    def get(self, case_id: str) -> CaseRecord | None:
+        row = self._session.get(CaseRow, case_id)
+        if row is None:
+            return None
+        return CaseRecord(
+            row.case_id, row.title, row.status, row.detective, row.resolution
+        )
+
+    def save(self, record: CaseRecord) -> None:
+        row = self._session.get(CaseRow, record.case_id)
+        row.status = record.status
+        row.detective = record.detective
+        row.resolution = record.resolution
+        self._session.flush()
+
+```
+
+`SqlCaseRepository` có đúng ba method mà `CaseRepository` đòi, nên service nhận nó không cần import hay base class. Có hai lựa chọn đáng để ý. Nó chuyển đổi giữa `CaseRow` (cái bảng, một kiểu của SQLAlchemy) và `CaseRecord` (dataclass thường mà service nói chuyện). Nếu trả thẳng ORM row, một lần đọc attribute lazy trong service sẽ lặng lẽ chạy SQL từ tầng giữa, và luật nghiệp vụ phụ thuộc vào một session đang sống. Và nó gọi `flush()` chứ không `commit()`: INSERT được gửi đi ngay để lỗi nổi lên tại đây, nhưng quyết định "cả request này chốt rồi" không phải việc của nó. Repository do AI viết thường kết thúc mọi method bằng `session.commit()`. Nhớ dòng đó, phần 2 sẽ cho thấy nó đắt thế nào.
+
+<BeP05Seam />
+
+Service không đổi — `git diff main -- demo/layered_service.py` trống — nhưng có một thứ trong đó vỡ. `CaseService` phát id từ một bộ đếm trong bộ nhớ của chính nó, mà cách nối dây của bài 4 tạo một service cho mỗi request. Với dict thì không ai thấy; với bảng có primary key thì thấy ngay. Đây là app y hệt nhưng chưa vá, `curl` hai lần:
+
+<TerminalOutput command="p05_app.py bỏ dòng seed — curl POST /cases?title=one, rồi ?title=two" label="Python 3.13 · FastAPI 0.165 · SQLAlchemy 2.0.58 · SQLite · captured Nov 2026" caption="Request thứ hai tạo service mới, bộ đếm lại bắt đầu từ 1. Database khác dict ở chỗ nó không chịu ghi đè C-1, và người dùng nhận lỗi 500.">
+```text
+service | open_case: the id and the open status are ours to set
+INFO:     127.0.0.1:59194 - "POST /cases?title=one HTTP/1.1" 201 Created
+service | open_case: the id and the open status are ours to set
+INFO:     127.0.0.1:59196 - "POST /cases?title=two HTTP/1.1" 500 Internal Server Error
+sqlalchemy.exc.IntegrityError: (sqlite3.IntegrityError) UNIQUE constraint failed: cases.case_id
+```
+</TerminalOutput>
+
+Phần nối dây, `demo/p05_app.py` dòng 21–28, nạp lại bộ đếm từ bảng:
+
+```python
+def get_service(
+    session: Session = Depends(get_session, scope="function"),
+) -> CaseService:
+    service = CaseService(SqlCaseRepository(session))
+    # The service counts ids in memory, and this service lives one request.
+    # Seed the counter from the table or the second request reuses C-1.
+    service._next_id = session.scalar(select(func.count()).select_from(CaseRow)) + 1
+    return service
+```
+
+`Depends(get_session)` xin FastAPI một session, dựng repository trên nó, rồi đưa service cho endpoint — đây là `get_service` của bài 4, chỉ khác là bên trong có repo thật. Chọc vào `_next_id` là một bản vá, và mình sẽ nói thẳng điều đó trong code review: cách sạch là để database tự cấp id, đó là sửa service, để dịp khác. Đếm số dòng cũng vỡ ngay ngày bạn xóa một dòng. Nó nằm ở đây để chứng minh một điều: đổi tầng lưu trữ vẫn có thể ảnh hưởng ngược lên trên, và test bằng fake repository sẽ không báo cho bạn.
+
+---
+
+## 2. Một session, một transaction, một request
+
+Transaction là một nhóm lệnh ghi hoặc cùng hiện ra, hoặc không cái nào hiện. Quy tắc đơn giản nhất làm đúng chuyện này cho web service: **một request, một transaction.** Mở khi request bắt đầu, commit khi request thành công, rollback khi có gì raise. Nơi nhìn thấy đầu và cuối của một request không phải repository hay service, mà là dependency phát session — `demo/p05_db.py`, dòng 85–95:
+
+```python
+def get_session() -> Iterator[Session]:
+    """One session per request: commit if the request succeeds, else roll back."""
+    session = SessionLocal()
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+```
+
+Dependency có `yield` gồm hai nửa. Mọi thứ trước `yield` chạy trước endpoint, và giá trị của nó là thứ endpoint nhận; mọi thứ sau chạy khi endpoint xong. Nếu endpoint raise, FastAPI ném exception vào generator tại `yield`, nên `except` chạy, ta rollback rồi raise lại, và người dùng vẫn nhận lỗi của họ. `finally` luôn trả connection về pool — quên dòng đó là cách pool bị rò rỉ.
+
+Xem nó chạy trên hai request. Request đầu tạo một case. Request thứ hai mở ba case trong một lần gọi, và title thứ ba bị rỗng — `demo/p05_app.py`, dòng 53–60:
+
+```python
+@app.post("/cases/batch", status_code=201)
+def open_batch(titles: list[str], service: CaseService = Depends(get_service)) -> dict:
+    """Open several cases in one request: all of them, or none."""
+    for title in titles:
+        if not title.strip():
+            raise ValueError("blank title")
+        service.open_case(title=title)
+    return {"opened": len(titles)}
+```
+
+Hai lần `service.open_case` đã gửi INSERT đi rồi. Sau đó là `ValueError`:
+
+<TerminalOutput command="SQL_ECHO=1 uvicorn p05_app:app --port 4335 — curl POST /cases, POST /cases/batch với title thứ ba rỗng, GET /stats" label="Python 3.13 · FastAPI 0.165 · SQLAlchemy 2.0.58 · SQLite · captured Nov 2026" caption="Batch in ra hai INSERT, rồi ROLLBACK. GET /stats vẫn đếm một case, không phải ba. Log là echo của chính SQLAlchemy, đã cắt timestamp và dòng tham số.">
+```text
+POST /cases -> HTTP 201
+POST /cases/batch -> HTTP 500
+GET /stats -> {"cases":1}
+--- POST /cases, server log ---
+BEGIN (implicit)
+SELECT count(*) AS count_1 
+FROM cases
+service | open_case: the id and the open status are ours to set
+INSERT INTO cases (case_id, title, status, detective, resolution) VALUES (?, ?, ?, ?, ?)
+COMMIT
+INFO:     127.0.0.1:59430 - "POST /cases?title=Missing+ring HTTP/1.1" 201 Created
+--- POST /cases/batch, server log ---
+BEGIN (implicit)
+SELECT count(*) AS count_1 
+FROM cases
+service | open_case: the id and the open status are ours to set
+INSERT INTO cases (case_id, title, status, detective, resolution) VALUES (?, ?, ?, ?, ?)
+service | open_case: the id and the open status are ours to set
+INSERT INTO cases (case_id, title, status, detective, resolution) VALUES (?, ?, ?, ?, ?)
+ROLLBACK
+INFO:     127.0.0.1:59432 - "POST /cases/batch HTTP/1.1" 500 Internal Server Error
+ValueError: blank title
+```
+</TerminalOutput>
+
+<BeP05Transaction />
+
+Giờ tới cái bẫy. Nếu `SqlCaseRepository.add` kết thúc bằng `self._session.commit()`, batch sẽ commit `a` và `b` trước khi phát hiện title rỗng: hai case đã ghi, lỗi đã trả, và client retry sẽ sinh bản trùng. Tương tự với `session = SessionLocal()` ở mức module dùng chung cho mọi request: nó không bao giờ rollback sau lỗi, và bị chia sẻ giữa các thread. Tutorial viết vậy vì nó ngắn hơn. Session là tuổi thọ của transaction, nên nó phải dài đúng bằng một request.
+
+Một thói quen liên quan: gọi API của bên khác hay `time.sleep` ngay trong endpoint khi session đang mở. Transaction mở suốt thời gian đó, connection cũng vậy. Chuyện này nối sang pool, phần 4.
+
+---
+
+## 3. Commit xảy ra lúc nào
+
+Phần code sau `yield` trong `get_session` chạy sau khi endpoint return. Nhưng là *trước hay sau khi client nhận response?* Ở FastAPI hiện tại, mặc định là **sau** khi response đã gửi. Docs gọi đó là scope `"request"`. Một thiết lập khác, `scope="function"`, kết thúc dependency ngay sau hàm endpoint và trước khi response đi ra.
+
+Vì sao quan trọng: với mặc định, client đã cầm `200 OK` khi `COMMIT` chạy. Nếu commit lỗi — vi phạm constraint, đầy đĩa, rớt kết nối — client đã được báo "xong" cho một việc chưa hề xảy ra. Đây là cả hai endpoint, với commit cố tình chậm (sleep một giây) để đọc thứ tự trên đồng hồ bấm giờ — `demo/p05_commit_order.py`, dòng 30–41:
+
+```python
+@app.post("/default")
+def default(session: Session = Depends(get_session)) -> dict:
+    session.execute(text("INSERT INTO cases VALUES ('d', 't', 'open', NULL, NULL)"))
+    print("web     | endpoint returns")
+    return {"ok": True}
+
+
+@app.post("/early")
+def early(session: Session = Depends(get_session, scope="function")) -> dict:
+    session.execute(text("INSERT INTO cases VALUES ('e', 't', 'open', NULL, NULL)"))
+    print("web     | endpoint returns")
+    return {"ok": True}
+```
+
+<TerminalOutput command="uvicorn p05_commit_order:app --port 4335 — curl -w time_total cho từng endpoint" label="Python 3.13 · FastAPI 0.165 · SQLAlchemy 2.0.58 · SQLite · captured Nov 2026" caption="/default trả lời sau 15 ms và COMMIT một giây xảy ra sau đó, đúng như thứ tự trong log. /early trả lời sau commit. Hai request cách nhau hai giây để commit đầu không giữ write lock của SQLite lên request sau.">
+```text
+POST /default -> HTTP 200 after 0.015303s
+POST /early -> HTTP 200 after 1.006159s
+--- server log ---
+web     | endpoint returns
+INFO:     127.0.0.1:59440 - "POST /default HTTP/1.1" 200 OK
+db      | COMMIT starts (1 s)
+web     | endpoint returns
+db      | COMMIT starts (1 s)
+INFO:     127.0.0.1:59442 - "POST /early HTTP/1.1" 200 OK
+```
+</TerminalOutput>
+
+<BeP05CommitOrder />
+
+Cái nào đúng tùy endpoint hứa gì. Với lệnh ghi mà client phải tin kết quả, commit trước khi trả lời: `Depends(get_session, scope="function")`, đúng như `get_service` ở phần 1. Với lệnh đọc, mặc định ổn và nhanh hơn chút. Thói quen của AI ở đây không phải bug của lựa chọn nào: nó chép dependency `get_db` từ tutorial rồi mặc định cho rằng commit nằm trước câu trả lời. Hãy đo như capture trên.
+
+---
+
+## 4. Pool
+
+Mở một connection database tốn kém: TCP, xác thực, đôi khi TLS, khởi tạo session. Nên engine giữ một **pool** các connection đã mở và cho mượn. Session xin pool một connection ở query đầu tiên, và trả lại khi `commit`, `rollback` hay `close`. Ba thiết lập quyết định pool ứng xử thế nào khi tải lên:
+
+| Thiết lập | Mặc định | Làm gì |
+|---|---|---|
+| `pool_size` | 5 | Số connection giữ mở sẵn |
+| `max_overflow` | 10 | Connection thêm được phép mở vượt `pool_size` khi tải cao, sau đó đóng lại |
+| `pool_timeout` | 30 | Số giây một request đợi connection rảnh trước khi báo lỗi |
+
+Mặc định cho phép 15 connection cùng lúc và đợi tối đa 30 giây. Một pool tí hon làm lỗi này dễ thấy — `demo/p05_pool.py`, dòng 13–20 và 31–35:
+
+```python
+engine = create_engine(
+    "sqlite:///pool_demo.db",
+    connect_args={"check_same_thread": False},
+    pool_size=2,  # connections kept open
+    max_overflow=0,  # extra connections allowed under load: none
+    pool_timeout=1,  # seconds a request waits for a free connection
+)
+SessionLocal = sessionmaker(engine)
+```
+
+```python
+@app.get("/slow")
+def slow(session: Session = Depends(get_session)) -> dict:
+    session.execute(text("SELECT 1"))  # first query: the connection is checked out here
+    time.sleep(3)  # stands in for a slow call made while still holding it
+    return {"pool": engine.pool.status()}
+```
+
+Endpoint chạy một query, nên session lấy ra một connection từ pool, rồi ngủ ba giây, đại diện cho bất kỳ cuộc gọi chậm nào làm trong lúc còn giữ connection. Ba request cùng lúc, pool có hai connection:
+
+<TerminalOutput command="uvicorn p05_pool:app --port 4335 — ba curl GET /slow đồng thời" label="Python 3.13 · FastAPI 0.165 · SQLAlchemy 2.0.58 · SQLite · captured Nov 2026" caption="Hai request nhận connection và chạy 3 s. Request thứ ba đợi đúng pool_timeout, một giây, rồi lỗi. Thông báo lỗi nêu đủ cả ba con số.">
+```text
+request 1: HTTP 200 after 3.019988s
+request 2: HTTP 200 after 3.003494s
+request 3: HTTP 500 after 1.005221s
+--- server log ---
+INFO:     127.0.0.1:59449 - "GET /slow HTTP/1.1" 500 Internal Server Error
+sqlalchemy.exc.TimeoutError: QueuePool limit of size 2 overflow 0 reached, connection timed out, timeout 1.00 (Background on this error at: https://sqlalche.me/e/20/3o7r)
+INFO:     127.0.0.1:59445 - "GET /slow HTTP/1.1" 200 OK
+INFO:     127.0.0.1:59447 - "GET /slow HTTP/1.1" 200 OK
+```
+</TerminalOutput>
+
+<BeP05Pool />
+
+Dạng lỗi này chính là vụ Val Town thu nhỏ. Database không chậm; các request giữ connection trong lúc làm việc khác. Xem sự cố cạn pool ảnh hưởng latency thế nào: request không chậm dần. Chúng xếp hàng `pool_timeout` giây rồi cùng lỗi một lượt, nên p99 nhảy về phía giá trị timeout. Hai quy tắc thực tế:
+
+- **Chỉ giữ connection ngắn bằng cái query.** Việc chậm (gọi HTTP, upload file) làm trước khi mở session hoặc sau khi đóng, không phải bên trong.
+- **Tính cỡ pool từ ngân sách, không từ mặc định.** Postgres cho phép tổng cộng `max_connections` connection, mặc định 100. Mỗi worker uvicorn có pool riêng, nên phép tính là `workers × (pool_size + max_overflow)` cộng thêm migration, công cụ admin và phần của replica, so với giới hạn đó. Cũng nhớ FastAPI chạy endpoint `def` thường trong một threadpool có giới hạn mặc định khoảng 40; pool 15 đứng sau 40 thread nghĩa là thread xếp hàng chờ connection, chứ không chờ CPU. Còn nếu bạn viết endpoint `async def` mà dùng session đồng bộ, mỗi query sẽ chặn event loop — đó là chủ đề của [bài async](/blog/backend-async-concurrency-workers/).
+
+---
+
+## 5. N+1: query mà bạn không thấy trong code
+
+Mẫu N+1: một query tải danh sách N dòng, rồi code đụng vào collection liên quan của từng dòng, và ORM bắn thêm một query cho mỗi dòng. Relationship của SQLAlchemy mặc định là lazy — dòng liên quan chỉ tải khi bạn đọc attribute lần đầu, không phải lúc tải dòng cha. Trong endpoint không chỗ nào viết "query"; một vòng lặp làm việc đó.
+
+`CaseRow` có relationship `evidence` (demo có ba dòng cho mỗi case). Hai endpoint dựng cùng một bản tóm tắt, và `before_cursor_execute` đếm mọi câu lệnh gửi tới database — `demo/p05_nplus1.py`, dòng 39–58:
+
+```python
+def measure(query, session: Session) -> dict:
+    statements.clear()
+    started = time.perf_counter()
+    cases = summarize(session.scalars(query))
+    return {
+        "cases": len(cases),
+        "queries": len(statements),
+        "ms": round((time.perf_counter() - started) * 1000, 1),
+    }
+
+
+@app.get("/lazy")
+def lazy(limit: int = 20, session: Session = Depends(get_session)) -> dict:
+    return measure(select(CaseRow).limit(limit), session)
+
+
+@app.get("/eager")
+def eager(limit: int = 20, session: Session = Depends(get_session)) -> dict:
+    query = select(CaseRow).options(selectinload(CaseRow.evidence)).limit(limit)
+    return measure(query, session)
+```
+
+`/lazy` chạy `select(CaseRow)` rồi đọc `c.evidence` trong `summarize`, nằm trong list comprehension. `/eager` thêm `selectinload(CaseRow.evidence)` vào query: SQLAlchemy tải hết dòng cha, rồi chạy thêm đúng một query cho tất cả dòng con bằng `WHERE case_id IN (…)`. Với ba case, echo của SQLAlchemy cho thấy khác biệt:
+
+<TerminalOutput command="SQL_ECHO=1 uvicorn p05_nplus1:app --port 4335 — curl 'GET /lazy?limit=3' rồi 'GET /eager?limit=3'" label="Python 3.13 · FastAPI 0.165 · SQLAlchemy 2.0.58 · SQLite · captured Nov 2026" caption="Lazy: query case, rồi cùng một query evidence lặp lại cho từng case, tổng 4 câu lệnh. Eager: 2 câu lệnh. Log là echo của SQLAlchemy đã cắt timestamp và dòng tham số.">
+```text
+GET /lazy?limit=3 -> {"cases":3,"queries":4,"ms":4.3}
+GET /eager?limit=3 -> {"cases":3,"queries":2,"ms":3.3}
+--- /lazy?limit=3 ---
+SELECT cases.case_id, cases.title, cases.status, cases.detective, cases.resolution 
+FROM cases
+ LIMIT ? OFFSET ?
+SELECT evidence.id AS evidence_id, evidence.case_id AS evidence_case_id, evidence.label AS evidence_label 
+FROM evidence 
+WHERE ? = evidence.case_id
+SELECT evidence.id AS evidence_id, evidence.case_id AS evidence_case_id, evidence.label AS evidence_label 
+FROM evidence 
+WHERE ? = evidence.case_id
+SELECT evidence.id AS evidence_id, evidence.case_id AS evidence_case_id, evidence.label AS evidence_label 
+FROM evidence 
+WHERE ? = evidence.case_id
+--- /eager?limit=3 ---
+SELECT cases.case_id, cases.title, cases.status, cases.detective, cases.resolution 
+FROM cases
+ LIMIT ? OFFSET ?
+SELECT evidence.case_id AS evidence_case_id, evidence.id AS evidence_id, evidence.label AS evidence_label 
+FROM evidence 
+WHERE evidence.case_id IN (?, ?, ?)
+```
+</TerminalOutput>
+
+Cùng endpoint đó với nhiều dòng hơn — số query lazy tăng theo N, số query eager thì không:
+
+<TerminalOutput command="curl từng endpoint với limit=20 và limit=200" label="Python 3.13 · FastAPI 0.165 · SQLAlchemy 2.0.58 · SQLite · captured Nov 2026" caption="Số query là chính xác và lần nào chạy cũng giống; số ms là của một lần chạy và sẽ dao động. SQLite chạy ngay trong process nên một query tốn micro giây. Với database qua mạng, mỗi query trong 200 query dư đó còn cộng thêm một round trip.">
+```text
+GET /lazy?limit=20 -> {"cases":20,"queries":21,"ms":4.0}
+GET /eager?limit=20 -> {"cases":20,"queries":2,"ms":1.5}
+GET /lazy?limit=200 -> {"cases":200,"queries":201,"ms":31.7}
+GET /eager?limit=200 -> {"cases":200,"queries":2,"ms":4.3}
+```
+</TerminalOutput>
+
+<BeP05NPlus1 />
+
+Vì sao lỗi này ẩn tới khi lên production: trên laptop dev với vài chục dòng và database chạy trong process, 21 query là 4 ms và không ai để ý. Ở production, cỡ trang là 100 hay 1.000, database cách một chặng mạng, và những request chậm nhất là những request có nhiều dòng con nhất. Con số query không bao giờ lộ ra trong diff, nên cách đúng là đếm query trong test. Với quan hệ một-nhiều mình thường chọn `selectinload`; quan hệ nhiều-một hợp với joined load hơn. Đếm trước, rồi mới chọn.
+
+---
+
+## 6. Migration: đổi schema khi đã có dữ liệu
+
+Từ đầu bài tới giờ ta gọi `Base.metadata.create_all(engine)` lúc import. Nó tạo những bảng **còn thiếu**. Nó không bao giờ sửa một bảng đã tồn tại. Nên hôm sau khi ship, bạn thêm một cột vào model, deploy, và `create_all` im lặng không làm gì. `demo/p05_migrate.py` tái hiện điều đó bằng hai phiên bản của cùng một model — dòng 41–50:
+
+```python
+def create_all_demo() -> None:
+    V1.metadata.create_all(engine)  # first deploy
+    V2.metadata.create_all(engine)  # next deploy: the table exists, so: nothing
+    print("create_all: no error, no change")
+    try:
+        with Session(engine) as session:
+            session.add(CaseV2(case_id="C-1", title="Missing ring"))
+            session.commit()
+    except OperationalError as exc:
+        print("first insert:", exc.orig)
+```
+
+<TerminalOutput command="python p05_migrate.py create_all" label="Python 3.13 · SQLAlchemy 2.0.58 · SQLite · captured Nov 2026" caption="create_all không báo lỗi gì. INSERT đầu tiên dùng cột mới là lúc production biết chuyện.">
+```text
+create_all: no error, no change
+first insert: table cases has no column named priority
+```
+</TerminalOutput>
+
+**Migration** là một thay đổi schema được viết thành bước có thứ tự, có đánh số, ghi lại ngay trong database để nó chỉ chạy đúng một lần. Phiên bản nhỏ nhất chạy được của ý đó chỉ là một danh sách và một bảng — `demo/p05_migrate.py`, dòng 53–73:
+
+```python
+MIGRATIONS = [
+    (1, "create cases", "CREATE TABLE cases (case_id TEXT PRIMARY KEY, title TEXT NOT NULL)"),
+    (2, "add priority", "ALTER TABLE cases ADD COLUMN priority INTEGER NOT NULL DEFAULT 3"),
+]
+
+```
+
+```python
+def migrate() -> None:
+    with engine.begin() as conn:
+        conn.execute(text("CREATE TABLE IF NOT EXISTS schema_migrations (version INTEGER PRIMARY KEY)"))
+    for version, name, sql in MIGRATIONS:
+        with engine.begin() as conn:  # one transaction per migration
+            done = conn.execute(
+                text("SELECT 1 FROM schema_migrations WHERE version = :v"), {"v": version}
+            ).first()
+            if done:
+                print(f"{version} {name}: already applied")
+                continue
+            conn.execute(text(sql))
+            conn.execute(text("INSERT INTO schema_migrations VALUES (:v)"), {"v": version})
+            print(f"{version} {name}: applied")
+
+```
+
+Mỗi migration chạy trong một khối `engine.begin()` riêng, cùng với dòng trong `schema_migrations` ghi nhận nó. Trên Postgres, thay đổi schema nằm trong transaction, nên một bước lỗi không để lại cả thay đổi lẫn bản ghi. Mình chưa thử một bước lỗi ở đây. Chạy hai lần:
+
+<TerminalOutput command="python p05_migrate.py migrate — hai lần" label="Python 3.13 · SQLAlchemy 2.0.58 · SQLite · captured Nov 2026" caption="Lần đầu áp dụng cả hai bước. Lần hai đọc schema_migrations và bỏ qua chúng.">
+```text
+1 create cases: applied
+2 add priority: applied
+(run again)
+1 create cases: already applied
+2 add priority: already applied
+(run again)
+```
+</TerminalOutput>
+
+<BeP05Migration />
+
+Cái runner này cỡ để học. Dự án thật dùng **Alembic**, công cụ migration của SQLAlchemy: cùng ý tưởng đánh số và ghi lại, cộng thêm tự sinh migration bằng cách so model với database, bước `downgrade`, và xử lý nhánh khi hai dev cùng thêm migration. Mình không chạy Alembic ở đây, nên capture trên chỉ là của runner tự viết, không hơn. Dùng công cụ nào thì mấy thói quen của AI cần bắt vẫn vậy: `create_all` lúc khởi động production; sửa migration cũ thay vì thêm migration mới; thêm cột `NOT NULL` không có default vào bảng đã có dòng (`DEFAULT 3` ở trên là thứ làm bước 2 hợp lệ trong SQLite); và merge output autogenerate mà không đọc.
+
+---
+
+## 7. SQLite sang Postgres: cái gì đổi
+
+Mọi output ở trên là SQLite, vì nó không cần cài gì và chạy lại được y hệt. Mình không chạy Postgres cho bài này, nên ở đây không có con số Postgres nào. Phần lớn code mang sang được; hành vi thì không hoàn toàn:
+
+| Cái gì | SQLite (bài này) | Postgres |
+|---|---|---|
+| URL và driver | `sqlite:///clue.db`, có sẵn | `postgresql+psycopg://user:password@host/db`, cộng package `psycopg` |
+| `connect_args` | cần `check_same_thread=False` | không dùng; `p05_db.py` đã bỏ qua |
+| Pool | database file vẫn có pool, nhưng không có mạng và không có giới hạn phía server | pool là thứ bảo vệ `max_connections`; mỗi worker có pool riêng |
+| Connection chết | file lúc nào cũng ở đó | firewall hay restart có thể cắt connection rảnh; `pool_pre_ping=True` kiểm tra một connection khi lấy ra |
+| Chi phí N+1 | micro giây mỗi query | một round trip mạng mỗi query |
+| Người ghi | một người ghi mỗi lúc cho mỗi file database | nhiều người ghi đồng thời; khóa theo dòng, không khóa cả database |
+| Kiểu cột | lỏng: cột nhận gần như mọi thứ | chặt: sai kiểu là database từ chối |
+| Migration | `ALTER TABLE` hạn chế | `ALTER TABLE` đầy đủ hơn; bảng lớn phải để ý lock |
+
+Không dòng nào trong `layered_service.py` đổi, và `SqlCaseRepository` cũng không: dòng đầu tiên phải đụng là `DATABASE_URL`, thứ hai là các thiết lập pool bạn chỉnh theo giới hạn của chính Postgres, và thứ ba là load test trên database bạn thật sự chạy ở production — việc của bài performance.
+
+<Callout type="note" title="Review data access do AI viết thế nào">
+Năm câu hỏi, theo thứ tự. Session có được tạo mỗi request và đóng trong `finally` không? Có đúng một chỗ commit không? Cỡ pool có được chọn, và `workers × (pool_size + max_overflow)` có vừa giới hạn của database không? Endpoint trả danh sách có test đếm query không? Thay đổi schema có đi kèm file migration không, và `create_all` đã ra khỏi startup production chưa? Câu nào cũng là một dòng bạn tìm ra được trong diff.
+</Callout>
+
+</Vi>
