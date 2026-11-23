@@ -166,7 +166,7 @@ In Kubernetes, `127.0.0.1` inside a pod is reachable from your laptop with `kube
 
 ## Put the Todo service under load
 
-A profile of an idle service is empty. You need traffic that looks like real use. Post 17 showed a load driver for this service; here is the same idea as a complete small program. It sends a fixed 2,000 requests per second from 8 workers. A fixed rate matters for later: when we change the code and profile again, both runs do the same amount of work, so any difference is the code and not the load.
+A profile of an idle service is empty. You need traffic that looks like real use. Post 17 showed a load driver for this service; here is the same idea as a complete small program. It sends up to 2,000 requests per second from 8 workers (about 1,400 per second achieved, because the 4 ms ticker drops ticks while a worker is stuck in the 20 ms `/report`). The rate matters for later: when we change the code and profile again, both runs do the same amount of work (16,924 requests against 16,920), so any difference is the code and not the load.
 
 The service needs two small additions first. A `/report` route stands in for a handler that waits on something slow (a database, say). It sleeps for 20 ms. Add the route line inside `routes()` and the handler anywhere in the file:
 
@@ -180,7 +180,7 @@ func (s *server) report(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
-The driver first creates 2,000 todos, so `GET /todos` has something real to encode. Then each worker uses a `time.NewTicker` (a channel that delivers one value every 4 ms; `<-tick.C` waits for the next one) to pace itself: 8 workers times 250 requests per second is 2,000. The mix is 10% `POST /todos`, 30% `GET /todos`, 10% `GET /report` and 50% `GET /todos/{id}`:
+The driver first creates 2,000 todos, so `GET /todos` has something real to encode. Then each worker uses a `time.NewTicker` (a channel that delivers one value every 4 ms; `<-tick.C` waits for the next one) to pace itself: 8 workers times 250 requests per second is 2,000 at most. The mix is 10% `POST /todos`, 30% `GET /todos`, 10% `GET /report` and 50% `GET /todos/{id}`:
 
 ```go
 // Command load drives the Todo service: 8 workers, a fixed duration.
@@ -220,7 +220,7 @@ func main() {
 		go func() {
 			defer wg.Done()
 			var mine []time.Duration
-			tick := time.NewTicker(4 * time.Millisecond) // 8 workers x 250/s = 2000 requests/s in total
+			tick := time.NewTicker(4 * time.Millisecond) // 8 workers x 250/s = 2000 requests/s at most
 			defer tick.Stop()
 			for i := 0; time.Now().Before(deadline); i++ {
 				<-tick.C
@@ -264,7 +264,7 @@ requests=16924 p50=404.5µs p99=21.395167ms
 ```
 </TerminalOutput>
 
-Remember that `p99` of about 21 ms. The service answers most requests in well under a millisecond, so something takes 20 ms or more for about one request in ten. We will find it, and the CPU profile will not be the tool that does.
+`sort.Slice` sorts the latencies so `p(0.99)` can pick the value that 99% of requests were faster than; that value is `p99`, and `p50` is the median. Remember that `p99` of about 21 ms. The service answers most requests in well under a millisecond, so something takes 20 ms or more for about one request in ten. We will find it, and the CPU profile will not be the tool that does.
 
 ---
 
@@ -360,7 +360,7 @@ Memory has two different questions, and the heap profile answers both. Each samp
 - `alloc_space` and `alloc_objects`: everything allocated since the process started, even what the garbage collector has already freed.
 - `inuse_space` and `inuse_objects`: only what is still alive, as of the last garbage collection.
 
-<TerminalOutput command="go tool pprof -sample_index=alloc_space -top -nodecount=6 heap-v1.pb.gz" label="Apple M2 · Go 1.27.1" caption="Everything the service allocated since it started: 1.25 GB in a few seconds.">
+<TerminalOutput command="go tool pprof -unit=GB -sample_index=alloc_space -top -nodecount=6 heap-v1.pb.gz" label="Apple M2 · Go 1.27.1" caption="Everything the service allocated since it started: 1.25 GB in a few seconds.">
 ```text
 File: todo
 Type: alloc_space
@@ -378,7 +378,7 @@ Showing top 6 nodes out of 32
 ```
 </TerminalOutput>
 
-<TerminalOutput command="go tool pprof -sample_index=inuse_space -top -nodecount=5 heap-v1.pb.gz" label="Apple M2 · Go 1.27.1" caption="What is alive at the last collection: 7,112 kB.">
+<TerminalOutput command="go tool pprof -unit=kB -sample_index=inuse_space -top -nodecount=5 heap-v1.pb.gz" label="Apple M2 · Go 1.27.1" caption="What is alive at the last collection: 7,112 kB.">
 ```text
 File: todo
 Type: inuse_space
@@ -568,7 +568,7 @@ Showing top 8 nodes out of 265
 ```
 </TerminalOutput>
 
-<TerminalOutput command="go tool pprof -sample_index=alloc_space -top -nodecount=4 -diff_base=heap-v1.pb.gz heap-v2.pb.gz" label="Apple M2 · Go 1.27.1" caption="About 1.15 GB less allocated: the copy in store.list and the JSON encoder buffers.">
+<TerminalOutput command="go tool pprof -sample_index=alloc_space -top -nodecount=4 -diff_base=heap-v1.pb.gz heap-v2.pb.gz" label="Apple M2 · Go 1.27.1" caption="About 1.19 GB less allocated: the copy in store.list and the JSON encoder buffers.">
 ```text
 File: todo2
 Type: alloc_space
@@ -789,7 +789,7 @@ Trong Kubernetes, `127.0.0.1` bên trong pod mở được từ laptop bằng `k
 
 ## Cho Todo service chịu tải
 
-Profile của service đang nhàn rỗi thì trống trơn. Bạn cần traffic giống dùng thật. Bài 17 có một load driver cho service này; đây là cùng ý tưởng dưới dạng một chương trình nhỏ hoàn chỉnh. Nó gửi đều 2.000 request mỗi giây từ 8 worker. Tốc độ cố định quan trọng cho phần sau: khi đổi code và profile lại, cả hai lần chạy làm cùng một lượng việc, nên mọi khác biệt đến từ code chứ không phải từ tải.
+Profile của service đang nhàn rỗi thì trống trơn. Bạn cần traffic giống dùng thật. Bài 17 có một load driver cho service này; đây là cùng ý tưởng dưới dạng một chương trình nhỏ hoàn chỉnh. Nó gửi tối đa 2.000 request mỗi giây từ 8 worker (thực tế đạt khoảng 1.400 mỗi giây, vì ticker 4 ms bỏ bớt nhịp khi một worker đang kẹt ở `/report` 20 ms). Tốc độ này quan trọng cho phần sau: khi đổi code và profile lại, cả hai lần chạy làm cùng một lượng việc (16.924 request so với 16.920), nên mọi khác biệt đến từ code chứ không phải từ tải.
 
 Trước hết service cần thêm hai thứ nhỏ. Route `/report` đóng vai handler phải chờ thứ gì đó chậm (ví dụ database). Nó ngủ 20 ms. Thêm dòng route vào `routes()` và handler vào chỗ nào trong file cũng được:
 
@@ -803,7 +803,7 @@ func (s *server) report(w http.ResponseWriter, r *http.Request) {
 }
 ```
 
-Driver tạo trước 2.000 todo để `GET /todos` có dữ liệu thật mà encode. Sau đó mỗi worker dùng `time.NewTicker` (một channel gửi ra một giá trị sau mỗi 4 ms; `<-tick.C` chờ giá trị tiếp theo) để tự giữ nhịp: 8 worker nhân 250 request mỗi giây là 2.000. Tỉ lệ request: 10% `POST /todos`, 30% `GET /todos`, 10% `GET /report` và 50% `GET /todos/{id}`:
+Driver tạo trước 2.000 todo để `GET /todos` có dữ liệu thật mà encode. Sau đó mỗi worker dùng `time.NewTicker` (một channel gửi ra một giá trị sau mỗi 4 ms; `<-tick.C` chờ giá trị tiếp theo) để tự giữ nhịp: 8 worker nhân 250 request mỗi giây là tối đa 2.000. Tỉ lệ request: 10% `POST /todos`, 30% `GET /todos`, 10% `GET /report` và 50% `GET /todos/{id}`:
 
 ```go
 // Command load drives the Todo service: 8 workers, a fixed duration.
@@ -843,7 +843,7 @@ func main() {
 		go func() {
 			defer wg.Done()
 			var mine []time.Duration
-			tick := time.NewTicker(4 * time.Millisecond) // 8 workers x 250/s = 2000 requests/s in total
+			tick := time.NewTicker(4 * time.Millisecond) // 8 workers x 250/s = 2000 requests/s at most
 			defer tick.Stop()
 			for i := 0; time.Now().Before(deadline); i++ {
 				<-tick.C
@@ -887,7 +887,7 @@ requests=16924 p50=404.5µs p99=21.395167ms
 ```
 </TerminalOutput>
 
-Hãy nhớ con số `p99` khoảng 21 ms. Service trả lời phần lớn request trong chưa tới một mili giây, vậy thì có thứ gì đó mất từ 20 ms trở lên ở khoảng một request trong mười. Mình sẽ tìm ra nó, và CPU profile không phải công cụ làm được việc đó.
+`sort.Slice` sắp xếp các độ trễ để `p(0.99)` lấy ra giá trị mà 99% request nhanh hơn; giá trị đó là `p99`, còn `p50` là trung vị. Hãy nhớ con số `p99` khoảng 21 ms. Service trả lời phần lớn request trong chưa tới một mili giây, vậy thì có thứ gì đó mất từ 20 ms trở lên ở khoảng một request trong mười. Mình sẽ tìm ra nó, và CPU profile không phải công cụ làm được việc đó.
 
 ---
 
@@ -983,7 +983,7 @@ Bộ nhớ có hai câu hỏi khác nhau, và heap profile trả lời cả hai.
 - `alloc_space` và `alloc_objects`: mọi thứ đã cấp phát từ lúc tiến trình bắt đầu, kể cả phần garbage collector đã giải phóng.
 - `inuse_space` và `inuse_objects`: chỉ phần còn sống, tính tại lần garbage collection gần nhất.
 
-<TerminalOutput command="go tool pprof -sample_index=alloc_space -top -nodecount=6 heap-v1.pb.gz" label="Apple M2 · Go 1.27.1" caption="Mọi thứ service đã cấp phát từ lúc khởi động: 1,25 GB chỉ trong vài giây.">
+<TerminalOutput command="go tool pprof -unit=GB -sample_index=alloc_space -top -nodecount=6 heap-v1.pb.gz" label="Apple M2 · Go 1.27.1" caption="Mọi thứ service đã cấp phát từ lúc khởi động: 1,25 GB chỉ trong vài giây.">
 ```text
 File: todo
 Type: alloc_space
@@ -1001,7 +1001,7 @@ Showing top 6 nodes out of 32
 ```
 </TerminalOutput>
 
-<TerminalOutput command="go tool pprof -sample_index=inuse_space -top -nodecount=5 heap-v1.pb.gz" label="Apple M2 · Go 1.27.1" caption="Phần còn sống ở lần thu gom gần nhất: 7.112 kB.">
+<TerminalOutput command="go tool pprof -unit=kB -sample_index=inuse_space -top -nodecount=5 heap-v1.pb.gz" label="Apple M2 · Go 1.27.1" caption="Phần còn sống ở lần thu gom gần nhất: 7.112 kB.">
 ```text
 File: todo
 Type: inuse_space
@@ -1191,7 +1191,7 @@ Showing top 8 nodes out of 265
 ```
 </TerminalOutput>
 
-<TerminalOutput command="go tool pprof -sample_index=alloc_space -top -nodecount=4 -diff_base=heap-v1.pb.gz heap-v2.pb.gz" label="Apple M2 · Go 1.27.1" caption="Cấp phát ít hơn khoảng 1,15 GB: phần copy trong store.list và các buffer của bộ encode JSON.">
+<TerminalOutput command="go tool pprof -sample_index=alloc_space -top -nodecount=4 -diff_base=heap-v1.pb.gz heap-v2.pb.gz" label="Apple M2 · Go 1.27.1" caption="Cấp phát ít hơn khoảng 1,19 GB: phần copy trong store.list và các buffer của bộ encode JSON.">
 ```text
 File: todo2
 Type: alloc_space
