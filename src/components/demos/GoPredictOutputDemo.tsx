@@ -97,7 +97,7 @@ func main() {
       { text: 'a: 0 b: 1000  (the last case always wins)' },
       { text: 'about half each, and the numbers change on every run', right: true },
     ],
-    output: 'a: 499 b: 501',
+    output: 'a: 484 b: 516',
     whyEn:
       'When several cases are ready, select picks one at random. The numbers above are from one real run; yours will differ, usually close to 500 each. Never write code that depends on which case wins.',
     whyVi:
