@@ -42,3 +42,4 @@ Used by `src/components/demos/AnimatedFlow.tsx` (node `icon` key -> file). Extra
 | `detective.svg` | fluent-emoji-flat | detective |
 | `satellite.svg` | fluent-emoji-flat | satellite |
 | `profiler.svg` | fluent-emoji-flat | magnifying-glass-tilted-right |
+| `swagger.svg` | logos | swagger |
