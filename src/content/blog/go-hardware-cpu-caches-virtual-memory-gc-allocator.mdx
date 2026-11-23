@@ -1,23 +1,28 @@
 ---
 title: "Go hardware and GC"
 title_vi: "Phần cứng và GC trong Go"
-description: "How 64B CPU caches, OS 4KB virtual pages (VSS vs RSS), Go's 3-tier mcache allocator, and the Tri-Color Hybrid Write Barrier GC pace GOGC & GOMEMLIMIT in Kubernetes."
-description_vi: "Khám phá tầng phần cứng bên dưới Go: đường cache CPU 64B, trang nhớ ảo VSS vs RSS, cấp phát 3 tầng mcache và thuật toán GC 3 màu cùng nhịp GOGC / GOMEMLIMIT."
-date: 2026-11-20
+description: "CPU cache lines, false sharing, struct alignment, escape analysis, Linux VSS vs RSS, Go's 3-tier allocator, tri-color GC, and GOGC/GOMEMLIMIT in Kubernetes."
+description_vi: "Cache line 64 byte, false sharing, căn lề struct, escape analysis (-gcflags=-m=2), VSS vs RSS, bộ cấp phát 3 tầng, GC 3 màu và tinh chỉnh GOGC / GOMEMLIMIT trên Kubernetes."
+date: 2026-11-23
 category: "backend"
-tags: ["golang", "efficient-go", "hardware", "cpu-cache", "memory", "gc", "allocator"]
+tags: ["golang", "hardware", "cpu-cache", "escape-analysis", "memory", "gc", "allocator", "100-go-mistakes"]
 cover: "../../assets/series/golang/go-gopher-pencil-helmet.jpg"
 cover_alt: "Pencil drawing of the Go gopher wearing a construction helmet, drawn by Renee French"
 draft: false
 sources:
   - { title: "Efficient Go: Data-Driven Performance Optimization", author: "Bartłomiej Płotka", chapters: "Ch. 4, 5 & Appendix A", url: "https://www.efficientgo.dev/" }
-  - { title: "Go runtime memory allocation constants (src/runtime/malloc.go)", author: "The Go Authors", url: "https://github.com/golang/go/blob/0351fe5c9795a37afd08c3c7568abd3186c629b4/src/runtime/malloc.go#L113-L185" }
-  - { title: "A Guide to the Go Garbage Collector", author: "The Go Authors", url: "https://tip.golang.org/doc/gc-guide" }
-  - { title: "How Uber Saved 70K Cores with Go GC Tuning", author: "Uber Engineering", url: "https://www.uber.com/blog/how-we-saved-70k-cores-across-30-mission-critical-services/" }
-  - { title: "What Every Programmer Should Know About Memory", author: "Ulrich Drepper", url: "https://people.freebsd.org/~lstewart/articles/cpumemory.pdf" }
+  - { title: "100 Go Mistakes and How to Avoid Them", author: "Teiva Harsanyi", chapters: "Ch. 12 (#91–#97, #99)", url: "https://100go.co/" }
+  - { title: "A Guide to the Go Garbage Collector", author: "The Go Authors", url: "https://go.dev/doc/gc-guide" }
+  - { title: "Go runtime: 4 years later", author: "Michael Knyszek (The Go Blog)", url: "https://go.dev/blog/go1.19-runtime" }
+  - { title: "Go 1.16 Release Notes (Runtime: MADV_DONTNEED)", author: "The Go Authors", url: "https://go.dev/doc/go1.16#runtime" }
+  - { title: "How We Saved 70K Cores Across 30 Mission-Critical Services", author: "Uber Engineering", url: "https://www.uber.com/blog/how-we-saved-70k-cores-across-30-mission-critical-services/" }
+  - { title: "Why Discord is Switching from Go to Rust", author: "Jesse Howarth (Discord Blog)", url: "https://discord.com/blog/why-discord-is-switching-from-go-to-rust" }
+  - { title: "Go compiler escape analysis invariants (src/cmd/compile/internal/escape/escape.go)", author: "The Go Authors", url: "https://github.com/golang/go/blob/go1.27.1/src/cmd/compile/internal/escape/escape.go#L25-L30" }
+  - { title: "Go runtime allocator & size classes (src/runtime/malloc.go, src/internal/runtime/gc/sizeclasses.go)", author: "The Go Authors", url: "https://github.com/golang/go/blob/go1.27.1/src/runtime/malloc.go#L114-L264" }
+  - { title: "Go garbage collector algorithm (src/runtime/mgc.go)", author: "The Go Authors", url: "https://github.com/golang/go/blob/go1.27.1/src/runtime/mgc.go#L1-L65" }
+  - { title: "Go sync.Mutex fast-path outlining (src/internal/sync/mutex.go)", author: "The Go Authors", url: "https://github.com/golang/go/blob/go1.27.1/src/internal/sync/mutex.go#L61-L71" }
   - { title: "Ramaxel 16 GB DDR5-5600 SO-DIMM module (CC BY-SA 4.0)", author: "Sebastiaan Broekhoven", url: "https://commons.wikimedia.org/wiki/File:Ramaxel_16_GB_DDR5-5600_SO-DIMM_memory_module.jpg" }
   - { title: "HP PA-RISC 7000 silicon die macro photograph (CC BY-SA 4.0)", author: "Thomas Schanz", url: "https://commons.wikimedia.org/wiki/File:HP-HP9000-PARISC-PA7000-CPU-Chip-Closeup-Project-Mustang.jpg" }
-  - { title: "Memory virtualization addressable level diagram (Public Domain)", author: "Patrick Sullivan", url: "https://commons.wikimedia.org/wiki/File:Memory_virtualization_addressable_level.png" }
   - { title: "Go gopher pencil helmet (CC BY 3.0)", author: "Renee French", url: "https://commons.wikimedia.org/wiki/File:Go_gopher_pencil_helmet.jpg" }
 ---
 
@@ -26,181 +31,444 @@ import Concepts from '../../components/mdx/Concepts.astro';
 import En from '../../components/mdx/En.astro';
 import Figure from '../../components/mdx/Figure.astro';
 import GitHubCode from '../../components/mdx/GitHubCode.astro';
-import GoEffCompilerPasses from '../../components/mdx/GoEffCompilerPasses.astro';
-import GoEffCpuCachePipeline from '../../components/mdx/GoEffCpuCachePipeline.astro';
-import GoEffGcPacingCicd from '../../components/mdx/GoEffGcPacingCicd.astro';
-import GoEffNapkinRaerDemo from '../../components/mdx/GoEffNapkinRaerDemo.astro';
-import GoEffVirtualMemoryAllocator from '../../components/mdx/GoEffVirtualMemoryAllocator.astro';
-import GoHwCpuPipelineSuperscalar from '../../components/mdx/GoHwCpuPipelineSuperscalar.astro';
-import GoHwLinuxRssMadvise from '../../components/mdx/GoHwLinuxRssMadvise.astro';
+import GoEscapeAnalysisDemo from '../../components/mdx/GoEscapeAnalysisDemo.astro';
+import GoP16CacheLineFalseSharing from '../../components/mdx/GoP16CacheLineFalseSharing.astro';
+import GoP16GogcGomemlimit from '../../components/mdx/GoP16GogcGomemlimit.astro';
+import GoP16StackVsHeapEscape from '../../components/mdx/GoP16StackVsHeapEscape.astro';
+import GoP16StructPadding from '../../components/mdx/GoP16StructPadding.astro';
+import GoP16ThreeTierAllocator from '../../components/mdx/GoP16ThreeTierAllocator.astro';
+import GoP16VssRssMadvise from '../../components/mdx/GoP16VssRssMadvise.astro';
 import GoTricolorGcDemo from '../../components/mdx/GoTricolorGcDemo.astro';
 import QuoteCard from '../../components/mdx/QuoteCard.astro';
 import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
 import Vi from '../../components/mdx/Vi.astro';
 import heroDdr5 from '../../assets/blog/go-hardware-cpu-caches-virtual-memory-gc-allocator/ddr5-memory-module.jpg';
 import cpuDie from '../../assets/blog/go-hardware-cpu-caches-virtual-memory-gc-allocator/cpu-silicon-die.jpg';
-import vmPages from '../../assets/blog/go-hardware-cpu-caches-virtual-memory-gc-allocator/virtual-memory-pages.png';
 
 <En>
 
-<Figure src={heroDdr5} alt="Close-up of dual 16 GB DDR5 SO-DIMM memory modules showing integrated DRAM chips and gold edge contacts" caption="Physical DRAM chips live outside the CPU die—crossing the memory bus costs ~100 nanoseconds, roughly 100x longer than an on-core L1 cache hit." sourceTitle="Wikimedia Commons: Ramaxel DDR5-5600 SO-DIMM" sourceUrl="https://commons.wikimedia.org/wiki/File:Ramaxel_16_GB_DDR5-5600_SO-DIMM_memory_module.jpg" />
+<Figure src={heroDdr5} alt="Close-up of dual 16 GB DDR5 SO-DIMM memory modules showing integrated DRAM chips and gold edge contacts" caption="Physical DRAM chips sit off the CPU die. Crossing the memory bus takes roughly 100 nanoseconds, about 100x slower than an on-core L1 cache hit." sourceTitle="Wikimedia Commons: Ramaxel DDR5-5600 SO-DIMM" sourceUrl="https://commons.wikimedia.org/wiki/File:Ramaxel_16_GB_DDR5-5600_SO-DIMM_memory_module.jpg" />
 
-> "Memory latency is the dominant bottleneck on modern microprocessors; hiding those 100-nanosecond stalls through sequential cache-friendly data layouts beats micro-tuning arithmetic instructions."
-> &mdash; *Ulrich Drepper*, *What Every Programmer Should Know About Memory*
+> "You pay for memory allocation more than once. The first is obviously when you allocate it. But you also pay every time the garbage collection runs."
+> &mdash; *Damian Gryski*, *go-perfbook*
 
-### Three production incidents born in silicon, virtual pages, and GC pacing
+### Why clean Go still hits hardware walls and GC spikes
 
-High-level Go code reads so smoothly that it is easy to imagine an idealized machine where every slice read, pointer dereference, and memory free happens at constant speed. Real production clusters routinely remind teams otherwise:
+High-level Go hides pointers, page tables, and garbage collection behind ordinary loops and struct values. Under light load that abstraction holds up, while real production traffic exposes where it bends:
 
-- **Discord's pointer-heavy cache tail spikes.** Holding millions of in-memory message pointers forced Go's concurrent collector to inspect huge live pointer graphs periodically, driving multi-millisecond p99 pauses until workloads stripped raw pointers (`noscan`) or moved latency-sensitive caches off pointer trees.
-- **Uber reclaiming ~70,000 CPU cores across 30 services.** Microservices defaulting unconditionally to `GOGC=100` on containers with plenty of idle RAM spent up to **25–30% of cluster CPU** running needless garbage-collection cycles on tiny 100 MiB heaps—cutting fleet compute dramatically once pacer targets scaled dynamically against real pod headroom.
-- **Kubernetes pods OOMKilled while Go reported 40% free heap.** Teams watching only `runtime.MemStats.HeapAlloc` got blindsided by `cgroup container_memory_working_set_bytes` spikes because freed spans stay mapped in OS RSS temporarily until Go's background scavenger issues `madvise(MADV_DONTNEED)`.
+- **Discord's two-minute latency spikes.** Discord's Read States service kept tens of millions of cached entries in an in-memory Go LRU cache. Because Go forces a garbage collection cycle at least every two minutes even when heap growth is small, scanning millions of live pointer-heavy cache entries caused predictable CPU and tail-latency spikes until Discord moved that service to Rust.
+- **Uber reclaiming ~70,000 CPU cores across 30 services.** Microservices running with default `GOGC=100` inside containers with plenty of spare RAM burned up to 25% of total CPU inside `runtime.scanobject`. Dynamically scaling GC targets against container memory headroom recovered tens of thousands of cores, which helped motivate `GOMEMLIMIT` in Go 1.19.
+- **Linux RSS surprises between Go 1.12 and Go 1.15.** When Go switched Linux memory release from `MADV_DONTNEED` to lazy `MADV_FREE`, freed heap spans stayed counted in process `RSS` until the kernel faced memory pressure. Kubernetes dashboards reported rising memory even while Go's heap sat mostly empty, so Go 1.16 restored `MADV_DONTNEED` as the default.
 
-To optimize Go intentionally at Levels 3–5, let's trace the complete vertical stack from CPU pipelines up to Go's garbage collector:
+Five hardware and runtime layers sit between a Go loop and the container limits around it:
 
-1. **Superscalar CPUs, 64-byte cache lines, and pointer-chasing stalls**: why row-major slice scanning halves latency cleanly compared to strided or linked hops.
-2. **OS virtual memory (`VSS` vs. `RSS`), page faults, and `madvise(MADV_DONTNEED)`**: understanding container OOM limits accurately.
-3. **Go's 3-tier allocator (`mcache`, `mcentral`, `mheap`) and `noscan` spans**: lock-free per-P size-class allocation up to `32 KB`.
-4. **Tri-color concurrent mark-sweep GC and the Hybrid Write Barrier**: keeping STW pauses sub-millisecond while preserving mutated graphs safely.
-5. **Tuning `GOGC` and `GOMEMLIMIT` safely**: avoiding the GC CPU death spiral verified against live Go 1.27 `gctrace=1` logs.
+1. **CPU caches, false sharing, and instruction parallelism:** why memory layout and data dependencies govern loop speed before arithmetic does.
+2. **Struct alignment and padding:** how field ordering shrinks memory footprint and cuts cache-line traffic.
+3. **Stack vs. heap, escape analysis, inlining, and BCE:** reading `-gcflags="-m=2"` and `-d=ssa/check_bce/debug=1"` on real code, including our `Todo` service.
+4. **Virtual memory (`VSS` vs. `RSS`), `madvise`, and Go's 3-tier allocator:** how `mcache`, `mcentral`, and `mheap` separate `scan` and `noscan` memory.
+5. **Tri-color GC, `GOGC`, and `GOMEMLIMIT`:** how concurrent marking stays safe under mutation and how to size container limits without thrashing.
 
 <Callout type="note" title="TL;DR">
-Main DRAM sits **~100x slower than L1 cache** (`~100 ns` vs `~1 ns`), so pack values sequentially in slices instead of chasing `[]*Node` pointer graphs (`noscan` spans skip GC scanning too!). Inspect **`go build -gcflags="-m=1 -d=ssa/check_bce/debug=1"`** to verify Inlining & Bounds Check Elimination (`_ = win[3]`), ignore `VSS` when hunting Kubernetes memory spikes (`RSS` + `MADV_DONTNEED` govern pod limits), and set **`GOMEMLIMIT`** around 80–90% of container RAM without squeezing live heap until GC thrashes CPU.
+Main DRAM is ~100x slower than L1 cache, so pack values contiguously in slices, sort struct fields from largest to smallest to remove padding, and separate per-core counters onto distinct cache lines. Run `go build -gcflags="-m=2 -d=ssa/check_bce/debug=1"` to verify heap escapes, inlining, and bounds checks. In Kubernetes, monitor resident memory (`RSS` via `MADV_DONTNEED`) instead of virtual `VSS`, pair raised `GOGC` with `GOMEMLIMIT` around 80-90% of pod RAM, and cut allocations rather than hugging the limit.
+</Callout>
+
+<Callout type="tip" title="Recap before diving down">
+From [Go memory](/blog/go-memory-data-types-slices-maps-strings/) you already know how slice headers, map buckets, and strings sit in memory, and from [When to optimize](/blog/go-efficiency-workflow-raer-tfbo-hardware-memory/) you have RAER budgets and TFBO to decide when tuning earns its keep. Next come the hardware and runtime mechanics underneath those budgets, using our `Todo` handler from [Build a Go HTTP service](/blog/go-http-service-net-http-json-middleware/) to make compiler escapes concrete.
 </Callout>
 
 <Concepts>
 
-- **64-byte Cache Line**: fixed 64-byte slab copied from DRAM into CPU L1/L2 caches whenever a program reads even 1 byte; neighboring elements inside the same 64 bytes ride along practically free.
-- **Pointer chasing**: walking linked lists or `[]*Node` indirections where the CPU cannot compute address `i+1` until DRAM returns pointer `i`, flushing superscalar instruction pipelines.
-- **Page Fault (`VSS` vs. `RSS`)**: lazy OS mapping connecting reserved virtual memory ranges (`VSS`) to physical 4 KiB DRAM frames (`RSS`) only upon first write access.
-- **Tri-color GC + Hybrid Write Barrier**: Go's concurrent non-compacting mark algorithm painting heap objects White, Grey, and Black alongside brief sub-millisecond pauses.
+- **Memory wall**: the widening gap between fast CPU cores and slow main DRAM (~80-100 ns per cold read), meaning tight loops often spend more time waiting for bytes than computing.
+- **Cache line**: the fixed 64-byte (x86-64) or 128-byte (Apple Silicon) block copied from DRAM into CPU caches whenever your program reads even 1 byte.
+- **Escape analysis**: the compile-time pass deciding whether a Go variable stays on a goroutine's private stack or must live on the shared heap.
+- **VSS vs. RSS**: Virtual Set Size (`VSS`) is all address space a process reserved; Resident Set Size (`RSS`) is the physical RAM frames mapped right now.
 
 </Concepts>
 
 ---
 
-## 1. Superscalar CPUs, 64-byte cache lines, and pipeline stalls
+## 1. CPU caches, false sharing, and instruction parallelism
 
-Reading a cold cache line from off-chip DDR5 DRAM costs **~100 ns**—long enough for a modern 3.5 GHz Apple M2 core executing 4+ instructions per cycle to finish over **1,000 arithmetic instructions!** Modern silicon bridges that cliff through tiered SRAM caches directly on the die (`L1 ~1 ns`, `L2 ~4 ns`, `L3 ~15 ns`) fed by **64-byte cache lines** and hardware prefetchers predicting linear access strides.
+Modern CPUs run billions of instructions per second, yet pulling one uncached word from DRAM stalls a core for dozens of nanoseconds, long enough to finish hundreds of arithmetic instructions. Small on-die SRAM caches (`L1`, `L2`, `L3`) and a hardware prefetcher that predicts sequential strides hide most of that gap.
 
-<Figure src={cpuDie} alt="Close-up silicon die photograph of an HP PA-RISC 7000 microprocessor" caption="Look inside real silicon: most surface area around tiny ALUs belongs to on-die SRAM caches and branch prediction logic feeding instructions cleanly." sourceTitle="Wikimedia Commons: PA-RISC 7000 silicon die" sourceUrl="https://commons.wikimedia.org/wiki/File:HP-HP9000-PARISC-PA7000-CPU-Chip-Closeup-Project-Mustang.jpg" />
+<Figure src={cpuDie} alt="Close-up silicon die photograph of an HP PA-RISC 7000 microprocessor" caption="Most surface area on a real processor die goes to SRAM caches and control logic feeding data to tiny execution units." sourceTitle="Wikimedia Commons: PA-RISC 7000 silicon die" sourceUrl="https://commons.wikimedia.org/wiki/File:HP-HP9000-PARISC-PA7000-CPU-Chip-Closeup-Project-Mustang.jpg" />
 
-Watch how **spatial locality** transforms identical Go arithmetic across a `512×512` `int64` matrix (`2 MiB`) right on Apple M2 Go 1.27. Row-major traversal consumes all eight `int64` integers inside every 64-byte cache line; column-major traversal skips `4,096 bytes` every step, throwing away 56 unused bytes from every fetched cache line:
+| Hardware or system tier | Approximate latency | Relative scale | What it means in Go |
+| :--- | :--- | :--- | :--- |
+| L1 cache hit (per core) | ~1 ns | 1x | Keep hot loops scanning compact `[]T` values linearly |
+| L2 / L3 cache hit | ~4-15 ns | 4-15x | Smaller, tighter structs stay in on-chip cache longer |
+| Main DRAM miss | ~80-100 ns | ~100x | Avoid pointer chains (`*A -> *B -> *C`) in tight loops |
+| Same-AZ network RPC | ~500 µs - 2 ms | ~1,000,000x | Cut round-trips before micro-tuning nanoseconds |
+
+Whenever Go reads `s[0]` and misses L1, the CPU fetches an entire **cache line** (64 bytes on typical x86-64 servers, 128 bytes on Apple Silicon), bringing neighboring elements along for free. That hardware behavior explains why **spatial locality** (`#91`) shifts throughput between loops that share the same Big-O count.
+
+### Spatial locality, AoS vs. SoA, and unpredictable strides (`#91`)
+
+Here are three comparisons on Go 1.27.1 (Apple M2): summing a `512×512` `int64` matrix row-by-row vs. column-by-column, storing structs as an array (`[]OrderAoS`) vs. separate field slices (`OrderSoA`), and walking a slice vs. chasing pointers down a linked list:
 
 ```go
-// Row-major walks contiguous 8-byte steps (8 int64s per 64B cache line -> L1 hit!)
-for r := 0; r < 512; r++ {
-	for c := 0; c < 512; c++ { sum += m[r][c] }
+// Row-major walks contiguous 8-byte steps; Col-major jumps 4,096 bytes per step
+for r := range 512 {
+	for c := range 512 {
+		sum += mat[r][c]
+	}
 }
-// Column-major leaps 4,096 bytes per step, thrashing cache lines -> ~2x slower!
-for c := 0; c < 512; c++ {
-	for r := 0; r < 512; r++ { sum += m[r][c] }
+
+// Array of Structs (AoS): each 64B struct mixes hot amount with 56B cold metadata
+type OrderAoS struct {
+	amount int64
+	meta   [56]byte
+}
+
+// Struct of Arrays (SoA): scanning amounts packs 8 int64 values per 64B line
+type OrderSoA struct {
+	amounts []int64
+	metas   [][56]byte
 }
 ```
 
-<TerminalOutput command="go test -run=^$ -bench='^BenchmarkCh9' -benchmem -count=3 ." label="Apple M2 · Go 1.27" caption="Measured matrix traversal and branch behavior on Apple M2: row-major halves latency vs column-major with 0 allocs; simple branches compile cleanly to branchless CSEL instructions.">
+<TerminalOutput command="go test -run=^$ -bench='Benchmark(Matrix|Orders|Stride)_' -benchmem -count=3 ." label="Apple M2 · Go 1.27.1" caption="Measured on Apple M2 with Go 1.27.1: row-major halves matrix latency, and SoA scans contiguous amounts roughly 2.7x faster than jumping across 64-byte AoS records.">
 ```text
 goos: darwin   goarch: arm64   cpu: Apple M2
-BenchmarkCh9Matrix_RowMajor-8      10000    123336 ns/op    0 B/op    0 allocs/op
-BenchmarkCh9Matrix_ColMajor-8       4896    210259 ns/op    0 B/op    0 allocs/op
-BenchmarkCh9Branch_Unsorted-8      60099     20578 ns/op    0 B/op    0 allocs/op
-BenchmarkCh9Branch_Sorted-8        59560     20591 ns/op    0 B/op    0 allocs/op
+BenchmarkMatrix_RowMajor-8      3414     331993 ns/op    0 B/op    0 allocs/op
+BenchmarkMatrix_ColMajor-8      1765     687710 ns/op    0 B/op    0 allocs/op
+BenchmarkOrders_AoS-8            304    3907355 ns/op    0 B/op    0 allocs/op
+BenchmarkOrders_SoA-8            946    1469610 ns/op    0 B/op    0 allocs/op
+BenchmarkStride_Slice-8         1978     636947 ns/op    0 B/op    0 allocs/op
+BenchmarkStride_LinkedList-8    1736     661215 ns/op    0 B/op    0 allocs/op
 ```
 </TerminalOutput>
 
-<GoHwCpuPipelineSuperscalar />
+Look at `BenchmarkStride_LinkedList-8` in that table: all `500,000` nodes came from one contiguous slice (`make([]listNode, 500_000)`), and Apple M2's wide out-of-order engine hid most of the gap (`661-972 µs` across runs vs. `637-647 µs` for the slice). Once linked-list nodes scatter across random heap pages, every `n = n.next` hop becomes a **non-unit stride** that breaks hardware prefetching and forces serial `~80-100 ns` DRAM waits.
 
-Notice two deeper compiler secrets inside that Apple M2 benchmark:
-1. **Why pointer chasing ruins superscalar execution:** when looping `[]*Node`, each iteration depends serially on loading `n.Next` before decoding fields. Packed value slices (`[]Node` or parallel Structure-of-Arrays slices) feed Go's hardware prefetcher uninterrupted AND generate **`noscan` spans** so the garbage collector skips scanning them entirely!
-2. **Branchless `CSEL` instructions:** sorted vs. unsorted branching matched (`~20.5 µs`) because Go's ARM64/x86-64 SSA backend compiles trivial `if v >= 128 { sum += v }` patterns into branchless conditional moves (`CSEL`/`CMOV`), eliminating branch misprediction flushes completely!
+Cache geometry brings hardware-specific surprises too. On a `32 KiB`, 8-way set-associative L1D cache (`64 sets × 64 B = 4 KiB`), stepping by `512` `int64` columns (`4,096 B`) hashes every row into the exact same cache set (**conflict misses** at a **critical stride**), whereas `513` columns spreads across sets. On Apple M2's larger L1 cache, `512` and `513` columns ran nearly identically (`~515 ns/op` vs. `~550 ns/op`), which is why microbenchmarks need verification on production hardware.
 
-<GoEffCpuCachePipeline />
+### False sharing across CPU cores (`#92`)
 
-| Operation / Resource Level | Approximate Latency (Apple M2 / Server x86) | Napkin Multiplier | Go Optimization Implication |
-| :--- | :--- | :--- | :--- |
-| CPU L1 Cache hit | **~0.5 – 1 ns** | 1x | Keep hot loops scanning compact `[]T` values linearly |
-| Mutex uncontended Lock/Unlock | ~15 – 25 ns | ~25x | Use `atomic` for scalars; avoid tiny per-item lock grabs |
-| Main DRAM cold cache miss | **~80 – 100 ns** | **100x** | Avoid pointer chains (`*A -> *B -> *C`) in tight loops |
-| NVMe SSD 4 KB random read | ~50 – 100 µs | 100,000x | Buffer writes (`bufio.Writer`) instead of 1-byte syscalls |
-| Same-AZ microservice RPC | ~500 µs – 2 ms | 1,000,000x | Batch / coalesce via `singleflight` before micro-tuning CPU |
-
-<Concepts>
-
-- **Spatial locality**: storing sequentially accessed fields side-by-side (`[]Order`) so loading element `i` pulls `i+1..i+7` onto CPU L1 cache automatically.
-- **Branchless `CSEL` / `CMOV`**: CPU conditional-select machine instructions computing both outcomes and picking without speculative pipeline jumps or misprediction penalties.
-- **Structure of Arrays (SoA)**: splitting a fat struct array into parallel tight slices (`[]IDs`, `[]Amounts`) so hot loops scan 1 field without polluting cache lines with cold fields.
-
-</Concepts>
-
----
-
-## 2. Go compiler passes (`gcflags`) & napkin math estimator
-
-Before blaming hardware speed, inspect what Go's compiler already removes—or misses—via **`-gcflags="-m=1 -d=ssa/check_bce/debug=1"`**. In hot loops scanning slices stride-by-stride, inserting one **Bounds Check Elimination (`_ = win[3]`)** hint lets Go verify loop limits once at the top instead of emitting four panic checks per step:
+Because L1 and L2 belong to individual physical cores, two goroutines on different cores communicate cache updates through coherency protocols (such as MESI) at **cache-line granularity**, never variable granularity. When Goroutine 1 updates `c.a` while Goroutine 2 updates `c.b` on adjacent `atomic.Int64` fields in the same cache line, each write invalidates the other core's copy of that entire line even though there is zero Go data race.
 
 ```go
-func SumEveryFourth(s []int) int {
-	var total int
-	for i := 0; i+3 < len(s); i += 4 {
-		total += s[i] + s[i+1] + s[i+2] + s[i+3] // emits 4 IsInBounds checks inside loop!
+type CountersUnpadded struct {
+	a atomic.Int64
+	b atomic.Int64 // shares the same cache line as a
+}
+
+type CountersPad128 struct {
+	a atomic.Int64
+	_ [120]byte    // x86-64 64B line needs _ [56]byte; Apple Silicon uses 128B
+	b atomic.Int64
+}
+```
+
+<GoP16CacheLineFalseSharing />
+
+<TerminalOutput command="go test -run=^$ -bench='BenchmarkFalseSharing_' -benchmem -count=3 ." label="Apple M2 · Go 1.27.1" caption="Separating two concurrent atomic counters onto different cache lines cuts runtime roughly 3x across 100k updates per goroutine with no algorithmic change.">
+```text
+BenchmarkFalseSharing_Unpadded-8     508    2218435 ns/op    96 B/op    3 allocs/op
+BenchmarkFalseSharing_Pad64-8       2055     666068 ns/op    70 B/op    3 allocs/op
+BenchmarkFalseSharing_Pad128-8      1852     852081 ns/op    64 B/op    3 allocs/op
+```
+</TerminalOutput>
+
+Another clean fix in Go is keeping a local `int64` on each worker's stack and summing once over a channel or after `WaitGroup.Wait()`, avoiding shared writes altogether.
+
+### Instruction-level parallelism and data hazards (`#93`)
+
+Modern cores are **superscalar**: they decode, reorder, and run multiple independent instructions in parallel each cycle. Two hazards stall those pipelines:
+- **Control hazards (branches):** unpredictable `if` checks flush speculative pipelines (10-20 cycles lost), although Go's compiler emits branchless `CSEL`/`CMOV` machine instructions for simple conditional updates.
+- **Data hazards (dependencies):** if instruction `B` reads what instruction `A` just wrote, the core has to serialize them.
+
+Splitting one sum accumulator (`total += s[i]`) into two independent accumulators (`a += s[i]; b += s[i+1]`) breaks that read-after-write chain so the core runs both additions in parallel:
+
+```go
+func sumSingleAccum(s []int64) int64 {
+	var total int64
+	for i := range s {
+		total += s[i] // every iteration waits on the previous total
 	}
 	return total
 }
 
-func SumWithBCEHint(s []int) int {
-	if len(s) < 4 { return 0 }
+func sumDualAccum(s []int64) int64 {
+	var a, b int64
+	i := 0
+	for ; i+1 < len(s); i += 2 {
+		a += s[i]     // independent dependency chain 1
+		b += s[i+1]   // independent dependency chain 2
+	}
+	if i < len(s) {
+		a += s[i]
+	}
+	return a + b
+}
+```
+
+<TerminalOutput command="go test -run=^$ -bench='BenchmarkAccum_' -benchmem -count=3 ." label="Apple M2 · Go 1.27.1" caption="Breaking one serial sum dependency into two independent accumulators speeds up summing 1 million int64 values by roughly 33% on Apple M2.">
+```text
+BenchmarkAccum_Single-8    2575    463835 ns/op    0 B/op    0 allocs/op
+BenchmarkAccum_Dual-8      3930    310856 ns/op    0 B/op    0 allocs/op
+```
+</TerminalOutput>
+
+Save ILP tricks like dual accumulators for measured hot loops (`#93`), since compiler code generation shifts across Go releases.
+
+<Concepts>
+
+- **Spatial locality**: storing elements read together side by side (`[]T` or Structure of Arrays) so each cache-line fetch brings useful bytes into L1.
+- **False sharing**: slowdowns caused when multiple cores write independent variables that share one physical cache line, forcing repeated invalidations.
+- **Instruction-level parallelism (ILP)**: a superscalar CPU executing multiple independent instructions per clock cycle when data dependencies allow it.
+- **Critical stride / conflict miss**: a stride matching a cache's set spacing so repeated accesses evict each other from the same cache set.
+
+</Concepts>
+
+---
+
+## 2. Struct alignment and padding
+
+A Go struct often takes more memory than the sum of its fields. On 64-bit CPUs, a 1-byte `bool` or `uint8` fits at any byte offset, a 4-byte `int32` starts on a 4-byte boundary, and an 8-byte `int64`, `float64`, or pointer starts on an 8-byte boundary. To keep every field aligned without splitting a read across two machine words, the compiler inserts hidden **padding** bytes, and **Go never reorders struct fields for you** (`#94`).
+
+<GoP16StructPadding />
+
+Running `unsafe.Sizeof` and `unsafe.Offsetof` on Go 1.27.1 shows how field order affects `Unpadded`, `Padded`, and Post 10's `Todo` struct if you later add an `Archived bool` field:
+
+```go
+type Unpadded struct {
+	Active bool  // offset 0 (1B) + 7B padding
+	ID     int64 // offset 8 (8B)
+	Flag   uint8 // offset 16 (1B) + 7B trailing padding = 24 bytes
+}
+
+type Padded struct {
+	ID     int64 // offset 0 (8B)
+	Active bool  // offset 8 (1B)
+	Flag   uint8 // offset 9 (1B) + 6B trailing padding = 16 bytes
+}
+
+type TodoBad struct {
+	Done     bool   // 1B + 7B padding
+	ID       int    // 8B
+	Archived bool   // 1B + 7B padding
+	Title    string // 16B = 40 bytes total
+}
+
+type TodoCompact struct {
+	Title    string // 16B (header: 8B ptr + 8B len)
+	ID       int    // 8B
+	Done     bool   // 1B
+	Archived bool   // 1B + 6B trailing padding = 32 bytes total
+}
+```
+
+<TerminalOutput command="go run layout_main.go" label="Apple M2 · Go 1.27.1" caption="Sorting fields largest-to-smallest removes interior padding gaps, shrinking Unpadded from 24 to 16 bytes and TodoBad from 40 to 32 bytes.">
+```text
+Unpadded: size=24 align=8 (offsets: Active=0 ID=8 Flag=16)
+Padded:   size=16 align=8 (offsets: ID=0 Active=8 Flag=9)
+Todo:        size=32 (ID=0 Title=8 Done=24)
+TodoBad:     size=40 (Done=0 ID=8 Archived=16 Title=24)
+TodoCompact: size=32 (Title=0 ID=16 Done=24 Archived=25)
+```
+</TerminalOutput>
+
+Removing interior padding saves 33% RAM for `Padded` vs. `Unpadded`, packs 4 structs into each 64-byte cache line instead of 2.67, and triggers fewer GC cycles when those structs sit on the heap.
+
+<TerminalOutput command="go test -run=^$ -bench='BenchmarkStructSum_' -benchmem -count=3 ." label="Apple M2 · Go 1.27.1" caption="Scanning 2 million structs on Apple M2: eliminating 8 bytes of padding drops the slice from 48 MB to 32 MB and runs ~2.6x faster.">
+```text
+BenchmarkStructSum_Unpadded24-8     418    2791106 ns/op    0 B/op    0 allocs/op
+BenchmarkStructSum_Padded16-8      1215    1067616 ns/op    0 B/op    0 allocs/op
+```
+</TerminalOutput>
+
+Reorder fields in hot or high-volume structs where memory density shows up in profiles; keep logical grouping first in small config structs initialized once at startup.
+
+<Concepts>
+
+- **Data alignment**: placing a $k$-byte field at a memory offset divisible by $k$ (capped at pointer width, 8 bytes on 64-bit CPUs) so the CPU fetches it in one read.
+- **Struct padding**: empty bytes inserted by the Go compiler between fields and at the end of a struct to keep every field and adjacent slice item aligned.
+
+</Concepts>
+
+---
+
+## 3. Stack, heap, escape analysis, inlining, and BCE
+
+In C or C++, you explicitly separate stack locals from `malloc`. In Go, you write `&x` or values naturally and the compiler decides where each variable belongs (`#95`):
+
+- **Goroutine stack:** each goroutine owns a private, contiguous stack (starting at `2 KiB` on 64-bit Linux and macOS) that grows or shrinks as needed. Pushing local variables subtracts from the CPU stack pointer (`SP`); returning moves `SP` back in one instruction with zero locks, zero GC tracking, and high L1 locality.
+- **Shared heap:** a process-wide memory pool shared across goroutines (`runtime.mallocgc`). Objects that outlive their declaring frame sit on the heap, so the GC has to trace their pointers and sweep them later.
+
+| Property | Goroutine stack frame | Shared Go heap |
+| :--- | :--- | :--- |
+| Allocation work | Pointer adjustment on `SP` | Size-class lookup + zeroing + pointer bitmap |
+| Cleanup work | Immediate on `return` (`0` GC cost) | Marked & swept later by concurrent GC |
+| Concurrency safety | Exclusive to one goroutine (no locks) | Shared across goroutines |
+| Effect on GC frequency | Invisible to `GOGC` & `GOMEMLIMIT` | Counts directly toward heap target |
+
+<GoP16StackVsHeapEscape />
+
+### Escape analysis (`-gcflags="-m=2"`)
+
+Go's escape analyzer enforces two invariants documented in `src/cmd/compile/internal/escape/escape.go`:
+
+<GitHubCode repo="golang/go" path="src/cmd/compile/internal/escape/escape.go" lines="L25-L30" url="https://github.com/golang/go/blob/go1.27.1/src/cmd/compile/internal/escape/escape.go#L25-L30" caption="Exact escape analysis contract in Go 1.27.1: stack allocation is safe only while pointers neither enter the heap nor outlive their frame.">
+```go
+// Here we analyze functions to determine which Go variables
+// (including implicit allocations such as calls to "new" or "make",
+// composite literals, etc.) can be allocated on the stack. The two
+// key invariants we have to ensure are: (1) pointers to stack objects
+// cannot be stored in the heap, and (2) pointers to a stack object
+// cannot outlive that object (e.g., because the declaring function
+// returned and destroyed the object's stack frame, or its space is
+// reused across loop iterations for logically distinct variables).
+```
+</GitHubCode>
+
+The practical rule is **sharing down stays on the stack; sharing up escapes to the heap**. Passing `&a` down into `sumDown(&a, &b)` keeps `a` and `b` on the caller's stack because the caller outlives `sumDown`. Returning `&z` up from `sumUp(a, b)` forces `z` onto the heap, making `BenchmarkStackVsHeap_Ptr` pay `8 B/op, 1 alloc/op` (`~8.6-11.2 ns/op` vs. `~2.8-3.5 ns/op` for returning `int` by value on Apple M2).
+
+Other common escape triggers include:
+- Storing a pointer (or value containing a pointer) in a global variable or sending it over a channel.
+- Allocating a dynamic slice whose length is unknown at compile time (`make([]byte, n)`), exceeding the compiler's stack size cap, or overflowing capacity in `append`.
+- Capturing a mutated variable in a closure or boxing a concrete value into an `any` / interface parameter.
+
+That interface boxing behavior shows up right inside Post 10's `writeJSON(w http.ResponseWriter, status int, v any)` helper when a handler passes `Todo` by value:
+
+```go
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeTodo(w http.ResponseWriter, t Todo) {
+	writeJSON(w, http.StatusOK, t) // t boxed into v any
+}
+```
+
+<TerminalOutput command="go build -gcflags='-m=2' todo_escape.go" label="Apple M2 · Go 1.27.1" caption="Real Go 1.27.1 escape trace on Post 10's writeJSON path: passing Todo into v any forces interface conversion and escapes t to the heap.">
+```text
+./todo_escape.go:14:6: cannot inline writeJSON: function too complex: cost 279 exceeds budget 80
+./todo_escape.go:20:6: can inline writeTodo with cost 63 as: func(http.ResponseWriter, Todo) { writeJSON(w, 200, t) }
+./todo_escape.go:15:16: []string{...} escapes to heap
+./todo_escape.go:14:51: leaking param: v
+./todo_escape.go:21:30: t escapes to heap in writeTodo:
+./todo_escape.go:21:30:   flow: {heap} <- &{storage for t}:
+./todo_escape.go:21:30:     from t (spill) at ./todo_escape.go:21:30
+./todo_escape.go:21:30:     from writeJSON(w, 200, t) (call parameter) at ./todo_escape.go:21:11
+./todo_escape.go:20:39: parameter t leaks to {storage for t} for writeTodo with derefs=0:
+./todo_escape.go:20:39:   flow: {storage for t} <- t:
+./todo_escape.go:20:39:     from t (interface-converted) at ./todo_escape.go:21:30
+```
+</TerminalOutput>
+
+Step through all four common escape patterns and their zero-allocation rewrites in the interactive tracer below:
+
+<GoEscapeAnalysisDemo />
+
+### Inlining (`#97`) and Bounds Check Elimination (BCE)
+
+The first two lines of that `-gcflags="-m=2"` trace show Go's **inlining cost budget of 80**. Small functions (`cost <= 80`) paste into the caller during compilation, dropping call overhead and often keeping values on the caller's stack. Since Go 1.9, **mid-stack inlining** allows inlining functions that call other functions. The standard library uses this via **fast-path / slow-path outlining** inside `internal/sync/mutex.go`:
+
+<GitHubCode repo="golang/go" path="src/internal/sync/mutex.go" lines="L61-L71" url="https://github.com/golang/go/blob/go1.27.1/src/internal/sync/mutex.go#L61-L71" caption="Real Go 1.27.1 stdlib trick: Mutex.Lock outlines lockSlow() so the uncontended fast path stays under the 80-cost inlining budget.">
+```go
+func (m *Mutex) Lock() {
+	// Fast path: grab unlocked mutex.
+	if atomic.CompareAndSwapInt32(&m.state, 0, mutexLocked) {
+		if race.Enabled {
+			race.Acquire(unsafe.Pointer(m))
+		}
+		return
+	}
+	// Slow path (outlined so that the fast path can be inlined)
+	m.lockSlow()
+}
+```
+</GitHubCode>
+
+Adding `-d=ssa/check_bce/debug=1` exposes **Bounds Check Elimination (BCE)** at the same time. Go inserts bounds checks before slice accesses (`if idx >= len(s) { panic }`) unless the SSA optimizer proves the index stays in range. Reslicing a 4-element window and reading `_ = win[3]` once clears all four bounds checks inside the loop:
+
+```go
+func sumEveryFourth(s []int) int {
+	var total int
+	for i := 0; i+3 < len(s); i += 4 {
+		total += s[i] + s[i+1] + s[i+2] + s[i+3] // 4 IsInBounds checks per step
+	}
+	return total
+}
+
+func sumWithBCEHint(s []int) int {
+	if len(s) < 4 {
+		return 0
+	}
 	var total int
 	for i := 0; i < len(s)-3; i += 4 {
 		win := s[i : i+4]
-		_ = win[3] // proves win[0..3] safe once at top -> zeroes checks inside loop!
+		_ = win[3] // proves length 4 up front -> 0 checks below
 		total += win[0] + win[1] + win[2] + win[3]
 	}
 	return total
 }
 ```
 
-<TerminalOutput command="go build -gcflags='-m=1 -d=ssa/check_bce/debug=1' bce_escape.go" label="Apple M2 · Go 1.27 Compiler" caption="Real Go 1.27 compiler diagnostics proving InlineAdd inlining, BCE check stripping, and Heap escape.">
+<TerminalOutput command="go build -gcflags='-m=1 -d=ssa/check_bce/debug=1' bce_clean.go" label="Apple M2 · Go 1.27.1" caption="Real Go 1.27.1 compiler output: sumEveryFourth emits four Found IsInBounds checks on line 22, while sumWithBCEHint emits zero inside its loop (cutting ~25 us to ~19 us on 100k ints).">
 ```text
-./bce_escape.go:3:6: can inline SumEveryFourth
-./bce_escape.go:24:6: can inline InlineAdd
-./bce_escape.go:28:22: inlining call to InlineAdd
-./bce_escape.go:3:21: s does not escape
-./bce_escape.go:27:2: moved to heap: onHeap
-./bce_escape.go:6:13: Found IsInBounds  (x4 lines in SumEveryFourth, 0 in SumWithBCEHint!)
+./bce_clean.go:3:6: can inline addVal
+./bce_clean.go:19:6: can inline sumEveryFourth
+./bce_clean.go:27:6: can inline sumWithBCEHint
+./bce_clean.go:16:15: inlining call to addVal
+./bce_clean.go:6:14: x does not escape
+./bce_clean.go:6:17: y does not escape
+./bce_clean.go:10:2: moved to heap: z
+./bce_clean.go:19:21: s does not escape
+./bce_clean.go:27:21: s does not escape
+./bce_clean.go:22:13: Found IsInBounds
+./bce_clean.go:22:20: Found IsInBounds
+./bce_clean.go:22:29: Found IsInBounds
+./bce_clean.go:22:38: Found IsInBounds
 ```
 </TerminalOutput>
 
-<GoEffCompilerPasses />
+### Three practical ways to cut allocations (`#96`)
 
-Pair compiler flags with interactive back-of-the-envelope **hardware napkin math** below so you can calculate instantly whether 1 million iterations need optimization at Level 1 vs Level 3:
-
-<GoEffNapkinRaerDemo />
+1. **Share down in APIs:** `io.Reader` accepts `Read(p []byte)` instead of returning a fresh `[]byte`, letting callers reuse one buffer across thousands of reads.
+2. **Watch compiler lookup fast paths:** looking up a map with a `[]byte` longer than 32 bytes via `k := string(key); v = m[k]` allocates a heap string (`26.0 ns/op, 64 B/op, 1 alloc/op` on Go 1.27.1), whereas `v = m[string(key)]` inline triggers Go's zero-copy lookup (`8.1 ns/op, 0 B/op, 0 allocs/op`).
+3. **Recycle buffers with `sync.Pool`:** pooling `*bytes.Buffer` pointers across calls cut a 1 KiB response build from `147.8 ns/op, 1024 B/op, 1 alloc/op` to `10.7 ns/op, 0 B/op, 0 allocs/op` on Go 1.27.1. Pool pointer types (`*bytes.Buffer`, because boxing a bare 24-byte `[]byte` header into `any` still allocates), reset buffers before `Put`, and keep in mind that GC clears idle pool items on collection. Full pooling and streaming patterns live in [Go optimization patterns](/blog/go-three-rs-optimization-patterns-streaming-pooling/).
 
 <Concepts>
 
-- **Bounds Check Elimination (BCE)**: compiler SSA pass deleting redundant `if i >= len(s) { panic }` guards once dominated by an earlier length assertion like `_ = win[3]`.
-- **BCE window hint**: slicing `win := s[i:i+4]` and reading the final element `_ = win[3]` once so the compiler proves `win[0..2]` safe statically.
+- **Bounds Check Elimination (BCE)**: an SSA compiler pass removing redundant `index out of range` checks once a dominating length check proves safety.
+- **Mid-stack & fast-path inlining**: splitting complex error or contention paths into a separate helper so the tiny fast path fits under Go's 80-node inline budget.
+- **`sync.Pool`**: a per-P temporary object cache safe for concurrent reuse that cuts allocation churn while letting GC reclaim entries under memory pressure.
 
 </Concepts>
 
 ---
 
-## 3. Virtual memory (`VSS` vs `RSS`), Linux `madvise`, and Go's 3-tier allocator
+## 4. Virtual memory (`VSS` vs. `RSS`), `madvise`, and Go's allocator
 
-Operating systems never hand binaries raw physical DRAM chips directly; every process lives inside its own sandboxed **Virtual Address Space (`VSS`)**. Reserving `256 MiB` via `mmap` barely touches physical RAM because Linux and macOS map real **4 KiB DRAM frames (`RSS`)** lazily through OS **Page Faults** only when memory writes occur!
+Processes never touch raw physical DRAM addresses directly. Every Go binary runs inside its own **Virtual Address Space (`VSS`)**, divided into **4 KiB pages** mapped onto physical **DRAM frames (`RSS`)** by the CPU's Memory Management Unit (MMU) and Translation Lookaside Buffer (TLB).
 
-Watch a notorious Kubernetes pitfall explained cleanly below: after a traffic spike pushes Go's Heap to `420 MiB` and concurrent GC collects garbage back down to `90 MiB`, Go **retains clean freed spans briefly in `RSS`** to avoid expensive kernel allocation round-trips on the next request wave—then calls **`madvise(MADV_DONTNEED)`** asynchronously in a background **scavenger** goroutine to drop OS RSS smoothly back toward `110 MiB`:
+Virtual memory works like airline overbooking: reserving address space via `mmap` assigns address ranges, while the kernel attaches real physical DRAM frames lazily through hardware **page faults** only when your code reads or writes inside each 4 KiB page. On Go 1.27.1, `syscall.Mmap` and `syscall.Getrusage` show that split directly:
 
-<Figure src={vmPages} alt="Operating system virtual memory pages mapping dynamically across physical RAM frames" caption="Every Go allocation lives inside virtual address tables mapped lazily onto physical RAM frames in 4 KiB pages on first write." sourceTitle="Wikimedia Commons: Memory virtualization addressable level" sourceUrl="https://commons.wikimedia.org/wiki/File:Memory_virtualization_addressable_level.png" />
+<TerminalOutput command="go run vss_rss.go run_vss.go" label="Apple M2 · Go 1.27.1" caption="Reserving 256 MiB via anonymous mmap leaves physical RSS unchanged at 4.1 MiB; touching one byte per 4 KiB page across 64 MiB brings RSS to 68.1 MiB.">
+```text
+start:    MaxRSS=4.1 MiB  HeapAlloc=0.15 MiB  HeapReleased=3.22 MiB
+after256: MaxRSS=4.1 MiB  (virtual reserved 256 MiB, untouched)
+touch64:  MaxRSS=68.1 MiB  (wrote 1 byte per 4 KiB page across 64 MiB)
+```
+</TerminalOutput>
 
-<GoHwLinuxRssMadvise />
+Lazy paging explains two common container surprises:
+1. **Ignore `VSS` when hunting memory leaks:** virtual reservations can exceed a node's physical RAM without spending a byte of DRAM.
+2. **Why `RSS` stays high right after GC sweeps:** after a traffic spike pushes Go's heap to `420 MiB` and GC reclaims garbage back down to `90 MiB`, Go holds freed spans briefly for the next burst before its background **scavenger** goroutine issues **`madvise(MADV_DONTNEED)`** on Linux. That syscall lets the kernel drop backing physical frames right away so container `RSS` (`container_memory_working_set_bytes`) falls back down without shrinking `VSS`.
 
-Directly atop virtual OS arenas sits Go's **TCMalloc-inspired 3-tier allocator** (`src/runtime/malloc.go`). Instead of contending on one giant global heap lock, Go divides sizes into **67 tiny/small classes (`8 B` up to `32 KB`)** managed across:
-- **`per-P mcache`** (zero mutex locks! Each active CPU processor slot `P` serves small allocations straight from its private local free lists)
-- **`mcentral`** (global per-size-class central lists partitioned into `scan` vs pointer-free `noscan` spans, only touched via mutex when `mcache` empties)
-- **`mheap`** (coarse multi-page spans carved from 64 MiB virtual arenas on 64-bit Unix / 4 MiB on Windows)
+<GoP16VssRssMadvise />
 
-<GitHubCode repo="golang/go" path="src/runtime/malloc.go" lines="L113-L185" url="https://github.com/golang/go/blob/0351fe5c9795a37afd08c3c7568abd3186c629b4/src/runtime/malloc.go#L113-L185" caption="Go's allocator sizing and OS arena constants in src/runtime/malloc.go explain how Go batches OS virtual memory requests into lock-free per-P buckets.">
+*(Older Go 1.12-1.15 posts mention `GODEBUG=madvdontneed=1` because Go briefly defaulted to lazy `MADV_FREE` before restoring `MADV_DONTNEED` in Go 1.16 so Linux container metrics track freed RAM promptly.)*
+
+### Go's 3-tier TCMalloc allocator (`mcache` / `mcentral` / `mheap`)
+
+Sitting atop OS virtual arenas is Go's 3-tier allocator (`src/runtime/malloc.go` and `src/internal/runtime/gc/sizeclasses.go`), built so goroutines rarely contend on a global heap lock:
+
+<GitHubCode repo="golang/go" path="src/runtime/malloc.go" lines="L114-L120" url="https://github.com/golang/go/blob/go1.27.1/src/runtime/malloc.go#L114-L120" caption="Core sizing parameters in Go 1.27.1's src/runtime/malloc.go linking tiny objects, 67 small size classes (up to 32 KiB), 8 KiB runtime pages, and 64 MiB virtual arenas.">
 ```go
 const (
 	maxTinySize   = _TinySize
@@ -208,265 +476,545 @@ const (
 	maxSmallSize  = gc.MaxSmallSize
 	pageSize      = 1 << gc.PageShift
 	pageMask      = pageSize - 1
-	...
-	// heapArenaBytes is the size of a heap arena.
-	// This is currently 64MB on 64-bit non-Windows, 4MB on 32-bit and Windows.
-	heapArenaBytes = 1 << logHeapArenaBytes
-)
 ```
 </GitHubCode>
 
-<GoEffVirtualMemoryAllocator />
+<GoP16ThreeTierAllocator />
+
+Go splits small allocations into **67 size classes** (`8 B` up to `32 KiB`) across three tiers:
+1. **`per-P mcache` (zero locks):** each logical processor `P` owns a private cache of spans for each size class, plus a tiny allocator packing pointer-free sub-16 B values together. Small allocations finish here with no mutexes.
+2. **`mcentral` (per-size-class lock):** when `mcache` empties a span, it refills from `mcentral`, which separates **`scan` spans** (objects holding pointers) from **`noscan` spans** (raw data like `[]int64` or `[]byte`). Separating `noscan` spans lets the garbage collector skip tracing pointer-free buffers, which explains why flat value layouts avoid the pointer-graph scans that slowed Discord's LRU cache.
+3. **`mheap` (global lock):** manages 8 KiB runtime pages carved from `64 MiB` OS virtual arenas on 64-bit Unix (`4 MiB` on 32-bit and Windows), and handles objects over `32 KiB` directly without touching `mcache`.
 
 <Concepts>
 
-- **`per-P mcache`**: fast thread-local span cache bound strictly to one logical processor `P`, allowing normal small Go heap allocations (`<= 32 KB`) with **zero lock contention**.
-- **`scan` vs. `noscan` span**: Go splits allocations holding pointers (`scan`) from raw data slices like `[]byte` or `[]int64` (`noscan`), cutting GC marking time dramatically on pointer-free structs.
-- **`madvise(MADV_DONTNEED)`**: Linux syscall invoked by Go's background scavenger telling the OS kernel it may reclaim unreferenced backing 4 KiB physical pages cleanly (`RSS` shrinks without changing `VSS`).
+- **On-demand paging (Page Fault)**: a hardware interrupt triggered the first time code reads or writes an unbacked 4 KiB virtual page, prompting the kernel to map a physical RAM frame.
+- **`madvise(MADV_DONTNEED)`**: Linux syscall called by Go's background scavenger to release physical RAM frames from idle heap spans back to the OS right away.
+- **`scan` vs. `noscan` spans**: allocator buckets keeping pointer-bearing structs apart from raw byte/number slabs so GC skips tracing pointer-free memory.
 
 </Concepts>
 
 ---
 
-## 4. Tri-color concurrent mark-sweep GC and the Hybrid Write Barrier
+## 5. Tri-color concurrent mark-sweep GC and the Hybrid Write Barrier
 
-Think of collecting heap garbage like decluttering an office building *while staff keep walking between rooms working*:
-1. **Mark Setup (brief Stop-The-World ~50 µs):** Go halts goroutines momentarily, switches on the **Hybrid Write Barrier**, and paints root references on Stacks & Globals **Grey** (meaning *"alive, needs children scanned"*).
-2. **Concurrent Marking (~25% background CPU):** app goroutines resume full traffic while background GC workers pop Grey objects, scan their outbound pointers to shade reachable children Grey, and turn fully-scanned objects **Black** (kept). Wait—what if a user goroutine wires an already-Black node `A.Next = D` onto a still-White node `D` mid-GC? The Hybrid Write Barrier shades `D` Grey instantly so no live data ever gets swept!
-3. **Concurrent Sweep (non-compacting):** remaining **White** slots are marked free lazily without moving living objects around in memory (zero pointer-fixup pauses!).
+Go's garbage collector (`src/runtime/mgc.go`) is **concurrent, non-generational, and non-compacting**: it sweeps unused heap blocks while your goroutines keep running and leaves live objects at their original addresses. Think of clearing clutter from an office while staff keep walking between desks:
 
-Step cleanly through every phase—and watch live `GOMEMLIMIT` headroom dynamics—in this interactive Tri-Color & Write Barrier tracer:
+1. **Mark Setup (brief Stop-The-World):** Go pauses goroutines briefly, turns on the **Hybrid Write Barrier**, and shades root pointers on Stacks and Globals **Grey** (*alive, children not scanned yet*).
+2. **Concurrent Marking (~25% background CPU):** application goroutines resume while background GC workers drain Grey objects, shade reachable children Grey, and mark finished objects **Black** (*kept*). If mutators allocate faster than workers can mark, Go triggers **Mark Assist**, forcing the allocating goroutine to scan a share of the heap before getting more memory.
+   What if your code links a still-**White** object `D` onto an already-**Black** node (`A.Next = D`) mid-cycle? Because the collector won't revisit Black node `A`, it could sweep live `D` by mistake. Go's **Hybrid Write Barrier** shades both the overwritten target and newly written pointer Grey during marking so live objects stay reachable.
+3. **Mark Termination (brief STW) & Lazy Sweep:** a second micro-pause disables the write barrier, and unused **White** slots sweep back to `mcache`/`mcentral` lazily as allocations request space.
+
+Step through all three colors, the Hybrid Write Barrier mutation guard, and memory-limit pacing in the interactive tracer below:
 
 <GoTricolorGcDemo />
 
-Read real Go 1.27 garbage-collector telemetry using **`GODEBUG=gctrace=1`** right off our Apple M2 benchmark binary (`3->4->1 MB` means `4 MB` before GC mark, `1 MB` live heap surviving afterward, and `0.050+0.70+0.008 ms` clock pauses):
+Running our allocation churn benchmark on Go 1.27.1 with `GODEBUG=gctrace=1` shows sub-millisecond STW pauses in practice:
 
-<TerminalOutput command="GODEBUG=gctrace=1 go test -bench=BenchmarkCh12_Pool -benchtime=10ms ." label="Apple M2 · Go 1.27 gctrace=1" caption="Real Go 1.27 GODEBUG=gctrace=1 telemetry: both STW pauses (MarkSetup + MarkTerm) finish in ~0.05 ms while concurrent marking runs smoothly on 8 Ps.">
+<TerminalOutput command="GODEBUG=gctrace=1 ./p16check.test -test.run=^$ -test.bench=BenchmarkAllocChurn -test.benchtime=30ms" label="Apple M2 · Go 1.27.1" caption="Real Go 1.27.1 gctrace=1 lines: MarkSetup and MarkTerm pauses stay sub-millisecond (0.16 ms and 0.024 ms on cycle 4), while live heap drops from 4 MB down to 1 MB across 8 Ps.">
 ```text
-gc 3 @0.055s 1%: 0.050+0.70+0.008 ms clock, 0.40+0.71/1.0/0.15+0.067 ms cpu, 3->4->1 MB, 4 MB goal, 0 MB stacks, 0 MB globals, 8 P
-gc 6 @0.136s 1%: 0.17+2.0+0.003 ms clock, 1.3+1.4/3.0/1.2+0.024 ms cpu, 3->4->3 MB, 4 MB goal, 0 MB stacks, 0 MB globals, 8 P
-gc 11 @0.188s 1%: 0.028+0.62+0.001 ms clock, 0.22+0.15/1.1/0.018+0.015 ms cpu, 5->5->2 MB, 5 MB goal, 0 MB stacks, 0 MB globals, 8 P
+gc 4 @0.005s 5%: 0.16+0.27+0.024 ms clock, 1.3+0.060/0.18/0.003+0.19 ms cpu, 3->4->1 MB, 4 MB goal, 0 MB stacks, 0 MB globals, 8 P
+gc 6 @0.007s 6%: 0.072+0.56+0.12 ms clock, 0.57+0.063/0.075/0.13+1.0 ms cpu, 3->6->3 MB, 4 MB goal, 0 MB stacks, 0 MB globals, 8 P
+gc 15 @0.017s 7%: 0.10+0.70+0.002 ms clock, 0.85+0.31/0.095/0+0.020 ms cpu, 5->6->1 MB, 5 MB goal, 0 MB stacks, 0 MB globals, 8 P
 ```
 </TerminalOutput>
 
+Reading `gc 4`: `@0.005s` is elapsed runtime, `5%` is cumulative GC CPU fraction, `0.16+0.27+0.024 ms clock` is STW Mark Setup + concurrent mark + STW Mark Termination wall time, `3->4->1 MB` is heap before GC -> heap at mark end -> live heap surviving afterward, and `8 P` is `GOMAXPROCS`.
+
 <Concepts>
 
-- **Stop-The-World (STW)**: micro-pauses (~10–100 µs in modern Go) at Mark Setup and Mark Termination solely to toggle barrier state safely across `GOMAXPROCS`.
-- **Hybrid Write Barrier**: Go 1.8+ compiler-inserted check active *only during GC marking*, shading both newly linked pointers and overwritten slots Grey so live objects survive concurrent mutation.
-- **Non-compacting mark-sweep**: Go avoids relocating living objects (unlike Java G1/ZGC), relying instead on TCMalloc size classes to maintain tiny fragmentation with microsecond pauses.
+- **Stop-The-World (STW)**: brief synchronization pauses at Mark Setup and Mark Termination to toggle the write barrier safely across all `P`s.
+- **Hybrid Write Barrier**: compiler-inserted pointer-write hook active only during concurrent GC marking, shading modified pointer targets Grey so live objects aren't missed.
+- **Mark Assist**: backpressure forcing fast-allocating goroutines to perform marking work proportional to their allocations when background markers fall behind.
 
 </Concepts>
 
 ---
 
-## 5. Tuning `GOGC` and `GOMEMLIMIT` safely in Kubernetes pods
+## 6. Tuning `GOGC` and `GOMEMLIMIT` safely in Kubernetes
 
-With tri-color internals clear, look at Go's two primary GC knobs in production clusters:
+Go exposes two knobs to balance CPU against memory (`#99`):
 
-1. **`GOGC` (default `100`):** scales GC frequency proportional to **live heap survival**. If `20 MiB` survives GC, `GOGC=100` waits until heap reaches `20 + 20 * 100% = 40 MiB`. Doubling to `GOGC=200` halves GC CPU cost at the price of 3x peak RAM headroom; leaving it fixed on low-heap/high-RAM containers wastes CPU scanning overly often (which is how Uber reclaimed ~70k cores).
-2. **`GOMEMLIMIT` (Go 1.19+ soft total target):** overrides `GOGC` safely upward so high `GOGC=400` or `GOGC=off` workloads run cheap without crossing Kubernetes container OOM ceilings (`container_memory_working_set_bytes`).
+1. **`GOGC` (default `100`, or `debug.SetGCPercent`):** sets the percentage of **new heap growth** allowed relative to surviving live heap (`HeapTarget = Live × (1 + GOGC/100)`). With `50 MiB` live and `GOGC=100`, Go collects at `100 MiB`. Raising `GOGC=200` raises the trigger to `150 MiB` and roughly halves GC frequency, which is why keeping `GOGC=100` in roomy containers wastes CPU (Uber's 70K-core win). Even with `GOGC=off`, Go forces a collection if two minutes pass without one, the exact two-minute heartbeat that hit Discord's Read States service.
+2. **`GOMEMLIMIT` (Go 1.19+ soft limit, or `debug.SetMemoryLimit`):** caps total Go-managed runtime memory (`MemStats.Sys - MemStats.HeapReleased`: heap, stacks, and runtime metadata, excluding binary text, `cgo`, or manual `syscall.Mmap`). It lets you raise `GOGC` (even to `off`) without crossing your pod limit, up to a safeguard ceiling.
 
-<QuoteCard author="Michael Knyszek" role="Go Runtime & GC Lead" sourceTitle="A Guide to the Go Garbage Collector" sourceUrl="https://tip.golang.org/doc/gc-guide">
-Because GOMEMLIMIT is a soft memory limit, Go caps GC CPU overhead near 50% rather than hanging infinitely if live retained memory truly exceeds your container limit—making allocation reduction far safer than pushing GOMEMLIMIT right against your OOM ceiling.
+<QuoteCard author="Michael Knyszek" role="Go Runtime & GC Team" sourceTitle="Go runtime: 4 years later" sourceUrl="https://go.dev/blog/go1.19-runtime">
+The runtime will limit the GC to 50% of total CPU time, even if this means exceeding the memory limit.
 </QuoteCard>
 
-<GoEffGcPacingCicd />
+Because `GOMEMLIMIT` caps GC at **50% of CPU** rather than stalling your service forever in an infinite collection loop (**GC thrashing**), keep `GOMEMLIMIT` 15-20% below your container's hard cgroup limit to leave room for OS page cache, runtime exclusions, and sudden bursts:
 
-| Kubernetes Pod RAM Limit | Recommended `GOMEMLIMIT` | Recommended `GOGC` Strategy | Primary Hazard to Monitor |
+<GoP16GogcGomemlimit />
+
+| Kubernetes pod memory limit | Suggested `GOMEMLIMIT` | `GOGC` strategy | Primary risk to watch |
 | :--- | :--- | :--- | :--- |
-| **Tight (`<= 256 MiB`)** | `200MiB` (~80%, reserve OS/stack overhead) | Keep `100` (avoid bursting) | True live cache >170 MiB -> GC CPU thrash |
-| **Standard (`1 GiB`)** | `850MiB` (~85%, leaves ~150 MiB buffer) | `100–200` (smooth throughput) | Page cache spikes under large file I/O |
-| **High-headroom batch worker (`4 GiB`, live 200 MiB)** | `3400MiB` (`85%`) | Raise to `300–500` or `off` bounded by `GOMEMLIMIT` | Suddenly loading 3 GiB live maps into memory |
+| Tight (`<= 256 MiB`) | `200MiB` (~80%) | Keep `100` | Live heap >170 MiB causes GC CPU thrashing |
+| Standard (`1 GiB`) | `850MiB` (~85%) | `100-200` | OS page cache spikes on heavy file I/O |
+| High headroom (`4 GiB`, 200 MiB live) | `3400MiB` (~85%) | `300-500` or `off` | Sudden burst filling >3 GiB live data |
 
-To build intuition for the exact trade-off, plug a steady service with **`Live = 50 MiB`** surviving each cycle inside a `512 MiB` pod into Go's pacing formula `Target = Live * (1 + GOGC/100)` capped by `GOMEMLIMIT=400MiB`:
+Plugging a `50 MiB` steady live heap inside a `512 MiB` pod into `Target = Live × (1 + GOGC/100)` shows the exact numbers:
 
-| Setting (`Live = 50 MiB`, Pod = `512 MiB`) | Next GC Trigger Heap | New Garbage Allowed per Cycle | Relative GC Frequency | Production Outcome |
-| :--- | :--- | :--- | :--- | :--- |
-| **`GOGC=50`, no `GOMEMLIMIT`** | `75 MiB` | `25 MiB` | **4x cycles** | Tiny RAM footprint (~`75 MiB`), highest GC CPU tax |
-| **`GOGC=100` (default)** | `100 MiB` | `50 MiB` | **2x cycles** | Safe baseline, wastes ~`300 MiB` of paid idle pod RAM |
-| **`GOGC=400`, `GOMEMLIMIT=400MiB`** | `250 MiB` (soft cap `400 MiB`) | `200 MiB` | **0.5x cycles** | **4x fewer GC pauses** using unused RAM safely below pod OOM |
-| **`GOGC=off`, `GOMEMLIMIT=400MiB`** | ~`400 MiB` total runtime | ~`340 MiB` (incl. stacks/meta) | Minimum steady rate | Beware sudden burst >`400 MiB` causing rapid back-to-back cycles |
+| Setting (`Live = 50 MiB`, Pod = `512 MiB`) | Next GC target | Garbage allowed per cycle | Relative GC frequency |
+| :--- | :--- | :--- | :--- |
+| `GOGC=50`, no limit | `75 MiB` | `25 MiB` | 4x vs. `GOGC=400` |
+| `GOGC=100` (default) | `100 MiB` | `50 MiB` | 2x (leaves ~300 MiB unused) |
+| `GOGC=400`, `GOMEMLIMIT=400MiB` | `250 MiB` | `200 MiB` | 0.5x (~4x fewer cycles than default) |
+| `GOGC=off`, `GOMEMLIMIT=400MiB` | ~`400 MiB` total | ~`340 MiB` headroom | Minimum until live data spikes near limit |
 
-One subtle Kubernetes detail trips up first-time Grafana readers: after Go sweeps freed spans back to `mheap`, Linux containers measure memory via **`container_memory_working_set_bytes`**, which includes OS pages that Go still holds until the background `scvg` scavenger calls **`madvise(..., MADV_DONTNEED)`**. Since Go 1.16+, Go defaults to `MADV_DONTNEED` rather than lazy `MADV_FREE`, so unused pages drop out of container `RSS` eagerly instead of triggering false-alarm Prometheus memory alerts.
-
-### Self-check questions before learning metrics & `benchstat`
-
-1. Why did `BenchmarkCh9Matrix_ColMajor` run nearly 2x slower than `BenchmarkCh9Matrix_RowMajor` on Apple M2 despite matching Big-O and emitting `0 allocs/op`? *(See Section 1)*
-2. In Go's SSA compiler, what happens after placing `_ = win[3]` once right above `win[0] + win[1] + win[2] + win[3]`? *(See Section 2)*
-3. Why does Go container Linux `RSS` stay temporarily elevated right after GC completes sweep—and which background OS call drops it cleanly back down? *(See Section 3)*
-4. Explain how Go's **Hybrid Write Barrier** protects live White object `D` when a user goroutine wires `A.Next = D` onto a Black node during concurrent marking. *(See Section 4)*
-5. Why can raising `GOMEMLIMIT` right to 99% of container RAM trigger both a **50% GC CPU burn** *and* an eventual pod OOMKill? *(See Section 5)*
+Two container companions belong right next to GC tuning in Kubernetes: Go 1.25+ adjusts `GOMAXPROCS` for container quotas, though CPU limits still trigger Linux **CFS throttling** as covered in [Go in production](/blog/go-production-stdlib-cpu-cache-gc-kubernetes/). Once this hardware and GC picture is clear, measure speedups rigorously in [Go benchmarking](/blog/go-observability-metrics-microbenchmarks-benchstat/) and pinpoint hotspots with `pprof` in [Go profiling](/blog/go-profiling-pprof-flamegraphs-off-cpu-continuous/).
 
 <Concepts>
 
-- **`GOGC` (Garbage Collection Target Percentage)**: heap growth ratio before initiating the next GC cycle (`100` = trigger when newly allocated bytes equal surviving live heap).
-- **`GOMEMLIMIT` (Soft Memory Limit)**: Go 1.19+ target capping total Go runtime memory (Heap + Stacks + Metadata) around 80–90% of pod limits before thrash protection caps GC CPU at 50%.
-- **GC CPU Thrashing**: feedback loop where genuine live objects consume ~95% of `GOMEMLIMIT`, forcing GC cycles to execute back-to-back continuously while freeing negligible bytes.
+- **`GOGC`**: target heap growth percentage before the next GC runs (`100` triggers collection when new allocations match surviving live heap).
+- **`GOMEMLIMIT`**: soft cap on Go-managed runtime memory (heap + stacks + metadata, excluding `cgo` and OS page cache) that forces earlier GCs near the limit, bounded at 50% CPU.
+- **GC thrashing**: tight feedback loop when genuine live objects sit just under `GOMEMLIMIT`, forcing continuous back-to-back collections for tiny gains.
 
 </Concepts>
+
+---
+
+## Key takeaways
+
+- Keep hot data contiguous in value slices (`[]T` or SoA) and separate per-core counters by cache-line padding (64 B x86-64, 128 B Apple Silicon) or local accumulators so cores don't thrash each other's L1 cache.
+- Sort large, high-volume struct fields from largest to smallest to remove interior padding; reordering two 1-byte flags cut `TodoBad` from 40 to 32 bytes and sped up a 2M-element `Unpadded` scan ~2.6x.
+- Verify compiler placement with `go build -gcflags="-m=2 -d=ssa/check_bce/debug=1"`: share pointers down instead of returning `&x` up, watch `any` boxing like in `writeJSON`, and let fast-path outlining keep small functions under the 80-node inline budget.
+- Measure container memory using physical `RSS` (`MADV_DONTNEED`, default on Linux since Go 1.16) rather than virtual `VSS`, and use `noscan` value types to minimize GC pointer scanning.
+- Pair raised `GOGC` with `GOMEMLIMIT` at ~80-85% of pod RAM to trade idle memory for lower GC CPU, while fixing allocation churn before live data pushes GC into the 50% thrashing cap.
+
+## Review questions
+
+1. Why did `BenchmarkOrders_SoA` run roughly 2.7x faster than `BenchmarkOrders_AoS` on Apple M2 even though both performed zero heap allocations and the exact same additions? *(See Section 1)*
+2. In `BenchmarkFalseSharing_Unpadded`, no Go data race exists because two goroutines touch different fields `a` and `b`. What hardware mechanism slows both cores down by ~3x, and what are two ways to fix it? *(See Section 1)*
+3. Why does the Go compiler keep `a` and `b` on the stack in `sumDown(&a, &b)` while emitting `moved to heap: z` in `sumUp(a, b)`, and why does passing `Todo` by value into `writeJSON(..., v any)` still escape? *(See Section 3)*
+4. After a traffic spike subsides and Go's GC sweeps 300 MiB of garbage, why might Kubernetes `RSS` stay temporarily elevated, and which syscall drops it back down without lowering `VSS`? *(See Section 4)*
+5. What happens if a Go service retains 390 MiB of genuinely live cache entries inside a container configured with `GOMEMLIMIT=400MiB` and `GOGC=off`? *(See Section 6)*
 
 </En>
 
 <Vi>
 
-<Figure src={heroDdr5} alt="Hai thanh RAM DDR5 SO-DIMM cận cảnh từng chip nhớ DRAM và chân đồng" caption="Thanh DRAM nằm ngoài con chip CPU — mỗi lần với tay ra tận RAM lấy dữ liệu mất tầm ~100 nano-giây, chậm hơn ~100 lần so với đọc ngay trên L1 cache nằm bên trong nhân." sourceTitle="Wikimedia Commons: Ramaxel DDR5-5600 SO-DIMM" sourceUrl="https://commons.wikimedia.org/wiki/File:Ramaxel_16_GB_DDR5-5600_SO-DIMM_memory_module.jpg" />
+<Figure src={heroDdr5} alt="Hai thanh RAM DDR5 SO-DIMM cận cảnh từng chip nhớ DRAM và chân đồng" caption="Thanh DRAM nằm ngoài đế silicon CPU, nên mỗi lần với ra RAM mất tầm ~100 nano-giây, chậm hơn ~100 lần so với đọc ngay trên L1 cache nằm bên trong nhân." sourceTitle="Wikimedia Commons: Ramaxel DDR5-5600 SO-DIMM" sourceUrl="https://commons.wikimedia.org/wiki/File:Ramaxel_16_GB_DDR5-5600_SO-DIMM_memory_module.jpg" />
 
-> "Độ trễ bộ nhớ là nút thắt thống trị mọi bộ vi xử lý hiện đại; giấu được những cú dừng 100 nano-giây nhờ bố trí dữ liệu thân thiện cache luôn thắng xa việc ngồi gọt từng lệnh cộng trừ lẻ."
-> &mdash; *Ulrich Drepper*, *What Every Programmer Should Know About Memory*
+> "Bạn trả tiền cho cấp phát bộ nhớ nhiều hơn một lần. Lần đầu tất nhiên là lúc cấp phát. Nhưng bạn còn phải trả tiếp mỗi khi bộ thu gom rác chạy."
+> &mdash; *Damian Gryski*, *go-perfbook*
 
-### Ba cú vấp sản xuất bắt nguồn từ silicon, trang nhớ ảo và nhịp chạy GC
+### Vì sao code Go gọn gàng vẫn vướng tường phần cứng và giật p99
 
-Code Go đọc qua êm ru dễ làm nhiều người lầm tưởng CPU hay RAM hoạt động đều đặn như nhau ở mọi cấu trúc dữ liệu. Thực tế production thường dạy ngược lại rất phũ phàng:
+Code Go bậc cao giấu con trỏ, bảng trang nhớ ảo và garbage collector đằng sau những vòng lặp và struct rất bình thường. Lúc ít tải lớp vỏ ấy chạy êm, nhưng tải production nhanh chóng kéo màn che đó xuống:
 
-- **Cơn đau p99 của Discord vì cache đầy con trỏ.** Giữ hàng triệu struct tin nhắn nối nhau qua con trỏ ép bộ thu gom rác đồng thời của Go phải quét đi quét lại cây con trỏ khổng lồ, tạo các đợt khựng p99 nhiều mili-giây cho tới khi tách bỏ con trỏ (`noscan`) hoặc đổi kiến trúc.
-- **Uber thu hồi ~70.000 nhân CPU chỉ bằng cách chỉnh nhịp GC.** Các microservice chạy mặc định `GOGC=100` trong những container dư dả RAM lại đốt tới **25–30% CPU toàn cụm** chỉ để quét lặp đi lặp lại đống Heap bé tẹo `100 MiB` — tiết kiệm khổng lồ ngay khi cho mục tiêu GC co giãn theo trần RAM trống thật của pod.
-- **Pod Kubernetes chết OOMKill ngay lúc Go báo Heap còn trống tới 40%.** Nhiều team chỉ nhìn `HeapAlloc` nên bị đánh úp bởi biểu đồ `container_memory_working_set_bytes` tăng vọt, quên mất các trang đã giải phóng tạm thời vẫn bám trên RSS của Linux tới khi goroutine scavenger gọi `madvise(MADV_DONTNEED)`.
+- **Cơn giật p99 theo chu kỳ 2 phút ở Discord.** Dịch vụ Read States của Discord giữ hàng chục triệu mục trong một LRU cache viết bằng Go. Vì Go ép chạy GC ít nhất 2 phút một lần kể cả khi heap ít tăng, mỗi đợt quét qua cây con trỏ khổng lồ ấy đều làm CPU và độ trễ đuôi vọt lên đều đặn, buộc họ chuyển dịch vụ đó sang Rust.
+- **Uber thu hồi ~70.000 nhân CPU trên 30 microservice.** Chạy mặc định `GOGC=100` trong những container thừa mứa RAM khiến nhiều dịch vụ đốt tới 25% CPU trong `runtime.scanobject`. Khi tự điều chỉnh mục tiêu GC theo đúng phần RAM trống của container, Uber tiết kiệm hàng chục nghìn nhân, góp phần mở đường cho `GOMEMLIMIT` ở Go 1.19.
+- **Bẫy RSS trên Linux từ Go 1.12 đến 1.15.** Khi Go chuyển từ `MADV_DONTNEED` sang `MADV_FREE` để trả RAM kiểu lười, các vùng heap đã dọn vẫn nằm nguyên trong chỉ số `RSS` cho tới khi OS thiếu RAM thật. Biểu đồ Kubernetes liên tục báo sắp tràn bộ nhớ dù heap Go đang rỗng, nên tới Go 1.16 đội ngũ runtime phải đưa `MADV_DONTNEED` về lại mặc định.
 
-Để tối ưu hiệu năng sâu ở Tầng 3–5, ta hãy đi xuyên dọc từ nhân chip silicon lên tận bộ thu gom rác của Go:
+Giữa một vòng lặp Go và giới hạn container là năm tầng phần cứng và runtime nối tiếp nhau:
 
-1. **CPU siêu vô hướng, Cache Line 64-byte và bẫy nhảy con trỏ**: vì sao duyệt slice liền khối nhanh gấp đôi nhảy cột, và câu chuyện lệnh `CSEL` không rẽ nhánh.
-2. **Các pha tối ưu của trình biên dịch Go & bảng nhẩm phần cứng**: Inlining, BCE (`_ = win[3]`), và Escape Analysis.
-3. **Bộ nhớ ảo Linux (`VSS` vs `RSS`), `madvise(MADV_DONTNEED)` và bộ cấp phát 3 tầng**: cách `mcache`/`mcentral`/`mheap` né lock và bỏ qua vùng `noscan`.
-4. **Thuật toán GC 3 màu đồng thời & Hybrid Write Barrier**: giữ dừng STW dưới một phần nghìn giây mà không làm mất object đang sống.
-5. **Tinh chỉnh `GOGC` & `GOMEMLIMIT` an toàn trên Kubernetes**: tránh vòng xoáy đốt 50% CPU qua số đo thật `GODEBUG=gctrace=1`.
+1. **Cache CPU, false sharing và song song cấp lệnh (ILP):** vì sao cách xếp byte và phụ thuộc dữ liệu quyết định tốc độ vòng lặp trước cả phép tính.
+2. **Căn lề struct và byte đệm (struct alignment & padding):** xếp lại trường sao cho bớt RAM và giảm số dòng cache phải đọc.
+3. **Stack vs. Heap, escape analysis, inlining và BCE:** đọc thẳng `-gcflags="-m=2"` và `-d=ssa/check_bce/debug=1"` trên code thật, gồm cả handler `Todo`.
+4. **Bộ nhớ ảo (`VSS` vs. `RSS`), `madvise` và bộ cấp phát 3 tầng:** cách `mcache`, `mcentral` và `mheap` tách vùng `scan` với `noscan`.
+5. **GC 3 màu, `GOGC` và `GOMEMLIMIT`:** cách rào ghi giữ an toàn khi app vẫn chạy song song và cách đặt ngưỡng pod không bị GC đốt CPU.
 
 <Callout type="note" title="Tóm tắt nhanh (TL;DR)">
-Truy cập thanh DRAM **chậm hơn ~100 lần so với L1 cache** (`~100 ns` vs `~1 ns`), nên hãy xếp dữ liệu liên tiếp trong slice giá trị `[]T` thay vì `[]*Node` (vừa kích hoạt prefetch L1 vừa thành `noscan` né được quét GC!). Bật **`-gcflags="-m=1 -d=ssa/check_bce/debug=1"`** kiểm tra Inlining & BCE, đo tràn RAM bằng **RSS** (đừng nhìn VSS), và đặt **`GOMEMLIMIT`** tầm 80–90% giới hạn container nhưng đừng để dữ liệu sống thật bám sát trần đó kẻo GC quay cuồng đốt sạch CPU.
+Đọc DRAM chậm hơn L1 cache ~100 lần, nên hãy giữ dữ liệu nóng liên tiếp trong slice giá trị, xếp trường struct từ lớn xuống nhỏ để bỏ byte đệm và tách biến đếm của từng nhân sang cache line riêng. Dùng `go build -gcflags="-m=2 -d=ssa/check_bce/debug=1"` để soi biến bị đẩy lên heap, hàm không được inline và lệnh kiểm tra biên thay vì đoán mò. Trên Kubernetes hãy theo dõi `RSS` thật (nhờ `MADV_DONTNEED`) chứ đừng nhìn `VSS`, kết hợp nâng `GOGC` kèm `GOMEMLIMIT` ở khoảng 80-90% trần pod và giảm cấp phát rác thay vì ép trần sát nút.
+</Callout>
+
+<Callout type="tip" title="Nhắc nhanh trước khi đi sâu">
+Ở [Bộ nhớ trong Go](/blog/go-memory-data-types-slices-maps-strings/) bạn đã nắm slice header, map bucket và chuỗi trên heap; còn ở [Khi nào nên tối ưu](/blog/go-efficiency-workflow-raer-tfbo-hardware-memory/) mình đã bàn về ngân sách RAER và chu trình TFBO. Phần dưới mổ thẳng tầng phần cứng và runtime đứng sau các ngân sách đó, lấy luôn struct `Todo` và `writeJSON` từ [Xây dựng HTTP service bằng Go](/blog/go-http-service-net-http-json-middleware/) làm ví dụ soi trình biên dịch.
 </Callout>
 
 <Concepts title="Giải thích nhanh mấy thuật ngữ nền tảng">
 
-- **Cache Line 64-byte**: khối cố định 64 byte được CPU bốc một lần từ DRAM lên L1/L2 mỗi khi chạm tới 1 byte — mọi biến nằm cạnh nhau trong 64 byte đó được đọc ké gần như miễn phí.
-- **Nhảy con trỏ (Pointer chasing)**: duyệt danh sách liên kết hoặc mảng con trỏ `[]*Node`, khiến CPU không tính trước được địa chỉ phần tử kế tiếp cho tới khi DRAM trả về, làm tắt nghẽn đường ống lệnh.
-- **Page Fault (`VSS` vs `RSS`)**: cơ chế ánh xạ lười của hệ điều hành — chỉ gắn khung 4 KiB RAM vật lý (`RSS`) vào không gian địa chỉ ảo (`VSS`) ngay lần đầu chương trình thực sự ghi vào trang đó.
-- **GC 3 màu + Hybrid Write Barrier**: thuật toán đánh dấu đồng thời Trắng/Xám/Đen không dời chỗ ô nhớ, phối hợp rào ghi bảo toàn object sống chỉ tốn pha dừng STW vài chục micro-giây.
+- **Bức tường bộ nhớ (Memory wall)**: khoảng cách tốc độ ngày càng doãng rộng giữa nhân CPU cực nhanh và DRAM chậm (~80-100 ns mỗi lần đọc nguội), khiến vòng lặp thường tốn thời gian chờ dữ liệu hơn là tính toán.
+- **Cache line**: khối cố định 64 byte (x86-64) hoặc 128 byte (Apple Silicon) được CPU bốc một lần từ DRAM lên cache mỗi khi chương trình chạm dù chỉ 1 byte.
+- **Phân tích thoát (Escape analysis)**: pha kiểm tra lúc biên dịch quyết định một biến ở lại stack riêng của goroutine hay phải đẩy ra heap dùng chung.
+- **VSS vs. RSS**: Virtual Set Size (`VSS`) là toàn bộ dải địa chỉ ảo tiến trình xin trước; Resident Set Size (`RSS`) mới là số khung RAM vật lý thực sự đang được gắn ở thời điểm đo.
 
 </Concepts>
 
 ---
 
-## 1. CPU siêu vô hướng, Cache Line 64-byte và bẫy tắt đường ống lệnh
+## 1. Cache CPU, false sharing và song song cấp lệnh
 
-Một cú với ra thanh DRAM rời bên ngoài tốn **~100 ns** — đủ lâu để một nhân Apple M2 3.5 GHz chạy xong hơn **1.000 phép toán số học**! Chip hiện đại che hố sâu đó bằng các tầng SRAM đệm ngay trên đế chip (`L1 ~1 ns`, `L2 ~4 ns`, `L3 ~15 ns`) tải theo lát **64-byte cache line**, kết hợp mạch nạp trước phần cứng (hardware prefetcher) tự đoán bước nhảy tuyến tính.
+Nhân CPU hiện đại chạy hàng tỷ lệnh mỗi giây, nhưng mỗi lần với ra DRAM nguội lại làm cả nhân đứng đợi hàng chục nano-giây, đủ lâu để thực thi xong hàng trăm phép tính. Để che khoảng trống ấy, trên đế chip luôn có các tầng SRAM siêu nhanh (`L1`, `L2`, `L3`) cùng mạch nạp trước phần cứng (hardware prefetcher) đoán trước bước nhảy tuyến tính.
 
-<Figure src={cpuDie} alt="Ảnh cận cảnh nhân silicon vi xử lý PA-RISC 7000" caption="Trên bề mặt con chip silicon thật, phần lớn diện tích quanh cụm tính toán dành cho các mảng bộ nhớ đệm SRAM (L1/L2) và mạch đoán nhánh." sourceTitle="Wikimedia Commons: PA-RISC 7000 silicon die" sourceUrl="https://commons.wikimedia.org/wiki/File:HP-HP9000-PARISC-PA7000-CPU-Chip-Closeup-Project-Mustang.jpg" />
+<Figure src={cpuDie} alt="Ảnh cận cảnh nhân silicon vi xử lý PA-RISC 7000" caption="Trên một đế silicon thật, phần lớn diện tích quanh cụm tính toán dành cho các mảng bộ nhớ đệm SRAM và mạch điều phối dữ liệu." sourceTitle="Wikimedia Commons: PA-RISC 7000 silicon die" sourceUrl="https://commons.wikimedia.org/wiki/File:HP-HP9000-PARISC-PA7000-CPU-Chip-Closeup-Project-Mustang.jpg" />
 
-Xem sức mạnh của **tính cục bộ không gian** khi cộng cùng một ma trận `512×512` `int64` (`2 MiB`) trên Apple M2 Go 1.27. Duyệt theo hàng dùng trọn 8 số `int64` trên cùng 1 cache line 64 byte; duyệt theo cột nhảy bước `4.096 byte` liên tục vứt đi 56 byte vừa tải khiến thời gian tăng gần gấp đôi:
+| Tầng phần cứng / hệ thống | Độ trễ ước lượng | Tỉ lệ nhẩm | Ý nghĩa khi viết Go |
+| :--- | :--- | :--- | :--- |
+| L1 cache hit (riêng từng nhân) | ~1 ns | 1x | Giữ vòng lặp nóng duyệt tuần tự slice giá trị `[]T` |
+| L2 / L3 cache hit | ~4-15 ns | 4-15x | Struct càng gọn càng trụ lâu trong cache trên chip |
+| DRAM cache miss | ~80-100 ns | ~100x | Tránh chuỗi con trỏ (`*A -> *B -> *C`) trong vòng lặp nóng |
+| RPC nội bộ cùng Availability Zone | ~500 µs - 2 ms | ~1.000.000x | Giảm số vòng gọi mạng trước khi gọt từng nano-giây CPU |
+
+Mỗi lần Go đọc `s[0]` bị hụt L1, CPU bốc nguyên một **cache line** (64 byte trên máy chủ x86-64, 128 byte trên Apple Silicon), kéo theo các phần tử nằm sát bên gần như miễn phí. Quy luật vật lý đó lý giải vì sao **cục bộ không gian (spatial locality)** (`#91`) làm thay đổi hẳn tốc độ giữa các đoạn code có cùng độ phức tạp Big-O.
+
+### Cục bộ không gian, AoS vs. SoA và bước nhảy khó đoán (`#91`)
+
+Dưới đây là ba phép thử thực tế trên Go 1.27.1 (Apple M2): cộng ma trận `512×512` `int64` theo hàng vs. theo cột, lưu mảng struct (`[]OrderAoS`) vs. tách cột slice (`OrderSoA`), và duyệt slice vs. duyệt danh sách liên kết con trỏ:
 
 ```go
-// Duyệt theo hàng (Row-major): 8 số int64 liên tiếp nằm gọn trong 1 cache line 64B
-for r := 0; r < 512; r++ {
-	for c := 0; c < 512; c++ { sum += m[r][c] }
+// Duyệt theo hàng đi bước 8 byte liền kề; duyệt cột nhảy cóc 4.096 byte mỗi bước
+for r := range 512 {
+	for c := range 512 {
+		sum += mat[r][c]
+	}
 }
-// Duyệt theo cột (Col-major): nhảy cóc 4.096 byte mỗi bước, làm rụng cache line!
-for c := 0; c < 512; c++ {
-	for r := 0; r < 512; r++ { sum += m[r][c] }
+
+// Array of Structs (AoS): mỗi struct 64B trộn chung field nóng với 56B metadata ít dùng
+type OrderAoS struct {
+	amount int64
+	meta   [56]byte
+}
+
+// Struct of Arrays (SoA): duyệt amounts gom trọn 8 số int64 trên mỗi line 64B
+type OrderSoA struct {
+	amounts []int64
+	metas   [][56]byte
 }
 ```
 
-<TerminalOutput command="go test -run=^$ -bench='^BenchmarkCh9' -benchmem -count=3 ." label="Apple M2 · Go 1.27" caption="Kết quả benchmark trực tiếp trên Apple M2: duyệt theo hàng nhanh hơn gần gấp đôi nhảy cột với 0 allocs; rẽ nhánh đơn giản tự tối ưu thành CSEL không rẽ nhánh.">
+<TerminalOutput command="go test -run=^$ -bench='Benchmark(Matrix|Orders|Stride)_' -benchmem -count=3 ." label="Apple M2 · Go 1.27.1" caption="Đo thật trên Apple M2 với Go 1.27.1: duyệt hàng nhanh gấp đôi duyệt cột, còn SoA cộng amounts nhanh hơn ~2,7 lần so với nhảy qua từng bản ghi AoS 64 byte.">
 ```text
 goos: darwin   goarch: arm64   cpu: Apple M2
-BenchmarkCh9Matrix_RowMajor-8      10000    123336 ns/op    0 B/op    0 allocs/op
-BenchmarkCh9Matrix_ColMajor-8       4896    210259 ns/op    0 B/op    0 allocs/op
-BenchmarkCh9Branch_Unsorted-8      60099     20578 ns/op    0 B/op    0 allocs/op
-BenchmarkCh9Branch_Sorted-8        59560     20591 ns/op    0 B/op    0 allocs/op
+BenchmarkMatrix_RowMajor-8      3414     331993 ns/op    0 B/op    0 allocs/op
+BenchmarkMatrix_ColMajor-8      1765     687710 ns/op    0 B/op    0 allocs/op
+BenchmarkOrders_AoS-8            304    3907355 ns/op    0 B/op    0 allocs/op
+BenchmarkOrders_SoA-8            946    1469610 ns/op    0 B/op    0 allocs/op
+BenchmarkStride_Slice-8         1978     636947 ns/op    0 B/op    0 allocs/op
+BenchmarkStride_LinkedList-8    1736     661215 ns/op    0 B/op    0 allocs/op
 ```
 </TerminalOutput>
 
-<GoHwCpuPipelineSuperscalar />
+Nhìn kỹ `BenchmarkStride_LinkedList-8` ở bảng trên: trong bài test đó toàn bộ `500.000` node nằm trong một mảng cấp phát liên tiếp (`make([]listNode, 500_000)`), cộng thêm bộ thực thi ngoài thứ tự (out-of-order) rộng của Apple M2 nên kết quả bám sát slice (`661-972 µs` tùy lượt so với `637-647 µs`). Với linked list cấp phát rải rác ngoài heap thật, mỗi bước `n = n.next` trở thành **bước nhảy không đều (non-unit stride)** làm mạch nạp trước bó tay, ép nhân đứng đợi `~80-100 ns` DRAM ở từng node.
 
-Có hai điểm chuyên sâu cực kỳ giá trị nằm sau con số đo kia:
-1. **Nhảy con trỏ làm liệt CPU siêu vô hướng & ép GC làm thêm việc:** duyệt `[]*Node` khiến CPU buộc phải đợi đọc xong con trỏ `n.Next` rồi mới đi tiếp. Ngược lại, dùng mảng giá trị liền khối (`[]Node` hay tách cột SoA) vừa đánh thức hardware prefetcher vừa giúp Go đánh dấu vùng nhớ thành **`noscan`**, bỏ qua hoàn toàn khâu dò con trỏ của Garbage Collector!
-2. **Lệnh không rẽ nhánh `CSEL`:** cả mảng đã sort lẫn xáo trộn cùng chạy `~20,5 µs` vì trình biên dịch Go hạ câu `if v >= 128` đơn giản xuống lệnh chọn có điều kiện **`CSEL` / `CMOV`**, triệt tiêu sạch lỗi đoán sai nhánh.
+Hình học cache cũng tạo ra các bẫy tùy kiến trúc máy. Trên server dùng L1D `32 KiB` chia 8 đường (set-associative, `64 set × 64 B = 4 KiB`), bước nhảy `512` cột `int64` (`4.096 B`) ép mọi hàng dồn vào đúng một cache set (**conflict miss** ở **bước nhảy tới hạn**, critical stride), trong khi `513` cột lại rải đều ra các set. Trên Apple M2 với cấu trúc L1 lớn hơn, `512` vs. `513` cột cho tốc độ ngang nhau (`~515 ns/op` vs. `~550 ns/op`), nhắc mình luôn kiểm chứng lại benchmark trên đúng phần cứng production.
 
-<GoEffCpuCachePipeline />
+### False sharing giữa hai nhân CPU (`#92`)
 
-| Tầng Phần Cứng / Thao tác | Độ trễ ước lượng (Apple M2 / x86 Server) | Tỉ lệ nhẩm | Gợi ý thiết kế Go |
-| :--- | :--- | :--- | :--- |
-| CPU L1 Cache Hit | **~0,5 – 1 ns** | 1x | Giữ vòng lặp nóng duyệt tuần tự slice giá trị `[]T` |
-| Mutex Lock/Unlock không đụng | ~15 – 25 ns | ~25x | Dùng `atomic` cho biến đếm đơn lẻ |
-| Truy cập DRAM nguội (Cache Miss) | **~80 – 100 ns** | **100x** | Hạn chế chuỗi con trỏ lồng nhau (`*A -> *B -> *C`) |
-| NVMe SSD đọc ngẫu nhiên 4 KB | ~50 – 100 µs | 100.000x | Luôn bọc `bufio.Writer` gom syscall nhỏ |
-| Gọi RPC nội bộ cùng Data Center | ~500 µs – 2 ms | 1.000.000x | Gom batch / `singleflight` trước khi chẻ CPU |
-
-<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
-
-- **Tính cục bộ không gian (Spatial locality)**: xếp dữ liệu hay đọc cùng lúc nằm sát bên nhau trong RAM (`[]Order`) để mỗi lần tải cache line 64B kéo sẵn cả 7 phần tử tiếp theo lên L1.
-- **Lệnh không rẽ nhánh `CSEL` / `CMOV`**: lệnh máy tính đồng thời đánh giá kết quả rồi chọn giá trị theo cờ điều kiện mà không làm gãy nhịp pipeline CPU.
-- **Structure of Arrays (SoA)**: tách mảng struct lớn thành nhiều slice song song theo từng trường (`[]IDs`, `[]Amounts`) để vòng lặp nóng không làm bẩn cache line bằng dữ liệu thừa.
-
-</Concepts>
-
----
-
-## 2. Soi 3 pha của trình biên dịch Go & bảng tính nhẩm phần cứng
-
-Trước khi nghi ngờ tốc độ runtime, hãy kiểm tra trình biên dịch Go đã tự dọn gì (hoặc còn giữ gì) thông qua cờ **`-gcflags='-m=1 -d=ssa/check_bce/debug=1'`**. Trong vòng lặp duyệt bước cố định, chỉ một dòng gợi ý **Bounds Check Elimination (`_ = win[3]`)** giúp xóa sạch 4 lần kiểm tra vượt mảng thừa bên trong vòng lặp:
+Vì L1 và L2 nằm riêng trên từng nhân vật lý, hai goroutine chạy trên hai nhân khác nhau đồng bộ bộ nhớ đệm thông qua giao thức như MESI ở **mức cả cache line**, không phải từng biến lẻ. Nếu Goroutine 1 tăng `c.a` còn Goroutine 2 tăng `c.b` khi hai biến `atomic.Int64` nằm kề nhau trên cùng một cache line, mỗi lần ghi của nhân này lại hủy sạch cache line bên nhân kia dù code hoàn toàn không có data race trong Go.
 
 ```go
-func SumEveryFourth(s []int) int {
-	var total int
-	for i := 0; i+3 < len(s); i += 4 {
-		total += s[i] + s[i+1] + s[i+2] + s[i+3] // chèn 4 lần check IsInBounds mỗi bước!
+type CountersUnpadded struct {
+	a atomic.Int64
+	b atomic.Int64 // nằm chung một cache line với a
+}
+
+type CountersPad128 struct {
+	a atomic.Int64
+	_ [120]byte    // x86-64 line 64B cần _ [56]byte; Apple Silicon dùng line 128B
+	b atomic.Int64
+}
+```
+
+<GoP16CacheLineFalseSharing />
+
+<TerminalOutput command="go test -run=^$ -bench='BenchmarkFalseSharing_' -benchmem -count=3 ." label="Apple M2 · Go 1.27.1" caption="Tách hai biến đếm atomic sang hai cache line khác nhau rút thời gian chạy xuống gần một phần ba qua 100k lần cộng ở mỗi goroutine mà không đổi thuật toán.">
+```text
+BenchmarkFalseSharing_Unpadded-8     508    2218435 ns/op    96 B/op    3 allocs/op
+BenchmarkFalseSharing_Pad64-8       2055     666068 ns/op    70 B/op    3 allocs/op
+BenchmarkFalseSharing_Pad128-8      1852     852081 ns/op    64 B/op    3 allocs/op
+```
+</TerminalOutput>
+
+Thay vì chèn byte đệm, mỗi worker chỉ cần giữ một biến `int64` cục bộ trên stack rồi cộng dồn một lần qua channel hoặc sau `WaitGroup.Wait()`, khỏi đụng vùng nhớ chung giữa các nhân.
+
+### Song song cấp lệnh (ILP) và phụ thuộc dữ liệu (`#93`)
+
+Nhân CPU hiện đại là máy **siêu vô hướng (superscalar)**: trong một chu kỳ xung nhịp, nó có thể giải mã và chạy song song nhiều lệnh độc lập. Hai loại rào cản phá thế song song đó:
+- **Rào cản điều khiển (control hazard):** nhánh `if` khó đoán khiến pipeline phải xả bỏ các lệnh đoán sai (tốn 10-20 chu kỳ), dù với phép gán có điều kiện đơn giản trình biên dịch Go thường hạ thành lệnh `CSEL`/`CMOV` không rẽ nhánh.
+- **Rào cản dữ liệu (data hazard):** nếu lệnh `B` cần đọc biến mà lệnh `A` vừa tính, CPU buộc phải đợi `A` xong trước.
+
+Tách một biến cộng dồn duy nhất (`total += s[i]`) thành hai biến cộng dồn độc lập (`a += s[i]; b += s[i+1]`) cắt đứt chuỗi chờ đọc-sau-ghi để nhân CPU chạy hai phép cộng song song:
+
+```go
+func sumSingleAccum(s []int64) int64 {
+	var total int64
+	for i := range s {
+		total += s[i] // mỗi vòng phải đợi kết quả total của vòng trước
 	}
 	return total
 }
 
-func SumWithBCEHint(s []int) int {
-	if len(s) < 4 { return 0 }
+func sumDualAccum(s []int64) int64 {
+	var a, b int64
+	i := 0
+	for ; i+1 < len(s); i += 2 {
+		a += s[i]     // chuỗi phụ thuộc độc lập 1
+		b += s[i+1]   // chuỗi phụ thuộc độc lập 2
+	}
+	if i < len(s) {
+		a += s[i]
+	}
+	return a + b
+}
+```
+
+<TerminalOutput command="go test -run=^$ -bench='BenchmarkAccum_' -benchmem -count=3 ." label="Apple M2 · Go 1.27.1" caption="Tách một phép cộng dồn nối tiếp thành hai biến cộng độc lập giúp cộng 1 triệu số int64 nhanh hơn khoảng 33% trên Apple M2.">
+```text
+BenchmarkAccum_Single-8    2575    463835 ns/op    0 B/op    0 allocs/op
+BenchmarkAccum_Dual-8      3930    310856 ns/op    0 B/op    0 allocs/op
+```
+</TerminalOutput>
+
+Chỉ nên dùng các mẹo vi tối ưu ILP như thế này ở đúng đường nóng đã đo đạc (`#93`), vì mã máy sinh ra có thể thay đổi theo từng bản nâng cấp trình biên dịch Go.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Cục bộ không gian (Spatial locality)**: xếp các dữ liệu thường đọc nối tiếp nằm sát cạnh nhau trong RAM (`[]T` hoặc Structure of Arrays) để mỗi lần kéo cache line tận dụng tối đa số byte mang lên L1.
+- **False sharing**: tụt hiệu năng khi nhiều nhân cùng ghi vào các biến độc lập vô tình nằm chung một cache line vật lý, buộc phần cứng liên tục hủy cache của nhau.
+- **Song song cấp lệnh (Instruction-level parallelism, ILP)**: khả năng của CPU siêu vô hướng chạy đồng thời nhiều lệnh trong một chu kỳ khi giữa chúng không có dây chuyền phụ thuộc dữ liệu.
+- **Critical stride / conflict miss**: bước nhảy bộ nhớ khớp đúng khoảng chia tập (set) của cache làm các hàng liên tiếp đá lẫn nhau ra khỏi cùng một cache set.
+
+</Concepts>
+
+---
+
+## 2. Căn lề struct và byte đệm
+
+Kích thước một struct trong Go thường lớn hơn tổng kích thước các trường cộng lại. Trên hệ 64-bit, biến 1 byte như `bool` hay `uint8` đặt ở địa chỉ nào cũng được, `int32` muốn địa chỉ chia hết cho 4, còn `int64`, `float64` hay con trỏ đòi địa chỉ chia hết cho 8. Để giữ đúng cam kết đó mà không chẻ đôi một biến qua hai từ nhớ, trình biên dịch chèn thêm các byte **đệm trống (padding)**, và **Go không tự sắp lại thứ tự trường trong struct cho bạn** (`#94`).
+
+<GoP16StructPadding />
+
+Kiểm tra trực tiếp bằng `unsafe.Sizeof` và `unsafe.Offsetof` trên Go 1.27.1 cho cặp struct `Unpadded` vs. `Padded`, cộng thêm struct `Todo` của Bài 10 khi đội ngũ thêm một cờ `Archived bool`:
+
+```go
+type Unpadded struct {
+	Active bool  // offset 0 (1B) + 7B đệm
+	ID     int64 // offset 8 (8B)
+	Flag   uint8 // offset 16 (1B) + 7B đệm cuối = 24 byte
+}
+
+type Padded struct {
+	ID     int64 // offset 0 (8B)
+	Active bool  // offset 8 (1B)
+	Flag   uint8 // offset 9 (1B) + 6B đệm cuối = 16 byte
+}
+
+type TodoBad struct {
+	Done     bool   // 1B + 7B đệm
+	ID       int    // 8B
+	Archived bool   // 1B + 7B đệm
+	Title    string // 16B = tổng 40 byte
+}
+
+type TodoCompact struct {
+	Title    string // 16B (header: 8B ptr + 8B len)
+	ID       int    // 8B
+	Done     bool   // 1B
+	Archived bool   // 1B + 6B đệm cuối = tổng 32 byte
+}
+```
+
+<TerminalOutput command="go run layout_main.go" label="Apple M2 · Go 1.27.1" caption="Xếp các trường từ lớn xuống nhỏ triệt tiêu phần đệm nằm giữa, rút Unpadded từ 24 xuống 16 byte và TodoBad từ 40 xuống 32 byte.">
+```text
+Unpadded: size=24 align=8 (offsets: Active=0 ID=8 Flag=16)
+Padded:   size=16 align=8 (offsets: ID=0 Active=8 Flag=9)
+Todo:        size=32 (ID=0 Title=8 Done=24)
+TodoBad:     size=40 (Done=0 ID=8 Archived=16 Title=24)
+TodoCompact: size=32 (Title=0 ID=16 Done=24 Archived=25)
+```
+</TerminalOutput>
+
+Gom struct gọn hơn giúp bớt 33% RAM cho `Padded` so với `Unpadded`, nhét được 4 phần tử vào mỗi cache line 64 byte thay vì 2,67 phần tử, và giảm tần suất chạy GC nếu slice nằm trên heap.
+
+<TerminalOutput command="go test -run=^$ -bench='BenchmarkStructSum_' -benchmem -count=3 ." label="Apple M2 · Go 1.27.1" caption="Quét slice 2 triệu phần tử trên Apple M2: bỏ 8 byte đệm giúp khối dữ liệu tụt từ 48 MB xuống 32 MB và chạy nhanh hơn ~2,6 lần.">
+```text
+BenchmarkStructSum_Unpadded24-8     418    2791106 ns/op    0 B/op    0 allocs/op
+BenchmarkStructSum_Padded16-8      1215    1067616 ns/op    0 B/op    0 allocs/op
+```
+</TerminalOutput>
+
+Chỉ nên đổi thứ tự trường trên những struct nóng hoặc lưu số lượng lớn; còn các struct cấu hình tạo một lần lúc khởi động thì cứ ưu tiên sắp theo nhóm ý nghĩa cho dễ đọc.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Căn lề dữ liệu (Data alignment)**: đặt biến kích thước $k$ byte tại địa chỉ chia hết cho $k$ (tối đa theo kích thước con trỏ, 8 byte trên máy 64-bit) để CPU nạp trọn trong một nhịp đọc.
+- **Byte đệm struct (Struct padding)**: khoảng trống do trình biên dịch Go tự chèn giữa các trường hoặc cuối struct nhằm bảo đảm mọi trường và từng phần tử kế tiếp trong slice đều đúng lề.
+
+</Concepts>
+
+---
+
+## 3. Stack, Heap, Escape Analysis, Inlining và BCE
+
+Trong C hay C++, bạn tự tay phân biệt biến stack với `malloc`. Trong Go, bạn cứ viết `&x` hoặc truyền giá trị bình thường, còn trình biên dịch tự tính xem biến nào đặt ở đâu (`#95`):
+
+- **Stack của goroutine:** mỗi goroutine giữ một vùng nhớ liên tiếp riêng (bắt đầu từ `2 KiB` trên Linux và macOS 64-bit) tự co giãn theo độ sâu hàm gọi. Cấp phát biến cục bộ chỉ là trừ con trỏ stack (`SP`), lúc `return` chỉ cần nhấc `SP` lên, không tốn khóa mutex, không phiền GC theo dõi, lại nằm sẵn rất ấm trên L1 cache.
+- **Heap dùng chung:** kho bộ nhớ toàn cục chia sẻ giữa mọi goroutine (`runtime.mallocgc`). Mọi biến sống qua thời điểm hàm kết thúc đều phải ra heap, buộc GC sau đó quét con trỏ và dọn dẹp lại.
+
+| Đặc tính | Stack Frame của Goroutine | Go Heap dùng chung |
+| :--- | :--- | :--- |
+| Chi phí cấp phát | Dịch con trỏ `SP` | Tra size class + xóa 0 + cập nhật bitmap con trỏ |
+| Chi phí thu hồi | Tự sạch ngay khi `return` (`0` tốn GC) | Đợi chu kỳ đánh dấu & quét của GC |
+| Tranh chấp đồng thời | Riêng một goroutine (không cần khóa) | Dùng chung toàn tiến trình |
+| Áp lực lên GC | Vô hình với `GOGC` & `GOMEMLIMIT` | Tính thẳng vào ngưỡng kích hoạt GC |
+
+<GoP16StackVsHeapEscape />
+
+### Đọc suy nghĩ trình biên dịch với Escape Analysis (`-gcflags="-m=2"`)
+
+Trình biên dịch Go tuân thủ hai bất biến rất gọn được ghi ngay đầu file `src/cmd/compile/internal/escape/escape.go`:
+
+<GitHubCode repo="golang/go" path="src/cmd/compile/internal/escape/escape.go" lines="L25-L30" url="https://github.com/golang/go/blob/go1.27.1/src/cmd/compile/internal/escape/escape.go#L25-L30" caption="Hai quy tắc thép của bộ phân tích thoát trong Go 1.27.1: biến ở stack chỉ an toàn khi con trỏ tới nó không lọt ra heap và không sống quá thời hạn stack frame.">
+```go
+// Here we analyze functions to determine which Go variables
+// (including implicit allocations such as calls to "new" or "make",
+// composite literals, etc.) can be allocated on the stack. The two
+// key invariants we have to ensure are: (1) pointers to stack objects
+// cannot be stored in the heap, and (2) pointers to a stack object
+// cannot outlive that object (e.g., because the declaring function
+// returned and destroyed the object's stack frame, or its space is
+// reused across loop iterations for logically distinct variables).
+```
+</GitHubCode>
+
+Quy tắc thực chiến dễ nhớ nhất là **truyền xuống thì ở stack; trả lên thì ra heap**. Truyền `&a` xuống cho `sumDown(&a, &b)` giữ `a` và `b` yên ổn trên stack của hàm gọi vì hàm gọi còn sống lâu hơn `sumDown`. Trả `&z` ngược lên từ `sumUp(a, b)` ép `z` nhảy ra heap, khiến `BenchmarkStackVsHeap_Ptr` tốn `8 B/op, 1 alloc/op` (`~8,6-11,2 ns/op` so với `~2,8-3,5 ns/op` khi trả thẳng `int` theo giá trị trên Apple M2).
+
+Những tình huống thường gặp khác cũng kéo biến lên heap:
+- Gán con trỏ (hoặc struct chứa con trỏ) vào biến toàn cục hoặc đẩy qua channel.
+- Tạo slice có độ dài chỉ biết lúc chạy (`make([]byte, n)`), vượt ngưỡng kích thước stack tối đa hoặc làm tràn mảng nền khi `append`.
+- Closure bắt giữ biến bị thay đổi, hoặc đóng hộp giá trị vào tham số `any` / interface.
+
+Ta thấy ngay bẫy đóng hộp interface đó trên hàm `writeJSON(w http.ResponseWriter, status int, v any)` của Bài 10 khi handler truyền `Todo` theo giá trị:
+
+```go
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeTodo(w http.ResponseWriter, t Todo) {
+	writeJSON(w, http.StatusOK, t) // t bị đóng hộp vào v any
+}
+```
+
+<TerminalOutput command="go build -gcflags='-m=2' todo_escape.go" label="Apple M2 · Go 1.27.1" caption="Kết quả -gcflags='-m=2' thật trên Go 1.27.1 cho writeJSON của Bài 10: truyền Todo vào tham số v any làm trình biên dịch chuyển đổi interface và đẩy t lên heap.">
+```text
+./todo_escape.go:14:6: cannot inline writeJSON: function too complex: cost 279 exceeds budget 80
+./todo_escape.go:20:6: can inline writeTodo with cost 63 as: func(http.ResponseWriter, Todo) { writeJSON(w, 200, t) }
+./todo_escape.go:15:16: []string{...} escapes to heap
+./todo_escape.go:14:51: leaking param: v
+./todo_escape.go:21:30: t escapes to heap in writeTodo:
+./todo_escape.go:21:30:   flow: {heap} <- &{storage for t}:
+./todo_escape.go:21:30:     from t (spill) at ./todo_escape.go:21:30
+./todo_escape.go:21:30:     from writeJSON(w, 200, t) (call parameter) at ./todo_escape.go:21:11
+./todo_escape.go:20:39: parameter t leaks to {storage for t} for writeTodo with derefs=0:
+./todo_escape.go:20:39:   flow: {storage for t} <- t:
+./todo_escape.go:20:39:     from t (interface-converted) at ./todo_escape.go:21:30
+```
+</TerminalOutput>
+
+Bạn có thể bấm qua bốn kiểu thoát stack kinh điển cùng cách sửa về 0 cấp phát ở trình mô phỏng bên dưới:
+
+<GoEscapeAnalysisDemo />
+
+### Inlining (`#97`) và khử kiểm tra biên BCE
+
+Hai dòng đầu tiên của `-gcflags="-m=2"` cho thấy Go áp một **ngân sách chi phí inline tối đa là 80**. Hàm nào nhỏ gọn (`cost <= 80`) sẽ được dán thẳng thân hàm vào chỗ gọi, vừa bỏ chi phí gọi hàm vừa thường giữ biến nằm trên stack thay vì thoát qua ranh giới hàm. Từ Go 1.9, **mid-stack inlining** cho phép inline cả hàm có gọi hàm con, kỹ thuật mà thư viện chuẩn dùng qua mô hình **tách đường nhanh / đường chậm (fast-path / slow-path outlining)** trong `internal/sync/mutex.go`:
+
+<GitHubCode repo="golang/go" path="src/internal/sync/mutex.go" lines="L61-L71" url="https://github.com/golang/go/blob/go1.27.1/src/internal/sync/mutex.go#L61-L71" caption="Mẹo thật trong stdlib Go 1.27.1: Mutex.Lock tách lockSlow() ra hàm riêng để đường khóa nhanh khi không tranh chấp nằm gọn dưới ngân sách inline 80.">
+```go
+func (m *Mutex) Lock() {
+	// Fast path: grab unlocked mutex.
+	if atomic.CompareAndSwapInt32(&m.state, 0, mutexLocked) {
+		if race.Enabled {
+			race.Acquire(unsafe.Pointer(m))
+		}
+		return
+	}
+	// Slow path (outlined so that the fast path can be inlined)
+	m.lockSlow()
+}
+```
+</GitHubCode>
+
+Kèm thêm cờ `-d=ssa/check_bce/debug=1`, ta soi được luôn **Bounds Check Elimination (BCE)**. Go tự chèn lệnh kiểm tra an toàn trước khi đọc slice (`if idx >= len(s) { panic }`) trừ khi pha SSA chứng minh được chỉ số không thể vượt biên. Tạo cửa sổ 4 phần tử rồi chạm `_ = win[3]` một lần giúp trình biên dịch gỡ hết các bước kiểm tra bên dưới:
+
+```go
+func sumEveryFourth(s []int) int {
+	var total int
+	for i := 0; i+3 < len(s); i += 4 {
+		total += s[i] + s[i+1] + s[i+2] + s[i+3] // 4 lần kiểm tra IsInBounds mỗi bước
+	}
+	return total
+}
+
+func sumWithBCEHint(s []int) int {
+	if len(s) < 4 {
+		return 0
+	}
 	var total int
 	for i := 0; i < len(s)-3; i += 4 {
 		win := s[i : i+4]
-		_ = win[3] // chứng minh trước tới chỉ số 3 -> sạch bóng check biên bên dưới!
+		_ = win[3] // chứng minh dài đủ 4 ngay đầu vòng lặp -> 0 kiểm tra bên dưới
 		total += win[0] + win[1] + win[2] + win[3]
 	}
 	return total
 }
 ```
 
-<TerminalOutput command="go build -gcflags='-m=1 -d=ssa/check_bce/debug=1' bce_escape.go" label="Apple M2 · Go 1.27 Compiler" caption="Output thật từ trình biên dịch Go 1.27 chứng minh inline InlineAdd, khử check biên BCE và thoát biến lên Heap.">
+<TerminalOutput command="go build -gcflags='-m=1 -d=ssa/check_bce/debug=1' bce_clean.go" label="Apple M2 · Go 1.27.1" caption="Kết quả thật trên Go 1.27.1: sumEveryFourth phát sinh 4 dòng Found IsInBounds tại dòng 22, còn sumWithBCEHint sạch bóng kiểm tra biên trong vòng lặp (rút ~25 us xuống ~19 us trên 100k số int).">
 ```text
-./bce_escape.go:3:6: can inline SumEveryFourth
-./bce_escape.go:24:6: can inline InlineAdd
-./bce_escape.go:28:22: inlining call to InlineAdd
-./bce_escape.go:3:21: s does not escape
-./bce_escape.go:27:2: moved to heap: onHeap
-./bce_escape.go:6:13: Found IsInBounds  (còn ở SumEveryFourth, SumWithBCEHint bằng 0!)
+./bce_clean.go:3:6: can inline addVal
+./bce_clean.go:19:6: can inline sumEveryFourth
+./bce_clean.go:27:6: can inline sumWithBCEHint
+./bce_clean.go:16:15: inlining call to addVal
+./bce_clean.go:6:14: x does not escape
+./bce_clean.go:6:17: y does not escape
+./bce_clean.go:10:2: moved to heap: z
+./bce_clean.go:19:21: s does not escape
+./bce_clean.go:27:21: s does not escape
+./bce_clean.go:22:13: Found IsInBounds
+./bce_clean.go:22:20: Found IsInBounds
+./bce_clean.go:22:29: Found IsInBounds
+./bce_clean.go:22:38: Found IsInBounds
 ```
 </TerminalOutput>
 
-<GoEffCompilerPasses />
+### Ba cách thực tế để giảm cấp phát bộ nhớ (`#96`)
 
-Kết hợp đọc output compiler cùng bảng ước lượng nhẩm tương tác dưới đây để quyết định ngay một tác vụ triệu dòng đang nghẽn ở Tầng 1 hay Tầng 3:
-
-<GoEffNapkinRaerDemo />
+1. **Thiết kế API truyền đệm từ trên xuống:** `io.Reader` nhận `Read(p []byte)` thay vì tạo và trả `[]byte` mới, giúp bên gọi tái sử dụng một buffer duy nhất qua hàng nghìn lượt đọc.
+2. **Tận dụng tối ưu tra map của trình biên dịch:** tra một map bằng `[]byte` dài hơn 32 byte qua biến trung gian `k := string(key); v = m[k]` sẽ cấp phát chuỗi trên heap (`26,0 ns/op, 64 B/op, 1 alloc/op` trên Go 1.27.1), còn viết gộp `v = m[string(key)]` kích hoạt đường tra map không cấp phát (`8,1 ns/op, 0 B/op, 0 allocs/op`).
+3. **Tái sử dụng buffer qua `sync.Pool`:** dùng pool `*bytes.Buffer` giúp công đoạn dựng buffer 1 KiB giảm từ `147,8 ns/op, 1024 B/op, 1 alloc/op` xuống còn `10,7 ns/op, 0 B/op, 0 allocs/op` trên Go 1.27.1. Nhớ bỏ vào pool kiểu con trỏ (`*bytes.Buffer`, vì đóng hộp header `[]byte` 24 byte vào `any` vẫn phát sinh cấp phát), gọi `Reset()` trước khi `Put`, và hiểu rằng GC sẽ dọn các phần tử rảnh trong pool ở chu kỳ thu gom rác. Phần chuyên sâu về pooling và Three Rs nằm ở [Các mẫu tối ưu Go](/blog/go-three-rs-optimization-patterns-streaming-pooling/).
 
 <Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
 
-- **BCE (Bounds Check Elimination)**: bước phân tích SSA của Go compiler tự gỡ bỏ câu lệnh kiểm tra biên `if i >= len(s)` thừa khi đã có điều kiện khống chế phía trên.
-- **Mẹo cửa sổ BCE (`win := s[i:i+4]`)**: tạo slice con rồi đụng vào phần tử cuối (`_ = win[3]`) ngay đầu thân vòng lặp để bảo chứng compiler bỏ kiểm tra cho `win[0..2]`.
+- **Khử kiểm tra biên (BCE, Bounds Check Elimination)**: bước tối ưu trên biểu diễn SSA tự xóa các lệnh kiểm tra vượt chỉ số mảng khi biểu thức khống chế phía trên đã bảo đảm an toàn.
+- **Tách fast-path để inline (Fast-path outlining)**: dời phần xử lý chậm ít gặp sang hàm riêng để phần đường nóng giữ kích thước dưới ngưỡng ngân sách 80 node và được inline.
+- **`sync.Pool`**: kho tái sử dụng object tạm an toàn cho nhiều goroutine theo từng `P`, giúp cắt giảm cấp phát rác nhưng vẫn cho phép GC thu hồi khi cần RAM.
 
 </Concepts>
 
 ---
 
-## 3. Bộ nhớ ảo Linux (`VSS` vs `RSS`), `madvise` và 3 tầng cấp phát Heap
+## 4. Bộ nhớ ảo (`VSS` vs. `RSS`), `madvise` và bộ cấp phát 3 tầng
 
-Hệ điều hành cấp riêng cho mỗi binary một không gian địa chỉ ảo (`VSS`). Xin cấp `256 MiB` qua `mmap` ban đầu hầu như không tốn DRAM vật lý bởi nhân Linux/macOS chỉ gắn từng trang **4 KiB thật (`RSS`)** thông qua ngắt **Page Fault** ngay lúc code chạm vào dữ liệu!
+Tiến trình không bao giờ chạm thẳng địa chỉ DRAM vật lý. Mỗi binary Go chạy trong một **Không gian địa chỉ ảo (`VSS`)** riêng, chia thành các **trang 4 KiB** và ánh xạ sang **khung DRAM vật lý (`RSS`)** qua bộ dịch địa chỉ MMU và bộ đệm TLB của CPU.
 
-Đây là lý do khiến nhiều đội vận hành Kubernetes hoảng hốt oan: sau đợt spike kéo Heap lên `420 MiB`, dù GC đã dọn sạch rác về còn `90 MiB` dữ liệu sống, Go vẫn **tạm giữ phần trang trống đó trong `RSS`** một lát đề phòng sắp có đợt tải mới, rồi mới để goroutine **scavenger** chạy ngầm gọi syscall **`madvise(MADV_DONTNEED)`** trả khung RAM vật lý lại cho nhân Linux (kéo RSS về ~`110 MiB`):
+Bộ nhớ ảo hoạt động giống chuyện hãng hàng không bán vượt số ghế: gọi `mmap` xin vùng nhớ mới chỉ là giữ trước số địa chỉ ảo, còn kernel chỉ gắn khung RAM vật lý thật thông qua ngắt phần cứng **page fault** ngay lần đầu chương trình đọc hoặc ghi vào trang 4 KiB đó. Trên Go 1.27.1, `syscall.Mmap` và `syscall.Getrusage` cho thấy ranh giới này rất rõ:
 
-<Figure src={vmPages} alt="Sơ đồ ánh xạ trang bộ nhớ ảo sang khung RAM vật lý" caption="Mọi cấp phát của Go đều đi qua bảng phân trang ảo — hệ điều hành chỉ rút RAM vật lý theo từng trang 4 KiB khi code thực sự đụng tới." sourceTitle="Wikimedia Commons: Memory virtualization addressable level" sourceUrl="https://commons.wikimedia.org/wiki/File:Memory_virtualization_addressable_level.png" />
+<TerminalOutput command="go run vss_rss.go run_vss.go" label="Apple M2 · Go 1.27.1" caption="Xin trước 256 MiB bằng mmap ẩn danh giữ nguyên RAM thật RSS ở 4,1 MiB; chỉ khi ghi 1 byte vào mỗi trang 4 KiB suốt 64 MiB thì RSS mới tăng lên 68,1 MiB.">
+```text
+start:    MaxRSS=4.1 MiB  HeapAlloc=0.15 MiB  HeapReleased=3.22 MiB
+after256: MaxRSS=4.1 MiB  (virtual reserved 256 MiB, untouched)
+touch64:  MaxRSS=68.1 MiB  (wrote 1 byte per 4 KiB page across 64 MiB)
+```
+</TerminalOutput>
 
-<GoHwLinuxRssMadvise />
+Cơ chế gắn trang lười này giải thích hai điều hay gây hiểu lầm trên production:
+1. **Đừng nhìn `VSS` để săn memory leak:** lượng địa chỉ ảo đăng ký trước có thể lớn hơn cả thanh RAM gắn trên máy mà chưa tốn một byte DRAM nào.
+2. **Vì sao `RSS` vẫn cao ngay sau khi GC vừa quét xong:** sau khi đỉnh tải đẩy heap lên `420 MiB` rồi GC dọn về còn `90 MiB` dữ liệu sống, Go giữ lại các span trống một lát đề phòng sắp có đợt tải tiếp, rồi mới để goroutine **scavenger** chạy nền gọi **`madvise(MADV_DONTNEED)`** trên Linux. Lời gọi này báo kernel rút ngay khung RAM vật lý về để `RSS` (`container_memory_working_set_bytes`) hạ xuống mà vẫn giữ nguyên dải ảo `VSS`.
 
-Ngay trên OS là **bộ cấp phát 3 tầng kiểu TCMalloc** (`src/runtime/malloc.go`). Thay vì tranh nhau một khóa toàn cục, Go chia các cấp phát nhỏ `<= 32 KB` làm **67 size class (`8 B -> 32 KB`)** qua ba lớp:
-- **`per-P mcache`**: nằm riêng trên từng processor logic `P` — cấp phát biến nhỏ **0 cần Mutex lock**!
-- **`mcentral`**: danh sách trung tâm theo từng size class, tách rạch ròi **`scan`** (chứa con trỏ) với **`noscan`** (chỉ là dữ liệu thô), chỉ khóa nhẹ lúc `mcache` hết chỗ.
-- **`mheap`**: quản lý trang lớn cắt từ các heap arena `64 MB` trên Linux/macOS 64-bit (`4 MB` trên Windows).
+<GoP16VssRssMadvise />
 
-<GitHubCode repo="golang/go" path="src/runtime/malloc.go" lines="L113-L185" url="https://github.com/golang/go/blob/0351fe5c9795a37afd08c3c7568abd3186c629b4/src/runtime/malloc.go#L113-L185" caption="Các hằng số trong src/runtime/malloc.go giải thích cách Go xin vùng nhớ theo arena lớn rồi phân nhỏ xuống per-P mcache không khóa.">
+*(Đây cũng là lý do các bài cũ viết cho Go 1.12-1.15 hay nhắc `GODEBUG=madvdontneed=1`: Go từng thử mặc định `MADV_FREE` trả lười rồi phải quay về `MADV_DONTNEED` từ Go 1.16 để chỉ số RSS của container khớp thực tế hơn.)*
+
+### Bộ cấp phát 3 tầng kiểu TCMalloc (`mcache` / `mcentral` / `mheap`)
+
+Nằm ngay phía trên lớp địa chỉ ảo của OS là bộ cấp phát 3 tầng (`src/runtime/malloc.go` và `src/internal/runtime/gc/sizeclasses.go`), giúp các goroutine xin bộ nhớ nhỏ mà hiếm khi phải giành khóa heap toàn cục:
+
+<GitHubCode repo="golang/go" path="src/runtime/malloc.go" lines="L114-L120" url="https://github.com/golang/go/blob/go1.27.1/src/runtime/malloc.go#L114-L120" caption="Các hằng số nền trong src/runtime/malloc.go của Go 1.27.1 gắn bộ gom biến siêu nhỏ, 67 lớp kích thước (tới 32 KiB), trang runtime 8 KiB và các arena ảo 64 MiB.">
 ```go
 const (
 	maxTinySize   = _TinySize
@@ -474,101 +1022,117 @@ const (
 	maxSmallSize  = gc.MaxSmallSize
 	pageSize      = 1 << gc.PageShift
 	pageMask      = pageSize - 1
-	...
-	// heapArenaBytes is the size of a heap arena.
-	// This is currently 64MB on 64-bit non-Windows, 4MB on 32-bit and Windows.
-	heapArenaBytes = 1 << logHeapArenaBytes
-)
 ```
 </GitHubCode>
 
-<GoEffVirtualMemoryAllocator />
+<GoP16ThreeTierAllocator />
+
+Go chia các cấp phát nhỏ thành **67 lớp kích thước (size classes)** từ `8 B` tới `32 KiB` qua ba tầng:
+1. **`per-P mcache` (không khóa):** mỗi processor logic `P` giữ riêng một danh sách span trống theo từng lớp kích thước, kèm bộ gộp tiny allocator cho biến không con trỏ dưới 16 B. Phần lớn cấp phát nhỏ xong ngay tại đây mà không chạm mutex.
+2. **`mcentral` (khóa theo lớp cỡ):** khi `mcache` hết chỗ trống, nó xin thêm span từ `mcentral`. Điểm đắt giá là `mcentral` tách hẳn **`scan` span** (chứa con trỏ) khỏi **`noscan` span** (chỉ chứa dữ liệu thuần như `[]int64` hay `[]byte`) để GC bỏ qua hoàn toàn mảng không con trỏ, giúp cấu trúc phẳng tránh được cơn ác mộng quét LRU cache như ở Discord.
+3. **`mheap` (khóa toàn cục):** quản lý các trang 8 KiB cắt từ arena ảo `64 MiB` trên Unix 64-bit (`4 MiB` trên Windows và 32-bit), và trực tiếp cấp phát cho các khối lớn hơn `32 KiB` không đi qua `mcache`.
 
 <Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
 
-- **`per-P mcache`**: kho cấp phát cục bộ gắn riêng cho từng logical processor `P`, giúp các cấp phát Heap nhỏ (`<= 32 KB`) không bao giờ phải tranh Mutex giữa các CPU core.
-- **Span `scan` vs. `noscan`**: Go tách vùng nhớ chứa con trỏ (`scan`) khỏi vùng dữ liệu thuần như `[]byte` hay `[]int64` (`noscan`), giảm mạnh tải quét cho GC.
-- **`madvise(MADV_DONTNEED)`**: lời gọi hệ thống được goroutine scavenger của Go phát ra để nhân Linux thu hồi lại khung RAM 4 KiB dư thừa mà không cần hủy dải địa chỉ ảo `VSS`.
+- **Gắn trang theo nhu cầu (On-demand paging / Page fault)**: ngắt phần cứng xảy ra lần đầu code chạm vào trang ảo 4 KiB chưa có khung RAM, buộc kernel gắn một khung RAM vật lý lúc đó.
+- **`madvise(MADV_DONTNEED)`**: lời gọi hệ thống được scavenger nền của Go dùng trên Linux để trả ngay khung DRAM của vùng heap rảnh cho kernel.
+- **Span `scan` vs. `noscan`**: cách chia rạch ròi giữa vùng chứa con trỏ (GC phải duyệt) và vùng thuần số liệu/byte (GC không cần đụng tới).
 
 </Concepts>
 
 ---
 
-## 4. Thuật toán GC 3 màu đồng thời & Hybrid Write Barrier
+## 5. Thuật toán GC 3 màu đồng thời và Hybrid Write Barrier
 
-Hãy tưởng tượng dọn dẹp văn phòng *ngay trong lúc nhân viên vẫn đang đi lại làm việc bình thường*:
-1. **Mark Setup (dừng STW cực ngắn ~50 µs):** Go tạm dừng chớp mắt để bật **Hybrid Write Barrier** và tô **Xám** toàn bộ điểm neo gốc (Stack & biến toàn cục — nghĩa là *"đã sống nhưng chưa quét hết con cháu"*).
-2. **Đánh dấu đồng thời (~25% CPU nền):** app chạy lại bình thường trong khi worker GC bốc từng node Xám ra xem các con trỏ bên trong, tô Xám đám con rồi chuyển node cha sang **Đen** (giữ lại). Còn nếu code app bỗng dưng nối node Trắng `D` vào sau một node đã tô Đen `A.Next = D` ngay giữa chừng? Lớp bảo vệ Write Barrier lập tức tô Xám `D` để đảm bảo object đang sống tuyệt đối không bị thu hồi oan!
-3. **Quét đồng thời không dời vùng nhớ (Non-compacting Sweep):** mọi slot còn lại mang màu **Trắng** tự động trả lại danh sách trống trên mspan mà không phải dịch chuyển địa chỉ các object đang sống.
+Bộ thu gom rác trong Go (`src/runtime/mgc.go`) hoạt động **đồng thời, không chia thế hệ (non-generational) và không dời ô nhớ (non-compacting)**, nghĩa là nó dọn rác song song lúc goroutine ứng dụng vẫn chạy và giữ nguyên địa chỉ các object đang sống. Hãy hình dung việc dọn văn phòng ngay giữa giờ nhân viên đi lại làm việc:
 
-Tự tay bấm qua từng pha đánh dấu Trắng -> Xám -> Đen, pha chèn Write Barrier và bẫy đốt CPU gần trần `GOMEMLIMIT` trong trình mô phỏng tương tác dưới đây:
+1. **Mark Setup (dừng STW cực ngắn):** Go tạm dừng mọi goroutine trong chớp mắt để bật **Hybrid Write Barrier** và tô **Xám** toàn bộ con trỏ gốc trên stack lẫn biến toàn cục (*còn sống, chưa quét hết con*).
+2. **Đánh dấu đồng thời (~25% CPU nền):** goroutine app chạy lại bình thường trong khi worker GC lấy dần node Xám, tô Xám các node con nó trỏ tới rồi chốt node cha sang **Đen** (*giữ lại*). Nếu app cấp phát nhanh hơn tốc độ quét nền, Go kích hoạt **Mark Assist**, buộc chính goroutine đang xin RAM phụ quét mark một phần rồi mới được cấp phát tiếp.
+   Nhưng lỡ giữa chừng app gán một node còn **Trắng** `D` vào sau một node đã **Đen** (`A.Next = D`) thì sao? Nếu không chặn lại, GC sẽ không quay lại xem node Đen `A` và có thể xóa nhầm `D` đang sống. **Hybrid Write Barrier** tự động tô Xám cả con trỏ mới nối lẫn con trỏ bị ghi đè trong suốt pha mark nên dữ liệu sống luôn được giữ lại.
+3. **Mark Termination (dừng STW ngắn) & Quét lười:** một cú dừng ngắn thứ hai tắt rào ghi, rồi các ô còn **Trắng** được trả dần về `mcache`/`mcentral` ngay lúc có lượt cấp phát mới.
+
+Bấm từng bước qua ba màu Trắng-Xám-Đen, tình huống Write Barrier cứu node `D` và bẫy ngưỡng `GOMEMLIMIT` ở trình mô phỏng tương tác bên dưới:
 
 <GoTricolorGcDemo />
 
-Đọc thử nhật ký chạy thật từ cờ **`GODEBUG=gctrace=1`** ngay trên Go 1.27 Apple M2 (`3->4->1 MB` nghĩa là trước quét `4 MB`, sống sót sau quét `1 MB`, còn thời gian dừng STW chỉ là `0.050 ms` và `0.008 ms`):
+Chạy thử benchmark sinh rác trên Go 1.27.1 kèm `GODEBUG=gctrace=1` cho thấy hai pha dừng STW thực tế nhỏ tới mức nào:
 
-<TerminalOutput command="GODEBUG=gctrace=1 go test -bench=BenchmarkCh12_Pool -benchtime=10ms ." label="Apple M2 · Go 1.27 gctrace=1" caption="Log GODEBUG=gctrace=1 thật trên Apple M2 Go 1.27: hai nhịp dừng STW chỉ tốn vài chục micro-giây trong khi phần đánh dấu chạy song song gọn nhẹ.">
+<TerminalOutput command="GODEBUG=gctrace=1 ./p16check.test -test.run=^$ -test.bench=BenchmarkAllocChurn -test.benchtime=30ms" label="Apple M2 · Go 1.27.1" caption="Log GODEBUG=gctrace=1 thật trên Go 1.27.1: hai pha dừng STW ở vòng 4 chỉ tốn 0,16 ms và 0,024 ms, kéo heap từ 4 MB xuống còn 1 MB sống sót trên 8 P.">
 ```text
-gc 3 @0.055s 1%: 0.050+0.70+0.008 ms clock, 0.40+0.71/1.0/0.15+0.067 ms cpu, 3->4->1 MB, 4 MB goal, 0 MB stacks, 0 MB globals, 8 P
-gc 6 @0.136s 1%: 0.17+2.0+0.003 ms clock, 1.3+1.4/3.0/1.2+0.024 ms cpu, 3->4->3 MB, 4 MB goal, 0 MB stacks, 0 MB globals, 8 P
-gc 11 @0.188s 1%: 0.028+0.62+0.001 ms clock, 0.22+0.15/1.1/0.018+0.015 ms cpu, 5->5->2 MB, 5 MB goal, 0 MB stacks, 0 MB globals, 8 P
+gc 4 @0.005s 5%: 0.16+0.27+0.024 ms clock, 1.3+0.060/0.18/0.003+0.19 ms cpu, 3->4->1 MB, 4 MB goal, 0 MB stacks, 0 MB globals, 8 P
+gc 6 @0.007s 6%: 0.072+0.56+0.12 ms clock, 0.57+0.063/0.075/0.13+1.0 ms cpu, 3->6->3 MB, 4 MB goal, 0 MB stacks, 0 MB globals, 8 P
+gc 15 @0.017s 7%: 0.10+0.70+0.002 ms clock, 0.85+0.31/0.095/0+0.020 ms cpu, 5->6->1 MB, 5 MB goal, 0 MB stacks, 0 MB globals, 8 P
 ```
 </TerminalOutput>
 
+Cách đọc dòng `gc 4`: `@0.005s` là thời điểm chạy, `5%` là tổng phần trăm CPU cho GC từ đầu, `0.16+0.27+0.024 ms clock` lần lượt là wall-time của STW Mark Setup + concurrent mark + STW Mark Termination, `3->4->1 MB` là heap trước GC -> cuối mark -> dữ liệu sống sót sau mark, và `8 P` là `GOMAXPROCS`.
+
 <Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
 
-- **Stop-The-World (STW)**: hai điểm dừng cực ngắn (~10–100 µs) đầu và cuối pha đánh dấu chỉ để bật/tắt trạng thái hàng rào ghi đồng bộ trên toàn bộ `GOMAXPROCS`.
-- **Hybrid Write Barrier**: đoạn kiểm tra nhỏ trình biên dịch tự chèn (chỉ bật trong lúc đang Mark GC), tô Xám cả con trỏ mới nối lẫn con trỏ bị ghi đè để giữ an toàn tuyệt đối cho dữ liệu sống.
-- **Thuật toán không dời ô nhớ (Non-compacting)**: khác JVM, Go GC không di chuyển các biến đang sống trong RAM mà bám theo size class TCMalloc để giảm phân mảnh và né các cú khựng dài.
+- **Stop-The-World (STW)**: hai khoảng dừng rất ngắn đầu và cuối pha đánh dấu chỉ để bật hoặc tắt write barrier đồng bộ trên toàn bộ `P`.
+- **Hybrid Write Barrier**: đoạn kiểm tra do trình biên dịch chèn quanh thao tác ghi con trỏ (chỉ kích hoạt lúc GC đang mark), tô Xám các đích bị đổi để bảo toàn đồ thị object sống.
+- **Mark Assist**: cơ chế hãm nhịp buộc goroutine cấp phát quá nhanh phải phụ chạy bước đánh dấu tỷ lệ theo lượng RAM nó vừa xin.
 
 </Concepts>
 
 ---
 
-## 5. Tinh chỉnh `GOGC` & `GOMEMLIMIT` an toàn trên cụm Kubernetes
+## 6. Tinh chỉnh `GOGC` và `GOMEMLIMIT` an toàn trên Kubernetes
 
-Khi đã thông suốt cơ chế quét 3 màu, hai tham số điều khiển nhịp GC mạnh nhất trong production lộ rõ:
+Go chỉ đưa ra hai núm chỉnh chính để đánh đổi giữa CPU và RAM (`#99`):
 
-1. **`GOGC` (mặc định `100`):** chọn thời điểm kích hoạt vòng lặp kế tiếp theo **tỷ lệ tăng trưởng Heap**. Nếu dữ liệu sống là `20 MiB`, `GOGC=100` đợi chạm `40 MiB` (`20 + 20 * 100%`). Tăng lên `GOGC=200` giảm một nửa công sức CPU cho GC — nhưng ngược lại các container thừa RAM mà để `GOGC=100` sẽ bị GC quét quá dày (đó chính là cơ hội giúp Uber thu hồi ~70.000 nhân CPU).
-2. **`GOMEMLIMIT` (trần mềm từ Go 1.19+):** ép GC quét tích cực khi tổng bộ nhớ runtime sắp chạm ngưỡng giới hạn của pod (`container_memory_working_set_bytes`), cho phép nâng `GOGC` lên cao an toàn mà không lo sập OOMKill bất ngờ.
+1. **`GOGC` (mặc định `100`, hoặc `debug.SetGCPercent`):** đặt phần trăm **rác mới được phép sinh thêm** so với lượng heap sống sót sau vòng trước (`Target = Live × (1 + GOGC/100)`). Nếu dữ liệu sống là `50 MiB`, `GOGC=100` sẽ đợi tới `100 MiB`. Tăng `GOGC=200` nâng trần lên `150 MiB` và giảm gần nửa số vòng GC, giải thích vì sao để mặc định `100` trong container dư RAM bị tốn CPU oan (câu chuyện 70K nhân ở Uber). Ngay cả khi tắt bằng `GOGC=off`, runtime vẫn ép chạy GC nếu quá 2 phút chưa quét lần nào, đúng chu kỳ 2 phút từng làm Discord giật p99.
+2. **`GOMEMLIMIT` (trần mềm từ Go 1.19, hoặc `debug.SetMemoryLimit`):** đặt ngưỡng mềm cho tổng bộ nhớ Go quản lý (`MemStats.Sys - MemStats.HeapReleased`: gồm heap, stack và metadata runtime, không tính phần binary, `cgo` hay `syscall.Mmap` ngoài). Nhờ có trần này bạn mới dám tăng `GOGC` (hoặc đặt `off`) mà không lo pod chết OOM khi tải tăng.
 
-<QuoteCard author="Michael Knyszek" role="Trưởng nhóm Go Runtime & GC" sourceTitle="A Guide to the Go Garbage Collector" sourceUrl="https://tip.golang.org/doc/gc-guide">
-Vì GOMEMLIMIT là giới hạn mềm, runtime Go tự hãm trần CPU dành cho GC ở khoảng 50% chứ không treo cứng vĩnh viễn nếu bộ nhớ sống thật vượt quá mức giới hạn — do đó giảm rác cấp phát vẫn an toàn hơn việc đẩy GOMEMLIMIT sát mép OOM.
+<QuoteCard author="Michael Knyszek" role="Đội ngũ Go Runtime & GC" sourceTitle="Go runtime: 4 years later" sourceUrl="https://go.dev/blog/go1.19-runtime">
+Runtime sẽ giới hạn GC ở mức tối đa 50% tổng thời gian CPU, kể cả khi điều đó khiến bộ nhớ vượt qua ngưỡng giới hạn.
 </QuoteCard>
 
-<GoEffGcPacingCicd />
+Vì `GOMEMLIMIT` khóa trần CPU cho GC ở mức **50%** để tránh ứng dụng treo cứng trong vòng lặp dọn rác vô tận (**GC thrashing**), đừng đặt `GOMEMLIMIT` sát mép giới hạn cgroup của container. Hãy chừa lại 15-20% khoảng thở cho OS page cache, phần ngoài Go runtime và các cú vọt đột ngột:
 
-| Giới hạn RAM Pod Kubernetes | Gợi ý `GOMEMLIMIT` | Chiến lược `GOGC` khuyên dùng | Rủi ro cần theo dõi |
+<GoP16GogcGomemlimit />
+
+| Giới hạn RAM của pod Kubernetes | Gợi ý `GOMEMLIMIT` | Chiến lược `GOGC` | Rủi ro chính cần theo dõi |
 | :--- | :--- | :--- | :--- |
-| **Pod nhỏ (`<= 256 MiB`)** | `200MiB` (~80%, chừa phần OS/stack) | Giữ `100` (ưu tiên an toàn tràn RAM) | Cache sống thật >170 MiB -> GC quay cuồng đốt CPU |
-| **Chuẩn backend (`1 GiB`)** | `850MiB` (~85%, chừa đệm ~150 MiB) | `100–200` (cân bằng p99 + CPU) | OS page cache tăng cao khi đọc file nặng |
-| **Batch worker dư RAM (`4 GiB`, live 200 MiB)** | `3400MiB` (`85%`) | Tăng `300–500` hoặc `off` có `GOMEMLIMIT` bảo vệ | Lệch đột ngột tải lên >3 GiB dữ liệu sống |
+| Chật (`<= 256 MiB`) | `200MiB` (~80%) | Giữ `100` | Dữ liệu sống >170 MiB đẩy GC quay cuồng đốt CPU |
+| Chuẩn (`1 GiB`) | `850MiB` (~85%) | `100-200` | OS page cache phình khi đọc ghi file lớn |
+| Dư RAM (`4 GiB`, live 200 MiB) | `3400MiB` (~85%) | `300-500` hoặc `off` | Tải vọt giữ >3 GiB dữ liệu sống vượt trần |
 
-Để hình dung rõ con số thực tế, thử thay một service giữ **`Live = 50 MiB`** sau mỗi vòng quét (chạy trong pod `512 MiB`) vào công thức `Target = Live * (1 + GOGC/100)` kèm trần `GOMEMLIMIT=400MiB`:
+Thay thử một service giữ `50 MiB` dữ liệu sống trong pod `512 MiB` vào công thức `Target = Live × (1 + GOGC/100)`:
 
-| Cấu hình (`Live = 50 MiB`, Pod = `512 MiB`) | Ngưỡng kích GC kế tiếp | Rác mới được phép trước khi quét | Tần suất chạy GC | Hệ quả trên Production |
-| :--- | :--- | :--- | :--- | :--- |
-| **`GOGC=50`, chưa đặt `GOMEMLIMIT`** | `75 MiB` | `25 MiB` | **Dày gấp 4x** | RAM rất nhỏ (~`75 MiB`), nhưng trả thuế CPU cho GC rất nặng |
-| **`GOGC=100` (mặc định)** | `100 MiB` | `50 MiB` | **Gấp 2x** | An toàn chuẩn, nhưng bỏ phí ~`300 MiB` RAM nhàn rỗi đã thuê |
-| **`GOGC=400`, `GOMEMLIMIT=400MiB`** | `250 MiB` (trần mềm `400 MiB`) | `200 MiB` | **Giảm còn 0.5x** | **Giảm 4 lần số nhịp GC** nhờ tận dụng RAM trống mà vẫn dưới ngưỡng OOM |
-| **`GOGC=off`, `GOMEMLIMIT=400MiB`** | ~`400 MiB` tổng runtime | ~`340 MiB` (gồm cả stack/meta) | Tối thiểu ở tải đều | Cẩn thận nếu tải dội lên sát `400 MiB` sẽ kéo GC chạy liên hoàn |
+| Cấu hình (`Live = 50 MiB`, Pod = `512 MiB`) | Ngưỡng kích GC kế tiếp | Rác mới cho phép mỗi vòng | Tần suất GC tương đối |
+| :--- | :--- | :--- | :--- |
+| `GOGC=50`, không đặt trần | `75 MiB` | `25 MiB` | Gấp 4x so với `GOGC=400` |
+| `GOGC=100` (mặc định) | `100 MiB` | `50 MiB` | Gấp 2x (bỏ phí ~300 MiB RAM trống) |
+| `GOGC=400`, `GOMEMLIMIT=400MiB` | `250 MiB` | `200 MiB` | 0,5x (~ít vòng GC hơn 4 lần) |
+| `GOGC=off`, `GOMEMLIMIT=400MiB` | ~`400 MiB` tổng | ~`340 MiB` khoảng thở | Thấp nhất tới khi dữ liệu sống chạm trần |
 
-Một chi tiết dễ làm người mới giật mình khi mở Grafana Kubernetes: sau khi GC quét rác xong, chỉ số **`container_memory_working_set_bytes`** chỉ thực sự tụt xuống khi goroutine **`scvg` (scavenger)** chạy nền và gọi xuống Linux **`madvise(..., MADV_DONTNEED)`**. Từ Go 1.16 trở đi, runtime mặc định dùng **`MADV_DONTNEED`** (thay vì `MADV_FREE` trả chậm như trước) nên page RAM thừa được thu hồi khỏi `RSS` rất nhanh, tránh cảnh báo OOM ảo trên dashboard Prometheus.
-
-### Câu hỏi tự kiểm tra trước khi sang Đo đạc & Benchstat
-
-1. Vì sao `BenchmarkCh9Matrix_ColMajor` chạy chậm hơn gần gấp đôi `RowMajor` trên Apple M2 dù cùng Big-O và phát sinh `0 allocs/op`? *(Xem Mục 1)*
-2. Khi đặt một dòng `_ = win[3]` ở đầu thân vòng lặp trước `win[0]+win[1]+win[2]+win[3]`, Go SSA compiler xử lý các kiểm tra biên phía dưới thế nào? *(Xem Mục 2)*
-3. Tại sao chỉ số `RSS` của container Linux vẫn đứng cao ngay sau khi GC vừa quét xong — và lời gọi hệ thống nào từ Go kéo nó hạ xuống an toàn? *(Xem Mục 3)*
-4. Giải thích vai trò của **Hybrid Write Barrier** khi code user thực hiện gán `A.Next = D` vào một node đã tô Đen ngay giữa pha đánh dấu đồng thời. *(Xem Mục 4)*
-5. Vì sao đặt `GOMEMLIMIT` sát mức 99% giới hạn RAM của pod lại có nguy cơ vừa đẩy CPU GC lên **50%** vừa vẫn chết OOMKill? *(Xem Mục 5)*
+Khi đẩy dịch vụ lên Kubernetes, có hai mảnh ghép đi liền với tinh chỉnh GC: cách `GOMAXPROCS` (đã nhận diện container từ Go 1.25+) phối hợp với **CFS CPU throttling** trên Linux nằm ở [Go trên production](/blog/go-production-stdlib-cpu-cache-gc-kubernetes/). Còn để chứng minh tốc độ bằng số liệu chuẩn và lần đúng điểm nóng qua `pprof`, hai bước kế tiếp là [Đo hiệu năng và benchstat](/blog/go-observability-metrics-microbenchmarks-benchstat/) cùng [Profiling Go với pprof](/blog/go-profiling-pprof-flamegraphs-off-cpu-continuous/).
 
 <Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
 
-- **`GOGC`**: tỷ lệ phần trăm Heap mới được phép cấp thêm trước khi kích hoạt chu kỳ GC kế tiếp (`100` nghĩa là chờ rác cộng thêm đúng bằng kích thước Heap đang sống).
-- **`GOMEMLIMIT`**: ngưỡng tổng bộ nhớ mềm (Go 1.19+) bao gồm Heap, Stack và Metadata; khi tiệm cận trần này, GC chạy thường xuyên hơn nhưng được hãm trần tối đa 50% CPU.
-- **GC Thrashing (Quay cuồng đốt CPU)**: hiện tượng dữ liệu sống thật chiếm tới ~95% `GOMEMLIMIT`, khiến các chu kỳ GC nổ liên hoàn suốt cả giây mà chẳng giải phóng được bao nhiêu RAM.
+- **`GOGC`**: tỷ lệ phần trăm heap được phép tăng thêm trước khi chạy chu kỳ GC kế tiếp (`100` nghĩa là chờ lượng rác bằng đúng kích thước dữ liệu đang sống).
+- **`GOMEMLIMIT`**: ngưỡng bộ nhớ mềm do Go runtime quản lý (heap + stack + metadata, không gồm `cgo` và page cache của OS), ép GC chạy dày hơn khi sát trần nhưng chặn tối đa ở 50% CPU.
+- **GC thrashing (GC quay cuồng)**: vòng lặp dọn rác liên hoàn xảy ra khi dữ liệu sống thực sự chiếm sát `GOMEMLIMIT`, khiến GC chạy liên tục mà giải phóng được rất ít RAM.
 
 </Concepts>
+
+---
+
+## Điểm rút ra (Key takeaways)
+
+- Giữ dữ liệu nóng nằm liền kề trong slice giá trị (`[]T` hoặc SoA) và tách các biến đếm song song sang cache line khác nhau (64 B trên x86-64, 128 B trên Apple Silicon) hoặc dùng biến cục bộ để các nhân không hủy cache của nhau.
+- Xếp trường trong các struct lớn từ kích thước lớn xuống nhỏ để bỏ byte đệm thừa; dồn hai biến `bool` xuống cuối rút `TodoBad` từ 40 xuống 32 byte và tăng tốc quét 2 triệu `Unpadded` lên ~2,6 lần.
+- Kiểm tra vị trí cấp phát bằng `go build -gcflags="-m=2 -d=ssa/check_bce/debug=1"`: truyền con trỏ xuống dưới thay vì trả `&x` lên trên, để ý trường hợp đóng hộp `any` như trong `writeJSON`, và giữ đường nóng dưới ngân sách 80 node để được inline.
+- Theo dõi bộ nhớ container bằng `RSS` vật lý (nhờ `MADV_DONTNEED`, mặc định trên Linux từ Go 1.16) thay vì `VSS`, đồng thời ưu tiên kiểu dữ liệu `noscan` để giảm tải quét con trỏ cho GC.
+- Phối hợp tăng `GOGC` cùng `GOMEMLIMIT` ở mức 80-85% RAM pod để tận dụng bộ nhớ trống giảm CPU cho GC, nhưng luôn tối ưu bớt cấp phát rác trước khi dữ liệu sống áp sát trần 50% CPU.
+
+## Câu hỏi ôn tập (Review questions)
+
+1. Vì sao `BenchmarkOrders_SoA` chạy nhanh hơn `BenchmarkOrders_AoS` khoảng 2,7 lần trên Apple M2 dù cả hai đều có `0 allocs/op` và cộng cùng số phần tử? *(Xem Mục 1)*
+2. Trong `BenchmarkFalseSharing_Unpadded`, code hoàn toàn không có data race vì hai goroutine sửa hai trường khác nhau `a` và `b`. Cơ chế phần cứng nào làm chậm đi gần 3 lần, và có hai cách nào để xử lý? *(Xem Mục 1)*
+3. Tại sao trình biên dịch giữ `a` và `b` trên stack ở `sumDown(&a, &b)` nhưng báo `moved to heap: z` ở `sumUp(a, b)`, và vì sao truyền `Todo` theo giá trị vào `writeJSON(..., v any)` vẫn bị đẩy ra heap? *(Xem Mục 3)*
+4. Sau khi qua cao điểm tải và GC vừa thu dọn xong 300 MiB rác, vì sao `RSS` của pod Kubernetes có thể vẫn đứng cao một lúc rồi mới hạ, và lời gọi hệ thống nào làm giảm `RSS` mà không đổi `VSS`? *(Xem Mục 4)*
+5. Điều gì xảy ra nếu một dịch vụ Go giữ 390 MiB dữ liệu cache thật sự còn sống bên trong container cấu hình `GOMEMLIMIT=400MiB` và `GOGC=off`? *(Xem Mục 6)*
 
 </Vi>

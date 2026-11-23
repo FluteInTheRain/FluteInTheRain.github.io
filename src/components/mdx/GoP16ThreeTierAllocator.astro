@@ -1,0 +1,116 @@
+---
+// Go's 3-tier allocator (src/runtime/malloc.go + internal/runtime/gc/sizeclasses.go):
+// Small objects (<= 32 KiB, 67 size classes) flow through per-P mcache -> mcentral -> mheap.
+// Large objects (> 32 KiB) bypass mcache/mcentral straight to mheap.
+const W = 900;
+const H = 330;
+---
+<figure class="gp16a">
+  <div class="gp16a-scroll">
+  <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Go 3-tier heap allocator: small allocations up to 32 KiB hit lock-free per-P mcache first, refill from mcentral scan or noscan spans under mutex, and grow from 64 MiB arenas in mheap; objects over 32 KiB go directly to mheap.">
+    {/* Top: Goroutine allocation request */}
+    <rect x="290" y="12" width="320" height="50" rx="8" class="box" />
+    <text x="450" y="33" text-anchor="middle" class="b">
+      <tspan data-lang-en>Heap allocation (runtime.mallocgc)</tspan>
+      <tspan data-lang-vi>Cấp phát heap (runtime.mallocgc)</tspan>
+    </text>
+    <text x="450" y="54" text-anchor="middle" class="m">
+      <tspan data-lang-en>from goroutine running on logical P</tspan>
+      <tspan data-lang-vi>từ goroutine đang chạy trên P</tspan>
+    </text>
+
+    {/* Left branch: Small <= 32 KiB */}
+    <path d="M 340 62 L 296 94" class="ln" />
+    <polygon points="290,98 295,89 301,98" class="hd" />
+    <text x="195" y="84" text-anchor="middle" class="b num">
+      <tspan data-lang-en>&lt;= 32 KiB (67 classes)</tspan>
+      <tspan data-lang-vi>&lt;= 32 KiB (67 cỡ)</tspan>
+    </text>
+
+    {/* Right branch: Large > 32 KiB */}
+    <path d="M 560 62 L 720 96 L 720 268" class="lnr" />
+    <polygon points="720,276 715,267 725,267" class="hdr" />
+    <text x="735" y="148" class="r num">
+      <tspan data-lang-en>&gt; 32 KiB large alloc</tspan>
+      <tspan data-lang-vi>&gt; 32 KiB cấp thẳng</tspan>
+    </text>
+    <text x="735" y="168" class="m">
+      <tspan data-lang-en>bypasses mcache</tspan>
+      <tspan data-lang-vi>đi thẳng tới mheap</tspan>
+    </text>
+
+    {/* Tier 1: mcache */}
+    <rect x="20" y="100" width="560" height="56" rx="8" class="good" />
+    <text x="36" y="124" class="b">1. per-P mcache</text>
+    <text x="172" y="124" class="b">
+      <tspan data-lang-en>(0 locks · fast local free list)</tspan>
+      <tspan data-lang-vi>(không lock · cấp ngay trên P)</tspan>
+    </text>
+    <text x="36" y="145" class="m num">
+      <tspan data-lang-en>Tiny allocs (&lt; 16 B, no ptrs) + size classes 8 B .. 32 KiB</tspan>
+      <tspan data-lang-vi>Gom biến tí hon (&lt; 16 B, không con trỏ) + lớp 8 B .. 32 KiB</tspan>
+    </text>
+
+    {/* Arrow mcache -> mcentral on empty */}
+    <line x1="300" x2="300" y1="156" y2="180" class="ln" />
+    <polygon points="300,187 295,178 305,178" class="hd" />
+    <text x="314" y="177" class="m">
+      <tspan data-lang-en>span full -> refill</tspan>
+      <tspan data-lang-vi>hết ô -> xin thêm span</tspan>
+    </text>
+
+    {/* Tier 2: mcentral */}
+    <rect x="20" y="188" width="560" height="62" rx="8" class="box" />
+    <text x="36" y="210" class="b">2. mcentral</text>
+    <text x="142" y="210" class="m">
+      <tspan data-lang-en>(per-class mutex · 8 KiB mspans)</tspan>
+      <tspan data-lang-vi>(khóa theo cỡ · các mspan 8 KiB)</tspan>
+    </text>
+    <rect x="34" y="219" width="264" height="24" rx="4" class="bad" />
+    <text x="166" y="236" text-anchor="middle" class="r">
+      <tspan data-lang-en>scan spans (contain pointers)</tspan>
+      <tspan data-lang-vi>span scan (chứa con trỏ -> GC quét)</tspan>
+    </text>
+    <rect x="310" y="219" width="256" height="24" rx="4" class="good" />
+    <text x="438" y="236" text-anchor="middle" class="b">
+      <tspan data-lang-en>noscan spans (GC skips)</tspan>
+      <tspan data-lang-vi>span noscan (GC bỏ qua)</tspan>
+    </text>
+
+    {/* Arrow mcentral -> mheap */}
+    <line x1="300" x2="300" y1="250" y2="270" class="ln" />
+    <polygon points="300,277 295,268 305,268" class="hd" />
+
+    {/* Tier 3: mheap */}
+    <rect x="20" y="278" width="860" height="40" rx="8" class="box" />
+    <text x="36" y="303" class="b">3. mheap</text>
+    <text x="122" y="303" class="m num">
+      <tspan data-lang-en>(global lock · carves 8 KiB pages from 64 MiB OS virtual arenas via mmap)</tspan>
+      <tspan data-lang-vi>(khóa toàn cục · chia trang 8 KiB từ các arena ảo 64 MiB xin qua mmap)</tspan>
+    </text>
+  </svg>
+  </div>
+  <figcaption>
+    <span data-lang-en>Go avoids a global heap lock on normal allocations by giving each processor slot <code>P</code> its own <code>mcache</code>. Splitting <code>mcentral</code> into <code>scan</code> and pointer-free <code>noscan</code> spans lets the garbage collector skip raw slices like <code>[]int64</code> or <code>[]byte</code>.</span>
+    <span data-lang-vi>Go tránh tranh khóa heap ở phần lớn cấp phát bằng kho riêng <code>mcache</code> trên từng <code>P</code>. Tách <code>mcentral</code> thành span <code>scan</code> (có con trỏ) và <code>noscan</code> (thuần dữ liệu) giúp GC bỏ qua hoàn toàn các slice như <code>[]int64</code> hay <code>[]byte</code>.</span>
+  </figcaption>
+</figure>
+
+<style>
+  .gp16a { margin: 2em 0; width: 100%; }
+  .gp16a-scroll { overflow-x: auto; }
+  .gp16a svg { display: block; width: 100%; min-width: 640px; height: auto; }
+  .gp16a text { font-size: 13.5px; fill: var(--text-body); }
+  .gp16a .b { font-weight: 700; fill: var(--text); }
+  .gp16a .m { fill: var(--text-muted); }
+  .gp16a .r { fill: var(--red); font-weight: 700; }
+  .gp16a .num { font-variant-numeric: tabular-nums; }
+  .gp16a .box { fill: var(--bg-alt); stroke: var(--text-muted); stroke-width: 1.2; }
+  .gp16a .good { fill: var(--gold-tint-bg); stroke: var(--gold); stroke-width: 1.2; }
+  .gp16a .bad { fill: var(--red-tint-bg); stroke: var(--red); stroke-width: 1.2; }
+  .gp16a .ln { fill: none; stroke: var(--text-muted); stroke-width: 1.5; }
+  .gp16a .hd { fill: var(--text-muted); }
+  .gp16a .lnr { fill: none; stroke: var(--red); stroke-width: 1.5; stroke-dasharray: 4 3; }
+  .gp16a .hdr { fill: var(--red); }
+  .gp16a figcaption { margin-top: 10px; font-size: 14px; color: var(--text-muted); line-height: 1.55; text-align: center; }
+</style>
