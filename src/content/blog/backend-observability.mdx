@@ -1,0 +1,1014 @@
+---
+title: "Evidence, not guesses"
+title_vi: "Bằng chứng, không phải đoán mò"
+description: "Cloudflare's 2025 outage dragged on while engineers suspected an attack. Structured logs, request ids, metrics and traces on a FastAPI service turn debugging into reading evidence."
+description_vi: "Sự cố Cloudflare 2025 kéo dài vì đội ngũ đoán là bị tấn công. Log có cấu trúc, request id, metric và trace trên service FastAPI biến debug thành đọc bằng chứng thay vì đoán."
+date: 2026-11-23
+category: "backend"
+tags: ["backend", "python", "fastapi", "observability", "opentelemetry", "logging"]
+cover: "../../assets/blog/backend-observability/metrics-scrape-cover.png"
+cover_alt: "Browser view of clue.api's /metrics page: Prometheus text lines for the http_request_duration_seconds histogram, with le bucket counts per route"
+draft: true
+sources:
+  - { title: "FastAPI: Modern Python Web Development", author: "Bill Lubanovic", chapters: "Ch. 9", url: "https://www.oreilly.com/library/view/fastapi/9781098135091/" }
+  - { title: "Cloudflare outage on November 18, 2025", author: "Cloudflare", url: "https://blog.cloudflare.com/18-november-2025-outage/" }
+  - { title: "Metric and label naming (labels and cardinality)", author: "Prometheus docs", url: "https://prometheus.io/docs/practices/naming/" }
+  - { title: "Histograms and summaries", author: "Prometheus docs", url: "https://prometheus.io/docs/practices/histograms/" }
+  - { title: "Python client: instrumenting", author: "Prometheus docs", url: "https://prometheus.github.io/client_python/instrumenting/" }
+  - { title: "Logging Cookbook", author: "Python docs", url: "https://docs.python.org/3/howto/logging-cookbook.html" }
+  - { title: "contextvars: Context Variables", author: "Python docs", url: "https://docs.python.org/3/library/contextvars.html" }
+  - { title: "Middleware", author: "FastAPI docs", url: "https://fastapi.tiangolo.com/tutorial/middleware/" }
+  - { title: "OpenTelemetry Python", author: "OpenTelemetry docs", url: "https://opentelemetry.io/docs/languages/python/" }
+  - { title: "OpenTelemetry FastAPI instrumentation", author: "opentelemetry-python-contrib", url: "https://opentelemetry-python-contrib.readthedocs.io/en/latest/instrumentation/fastapi/fastapi.html" }
+  - { title: "Trace Context (traceparent header)", author: "W3C Recommendation", url: "https://www.w3.org/TR/trace-context/" }
+  - { title: "Logging Cheat Sheet", author: "OWASP", url: "https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html" }
+  - { title: "San Onofre Nuclear Generating Station control room, 1968 (Public domain)", author: "U.S. Department of Energy", url: "https://commons.wikimedia.org/wiki/File:San_Onofre_Nuclear_Generating_Station_control_room,_1968.jpg" }
+---
+
+import En from '../../components/mdx/En.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
+import BeP10Interleave from '../../components/mdx/BeP10Interleave.astro';
+import BeP10RequestId from '../../components/mdx/BeP10RequestId.astro';
+import BeP10Histogram from '../../components/mdx/BeP10Histogram.astro';
+import BeP10Cardinality from '../../components/mdx/BeP10Cardinality.astro';
+import BeP10Waterfall from '../../components/mdx/BeP10Waterfall.astro';
+import BeP10Walk from '../../components/mdx/BeP10Walk.astro';
+import heroControlRoom from '../../assets/blog/backend-observability/control-room-1968.jpg';
+
+<En>
+
+<Figure src={heroControlRoom} alt="The control room of the San Onofre Nuclear Generating Station, circa 1968, with panels of dials, gauges and coloured lights for the operators" caption="A control room does not tell operators what to think. It puts evidence on the wall: dials, gauges and lights that, in the photo's own description, notify the operators 'instantaneously of any deviation from normal conditions'. A service needs the same wall, and it has to be built before the night something deviates." sourceTitle="Wikimedia Commons: San Onofre Nuclear Generating Station control room, 1968 (public domain, U.S. Department of Energy)" sourceUrl="https://commons.wikimedia.org/wiki/File:San_Onofre_Nuclear_Generating_Station_control_room,_1968.jpg" />
+
+> "Debugging is twice as hard as writing the code in the first place."
+> &mdash; *Brian Kernighan*, The Elements of Programming Style
+
+### The hook: two hours of guessing
+
+On 18 November 2025 a large part of the internet returned errors for hours. Cloudflare's own post-mortem is blunt about how it started. A database permissions change made a query return duplicate column metadata, which doubled the size of a configuration file for their Bot Management feature. The proxy software had a hard limit of 200 features, about 60 were in use, and the oversized file crashed it. Cloudflare dates the start of the incident to 11:20 UTC.
+
+What I find useful is what the team did next. They "initially wrongly suspected" a "hyper-scale DDoS attack". A fair guess: the symptoms looked like one. A coincidental outage of their status page, which is hosted off their own infrastructure, made the attack story stronger. And the errors came and went, because every five minutes the system generated either a good or a bad file: "This fluctuation made it unclear what was happening as the entire system would recover and then fail again." By 13:37 the team was working on rolling back the Bot Management file, more than two hours in. New file propagation stopped at 14:24, core traffic was mostly normal at 14:30, everything by 17:06. The post-mortem even notes that the debugging and observability systems themselves burned large amounts of CPU while enriching errors.
+
+I am not saying Cloudflare had no dashboards. I am saying the gap between "something is failing" and "this file, this limit" was crossed by guessing first and reading evidence second, on the worst day. Your service will have a smaller version of that gap. The size of it is decided long before the incident, by what each request leaves behind.
+
+AI-written FastAPI services leave very little. The generated endpoint works, passes the demo, and logs `print("here")`. This post builds the wall of dials instead, on the series' clue.api, in five questions:
+
+1. **Why `print()` is not a log**, and what one useful log line looks like.
+2. **How one request id follows a request across services**, and how to keep secrets out of what you log.
+3. **What a metric is for** — counts and buckets, and why an average lies.
+4. **What a trace adds** — the request's own timeline, across the database and the next service.
+5. **How to debug by evidence** — one deliberately slow request, found and explained in three steps.
+
+Post 1's `trace_demo.py` was the first, hand-rolled trace: a middleware that printed the dispatch chain of one request. This post is its production-grade descendant. It builds on the layers from [post 4](/blog/backend-layered-architecture/) and the SQLAlchemy layer from [post 5](/blog/backend-database-access-layer/).
+
+---
+
+## 1. A print is not a log
+
+Here is what debugging looks like when the only tool is `print()`. One endpoint, one print before the work, one in the middle, one at the end:
+
+```python
+@app.get("/cases/{case_id}/close")
+async def close(case_id: str) -> dict:
+    print("closing case")  # which case? which request? how long?
+    await asyncio.sleep(0.2 if case_id == "C-1" else 0.05)
+    print("rule check passed")
+    await asyncio.sleep(0.1)
+    print("done")
+    return {"closed": case_id}
+```
+
+Now two requests overlap, which is the normal state of a server:
+
+<TerminalOutput command="uvicorn p10_print:app — then curl /cases/C-1/close and /cases/C-2/close at the same moment" label="Python 3.13 · FastAPI 0.165.0 · uvicorn 0.54.0 · captured Nov 2026" caption="Six print lines from two requests. The first two are identical. Which request printed which, how long each took, and whether either failed: none of that is in this output.">
+```text
+INFO:     Started server process [80613]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:4340 (Press CTRL+C to quit)
+closing case
+closing case
+rule check passed
+done
+INFO:     127.0.0.1:49752 - "GET /cases/C-2/close HTTP/1.1" 200 OK
+rule check passed
+done
+INFO:     127.0.0.1:49753 - "GET /cases/C-1/close HTTP/1.1" 200 OK
+```
+</TerminalOutput>
+
+<BeP10Interleave />
+
+Everything a print could have said was thrown away because it was a string for a human in front of a terminal. The fix is the standard library's `logging`, with one change: the output is data, not prose. One JSON object per line, with the same fields on every line, so a machine can filter it and a person can still read it.
+
+`logging` has three parts you will meet everywhere. A **logger** is what code calls (`log.info(...)`). A **handler** decides where the line goes (stdout here). A **formatter** decides what it looks like. A **filter** can add or change fields on every record that passes. The JSON formatter below is about twenty lines (`demo/p10_logs.py`, the whole class):
+
+```python
+class JsonFormatter(logging.Formatter):
+    def __init__(self, service: str) -> None:
+        super().__init__()
+        self.service = service
+
+    def format(self, record: logging.LogRecord) -> str:
+        line = {
+            "ts": self.formatTime(record, "%H:%M:%S") + f".{int(record.msecs):03d}",
+            "level": record.levelname,
+            "service": self.service,
+            "logger": record.name,
+            "request_id": getattr(record, "request_id", "-"),
+            "msg": record.getMessage(),
+        }
+        line.update({k: v for k, v in vars(record).items() if k not in _STANDARD})
+        if record.exc_info:
+            line["exc"] = self.formatException(record.exc_info)
+        return json.dumps(line, default=str)
+```
+
+Two details matter. `extra={...}` on a log call becomes attributes on the record, and the loop over `vars(record)` copies every one that is not a standard attribute into the JSON, so `log.info("request", extra={"status": 201})` gives you a `status` field you can filter on. And `configure()` turns off uvicorn's own access log, otherwise every request gets a second, unstructured line:
+
+```python
+def configure(service: str) -> None:
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(JsonFormatter(service))
+    handler.addFilter(RequestIdFilter())
+    handler.addFilter(RedactFilter())
+    root = logging.getLogger()
+    root.handlers[:] = [handler]
+    root.setLevel(logging.INFO)
+    # uvicorn's own access log would be a second, unstructured line per request.
+    logging.getLogger("uvicorn.access").disabled = True
+```
+
+The line that matters most is the access line, one per request, written by a middleware. FastAPI's `@app.middleware("http")` wraps every request: code before `call_next` runs on the way in, code after it runs on the way out (post 1's middleware did exactly this to print). `demo/p10_middleware.py`, the whole file:
+
+```python
+import logging
+import time
+import uuid
+
+from fastapi import FastAPI, Request
+
+from p10_logs import request_id_var
+
+log = logging.getLogger("clue.access")
+
+
+def install(app: FastAPI) -> None:
+    @app.middleware("http")
+    async def request_context(request: Request, call_next):
+        # Trust a caller's id (so one id spans services), or mint our own.
+        rid = request.headers.get("x-request-id") or uuid.uuid4().hex[:8]
+        token = request_id_var.set(rid)
+        started = time.perf_counter()
+        status = 500  # if call_next raises, this is what we really answered
+        try:
+            response = await call_next(request)
+            status = response.status_code
+            response.headers["X-Request-ID"] = rid
+            return response
+        finally:
+            log.info(
+                "request",
+                extra={
+                    "method": request.method,
+                    "path": request.url.path,
+                    "status": status,
+                    "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+                },
+            )
+            request_id_var.reset(token)
+```
+
+Read it in three beats. It takes the id from the caller's `X-Request-ID` header or mints a short one, and stores it in a `ContextVar` (more on that in a moment). It times the call. And the `finally` block writes the line even when the handler raised, which is why `status` starts at 500: if `call_next` throws, the 500 is what the client got.
+
+Run the service and make two requests:
+
+<TerminalOutput command="uvicorn p10_app:app, then POST /cases and POST /cases/C-1/assign" label="Python 3.13 · FastAPI 0.165.0 · SQLAlchemy 2.0.58 · captured Nov 2026" caption="Two requests, four lines. Each request ends with exactly one 'request' line carrying method, path, status and duration_ms. The 'clue.service' lines come from post 4's service, and share the request id of the request they ran in.">
+```text
+{"ts": "17:21:28.841", "level": "INFO", "service": "clue-api", "logger": "clue.service", "request_id": "a6d3d33e", "msg": "open_case: the id and the open status are ours to set"}
+{"ts": "17:21:28.846", "level": "INFO", "service": "clue-api", "logger": "clue.access", "request_id": "a6d3d33e", "msg": "request", "method": "POST", "path": "/cases", "status": 201, "duration_ms": 10.2}
+{"ts": "17:21:28.860", "level": "INFO", "service": "clue-api", "logger": "clue.service", "request_id": "c94edf17", "msg": "assign(C-1): rule \u2014 only an open case can be taken"}
+{"ts": "17:21:28.862", "level": "INFO", "service": "clue-api", "logger": "clue.access", "request_id": "c94edf17", "msg": "request", "method": "POST", "path": "/cases/C-1/assign", "status": 200, "duration_ms": 4.1}
+```
+</TerminalOutput>
+
+<Callout type="warning" title="The AI habit to break">
+Ask an assistant to "add logging" and you usually get a `print`, or a `logging.info(f"processing {case}")` inside every endpoint: free text, no request id, no duration, a different shape in every file. When you review it, ask what question the line will answer at 3 a.m. If the answer is "I'll know when I see it", it is a print in a costume.
+</Callout>
+
+---
+
+## 2. One id across every service
+
+Look at the `clue.service` lines above. Post 4's `CaseService` has no idea there is a web request: it takes a case id and a detective name. Yet its lines carry `a6d3d33e`, the id of the request it ran inside. The mechanism is a `ContextVar`, Python's per-task variable. The middleware sets it once; a logging filter reads it on every record:
+
+```python
+request_id_var: ContextVar[str] = ContextVar("request_id", default="-")
+```
+
+```python
+class RequestIdFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.request_id = request_id_var.get()
+        ctx = trace.get_current_span().get_span_context()
+        if ctx.is_valid:  # only when tracing is on and a span is open
+            record.trace_id = format(ctx.trace_id, "032x")
+        return True
+```
+
+Because the value lives in the context of the running request, the service layer never receives a `request` argument just to log. FastAPI runs a plain `def` endpoint in a worker thread and copies the context into it, so the id survives there too (post 6 covers why sync endpoints run in threads). The catch: a new `threading.Thread` or a separate process starts with an empty context on Python 3.13, so code you hand off that way logs the id as `-`.
+
+The same series' `layered_service.py` says what it is doing with `print()`, through a small `_trace` helper. Rather than edit it, `p10_app.py` swaps that helper for a logger. One assignment turns every one of those prints into a structured line with the request id:
+
+```python
+layered_service._trace = lambda msg: log.info(msg)
+```
+
+Now the part that makes it a *correlation* id: it has to cross the network. clue.api's `/cases/{case_id}/report` calls a second service, evidence-lab, over HTTP. An `httpx` event hook stamps the id on every outgoing request, so no endpoint can forget:
+
+```python
+def stamp_request_id(request: httpx.Request) -> None:
+    """Forward the correlation id on every outgoing call, so nobody forgets."""
+    request.headers["X-Request-ID"] = p10_logs.request_id_var.get()
+
+
+lab = httpx.Client(base_url=LAB, event_hooks={"request": [stamp_request_id]})
+```
+
+```python
+@app.get("/cases/{case_id}/report")
+def report(case_id: str, service: CaseService = Depends(get_service)) -> dict:
+    case = service.get_case(case_id)
+    analysis = lab.get(f"/analyze/{case_id}", timeout=5).json()
+    return {"case": vars(case), "analysis": analysis}
+```
+
+evidence-lab (`demo/p10_lab.py`) is a tiny FastAPI app that installs the same logging and the same middleware, so it reads the header and logs the same id. One request, sent with an id of its own choosing:
+
+<TerminalOutput command="curl -H 'X-Request-ID: demo-7f3a' localhost:4340/cases/C-1/report — then the two services' stdout, filtered to that request" label="Python 3.13 · FastAPI 0.165.0 · httpx 0.28.1 · captured Nov 2026" caption="Two processes, two log files, one request. The first two lines are evidence-lab's, the last two are clue-api's. The same id is on all four: that is what lets you search both files at once.">
+```text
+{"ts": "17:21:28.882", "level": "INFO", "service": "evidence-lab", "logger": "lab", "request_id": "demo-7f3a", "msg": "analysis started", "case_id": "C-1"}
+{"ts": "17:21:28.934", "level": "INFO", "service": "evidence-lab", "logger": "clue.access", "request_id": "demo-7f3a", "msg": "request", "method": "GET", "path": "/analyze/C-1", "status": 200, "duration_ms": 53.0}
+{"ts": "17:21:28.935", "level": "INFO", "service": "clue-api", "logger": "httpx", "request_id": "demo-7f3a", "msg": "HTTP Request: GET http://127.0.0.1:4341/analyze/C-1 \"HTTP/1.1 200 OK\""}
+{"ts": "17:21:28.936", "level": "INFO", "service": "clue-api", "logger": "clue.access", "request_id": "demo-7f3a", "msg": "request", "method": "GET", "path": "/cases/C-1/report", "status": 200, "duration_ms": 64.4}
+```
+</TerminalOutput>
+
+<BeP10RequestId />
+
+If the caller sends no id, the middleware mints one and returns it in the response's `X-Request-ID`, which is the id a user quotes in a bug report. Mind the trust: an id from the outside is a label, never an identity, so do not build anything that grants access from it.
+
+### What never reaches a log
+
+Logs are copied, indexed, shipped to a vendor and kept for months. Whatever a log line holds is now in all of those places. An assistant debugging a login bug writes this:
+
+```python
+token = "eyJhbGciOi.demo.signature"
+user = {"name": "holmes", "password": "hunter2"}
+
+# 1) The line an assistant writes while debugging a login problem.
+plain = logging.StreamHandler(sys.stdout)
+plain.setFormatter(p10_logs.JsonFormatter("clue-api"))
+log = logging.getLogger("clue.auth")
+log.addHandler(plain)
+log.setLevel(logging.INFO)
+log.info(f"login failed for {user} token={token}")
+```
+
+An f-string builds the final message before logging sees it, so the secret is already inside the text. The fix is a filter on the handler, the last line of defence, in the same file as the formatter (`demo/p10_logs.py`):
+
+```python
+# Catches token=abc, 'password': 'hunter2' and "api_key": "abc" alike.
+_SECRET = re.compile(
+    r"""(?i)(password|token|authorization|api[_-]?key)(['"]?\s*[=:]\s*)['"]?[^\s,'"})]+['"]?"""
+)
+```
+
+```python
+class RedactFilter(logging.Filter):
+    """Last line of defence: scrub secrets from the message and from extras."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = _SECRET.sub(r"\1\2[REDACTED]", record.getMessage())
+        record.args = None
+        for key in ("password", "token", "authorization"):
+            if key in record.__dict__:
+                record.__dict__[key] = "[REDACTED]"
+        return True
+```
+
+<TerminalOutput command="python p10_redact.py" label="Python 3.13 · captured Nov 2026" caption="Same call, before and after the filter. The password in the dict and the token are masked in the message; the extra field named password is masked too. This is a safety net: the real fix is not logging the user dict at all.">
+```text
+{"ts": "17:28:40.708", "level": "INFO", "service": "clue-api", "logger": "clue.auth", "request_id": "-", "msg": "login failed for {'name': 'holmes', 'password': 'hunter2'} token=eyJhbGciOi.demo.signature"}
+{"ts": "17:28:40.708", "level": "INFO", "service": "clue-api", "logger": "clue.auth", "request_id": "-", "msg": "login failed for {'name': 'holmes', 'password': [REDACTED]} token=[REDACTED]"}
+{"ts": "17:28:40.708", "level": "INFO", "service": "clue-api", "logger": "clue.auth", "request_id": "-", "msg": "login failed", "user": "holmes", "password": "[REDACTED]"}
+```
+</TerminalOutput>
+
+A regex catches what it was written for and nothing else: it will miss a secret in a shape you did not anticipate. Treat it as the net under the trapeze. The habit is to log identifiers (`case_id`, the user's id), never the object, never a token, a password or a full request body. [Post 7](/blog/backend-auth-oauth2-jwt/) is where those tokens come from.
+
+---
+
+## 3. Metrics: count, bucket, never average
+
+Logs answer "what happened to this request". They cannot answer "how is the service doing", because nobody reads 10,000 lines. For that you want numbers that are cheap to keep: **metrics**. A metric is a name, a few labels, and a value that a scraper (Prometheus, for example) reads from `/metrics` every few seconds.
+
+Two metric types cover most backends. A **counter** only goes up: requests served. A **histogram** counts observations into buckets: how many requests took up to 10 ms, up to 50 ms, up to 100 ms. `prometheus_client` provides both, and the middleware in `demo/p10_metrics.py` feeds them:
+
+```python
+REQUESTS = Counter(
+    "http_requests_total", "Requests served", ["method", "route", "status"]
+)
+LATENCY = Histogram(
+    "http_request_duration_seconds",
+    "Request latency",
+    ["route"],
+    buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5),
+)
+```
+
+The histogram's buckets are chosen up front: the boundaries are the only resolution you will ever get back. These run from 10 ms to 2.5 s. A middleware records every request into both:
+
+```python
+    @app.middleware("http")
+    async def measure(request: Request, call_next):
+        started = time.perf_counter()
+        status = 500
+        try:
+            response = await call_next(request)
+            status = response.status_code
+            return response
+        finally:
+            # The route TEMPLATE ("/cases/{case_id}"), never the raw path:
+            # the raw path would mint one time series per case id.
+            route = request.scope.get("route")
+            label = route.path if route else "unmatched"
+            REQUESTS.labels(request.method, label, str(status)).inc()
+            LATENCY.labels(label).observe(time.perf_counter() - started)
+```
+
+Mind the comment inside: the label is the route *template* (`/cases/{case_id}/report`), read from `request.scope["route"]` after the router has matched, and never the raw path. The raw path contains the case id, and every distinct value would become its own time series; the end of this section shows what that costs. Now send forty report requests (one of the eight cases is slow) and scrape:
+
+<TerminalOutput command="python p10_walk.py  (40 report requests, then the /metrics scrape for that route)" label="Python 3.13 · FastAPI 0.165.0 · prometheus-client 0.26.0 · captured Nov 2026" caption="The 'le' (less than or equal) buckets are cumulative: 35 requests took up to 0.1 s, all 40 took up to 2.5 s, so 5 took between 1 s and 2.5 s. The last line is what a dashboard that charts the average would show.">
+```text
+http_request_duration_seconds_bucket{le="0.01",route="/cases/{case_id}/report"} 0.0
+http_request_duration_seconds_bucket{le="0.05",route="/cases/{case_id}/report"} 0.0
+http_request_duration_seconds_bucket{le="0.1",route="/cases/{case_id}/report"} 35.0
+http_request_duration_seconds_bucket{le="0.25",route="/cases/{case_id}/report"} 35.0
+http_request_duration_seconds_bucket{le="0.5",route="/cases/{case_id}/report"} 35.0
+http_request_duration_seconds_bucket{le="1.0",route="/cases/{case_id}/report"} 35.0
+http_request_duration_seconds_bucket{le="2.5",route="/cases/{case_id}/report"} 40.0
+http_request_duration_seconds_bucket{le="+Inf",route="/cases/{case_id}/report"} 40.0
+average = 200 ms over 40 requests
+```
+</TerminalOutput>
+
+<BeP10Histogram />
+
+Average latency is 200 ms, and not one request took 200 ms. Thirty-five were under 100 ms and five were over a second. A latency alert on the average would be quiet (200 ms looks healthy), while one request in eight is unusable. A histogram keeps the shape: you can ask for the 95th or 99th percentile, you can add histograms from several workers together (you cannot average averages), and you can see two humps instead of one number between them. The trap for AI-written code is that `time.time()` around a handler and one `avg_latency` gauge is the first thing it produces.
+
+The other trap is a label. Here is the same ten thousand requests counted by route and by user id:
+
+```python
+for user_id in range(1, 10_001):  # ten thousand callers, one route
+    by_route.labels("/cases/{case_id}/report").inc()
+    by_user.labels(str(user_id)).inc()
+```
+
+<TerminalOutput command="python p10_cardinality.py" label="Python 3.13 · prometheus-client 0.26.0 · captured Nov 2026" caption="Same ten thousand increments, one extra label. Every distinct user id is a new time series held in memory and stored by the scraper.">
+```text
+label route   :      1 series
+label user_id :  10000 series
+```
+</TerminalOutput>
+
+<BeP10Cardinality />
+
+Prometheus's own naming guide says it plainly: "Do not use labels to store dimensions with high cardinality (many different label values), such as user IDs, email addresses, or other unbounded sets of values." Metrics stay cheap because they aggregate; a label that grows with your users removes exactly that property. Who asked for which case belongs in a log line (searchable, per request) or a trace attribute. Labels are for small, fixed sets: the route template, the method, the status class.
+
+---
+
+## 4. Traces: the request's own timeline
+
+Metrics tell you a route is slow. Logs tell you which request. Neither shows where the time went *inside* a request that touched a database and another service. A **trace** does: it is the tree of **spans** a single request produced. Each span has a name, a start and an end, a `trace_id` shared by the whole tree, and a `parent_id` pointing at the span that caused it.
+
+**OpenTelemetry** is the vendor-neutral standard for producing them. In Python that is three kinds of piece: the SDK (creates and exports spans), an exporter (where they go), and instrumentation packages that wrap a library so you write no span code. `demo/p10_tracing.py` wires all of it in one function:
+
+```python
+def setup(app: FastAPI, service: str, engine=None) -> None:
+    provider = TracerProvider(resource=Resource.create({"service.name": service}))
+    # Console exporter: no collector needed. Production would use a
+    # BatchSpanProcessor + OTLP exporter instead of printing each span.
+    provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
+    trace.set_tracer_provider(provider)
+
+    FastAPIInstrumentor.instrument_app(app)
+    HTTPXClientInstrumentor().instrument()  # also injects the traceparent header
+    if engine is not None:
+        SQLAlchemyInstrumentor().instrument(engine=engine)
+```
+
+Each line does one job. `FastAPIInstrumentor.instrument_app(app)` opens a span for every request. `HTTPXClientInstrumentor` opens a span for every outgoing call and also injects a `traceparent` header (the W3C Trace Context format) carrying the trace id, so evidence-lab's span joins the same trace instead of starting its own. `SQLAlchemyInstrumentor` gives post 5's engine a span per SQL statement. The exporter here is `ConsoleSpanExporter`, which prints spans, so no collector is needed to try this. In production you would swap in a `BatchSpanProcessor` and an OTLP exporter: the simple processor exports each span synchronously on the request's own thread, fine for a demo and a cost you do not want on every request.
+
+Custom spans are one `with` away. The service layer from post 4 gets a span around its moves, without touching `layered_service.py`:
+
+```python
+class ObservedCaseService(CaseService):
+    """post 4's service, unchanged, plus a span around each move."""
+
+    def get_case(self, case_id: str) -> CaseRecord:
+        with tracer.start_as_current_span("CaseService.get_case"):
+            return super().get_case(case_id)
+
+    def assign(self, case_id: str, detective: str) -> CaseRecord:
+        with tracer.start_as_current_span("CaseService.assign"):
+            return super().assign(case_id, detective)
+```
+
+One request, `/cases/C-7/report`, with both services tracing. The exporter prints a JSON object per span; `p10_spans.py` reads the output of both services and prints the last trace as a table:
+
+<TerminalOutput command="python p10_spans.py clue.out lab.out" label="Python 3.13 · OpenTelemetry 1.45.2 · instrumentation 0.66b2 · captured Nov 2026" caption="One trace, two services, seven spans (the ASGI send/receive spans are hidden). 'at ms' is when the span started relative to the root, 'ms' is how long it took. Every parent_id is the span_id of a row above it.">
+```text
+trace_id 0xcd8693caa6f5931e2d8fdb34fa4df809
+span_id             parent_id              at ms       ms  service / name
+0xb4a04ca69d9f5c3e  -                       0.00  1227.08  clue-api / GET /cases/{case_id}/report
+0x3b74205d94f6bbbb  0xb4a04ca69d9f5c3e      1.14     0.07  clue-api / connect
+0x8344319fe0861a10  0xb4a04ca69d9f5c3e      1.56     0.08  clue-api / SELECT p10.db
+0x377052936dc5eb54  0xb4a04ca69d9f5c3e      2.08     1.45  clue-api / CaseService.get_case
+0x01600df5d5ea050e  0x377052936dc5eb54      2.50     0.07  clue-api / SELECT p10.db
+0xf89387690f8010c4  0xb4a04ca69d9f5c3e      4.22  1220.35  clue-api / GET
+0xec0318c52e06f1e3  0xf89387690f8010c4      5.80  1218.59  evidence-lab / GET /analyze/{case_id}
+```
+</TerminalOutput>
+
+<BeP10Waterfall />
+
+A raw span, the evidence-lab one, so you can see what the table was made from:
+
+<TerminalOutput command="python p10_spans.py --raw 'GET /analyze/{case_id}' clue.out lab.out  (first lines)" label="Python 3.13 · OpenTelemetry 1.45.2 · captured Nov 2026" caption="An excerpt of the exported span. The trace_id is shared with the clue-api spans; parent_id is the span_id of clue-api's outgoing GET, which is the row with span_id 0xf89387690f8010c4 in the table. Everything after end_time (status, attributes, resource) is cut here.">
+```text
+{
+  "name": "GET /analyze/{case_id}",
+  "context": {
+    "trace_id": "0xcd8693caa6f5931e2d8fdb34fa4df809",
+    "span_id": "0xec0318c52e06f1e3",
+    "trace_state": "[]"
+  },
+  "kind": "SpanKind.SERVER",
+  "parent_id": "0xf89387690f8010c4",
+  "start_time": "2026-11-23T10:22:49.808725Z",
+  "end_time": "2026-11-23T10:22:51.027312Z",
+```
+</TerminalOutput>
+
+That `parent_id` is what the `traceparent` header carried across the network. Without it you would have two unrelated one-span traces and no way to say the second service was the reason for the first one's slowness.
+
+The trace id and the request id do the same job in two vocabularies. When tracing is on, the logging filter also adds `trace_id` to every log line, so a log line leads to its trace and back. When it is off, nothing breaks: the `request_id` is still there.
+
+---
+
+## 5. Debug by evidence
+
+Here is the whole thing in use, on a fault I built into the demo: evidence-lab is slow for one case, C-7 (it has a huge evidence set). Nobody told the dashboard. A user says "the report page is sometimes slow".
+
+The guesses come first, because they always do: the database, a missing index, the thread pool, the new deploy. Any of them can be true and each one takes a half hour to rule in or out with a code change. Skip them. Use the three signals in order, each narrowing what the next one has to answer.
+
+<BeP10Walk />
+
+**Step 1, metrics: is it real, and how often?** The histogram from section 3: 5 of 40 report requests took over a second. It is real, it is the report route, and it is a minority. That is a different bug from "everything is slow" and already rules out most global causes.
+
+**Step 2, logs: which requests?** Filter the access lines for slow ones, take one request id, and search both services' logs for it:
+
+<TerminalOutput command={`grep -E '"duration_ms": [0-9]{4}' clue.out | head -1, then grep 94520390 clue.out lab.out`} label="Python 3.13 · FastAPI 0.165.0 · captured Nov 2026" caption="clue-api took 1205.2 ms for GET /cases/C-7/report; evidence-lab, for the same request id, took 1202.9 ms for /analyze/C-7. Nothing else in the request took a measurable time. The slow case is C-7, not the route in general.">
+```text
+{"ts": "17:21:39.690", "level": "INFO", "service": "clue-api", "logger": "clue.access", "request_id": "94520390", "msg": "request", "method": "GET", "path": "/cases/C-7/report", "status": 200, "duration_ms": 1205.2}
+clue.out: {"ts": "17:21:39.689", "level": "INFO", "service": "clue-api", "logger": "httpx", "request_id": "94520390", "msg": "HTTP Request: GET http://127.0.0.1:4341/analyze/C-7 \"HTTP/1.1 200 OK\""}
+clue.out: {"ts": "17:21:39.690", "level": "INFO", "service": "clue-api", "logger": "clue.access", "request_id": "94520390", "msg": "request", "method": "GET", "path": "/cases/C-7/report", "status": 200, "duration_ms": 1205.2}
+lab.out:  {"ts": "17:21:38.486", "level": "INFO", "service": "evidence-lab", "logger": "lab", "request_id": "94520390", "msg": "analysis started", "case_id": "C-7"}
+lab.out:  {"ts": "17:21:39.689", "level": "INFO", "service": "evidence-lab", "logger": "clue.access", "request_id": "94520390", "msg": "request", "method": "GET", "path": "/analyze/C-7", "status": 200, "duration_ms": 1202.9}
+```
+</TerminalOutput>
+
+Two files, one id, and you can already say where the time sat: inside the second service, for case C-7. Without the forwarded id these would have been two logs with no join.
+
+**Step 3, traces: where inside?** The trace from section 4 for the same kind of request: the evidence-lab span lasts 1218.59 ms of the root's 1227.08. The two SQL spans take 0.08 and 0.07 ms. The database was never the problem, and the guesses about indexes and the thread pool are closed by a number, not by a change.
+
+The fix lives in evidence-lab (C-7's huge evidence set), and the three signals have given you its name, its route and its case id before you opened a single source file. That is the point of the order. A guess costs a change and a deploy to test; each of these costs one query on data you already have.
+
+<Callout type="note" title="Observability has a price">
+Cloudflare's post-mortem notes that large amounts of CPU went to its debugging and observability systems while the incident was under way. Everything in this post costs something: JSON formatting on the request path, a counter increment per request, a span per SQL statement, a log line that blocks if stdout is slow. Keep the per-request work small, export in batches, and make sure the thing you add to find a fault cannot become one.
+</Callout>
+
+### The review habit
+
+A checklist for the next AI-written service, one line each:
+
+| It wrote | Ask | Fix in this post |
+|---|---|---|
+| `print()` or `logging.info(f"...")` in endpoints | Can I filter these by request, status and duration? | JSON formatter + the access middleware (section 1) |
+| Logs that name the user, a token or a body | Would I be comfortable seeing this in a vendor's index? | `RedactFilter`, log ids not objects (section 2) |
+| A call to another service | Does it forward the request id and `traceparent`? | `httpx` hook + `HTTPXClientInstrumentor` (sections 2, 4) |
+| `avg_latency` or a single timer | Can it show a tail? | Histogram with explicit buckets (section 3) |
+| A label like `user_id` or the raw path | How many distinct values can this take? | Route template, fixed small sets (section 3) |
+| A trace exporter set to print | What does it cost on every request? | `BatchSpanProcessor` + OTLP in production (section 4) |
+
+<Concepts>
+- **Structured log**: one machine-readable record per event (JSON here) with the same fields every time, so tools can filter and count it.
+- **Correlation id (request id)**: a value stamped on every log line of one request and forwarded to every service it calls, so separate logs can be joined.
+- **`ContextVar`**: a Python variable whose value belongs to the current task or request context, so deep code can read it without a parameter.
+- **Counter / histogram**: a number that only goes up, and a set of bucket counts that keeps the shape of a distribution, respectively.
+- **Cardinality**: how many distinct values a label can take. Each one is a separate time series, so unbounded labels grow memory without limit.
+- **Trace / span**: a trace is everything one request caused; a span is one timed step in it, with a `parent_id` pointing at the step that caused it.
+</Concepts>
+
+</En>
+
+<Vi>
+
+<Figure src={heroControlRoom} alt="Phòng điều khiển của nhà máy điện hạt nhân San Onofre, khoảng năm 1968, với các bảng đồng hồ, thang đo và đèn màu cho người vận hành" caption="Phòng điều khiển không bảo người vận hành phải nghĩ gì. Nó đặt bằng chứng lên tường: đồng hồ, thang đo và đèn mà chính phần mô tả ảnh gọi là báo cho người vận hành 'ngay lập tức mọi sai lệch so với điều kiện bình thường'. Service cần một bức tường như vậy, và phải dựng nó từ trước cái đêm có chuyện." sourceTitle="Wikimedia Commons: San Onofre Nuclear Generating Station control room, 1968 (public domain, U.S. Department of Energy)" sourceUrl="https://commons.wikimedia.org/wiki/File:San_Onofre_Nuclear_Generating_Station_control_room,_1968.jpg" />
+
+> "Debugging is twice as hard as writing the code in the first place."
+> &mdash; *Brian Kernighan*, The Elements of Programming Style
+
+### Mở đầu: hai tiếng đoán mò
+
+Ngày 18/11/2025, một phần lớn internet trả lỗi suốt nhiều giờ. Bản post-mortem của chính Cloudflare kể thẳng chuyện khởi đầu. Một thay đổi quyền trong database khiến một câu query trả về metadata cột bị lặp, làm file cấu hình của tính năng Bot Management phình gấp đôi. Phần mềm proxy có giới hạn cứng 200 feature, đang dùng khoảng 60, và file quá cỡ làm nó sập. Cloudflare tính điểm bắt đầu sự cố lúc 11:20 UTC.
+
+Điều mình thấy đáng học là chuyện xảy ra sau đó. Đội ngũ ban đầu "initially wrongly suspected" (nghi nhầm) một cuộc tấn công "hyper-scale DDoS". Đoán vậy là hợp lý, vì triệu chứng giống thật. Trang status của họ, vốn đặt ngoài hạ tầng Cloudflare, cũng ngẫu nhiên sập đúng lúc đó, càng làm giả thuyết tấn công có vẻ đúng. Lỗi lại lúc có lúc không, vì cứ năm phút hệ thống sinh ra một file tốt hoặc một file hỏng: "This fluctuation made it unclear what was happening as the entire system would recover and then fail again." Đến 13:37, tức hơn hai tiếng sau, đội mới tập trung vào việc rollback file Bot Management. 14:24 họ chặn việc sinh và phát tán file mới, 14:30 traffic lõi gần như bình thường, 17:06 mọi thứ xong. Bài post-mortem còn ghi thêm: chính các hệ thống debug và observability cũng ngốn nhiều CPU lúc đang xử lý lỗi.
+
+Mình không nói Cloudflare không có dashboard. Mình nói khoảng cách từ "có gì đó đang hỏng" đến "file này, giới hạn này" đã được vượt qua bằng đoán trước, đọc bằng chứng sau, vào đúng ngày tệ nhất. Service của bạn cũng có khoảng cách đó, nhỏ hơn. Nó rộng hay hẹp được quyết định từ rất lâu trước sự cố, bởi mỗi request để lại gì phía sau.
+
+Service FastAPI do AI viết thường để lại rất ít. Endpoint sinh ra chạy được, qua được bản demo, và log bằng `print("here")`. Bài này dựng bức tường đồng hồ thay vào đó, trên clue.api của series, qua năm câu hỏi:
+
+1. **Vì sao `print()` không phải log**, và một dòng log hữu ích trông thế nào.
+2. **Một request id đi theo request qua nhiều service ra sao**, và giữ bí mật ngoài log thế nào.
+3. **Metric để làm gì**: đếm và chia bucket, và vì sao trung bình nói dối.
+4. **Trace thêm được gì**: dòng thời gian riêng của một request, qua database và qua service kế tiếp.
+5. **Debug bằng bằng chứng**: một request cố tình chậm, tìm ra và giải thích trong ba bước.
+
+`trace_demo.py` của bài 1 là cái trace đầu tiên, viết tay: một middleware in chuỗi dispatch của một request. Bài này là bản hậu duệ dùng được ở production của nó. Nó dựng trên các tầng ở [bài 4](/blog/backend-layered-architecture/) và tầng SQLAlchemy ở [bài 5](/blog/backend-database-access-layer/).
+
+---
+
+## 1. Print không phải log
+
+Đây là debug khi công cụ duy nhất là `print()`. Một endpoint, một print trước khi làm, một print giữa chừng, một print lúc xong:
+
+```python
+@app.get("/cases/{case_id}/close")
+async def close(case_id: str) -> dict:
+    print("closing case")  # which case? which request? how long?
+    await asyncio.sleep(0.2 if case_id == "C-1" else 0.05)
+    print("rule check passed")
+    await asyncio.sleep(0.1)
+    print("done")
+    return {"closed": case_id}
+```
+
+Giờ cho hai request chạy chồng nhau, trạng thái bình thường của mọi server:
+
+<TerminalOutput command="uvicorn p10_print:app — rồi curl /cases/C-1/close và /cases/C-2/close cùng lúc" label="Python 3.13 · FastAPI 0.165.0 · uvicorn 0.54.0 · capture tháng 11/2026" caption="Sáu dòng print từ hai request. Hai dòng đầu y hệt nhau. Dòng nào của request nào, mỗi request mất bao lâu, có request nào lỗi không: không có gì trong output này.">
+```text
+INFO:     Started server process [80613]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:4340 (Press CTRL+C to quit)
+closing case
+closing case
+rule check passed
+done
+INFO:     127.0.0.1:49752 - "GET /cases/C-2/close HTTP/1.1" 200 OK
+rule check passed
+done
+INFO:     127.0.0.1:49753 - "GET /cases/C-1/close HTTP/1.1" 200 OK
+```
+</TerminalOutput>
+
+<BeP10Interleave />
+
+Mọi thứ một dòng print đáng lẽ nói được đều bị bỏ đi, vì nó là chuỗi chữ cho một người đang ngồi trước terminal. Cách sửa là `logging` của thư viện chuẩn, với một thay đổi: output là dữ liệu, không phải văn xuôi. Mỗi dòng một object JSON, các dòng có cùng trường, để máy lọc được mà người vẫn đọc được.
+
+`logging` có ba mảnh bạn sẽ gặp ở mọi nơi. **Logger** là thứ code gọi (`log.info(...)`). **Handler** quyết định dòng log đi đâu (ở đây là stdout). **Formatter** quyết định nó trông thế nào. Thêm **filter** có thể gắn thêm hoặc sửa trường trên mọi record đi qua. Formatter JSON bên dưới dài chừng hai chục dòng (`demo/p10_logs.py`, nguyên class):
+
+```python
+class JsonFormatter(logging.Formatter):
+    def __init__(self, service: str) -> None:
+        super().__init__()
+        self.service = service
+
+    def format(self, record: logging.LogRecord) -> str:
+        line = {
+            "ts": self.formatTime(record, "%H:%M:%S") + f".{int(record.msecs):03d}",
+            "level": record.levelname,
+            "service": self.service,
+            "logger": record.name,
+            "request_id": getattr(record, "request_id", "-"),
+            "msg": record.getMessage(),
+        }
+        line.update({k: v for k, v in vars(record).items() if k not in _STANDARD})
+        if record.exc_info:
+            line["exc"] = self.formatException(record.exc_info)
+        return json.dumps(line, default=str)
+```
+
+Hai chi tiết đáng chú ý. `extra={...}` trong lời gọi log thành attribute của record, và vòng lặp trên `vars(record)` chép mọi attribute không chuẩn vào JSON, nên `log.info("request", extra={"status": 201})` cho bạn một trường `status` để lọc. Còn `configure()` tắt access log của uvicorn, không thì mỗi request có thêm một dòng thứ hai không có cấu trúc:
+
+```python
+def configure(service: str) -> None:
+    handler = logging.StreamHandler(sys.stdout)
+    handler.setFormatter(JsonFormatter(service))
+    handler.addFilter(RequestIdFilter())
+    handler.addFilter(RedactFilter())
+    root = logging.getLogger()
+    root.handlers[:] = [handler]
+    root.setLevel(logging.INFO)
+    # uvicorn's own access log would be a second, unstructured line per request.
+    logging.getLogger("uvicorn.access").disabled = True
+```
+
+Dòng quan trọng nhất là dòng access, mỗi request một dòng, do middleware ghi. `@app.middleware("http")` của FastAPI bọc quanh mỗi request: code trước `call_next` chạy lúc vào, code sau nó chạy lúc ra (middleware ở bài 1 làm đúng việc này để in). `demo/p10_middleware.py`, nguyên file:
+
+```python
+import logging
+import time
+import uuid
+
+from fastapi import FastAPI, Request
+
+from p10_logs import request_id_var
+
+log = logging.getLogger("clue.access")
+
+
+def install(app: FastAPI) -> None:
+    @app.middleware("http")
+    async def request_context(request: Request, call_next):
+        # Trust a caller's id (so one id spans services), or mint our own.
+        rid = request.headers.get("x-request-id") or uuid.uuid4().hex[:8]
+        token = request_id_var.set(rid)
+        started = time.perf_counter()
+        status = 500  # if call_next raises, this is what we really answered
+        try:
+            response = await call_next(request)
+            status = response.status_code
+            response.headers["X-Request-ID"] = rid
+            return response
+        finally:
+            log.info(
+                "request",
+                extra={
+                    "method": request.method,
+                    "path": request.url.path,
+                    "status": status,
+                    "duration_ms": round((time.perf_counter() - started) * 1000, 1),
+                },
+            )
+            request_id_var.reset(token)
+```
+
+Đọc nó theo ba nhịp. Nó lấy id từ header `X-Request-ID` của caller hoặc tự sinh một id ngắn, rồi cất vào một `ContextVar` (lát nữa nói thêm). Nó bấm giờ lời gọi. Và khối `finally` ghi dòng log kể cả khi handler ném lỗi, nên `status` khởi đầu là 500: nếu `call_next` ném exception thì 500 là thứ client nhận được.
+
+Chạy service và gửi hai request:
+
+<TerminalOutput command="uvicorn p10_app:app, rồi POST /cases và POST /cases/C-1/assign" label="Python 3.13 · FastAPI 0.165.0 · SQLAlchemy 2.0.58 · capture tháng 11/2026" caption="Hai request, bốn dòng. Mỗi request kết thúc bằng đúng một dòng 'request' có method, path, status và duration_ms. Các dòng 'clue.service' đến từ service của bài 4, và mang cùng request id với request mà chúng chạy trong đó.">
+```text
+{"ts": "17:21:28.841", "level": "INFO", "service": "clue-api", "logger": "clue.service", "request_id": "a6d3d33e", "msg": "open_case: the id and the open status are ours to set"}
+{"ts": "17:21:28.846", "level": "INFO", "service": "clue-api", "logger": "clue.access", "request_id": "a6d3d33e", "msg": "request", "method": "POST", "path": "/cases", "status": 201, "duration_ms": 10.2}
+{"ts": "17:21:28.860", "level": "INFO", "service": "clue-api", "logger": "clue.service", "request_id": "c94edf17", "msg": "assign(C-1): rule \u2014 only an open case can be taken"}
+{"ts": "17:21:28.862", "level": "INFO", "service": "clue-api", "logger": "clue.access", "request_id": "c94edf17", "msg": "request", "method": "POST", "path": "/cases/C-1/assign", "status": 200, "duration_ms": 4.1}
+```
+</TerminalOutput>
+
+<Callout type="warning" title="Thói quen AI cần bỏ">
+Bảo trợ lý "thêm logging", bạn thường nhận được một `print`, hoặc một `logging.info(f"processing {case}")` trong từng endpoint: chữ tự do, không request id, không thời lượng, mỗi file một kiểu. Khi review, hỏi xem dòng đó sẽ trả lời câu gì lúc 3 giờ sáng. Nếu câu trả lời là "thấy rồi mới biết", đó là một cái print mặc áo khác.
+</Callout>
+
+---
+
+## 2. Một id đi qua mọi service
+
+Nhìn các dòng `clue.service` ở trên. `CaseService` của bài 4 không biết có request web nào: nó nhận một case id và tên thám tử. Vậy mà dòng log của nó mang `a6d3d33e`, id của request nó chạy bên trong. Cơ chế là `ContextVar`, biến riêng theo từng task của Python. Middleware đặt nó một lần; một filter của logging đọc nó trên mọi record:
+
+```python
+request_id_var: ContextVar[str] = ContextVar("request_id", default="-")
+```
+
+```python
+class RequestIdFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.request_id = request_id_var.get()
+        ctx = trace.get_current_span().get_span_context()
+        if ctx.is_valid:  # only when tracing is on and a span is open
+            record.trace_id = format(ctx.trace_id, "032x")
+        return True
+```
+
+Vì giá trị nằm trong context của request đang chạy, tầng service không phải nhận thêm tham số `request` chỉ để log. FastAPI chạy endpoint `def` thường trong một worker thread và chép context sang đó, nên id vẫn còn (bài 6 giải thích vì sao endpoint sync chạy trong thread). Một cái bẫy: `threading.Thread` mới hoặc process riêng khởi đầu với context rỗng trên Python 3.13, nên code bạn đẩy sang đó sẽ log id là `-`.
+
+`layered_service.py` của series nói nó đang làm gì bằng `print()`, qua một helper `_trace` nhỏ. Thay vì sửa file đó, `p10_app.py` đổi helper ấy thành logger. Một phép gán biến mọi dòng print thành dòng log có cấu trúc kèm request id:
+
+```python
+layered_service._trace = lambda msg: log.info(msg)
+```
+
+Giờ tới phần khiến nó thành id *tương quan*: nó phải đi qua mạng. `/cases/{case_id}/report` của clue.api gọi một service thứ hai, evidence-lab, qua HTTP. Một event hook của `httpx` đóng dấu id lên mọi request đi ra, nên không endpoint nào quên được:
+
+```python
+def stamp_request_id(request: httpx.Request) -> None:
+    """Forward the correlation id on every outgoing call, so nobody forgets."""
+    request.headers["X-Request-ID"] = p10_logs.request_id_var.get()
+
+
+lab = httpx.Client(base_url=LAB, event_hooks={"request": [stamp_request_id]})
+```
+
+```python
+@app.get("/cases/{case_id}/report")
+def report(case_id: str, service: CaseService = Depends(get_service)) -> dict:
+    case = service.get_case(case_id)
+    analysis = lab.get(f"/analyze/{case_id}", timeout=5).json()
+    return {"case": vars(case), "analysis": analysis}
+```
+
+evidence-lab (`demo/p10_lab.py`) là một app FastAPI nhỏ cài cùng logging và cùng middleware, nên nó đọc header và log cùng id. Một request, gửi kèm id do mình chọn:
+
+<TerminalOutput command="curl -H 'X-Request-ID: demo-7f3a' localhost:4340/cases/C-1/report — rồi stdout của hai service, lọc theo request đó" label="Python 3.13 · FastAPI 0.165.0 · httpx 0.28.1 · capture tháng 11/2026" caption="Hai process, hai file log, một request. Hai dòng đầu của evidence-lab, hai dòng cuối của clue-api. Cùng một id trên cả bốn dòng: nhờ vậy bạn tìm được cả hai file một lần.">
+```text
+{"ts": "17:21:28.882", "level": "INFO", "service": "evidence-lab", "logger": "lab", "request_id": "demo-7f3a", "msg": "analysis started", "case_id": "C-1"}
+{"ts": "17:21:28.934", "level": "INFO", "service": "evidence-lab", "logger": "clue.access", "request_id": "demo-7f3a", "msg": "request", "method": "GET", "path": "/analyze/C-1", "status": 200, "duration_ms": 53.0}
+{"ts": "17:21:28.935", "level": "INFO", "service": "clue-api", "logger": "httpx", "request_id": "demo-7f3a", "msg": "HTTP Request: GET http://127.0.0.1:4341/analyze/C-1 \"HTTP/1.1 200 OK\""}
+{"ts": "17:21:28.936", "level": "INFO", "service": "clue-api", "logger": "clue.access", "request_id": "demo-7f3a", "msg": "request", "method": "GET", "path": "/cases/C-1/report", "status": 200, "duration_ms": 64.4}
+```
+</TerminalOutput>
+
+<BeP10RequestId />
+
+Nếu caller không gửi id, middleware tự sinh và trả lại trong `X-Request-ID` của response, đó là id mà người dùng dán vào bug report. Nhớ giữ ranh giới tin cậy: id đến từ bên ngoài chỉ là nhãn, không bao giờ là danh tính, đừng dựng thứ gì cấp quyền dựa trên nó.
+
+### Thứ không bao giờ được vào log
+
+Log bị chép, bị index, bị đẩy lên vendor và giữ hàng tháng. Cái gì nằm trong một dòng log là đã nằm ở tất cả những chỗ đó. Một trợ lý đang debug lỗi đăng nhập sẽ viết thế này:
+
+```python
+token = "eyJhbGciOi.demo.signature"
+user = {"name": "holmes", "password": "hunter2"}
+
+# 1) The line an assistant writes while debugging a login problem.
+plain = logging.StreamHandler(sys.stdout)
+plain.setFormatter(p10_logs.JsonFormatter("clue-api"))
+log = logging.getLogger("clue.auth")
+log.addHandler(plain)
+log.setLevel(logging.INFO)
+log.info(f"login failed for {user} token={token}")
+```
+
+f-string dựng xong thông điệp trước khi logging nhìn thấy, nên bí mật đã nằm sẵn trong chuỗi. Cách sửa là một filter gắn trên handler, lớp chặn cuối cùng, nằm cùng file với formatter (`demo/p10_logs.py`):
+
+```python
+# Catches token=abc, 'password': 'hunter2' and "api_key": "abc" alike.
+_SECRET = re.compile(
+    r"""(?i)(password|token|authorization|api[_-]?key)(['"]?\s*[=:]\s*)['"]?[^\s,'"})]+['"]?"""
+)
+```
+
+```python
+class RedactFilter(logging.Filter):
+    """Last line of defence: scrub secrets from the message and from extras."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        record.msg = _SECRET.sub(r"\1\2[REDACTED]", record.getMessage())
+        record.args = None
+        for key in ("password", "token", "authorization"):
+            if key in record.__dict__:
+                record.__dict__[key] = "[REDACTED]"
+        return True
+```
+
+<TerminalOutput command="python p10_redact.py" label="Python 3.13 · capture tháng 11/2026" caption="Cùng một lời gọi, trước và sau filter. Password trong dict và token bị che trong message; trường extra tên password cũng bị che. Đây là lưới an toàn: cách sửa thật là đừng log nguyên cái dict user.">
+```text
+{"ts": "17:28:40.708", "level": "INFO", "service": "clue-api", "logger": "clue.auth", "request_id": "-", "msg": "login failed for {'name': 'holmes', 'password': 'hunter2'} token=eyJhbGciOi.demo.signature"}
+{"ts": "17:28:40.708", "level": "INFO", "service": "clue-api", "logger": "clue.auth", "request_id": "-", "msg": "login failed for {'name': 'holmes', 'password': [REDACTED]} token=[REDACTED]"}
+{"ts": "17:28:40.708", "level": "INFO", "service": "clue-api", "logger": "clue.auth", "request_id": "-", "msg": "login failed", "user": "holmes", "password": "[REDACTED]"}
+```
+</TerminalOutput>
+
+Regex chỉ bắt được cái nó được viết để bắt: bí mật nằm trong một dạng bạn không lường trước thì nó bỏ sót. Coi nó là tấm lưới dưới xà đu. Thói quen đúng là log định danh (`case_id`, id của người dùng), không log cả object, không log token, password hay nguyên body request. Token đến từ đâu thì [bài 7](/blog/backend-auth-oauth2-jwt/) kể.
+
+---
+
+## 3. Metric: đếm, chia bucket, đừng lấy trung bình
+
+Log trả lời "request này đã xảy ra chuyện gì". Nó không trả lời được "service đang khỏe không", vì không ai đọc nổi 10.000 dòng. Muốn vậy bạn cần những con số rẻ để giữ: **metric**. Một metric gồm một cái tên, vài label và một giá trị mà scraper (ví dụ Prometheus) đọc từ `/metrics` vài giây một lần.
+
+Hai loại metric phủ phần lớn backend. **Counter** chỉ tăng: số request đã phục vụ. **Histogram** đếm quan sát vào các bucket: bao nhiêu request mất tới 10 ms, tới 50 ms, tới 100 ms. `prometheus_client` có cả hai, và middleware trong `demo/p10_metrics.py` nạp dữ liệu cho chúng:
+
+```python
+REQUESTS = Counter(
+    "http_requests_total", "Requests served", ["method", "route", "status"]
+)
+LATENCY = Histogram(
+    "http_request_duration_seconds",
+    "Request latency",
+    ["route"],
+    buckets=(0.01, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5),
+)
+```
+
+Các bucket của histogram phải chọn trước: ranh giới là độ phân giải duy nhất bạn nhận lại được. Ở đây chúng chạy từ 10 ms đến 2,5 s. Một middleware ghi mỗi request vào cả hai:
+
+```python
+    @app.middleware("http")
+    async def measure(request: Request, call_next):
+        started = time.perf_counter()
+        status = 500
+        try:
+            response = await call_next(request)
+            status = response.status_code
+            return response
+        finally:
+            # The route TEMPLATE ("/cases/{case_id}"), never the raw path:
+            # the raw path would mint one time series per case id.
+            route = request.scope.get("route")
+            label = route.path if route else "unmatched"
+            REQUESTS.labels(request.method, label, str(status)).inc()
+            LATENCY.labels(label).observe(time.perf_counter() - started)
+```
+
+Để ý comment bên trong: label là *template* của route (`/cases/{case_id}/report`), lấy từ `request.scope["route"]` sau khi router đã khớp, không bao giờ là path thô. Path thô chứa case id, và mỗi giá trị khác nhau sẽ thành một time series riêng; cuối mục này cho thấy cái giá. Giờ gửi bốn mươi request report (một trong tám case bị chậm) rồi scrape:
+
+<TerminalOutput command="python p10_walk.py  (40 request report, rồi scrape /metrics của route đó)" label="Python 3.13 · FastAPI 0.165.0 · prometheus-client 0.26.0 · capture tháng 11/2026" caption="Các bucket 'le' (nhỏ hơn hoặc bằng) là cộng dồn: 35 request mất tới 0.1 s, cả 40 mất tới 2.5 s, nên 5 request mất từ 1 s đến 2.5 s. Dòng cuối là thứ một dashboard vẽ trung bình sẽ hiển thị.">
+```text
+http_request_duration_seconds_bucket{le="0.01",route="/cases/{case_id}/report"} 0.0
+http_request_duration_seconds_bucket{le="0.05",route="/cases/{case_id}/report"} 0.0
+http_request_duration_seconds_bucket{le="0.1",route="/cases/{case_id}/report"} 35.0
+http_request_duration_seconds_bucket{le="0.25",route="/cases/{case_id}/report"} 35.0
+http_request_duration_seconds_bucket{le="0.5",route="/cases/{case_id}/report"} 35.0
+http_request_duration_seconds_bucket{le="1.0",route="/cases/{case_id}/report"} 35.0
+http_request_duration_seconds_bucket{le="2.5",route="/cases/{case_id}/report"} 40.0
+http_request_duration_seconds_bucket{le="+Inf",route="/cases/{case_id}/report"} 40.0
+average = 200 ms over 40 requests
+```
+</TerminalOutput>
+
+<BeP10Histogram />
+
+Độ trễ trung bình là 200 ms, và không request nào mất 200 ms. Ba mươi lăm cái dưới 100 ms, năm cái trên một giây. Alert đặt trên trung bình sẽ im (200 ms trông khỏe), trong khi cứ tám request thì một cái không dùng nổi. Histogram giữ lại hình dạng: bạn hỏi được percentile 95 hay 99, cộng được histogram của nhiều worker với nhau (trung bình của các trung bình thì không cộng được), và thấy hai cái bướu thay vì một con số nằm giữa. Cái bẫy với code AI viết là `time.time()` bao quanh handler cùng một gauge `avg_latency` luôn là thứ nó sinh ra đầu tiên.
+
+Cái bẫy còn lại là label. Đây là cùng mười nghìn request, đếm theo route và đếm theo user id:
+
+```python
+for user_id in range(1, 10_001):  # ten thousand callers, one route
+    by_route.labels("/cases/{case_id}/report").inc()
+    by_user.labels(str(user_id)).inc()
+```
+
+<TerminalOutput command="python p10_cardinality.py" label="Python 3.13 · prometheus-client 0.26.0 · capture tháng 11/2026" caption="Cùng mười nghìn lần tăng, thêm một label. Mỗi user id khác nhau là một time series mới, nằm trong bộ nhớ và được scraper lưu lại.">
+```text
+label route   :      1 series
+label user_id :  10000 series
+```
+</TerminalOutput>
+
+<BeP10Cardinality />
+
+Hướng dẫn đặt tên của chính Prometheus nói rất thẳng: "Do not use labels to store dimensions with high cardinality (many different label values), such as user IDs, email addresses, or other unbounded sets of values." Metric rẻ vì nó gộp lại; một label tăng theo số người dùng làm mất đúng tính chất đó. Ai hỏi case nào thì thuộc về dòng log (tìm theo từng request) hoặc attribute của trace. Label chỉ dành cho tập nhỏ, cố định: template route, method, nhóm status.
+
+---
+
+## 4. Trace: dòng thời gian của chính request
+
+Metric cho biết một route chậm. Log cho biết request nào. Cả hai đều không chỉ ra thời gian đi đâu *bên trong* một request đã chạm database và một service khác. **Trace** làm được việc đó: nó là cây các **span** mà một request sinh ra. Mỗi span có tên, thời điểm bắt đầu và kết thúc, một `trace_id` chung cho cả cây, và một `parent_id` trỏ tới span đã gây ra nó.
+
+**OpenTelemetry** là chuẩn trung lập với vendor để sinh ra chúng. Ở Python có ba loại mảnh: SDK (tạo và export span), exporter (span đi đâu), và các gói instrumentation bọc quanh một thư viện để bạn khỏi tự viết code tạo span. `demo/p10_tracing.py` nối tất cả trong một hàm:
+
+```python
+def setup(app: FastAPI, service: str, engine=None) -> None:
+    provider = TracerProvider(resource=Resource.create({"service.name": service}))
+    # Console exporter: no collector needed. Production would use a
+    # BatchSpanProcessor + OTLP exporter instead of printing each span.
+    provider.add_span_processor(SimpleSpanProcessor(ConsoleSpanExporter()))
+    trace.set_tracer_provider(provider)
+
+    FastAPIInstrumentor.instrument_app(app)
+    HTTPXClientInstrumentor().instrument()  # also injects the traceparent header
+    if engine is not None:
+        SQLAlchemyInstrumentor().instrument(engine=engine)
+```
+
+Mỗi dòng làm một việc. `FastAPIInstrumentor.instrument_app(app)` mở một span cho mỗi request. `HTTPXClientInstrumentor` mở một span cho mỗi lời gọi đi ra, và gắn thêm header `traceparent` (định dạng W3C Trace Context) mang trace id, để span của evidence-lab nhập vào cùng trace thay vì tự mở trace mới. `SQLAlchemyInstrumentor` cho engine của bài 5 một span cho mỗi câu SQL. Exporter ở đây là `ConsoleSpanExporter`, chỉ in span ra, nên thử không cần collector. Ở production bạn đổi sang `BatchSpanProcessor` và exporter OTLP: processor đơn giản export từng span ngay trên thread của request, ổn cho demo nhưng là chi phí bạn không muốn trả ở mọi request.
+
+Span tự viết chỉ cách một câu `with`. Tầng service của bài 4 có thêm span quanh mỗi nước đi mà không cần đụng `layered_service.py`:
+
+```python
+class ObservedCaseService(CaseService):
+    """post 4's service, unchanged, plus a span around each move."""
+
+    def get_case(self, case_id: str) -> CaseRecord:
+        with tracer.start_as_current_span("CaseService.get_case"):
+            return super().get_case(case_id)
+
+    def assign(self, case_id: str, detective: str) -> CaseRecord:
+        with tracer.start_as_current_span("CaseService.assign"):
+            return super().assign(case_id, detective)
+```
+
+Một request, `/cases/C-7/report`, cả hai service đều bật trace. Exporter in một object JSON cho mỗi span; `p10_spans.py` đọc output của cả hai service và in trace cuối cùng thành bảng:
+
+<TerminalOutput command="python p10_spans.py clue.out lab.out" label="Python 3.13 · OpenTelemetry 1.45.2 · instrumentation 0.66b2 · capture tháng 11/2026" caption="Một trace, hai service, bảy span (các span ASGI send/receive được ẩn). 'at ms' là lúc span bắt đầu so với root, 'ms' là nó kéo dài bao lâu. Mỗi parent_id là span_id của một dòng phía trên.">
+```text
+trace_id 0xcd8693caa6f5931e2d8fdb34fa4df809
+span_id             parent_id              at ms       ms  service / name
+0xb4a04ca69d9f5c3e  -                       0.00  1227.08  clue-api / GET /cases/{case_id}/report
+0x3b74205d94f6bbbb  0xb4a04ca69d9f5c3e      1.14     0.07  clue-api / connect
+0x8344319fe0861a10  0xb4a04ca69d9f5c3e      1.56     0.08  clue-api / SELECT p10.db
+0x377052936dc5eb54  0xb4a04ca69d9f5c3e      2.08     1.45  clue-api / CaseService.get_case
+0x01600df5d5ea050e  0x377052936dc5eb54      2.50     0.07  clue-api / SELECT p10.db
+0xf89387690f8010c4  0xb4a04ca69d9f5c3e      4.22  1220.35  clue-api / GET
+0xec0318c52e06f1e3  0xf89387690f8010c4      5.80  1218.59  evidence-lab / GET /analyze/{case_id}
+```
+</TerminalOutput>
+
+<BeP10Waterfall />
+
+Một span thô, span của evidence-lab, để bạn thấy bảng trên được làm từ gì:
+
+<TerminalOutput command="python p10_spans.py --raw 'GET /analyze/{case_id}' clue.out lab.out  (những dòng đầu)" label="Python 3.13 · OpenTelemetry 1.45.2 · capture tháng 11/2026" caption="Trích một span đã export. trace_id dùng chung với các span của clue-api; parent_id là span_id của lời gọi GET đi ra của clue-api, tức dòng có span_id 0xf89387690f8010c4 trong bảng. Phần sau end_time (status, attributes, resource) bị cắt ở đây.">
+```text
+{
+  "name": "GET /analyze/{case_id}",
+  "context": {
+    "trace_id": "0xcd8693caa6f5931e2d8fdb34fa4df809",
+    "span_id": "0xec0318c52e06f1e3",
+    "trace_state": "[]"
+  },
+  "kind": "SpanKind.SERVER",
+  "parent_id": "0xf89387690f8010c4",
+  "start_time": "2026-11-23T10:22:49.808725Z",
+  "end_time": "2026-11-23T10:22:51.027312Z",
+```
+</TerminalOutput>
+
+`parent_id` đó chính là thứ header `traceparent` mang qua mạng. Không có nó, bạn sẽ có hai trace rời nhau mỗi cái một span, và không cách nào nói service thứ hai là lý do khiến cái đầu chậm.
+
+Trace id và request id làm cùng một việc bằng hai bộ từ vựng. Khi bật tracing, filter của logging thêm luôn `trace_id` vào mọi dòng log, nên từ dòng log đi được tới trace và ngược lại. Khi tắt thì không có gì hỏng: `request_id` vẫn còn đó.
+
+---
+
+## 5. Debug bằng bằng chứng
+
+Đây là cả bộ đồ nghề dùng thật, trên một lỗi mình cài sẵn vào demo: evidence-lab chậm với một case, C-7 (bộ chứng cứ của nó rất lớn). Không ai báo cho dashboard. Một người dùng nói "trang report thỉnh thoảng chậm".
+
+Những phỏng đoán đến trước, vì lúc nào cũng vậy: database, thiếu index, thread pool, bản deploy mới. Cái nào cũng có thể đúng và mỗi cái tốn nửa tiếng sửa code mới loại trừ được. Bỏ qua chúng. Dùng ba tín hiệu theo thứ tự, mỗi cái thu hẹp câu hỏi cho cái kế tiếp.
+
+<BeP10Walk />
+
+**Bước 1, metric: có thật không, bao nhiêu lần?** Histogram ở mục 3: 5 trong 40 request report mất hơn một giây. Có thật, đúng route report, và chỉ là thiểu số. Đó là một lỗi khác với "mọi thứ đều chậm" và đã loại phần lớn nguyên nhân toàn cục.
+
+**Bước 2, log: request nào?** Lọc các dòng access chậm, lấy một request id, rồi tìm id đó trong log của cả hai service:
+
+<TerminalOutput command={`grep -E '"duration_ms": [0-9]{4}' clue.out | head -1, rồi grep 94520390 clue.out lab.out`} label="Python 3.13 · FastAPI 0.165.0 · capture tháng 11/2026" caption="clue-api mất 1205.2 ms cho GET /cases/C-7/report; evidence-lab, cùng request id, mất 1202.9 ms cho /analyze/C-7. Không phần nào khác của request mất thời gian đo được. Case chậm là C-7, không phải cả route.">
+```text
+{"ts": "17:21:39.690", "level": "INFO", "service": "clue-api", "logger": "clue.access", "request_id": "94520390", "msg": "request", "method": "GET", "path": "/cases/C-7/report", "status": 200, "duration_ms": 1205.2}
+clue.out: {"ts": "17:21:39.689", "level": "INFO", "service": "clue-api", "logger": "httpx", "request_id": "94520390", "msg": "HTTP Request: GET http://127.0.0.1:4341/analyze/C-7 \"HTTP/1.1 200 OK\""}
+clue.out: {"ts": "17:21:39.690", "level": "INFO", "service": "clue-api", "logger": "clue.access", "request_id": "94520390", "msg": "request", "method": "GET", "path": "/cases/C-7/report", "status": 200, "duration_ms": 1205.2}
+lab.out:  {"ts": "17:21:38.486", "level": "INFO", "service": "evidence-lab", "logger": "lab", "request_id": "94520390", "msg": "analysis started", "case_id": "C-7"}
+lab.out:  {"ts": "17:21:39.689", "level": "INFO", "service": "evidence-lab", "logger": "clue.access", "request_id": "94520390", "msg": "request", "method": "GET", "path": "/analyze/C-7", "status": 200, "duration_ms": 1202.9}
+```
+</TerminalOutput>
+
+Hai file, một id, và bạn đã nói được thời gian nằm ở đâu: bên trong service thứ hai, với case C-7. Không có id được chuyển tiếp thì đây là hai bản log chẳng nối được với nhau.
+
+**Bước 3, trace: nằm ở đâu bên trong?** Trace ở mục 4 cho một request cùng loại: span evidence-lab kéo dài 1218.59 ms trong tổng 1227.08 ms của root. Hai span SQL mất 0.08 và 0.07 ms. Database chưa bao giờ là vấn đề, và các phỏng đoán về index với thread pool được đóng lại bằng một con số, không phải bằng một lần sửa code.
+
+Chỗ cần sửa nằm ở evidence-lab (bộ chứng cứ lớn của C-7), và ba tín hiệu đã cho bạn tên nó, route của nó và case id trước khi bạn mở một file source nào. Đó là lý do cho thứ tự này. Một phỏng đoán tốn một lần sửa và một lần deploy để kiểm chứng; mỗi bước ở đây tốn một câu query trên dữ liệu bạn đã có.
+
+<Callout type="note" title="Observability có giá của nó">
+Bài post-mortem của Cloudflare ghi rằng nhiều CPU đã đổ vào các hệ thống debug và observability trong lúc sự cố đang diễn ra. Mọi thứ trong bài này đều có chi phí: format JSON trên đường đi của request, một lần tăng counter mỗi request, một span cho mỗi câu SQL, một dòng log bị chặn nếu stdout chậm. Giữ phần việc mỗi request thật nhỏ, export theo batch, và đảm bảo thứ bạn thêm vào để tìm lỗi không tự trở thành lỗi.
+</Callout>
+
+### Thói quen review
+
+Checklist cho service AI viết tiếp theo, mỗi mục một dòng:
+
+| Nó viết | Hỏi | Cách sửa trong bài |
+|---|---|---|
+| `print()` hoặc `logging.info(f"...")` trong endpoint | Lọc được theo request, status và thời lượng không? | JSON formatter + middleware access (mục 1) |
+| Log có tên user, token hay body | Mình có chịu được cảnh thấy cái này trong index của vendor không? | `RedactFilter`, log id thay vì object (mục 2) |
+| Một lời gọi sang service khác | Có chuyển tiếp request id và `traceparent` không? | hook `httpx` + `HTTPXClientInstrumentor` (mục 2, 4) |
+| `avg_latency` hay một cái timer đơn | Nó có cho thấy cái đuôi không? | Histogram với bucket tường minh (mục 3) |
+| Label kiểu `user_id` hay path thô | Label này nhận được bao nhiêu giá trị khác nhau? | Template route, tập nhỏ cố định (mục 3) |
+| Exporter của trace đặt chế độ in ra | Nó tốn gì trên mỗi request? | `BatchSpanProcessor` + OTLP ở production (mục 4) |
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+- **Structured log (log có cấu trúc)**: mỗi sự kiện một bản ghi máy đọc được (ở đây là JSON) với các trường giống nhau, để công cụ lọc và đếm được.
+- **Correlation id (request id)**: giá trị đóng dấu lên mọi dòng log của một request và được chuyển tiếp tới mọi service nó gọi, để nối được các bản log rời nhau.
+- **`ContextVar`**: biến Python mà giá trị thuộc về task hay request context hiện tại, nên code nằm sâu đọc được mà không cần tham số.
+- **Counter / histogram**: lần lượt là con số chỉ tăng, và tập số đếm theo bucket giữ được hình dạng của một phân phối.
+- **Cardinality (số lượng giá trị phân biệt)**: một label nhận được bao nhiêu giá trị khác nhau. Mỗi giá trị là một time series riêng, nên label không giới hạn làm bộ nhớ phình mãi.
+- **Trace / span**: trace là mọi thứ một request gây ra; span là một bước có bấm giờ trong đó, với `parent_id` trỏ tới bước đã gây ra nó.
+</Concepts>
+
+</Vi>
