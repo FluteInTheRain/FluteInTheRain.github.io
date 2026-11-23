@@ -73,17 +73,17 @@ Each level has a one-line promise the series page shows as the act blurb.
 | # | Slug | Topic label (title) | Reuses | Book |
 |---|---|---|---|---|
 | 1 | `go-first-program-modules-packages` *(new)* | Go basics | old part 1 §2 packages/`internal/`, light parts of §1 build and §3 `go.mod` | EG ch2; 100GM ch2 #12–#16 |
-| 2 | `go-variables-types-pointers-functions` *(new)* | Go types and functions | old part 1 §4 pointers + `defer` (no struct padding) | EG ch2; 100GM #1–#4, #17–#19, #42–#44, #47 |
-| 3 | `go-slices-maps-strings` *(new)* | Go collections | old part 2 §1–2 (usage only), old part 1 §5 strings | 100GM #20–#24, #27, #36–#38 |
+| 2 | `go-variables-types-pointers-functions` *(new)* | Go types and functions | old part 1 §4 pointers + `defer` (no struct padding) | EG ch2; 100GM #1, #2, #17–#19, #42, #47 |
+| 3 | `go-slices-maps-strings` *(new)* | Go collections | old part 2 §1–2 (usage only), old part 1 §5 strings | 100GM #20–#24, #36, #37 |
 | 4 | `go-structs-methods-interfaces` *(new)* | Go structs and interfaces | old part 2 §3–5 (usage, no `iface` layout) | 100GM #11 (embedding usage only; hazards in post 12) |
-| 5 | `go-errors-defer-panic` *(new)* | Go errors | old part 3 §1–2, old part 5 §4 "handle once" | 100GM ch7 #48–#54 |
+| 5 | `go-errors-defer-panic` *(new)* | Go errors | old part 3 §1–2, old part 5 §4 "handle once" | 100GM #43, #44, ch7 #48–#54 |
 | 6 | `go-testing-table-tests` *(new)* | Go testing | old part 3 §5 | 100GM ch11 #82–#88, #90 |
 | 7 | `go-goroutines-channels-select` *(new)* | Goroutines and channels | old part 3 §3–4 (channels/select) | 100GM #55, #57, #62, #65, #67 |
 | 8 | `go-context-timeouts-mutexes` *(new)* | Context and locks | old part 3 §4 (context, mutex) | 100GM #60, #61, #70, #71, #74 |
 | 9 | `go-concurrency-patterns-worker-pools-pipelines` *(new)* | Go concurrency patterns | none (new material) | 100GM #73; Go blog "Pipelines and cancellation"; Rob Pike "Go Concurrency Patterns" (2012) |
 | 10 | `go-http-service-net-http-json-middleware` *(new)* | Build a Go HTTP service | none (new material) | EG ch2; `net/http` docs, Go 1.22 routing and `log/slog` posts on the Go blog |
-| 11 | `go-memory-data-types-slices-maps-strings` *(kept)* | Go memory | old part 4 (slice header, leaks, range) + old part 2 §1–2 internals (24-byte header, SwissTable) | 100GM #25, #26, #28–#35, #39–#41 |
-| 12 | `go-abstractions-interfaces-generics-errors` *(kept)* | Go interfaces deep dive | old part 5 §1–3 + old part 2 §5 `iface`/typed nil; errors section moves to post 5 | 100GM #5–#10, #45, #46 |
+| 11 | `go-memory-data-types-slices-maps-strings` *(kept)* | Go memory | old part 4 (slice header, leaks, range) + old part 2 §1–2 internals (24-byte header, SwissTable) | 100GM #25–#35, #38–#41 |
+| 12 | `go-abstractions-interfaces-generics-errors` *(kept)* | Go interfaces deep dive | old part 5 §1–3 + old part 2 §5 `iface`/typed nil; errors section moves to post 5 | 100GM #3–#10, #45, #46 |
 | 13 | `go-concurrency-scheduler-channels-context-mutexes` *(kept)* | Go concurrency deep dive | old part 6 (GMP, races, nil channels, etcd deadlock) | 100GM #56, #58, #59, #63, #64, #66, #68, #69, #72; EG ch4 (scheduler) |
 | 14 | `go-production-stdlib-cpu-cache-gc-kubernetes` *(kept)* | Go in production | old part 7 §1 stdlib traps + §4 K8s CFS throttling | 100GM ch10 #75–#81, #100 |
 | 15 | `go-efficiency-workflow-raer-tfbo-hardware-memory` *(kept)* | When to optimize | old part 8 §1–3 (RAER, TFBO) | EG ch1, ch3 |
@@ -99,15 +99,15 @@ Book abbreviations: EG = *Efficient Go*, 100GM = *100 Go Mistakes*.
 
 Every post follows the `book-to-post` structure: hero, hook, Concepts box, sections, Key takeaways, Review questions, bilingual `<En>`/`<Vi>`, `sources` frontmatter. Levels 1–2 add a **"Coming from Java / Python / JS"** comparison table in the first section.
 
-**1. Go basics.** What Go is built for (fast builds, one static binary, simple deploy), with Go's own design story as the real case. `go install`, `go run`, `go build`. `go mod init`, what `go.mod`/`go.sum` hold, `go get` (one paragraph on why versions are stable, no MVS algorithm). Packages = folders, capitalised names are exported, `internal/`. Project layout for a small service. `gofmt`, `go vet`. Demo: animated flow "source → `go build` → one binary → run on a bare container".
+**1. Go basics.** What Go is built for (fast builds, one static binary, simple deploy), with Go's own design story as the real case. `go install`, `go run`, `go build`. `go mod init`, what `go.mod`/`go.sum` hold, `go get` (one paragraph on why versions are stable, no MVS algorithm). Packages = folders, capitalised names are exported, `internal/`. Project layout for a small service; the module path is explained at the first import that uses it. `gofmt`, `go vet`. Docker `FROM scratch` / cross-compiling: one sentence, details in post 10. Demo: animated flow "source → `go build` → one binary → run on a bare container".
 
-**2. Go types and functions.** `var` vs `:=`, zero values (why no "undefined"), basic types, constants and `iota`, explicit conversions, integer overflow. Functions with multiple returns, named results (when not to). Pointers: everything passes by value; when to pass `*T`; no pointer arithmetic. `defer` basics (runs at function exit, LIFO, arguments captured now). Shadowing with `:=` as the first trap. Demo: interactive "pass by value vs pointer" stepper.
+**2. Go types and functions.** `var` vs `:=`, zero values (why no "undefined"), basic types, constants and `iota`, explicit conversions, integer overflow. Functions with multiple returns. Pointers: everything passes by value; when to pass `*T`; no pointer arithmetic. `defer` basics (runs at function exit, LIFO, arguments captured now). Shadowing with `:=` as the first trap. Overflow/float/octal stay short: one overflow example, octal in two lines, no NaN/Inf detail. Demo: interactive "pass by value vs pointer" stepper.
 
-**3. Go collections.** Arrays vs slices as a reader of other languages sees them (`ArrayList`/`list`/`Array`), `make`, `append`, `len`/`cap` at usage level, nil vs empty slice, `copy`. Maps: create, comma-ok, delete, iteration order is random. Strings are bytes; `rune`; ranging over `"Phở"`. Link forward to post 11 for what happens underneath. Demo: `append` growth visualiser (usage level, capacity growth only).
+**3. Go collections.** Arrays vs slices as a reader of other languages sees them (`ArrayList`/`list`/`Array`), `make`, `append`, `len`/`cap` at usage level, nil vs empty slice, `copy`. Maps: create, comma-ok, delete, iteration order is random. Slices can share memory: one plain `b := a[1:3]; b[0] = 99` example, the why goes to post 11. Strings are bytes; `rune`; ranging over `"Phở"`. Link forward to post 11 for what happens underneath. Capacity advice stays one rule ("`make` with a capacity when you know the size"); growth tables, allocation counts, map size hints and `strings.Trim*` pitfalls live in post 11. Demo: `append` growth visualiser (usage level).
 
 **4. Go structs and interfaces.** No classes: structs + methods. Value vs pointer receivers (one rule of thumb). Embedding as composition, not inheritance. Interfaces are satisfied implicitly; small interfaces (`io.Reader`, `fmt.Stringer`) as real stdlib cases. Type switches. Generics at usage level (`[T any]`, `slices`, `maps` packages). Link forward to post 12. Demo: "which type satisfies which interface" interactive checker.
 
-**5. Go errors.** Errors are values; `if err != nil` and why Go chose it (compare with exceptions). Creating errors, wrapping with `%w`, `errors.Is`/`errors.As`, `errors.Join`. Handle an error once (log or return, not both). `defer` for cleanup, `panic`/`recover` and when panic is legitimate. Real case: a sourced incident where swallowed or duplicated errors hid a failure. Demo: error-wrap chain unwinder.
+**5. Go errors.** Errors are values; `if err != nil` and why Go chose it (compare with exceptions). Creating errors, wrapping with `%w`, `errors.Is`/`errors.As`, `errors.Join`. Handle an error once (log or return, not both). Named results and the `err` they silently keep (100GM #43–#44) live here, since their trap is about errors. `defer` for cleanup, `panic`/`recover` and when panic is legitimate. Real case: a sourced incident where swallowed or duplicated errors hid a failure. Demo: error-wrap chain unwinder.
 
 **6. Go testing.** `go test`, `_test.go`, table-driven tests, subtests `t.Run`, `t.Helper`, `t.Parallel`, test fixtures, `httptest`, coverage, `-race` first look (details in post 13). Test categories (build tags / `-short`). Demo: run a table test step by step.
 
@@ -117,11 +117,11 @@ Every post follows the `book-to-post` structure: hero, hook, Concepts box, secti
 
 **9. Go concurrency patterns.** Putting posts 7–8 to work on real shapes of work: worker pool with a fixed number of goroutines, fan-out/fan-in, pipeline stages with cancellation, bounding concurrency with a semaphore channel, rate limiting (`time.Ticker`, `golang.org/x/time/rate`), `errgroup` (first error cancels the rest, `SetLimit`). Each pattern: the problem it solves, the code, how it shuts down cleanly. Demo: worker-pool simulator where the reader changes worker count and sees throughput and queue length.
 
-**10. Build a Go HTTP service.** Assemble levels 1–2 into one small JSON API with only the standard library: `net/http` with Go 1.22 method + path patterns, JSON encode/decode with validation, a middleware chain (logging, recover, request ID), `log/slog`, server timeouts set from the start (why: one line linking post 14), config from env, graceful shutdown with `signal.NotifyContext` + `Server.Shutdown`, handler tests with `httptest`. Project layout reuses post 1. This service becomes the running example that levels 3–4 reach for where it fits. Demo: animated request path through middleware → handler → JSON response.
+**10. Build a Go HTTP service.** Assemble levels 1–2 into one small JSON API with only the standard library: `net/http` with Go 1.22 method + path patterns, JSON encode/decode with validation, a middleware chain (logging, recover, request ID), `log/slog`, server timeouts set from the start (why: one line linking post 14), config from env, graceful shutdown with `signal.NotifyContext` + `Server.Shutdown`, shipping the binary in a `FROM scratch` container with `GOOS`/`GOARCH` cross-compiling (moved from post 1), handler tests with `httptest`. Project layout reuses post 1. This service becomes the running example that levels 3–4 reach for where it fits. Demo: animated request path through middleware → handler → JSON response.
 
-**11. Go memory (kept slug).** Slice header (pointer, len, cap), shared backing arrays, `append` overwriting a neighbour, slice and substring memory leaks, maps never shrink, SwissTable maps (Go 1.24+), range copies and pointer elements, comparing values. Starts with a recap box linking posts 3 and 4.
+**11. Go memory (kept slug).** Slice header (pointer, len, cap), shared backing arrays, `append` overwriting a neighbour, slice and substring memory leaks, maps never shrink, SwissTable maps (Go 1.24+), range copies and pointer elements, comparing values, how `append` grows capacity (growth table, allocation counts), map size hints, `strings.Trim*` vs `TrimSuffix`. Starts with a recap box linking posts 3 and 4.
 
-**12. Go interfaces deep dive (kept slug).** Interface values as (type, data); the typed-nil trap; interface pollution; consumer-side interfaces; returning interfaces; `any`; when generics fit and when they do not; type-embedding hazards; using a filename as a function input.
+**12. Go interfaces deep dive (kept slug).** Interface values as (type, data); the typed-nil trap; interface pollution; consumer-side interfaces; returning interfaces; `any`; when generics fit and when they do not; type-embedding hazards; using a filename as a function input; `init()` functions and getters/setters (moved from post 2).
 
 **13. Go concurrency deep dive (kept slug).** GMP scheduler; why more goroutines can be slower; data race vs race condition; loop variables in goroutines (Go 1.22 change); `select` is random; nil channels; `append` races; `sync.Cond`; the etcd deadlock as the real case.
 
@@ -144,6 +144,8 @@ Every post follows the `book-to-post` structure: hero, hook, Concepts box, secti
 Demo: "predict the output" interactive cards (reveal + explanation), still readable without JS.
 
 ## Writing rules for every post
+
+- **Examples use only what earlier posts taught.** No `recover`, closures, `testing` helpers, structs, methods or `context` in a snippet before the post that teaches them; undefined helper functions are not allowed. If a snippet needs scaffolding to produce its output, show plain code and let the output carry the point. *(Added 2026-11-23 after a newcomer reader test of posts 1–3.)*
 
 - **Explain plainly first, then detail.** Each section opens with a 2–3 sentence plain explanation before code or internals.
 - **Real cases first** (memory `posts-prefer-real-cases`): sourced incidents, Go issues, engineering blogs; analogies only as a one-line aid.
@@ -190,7 +192,7 @@ Demo: "predict the output" interactive cards (reveal + explanation), still reada
 
 ### Details settled during the builder check
 
-- **Every 100 Go Mistakes number has exactly one home.** Checked 2026-11-23 by script against the Book column: #1–#100 all assigned, no duplicates (#73 `errgroup` moved from post 8 to post 9 when the patterns post was added). Posts 15 and 19 use only *Efficient Go*; posts 10 and 20 rely on official Go docs and the earlier posts.
+- **Every 100 Go Mistakes number has exactly one home.** Checked 2026-11-23 by script against the Book column: #1–#100 all assigned, no duplicates (#73 `errgroup` moved from post 8 to post 9 when the patterns post was added; after the reader test, #3/#4 moved 2→12, #43/#44 moved 2→5, #27/#38 moved 3→11). Posts 15 and 19 use only *Efficient Go*; posts 10 and 20 rely on official Go docs and the earlier posts.
 - **Frontmatter for new posts:** `category: "backend"`, same as the current Go posts. `date` is the day each post is written. The series order comes from `series.ts`, not from dates. Covers are picked from `src/assets/series/golang/`.
 - **`series.ts`** is switched only at step 5, in one PR. The current entry stays untouched until then.
 

@@ -3,6 +3,12 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-23 — Series Go: viết bài 1–3 (draft) và chỉnh lại theo bài test người đọc
+
+- **Đã làm:** 3 agent Sonnet viết bài 1–3 trên 3 nhánh `feat/go-post-01-basics`, `feat/go-post-02-types`, `feat/go-post-03-collections` (chưa push). Mỗi bài qua review nội dung + 1 vòng sửa, rồi 1 lượt humanizer. Bài test người đọc (agent đóng vai dev Java chưa viết Go) chấm cả 3 bài "Mostly easy": ví dụ dùng thứ chưa học (`recover`, closure, struct, `context`), bài 2 ôm ~8 chủ đề, bài 3 đi sâu vào tăng capacity/benchmark.
+- **Ai quyết:** user chọn phương án A — sửa mọi ví dụ chỉ dùng thứ đã học và dời phần sâu sang bài sau. Spec cập nhật: #3/#4 (`init`, getter) 2→12, #43/#44 (named results) 2→5, #27/#38 (size hint map, Trim) 3→11, Docker `FROM scratch` 1→10; thêm luật viết "ví dụ chỉ dùng thứ bài trước đã dạy". Sách đọc qua text tách sẵn trong `books/_extract/` thay vì `/book-to-skill` (tiết kiệm token, AI quyết).
+- **Chưa chốt:** Khang duyệt kỹ bài 1 (pilot) sau khi sửa; push/PR sau khi duyệt.
+
 ## 2026-11-23 — Thiết kế lại series Go: 20 bài, từ cơ bản đến phỏng vấn
 
 - **Đã làm:** spec `docs/superpowers/specs/2026-11-23-go-series-redesign-design.md` (nhánh `chore/go-series-redesign-spec`). Series `golang` 12 bài chia lại thành 20 bài, 5 cấp: Viết Go (1–6) → Chạy song song (7–10) → Bên trong & bẫy (11–14) → Đo & tối ưu (15–19) → Phỏng vấn (20). Mỗi chủ đề chỉ có một bài "nhà"; 100 lỗi của *100 Go Mistakes* được phân đủ, mỗi lỗi đúng một bài (kiểm bằng script).
