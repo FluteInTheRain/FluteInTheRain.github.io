@@ -93,10 +93,10 @@ export default function GoSatisfyCheckerDemo() {
         <thead>
           <tr>
             <th></th>
-            <th>Stringer: value</th>
-            <th>Stringer: pointer</th>
-            <th>Incrementer: value</th>
-            <th>Incrementer: pointer</th>
+            <th><span data-lang-en>Stringer: value</span><span data-lang-vi>Stringer: giá trị</span></th>
+            <th><span data-lang-en>Stringer: pointer</span><span data-lang-vi>Stringer: con trỏ</span></th>
+            <th><span data-lang-en>Incrementer: value</span><span data-lang-vi>Incrementer: giá trị</span></th>
+            <th><span data-lang-en>Incrementer: pointer</span><span data-lang-vi>Incrementer: con trỏ</span></th>
           </tr>
         </thead>
         <tbody>

@@ -5,12 +5,11 @@ description: "Go has no classes. Structs, methods, embedding, implicit interface
 description_vi: "Go không có class. Struct, method, embedding, interface ngầm định, type switch và generics, giải thích cho người đến từ Java, Python hay JavaScript."
 date: 2026-11-23
 category: "backend"
-tags: ["golang", "structs", "interfaces", "generics", "100-go-mistakes"]
+tags: ["golang", "structs", "interfaces", "generics"]
 cover: "../../assets/series/golang/go-gopher-pencil-wrench.jpg"
 cover_alt: "Pencil drawing of the Go gopher holding a wrench, drawn by Renee French"
 draft: true
 sources:
-  - { title: "100 Go Mistakes and How to Avoid Them", author: "Teiva Harsanyi", chapters: "Mistake #11 (the config struct and zero-value problem it starts from; embedding hazards are in the interfaces deep-dive post)", url: "https://100go.co/" }
   - { title: "Go FAQ: Why is there no type inheritance?", author: "The Go Authors", url: "https://go.dev/doc/faq#inheritance" }
   - { title: "Go Proverbs", author: "Rob Pike", url: "https://go-proverbs.github.io/" }
   - { title: "io package: Reader", author: "The Go Authors", url: "https://pkg.go.dev/io#Reader" }
@@ -35,7 +34,7 @@ import heroPlugs from '../../assets/blog/go-structs-methods-interfaces/power-boa
 
 <Figure src={heroPlugs} alt="A white four-way power board with its plug resting on top, on a dark table" caption="A socket does not ask what is plugged into it, only whether the plug fits. A Go interface works the same way." sourceTitle="Wikimedia Commons: Four way power board Australian plugs.jpg (public domain, Leon Brooks)" sourceUrl="https://commons.wikimedia.org/wiki/File:Four_way_power_board_Australian_plugs.jpg" />
 
-> "In Go a type automatically satisfies any interface that specifies a subset of its methods."
+> "…in Go a type automatically satisfies any interface that specifies a subset of its methods."
 > &mdash; *The Go FAQ*, "Why is there no type inheritance?"
 
 ### Go has no class keyword, and no implements
@@ -158,7 +157,7 @@ func main() {
 
 <TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="The value receiver changed a copy and the change was thrown away. The pointer receiver changed the real counter.">
 ```text
-after IncValue:  0
+after IncValue:   0
 after IncPointer: 1
 ```
 </TerminalOutput>
@@ -384,7 +383,7 @@ func main() {
 ```
 </TerminalOutput>
 
-Why this rule? A value stored in an interface is a private copy. A pointer method on that copy would change the copy and lose the change, which is nearly always a bug. So the compiler refuses. The opposite direction is fine: a pointer's methods include the value-receiver ones. Try every combination below. The messages are the real compiler output.
+Why this rule? When you put a value into an interface variable, Go stores a copy of it. Say `Counter{}` went in and you called `Inc()`: it would raise `n` on that hidden copy, and your own `Counter` would stay at 0, the same trap as `IncValue` above. That is nearly always a bug, so the compiler refuses. The opposite direction is fine: a pointer's methods include the value-receiver ones. Try every combination below. Each message is the reason part of the real compiler error.
 
 <GoSatisfyCheckerDemo />
 
@@ -396,7 +395,7 @@ A function that returns a nil pointer inside an interface value produces an inte
 
 - **Implicit satisfaction**: a type fits an interface just by having its methods. The type never names the interface.
 - **`io.Reader` / `fmt.Stringer` / `http.Handler`**: three standard interfaces with one method each. Most Go code you read is built on them.
-- **Method set**: the methods a type can be used with inside an interface. For `T` it is the value-receiver methods; for `*T` it is all of them.
+- **Method set**: the methods a type can be used with inside an interface. A plain `Counter` gets only the methods written `(c Counter)`; a `*Counter` gets those plus the ones written `(c *Counter)`.
 
 </Concepts>
 
@@ -405,6 +404,41 @@ A function that returns a nil pointer inside an interface value produces an inte
 ## Type switches and assertions
 
 Sometimes you hold an interface value and need to know what is inside it. `any` is the interface with no methods, so every type fits it (the older spelling is `interface{}`). A type switch asks "what is the concrete type?" and gives you the value already converted in each branch.
+
+Read `switch v := x.(type)` as: look at the real type inside `x`, run the matching `case`, and call the value `v` with that type. Start with two types:
+
+```go
+package main
+
+import "fmt"
+
+func describe(x any) string {
+	switch v := x.(type) {
+	case int:
+		return fmt.Sprintf("int %d", v+1)
+	case string:
+		return "string of length " + fmt.Sprint(len(v))
+	default:
+		return fmt.Sprintf("something else: %T", v)
+	}
+}
+
+func main() {
+	fmt.Println(describe(41))
+	fmt.Println(describe("Phở"))
+	fmt.Println(describe(3.5))
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Inside case int, v is an int, so v+1 works. Inside case string, v is a string, so len(v) works. 3.5 is a float64 and matches neither case, so default runs." >
+```text
+int 42
+string of length 5
+something else: float64
+```
+</TerminalOutput>
+
+Real programs have more kinds of cases. Here is the same switch with a struct type, an interface (`fmt.Stringer`, any type with a `String()` method) and `nil` added:
 
 ```go
 package main
@@ -536,56 +570,16 @@ func main() {
 }
 ```
 
-<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="A struct cannot be compared with > and <, so this fails to compile. The message lists every type cmp.Ordered allows.">
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="A struct cannot be compared with > and <, so this fails to compile. The compiler lists every type cmp.Ordered allows; the middle of that list is cut here with …">
 ```text
 # command-line-arguments
-./main.go:18:17: Pair does not satisfy cmp.Ordered (Pair missing in ~int | ~int8 | ~int16 | ~int32 | ~int64 | ~uint | ~uint8 | ~uint16 | ~uint32 | ~uint64 | ~uintptr | ~float32 | ~float64 | ~string)
+./main.go:18:17: Pair does not satisfy cmp.Ordered (Pair missing in ~int | ~int8 | ~int16 | … | ~string)
 ```
 </TerminalOutput>
 
-Types can be generic too. A `Stack[T]` holds any one element type, and the methods use `T`:
+Types can be generic as well, not only functions. A generic `Stack[T]` type is built step by step in the [Go interfaces deep dive](/blog/go-abstractions-interfaces-generics-errors/); for now, using generic functions is enough.
 
-```go
-package main
-
-import "fmt"
-
-type Stack[T any] struct {
-	items []T
-}
-
-func (s *Stack[T]) Push(x T) { s.items = append(s.items, x) }
-
-func (s *Stack[T]) Pop() (T, bool) {
-	var zero T
-	if len(s.items) == 0 {
-		return zero, false
-	}
-	last := s.items[len(s.items)-1]
-	s.items = s.items[:len(s.items)-1]
-	return last, true
-}
-
-func main() {
-	var s Stack[string]
-	s.Push("a")
-	s.Push("b")
-	v, ok := s.Pop()
-	fmt.Println(v, ok)
-	var n Stack[int]
-	v2, ok2 := n.Pop()
-	fmt.Println(v2, ok2)
-}
-```
-
-<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Stack[string] and Stack[int] are separate types made from one definition. Pop on an empty stack returns the zero value and false.">
-```text
-b true
-0 false
-```
-</TerminalOutput>
-
-Which one should you pick? A plain rule: use an interface when different types do the same thing in different ways (a database and a fake in a test), and use generics when the same code must run over many types (sorting, a stack). Start without generics, and add them when you notice yourself copying a function. The longer discussion of when abstractions help or hurt is in [Go interfaces deep dive](/blog/go-abstractions-interfaces-generics-errors/).
+Which one should you pick? A plain rule: use an interface when different types do the same thing in different ways (a database and a fake in a test), and use generics when the same code must run over many types (sorting, finding the largest). Start without generics, and add them when you notice yourself copying a function. The longer discussion of when abstractions help or hurt is in the same post.
 
 <Concepts>
 
@@ -623,7 +617,7 @@ Errors and `panic` are in the [errors post](/blog/go-errors-defer-panic/). The h
 
 <Figure src={heroPlugs} alt="Ổ cắm điện bốn lỗ màu trắng với phích cắm đặt phía trên, trên mặt bàn tối" caption="Ổ cắm không hỏi thứ cắm vào là gì, chỉ hỏi phích có vừa không. Interface trong Go hoạt động y như vậy." sourceTitle="Wikimedia Commons: Four way power board Australian plugs.jpg (phạm vi công cộng, Leon Brooks)" sourceUrl="https://commons.wikimedia.org/wiki/File:Four_way_power_board_Australian_plugs.jpg" />
 
-> "Trong Go, một kiểu tự động thỏa mọi interface chỉ định một tập con các method của nó."
+> "…trong Go, một kiểu tự động thỏa mọi interface chỉ định một tập con các method của nó."
 > &mdash; *Go FAQ*, "Why is there no type inheritance?"
 
 ### Go không có từ khóa class, cũng không có implements
@@ -746,7 +740,7 @@ func main() {
 
 <TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Value receiver sửa bản sao, thay đổi bị bỏ đi. Pointer receiver sửa counter thật.">
 ```text
-after IncValue:  0
+after IncValue:   0
 after IncPointer: 1
 ```
 </TerminalOutput>
@@ -972,7 +966,7 @@ func main() {
 ```
 </TerminalOutput>
 
-Vì sao có quy tắc này? Giá trị lưu trong interface là một bản sao riêng. Method pointer chạy trên bản sao đó sẽ sửa bản sao rồi mất thay đổi, gần như luôn là bug. Nên compiler từ chối. Chiều ngược lại thì ổn: tập method của con trỏ gồm cả method value receiver. Hãy thử mọi tổ hợp bên dưới. Các thông báo là output thật của compiler.
+Vì sao có quy tắc này? Khi bạn đưa một giá trị vào biến interface, Go lưu một bản sao của nó. Giả sử `Counter{}` được đưa vào rồi bạn gọi `Inc()`: nó sẽ tăng `n` trên bản sao ẩn đó, còn `Counter` của bạn vẫn là 0, cùng cái bẫy với `IncValue` ở trên. Gần như luôn là bug, nên compiler từ chối. Chiều ngược lại thì ổn: tập method của con trỏ gồm cả method value receiver. Hãy thử mọi tổ hợp bên dưới. Mỗi thông báo là phần lý do của lỗi compiler thật.
 
 <GoSatisfyCheckerDemo />
 
@@ -984,7 +978,7 @@ Hàm trả về con trỏ nil bên trong một giá trị interface sẽ cho ra 
 
 - **Thỏa ngầm định**: kiểu khớp interface chỉ nhờ có các method của nó. Kiểu không bao giờ nêu tên interface.
 - **`io.Reader` / `fmt.Stringer` / `http.Handler`**: ba interface chuẩn, mỗi cái một method. Phần lớn code Go bạn đọc được xây trên chúng.
-- **Method set**: những method mà một kiểu có thể dùng bên trong interface. Với `T` là các method value receiver; với `*T` là tất cả.
+- **Method set**: những method mà một kiểu có thể dùng bên trong interface. Một `Counter` thường chỉ có các method viết `(c Counter)`; một `*Counter` có thêm cả các method viết `(c *Counter)`.
 
 </Concepts>
 
@@ -993,6 +987,41 @@ Hàm trả về con trỏ nil bên trong một giá trị interface sẽ cho ra 
 ## Type switch và type assertion
 
 Đôi khi bạn cầm một giá trị interface và cần biết bên trong là gì. `any` là interface không có method nào, nên kiểu nào cũng khớp (cách viết cũ là `interface{}`). Type switch hỏi "kiểu cụ thể là gì?" và đưa bạn giá trị đã được chuyển sẵn trong mỗi nhánh.
+
+Đọc `switch v := x.(type)` như sau: xem kiểu thật bên trong `x`, chạy `case` khớp, và gọi giá trị đó là `v` với đúng kiểu ấy. Bắt đầu với hai kiểu:
+
+```go
+package main
+
+import "fmt"
+
+func describe(x any) string {
+	switch v := x.(type) {
+	case int:
+		return fmt.Sprintf("int %d", v+1)
+	case string:
+		return "string of length " + fmt.Sprint(len(v))
+	default:
+		return fmt.Sprintf("something else: %T", v)
+	}
+}
+
+func main() {
+	fmt.Println(describe(41))
+	fmt.Println(describe("Phở"))
+	fmt.Println(describe(3.5))
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Trong case int, v là int nên v+1 chạy được. Trong case string, v là string nên len(v) chạy được. 3.5 là float64, không khớp case nào nên default chạy." >
+```text
+int 42
+string of length 5
+something else: float64
+```
+</TerminalOutput>
+
+Chương trình thật có nhiều loại case hơn. Đây là cùng switch đó, thêm một kiểu struct, một interface (`fmt.Stringer`, kiểu nào có method `String()`) và `nil`:
 
 ```go
 package main
@@ -1124,56 +1153,16 @@ func main() {
 }
 ```
 
-<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Struct không so sánh được bằng > và <, nên không biên dịch được. Thông báo liệt kê mọi kiểu cmp.Ordered cho phép.">
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Struct không so sánh được bằng > và <, nên không biên dịch được. Compiler liệt kê mọi kiểu cmp.Ordered cho phép; phần giữa danh sách được cắt bằng … ở đây.">
 ```text
 # command-line-arguments
-./main.go:18:17: Pair does not satisfy cmp.Ordered (Pair missing in ~int | ~int8 | ~int16 | ~int32 | ~int64 | ~uint | ~uint8 | ~uint16 | ~uint32 | ~uint64 | ~uintptr | ~float32 | ~float64 | ~string)
+./main.go:18:17: Pair does not satisfy cmp.Ordered (Pair missing in ~int | ~int8 | ~int16 | … | ~string)
 ```
 </TerminalOutput>
 
-Kiểu cũng có thể là generic. `Stack[T]` chứa một kiểu phần tử bất kỳ, và các method dùng `T`:
+Kiểu cũng có thể là generic, không chỉ hàm. Kiểu `Stack[T]` generic được xây từng bước trong [Go interfaces deep dive](/blog/go-abstractions-interfaces-generics-errors/); lúc này biết dùng hàm generic là đủ.
 
-```go
-package main
-
-import "fmt"
-
-type Stack[T any] struct {
-	items []T
-}
-
-func (s *Stack[T]) Push(x T) { s.items = append(s.items, x) }
-
-func (s *Stack[T]) Pop() (T, bool) {
-	var zero T
-	if len(s.items) == 0 {
-		return zero, false
-	}
-	last := s.items[len(s.items)-1]
-	s.items = s.items[:len(s.items)-1]
-	return last, true
-}
-
-func main() {
-	var s Stack[string]
-	s.Push("a")
-	s.Push("b")
-	v, ok := s.Pop()
-	fmt.Println(v, ok)
-	var n Stack[int]
-	v2, ok2 := n.Pop()
-	fmt.Println(v2, ok2)
-}
-```
-
-<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Stack[string] và Stack[int] là hai kiểu riêng được tạo từ một định nghĩa. Pop trên stack rỗng trả về giá trị zero và false.">
-```text
-b true
-0 false
-```
-</TerminalOutput>
-
-Chọn cái nào? Quy tắc đơn giản: dùng interface khi các kiểu khác nhau làm cùng một việc theo cách khác nhau (database thật và bản giả trong test), dùng generics khi cùng một đoạn code phải chạy trên nhiều kiểu (sắp xếp, stack). Cứ bắt đầu không dùng generics, và thêm vào khi bạn thấy mình đang copy hàm. Phần bàn kỹ hơn về lúc nào trừu tượng hóa giúp hay hại nằm ở [Go interfaces deep dive](/blog/go-abstractions-interfaces-generics-errors/).
+Chọn cái nào? Quy tắc đơn giản: dùng interface khi các kiểu khác nhau làm cùng một việc theo cách khác nhau (database thật và bản giả trong test), dùng generics khi cùng một đoạn code phải chạy trên nhiều kiểu (sắp xếp, tìm giá trị lớn nhất). Cứ bắt đầu không dùng generics, và thêm vào khi bạn thấy mình đang copy hàm. Phần bàn kỹ hơn về lúc nào trừu tượng hóa giúp hay hại nằm ở chính bài đó.
 
 <Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
 
