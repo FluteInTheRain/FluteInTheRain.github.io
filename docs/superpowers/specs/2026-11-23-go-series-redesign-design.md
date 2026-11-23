@@ -75,7 +75,7 @@ Each level has a one-line promise the series page shows as the act blurb.
 | 1 | `go-first-program-modules-packages` *(new)* | Go basics | old part 1 §2 packages/`internal/`, light parts of §1 build and §3 `go.mod` | EG ch2; 100GM ch2 #12–#16 |
 | 2 | `go-variables-types-pointers-functions` *(new)* | Go types and functions | old part 1 §4 pointers + `defer` (no struct padding) | EG ch2; 100GM #1, #2, #17–#19, #42, #47 |
 | 3 | `go-slices-maps-strings` *(new)* | Go collections | old part 2 §1–2 (usage only), old part 1 §5 strings | 100GM #20–#24, #36, #37 |
-| 4 | `go-structs-methods-interfaces` *(new)* | Go structs and interfaces | old part 2 §3–5 (usage, no `iface` layout) | 100GM #11 (embedding usage only; hazards in post 12) |
+| 4 | `go-structs-methods-interfaces` *(new)* | Go structs and interfaces | old part 2 §3–5 (usage, no `iface` layout) | — (no 100GM item; embedding hazards are #10 in post 12) |
 | 5 | `go-errors-defer-panic` *(new)* | Go errors | old part 3 §1–2, old part 5 §4 "handle once" | 100GM #43, #44, ch7 #48–#54 |
 | 6 | `go-testing-table-tests` *(new)* | Go testing | old part 3 §5 | 100GM ch11 #82–#88, #90 |
 | 7 | `go-goroutines-channels-select` *(new)* | Goroutines and channels | old part 3 §3–4 (channels/select) | 100GM #55, #57, #62, #65, #67 |
@@ -83,7 +83,7 @@ Each level has a one-line promise the series page shows as the act blurb.
 | 9 | `go-concurrency-patterns-worker-pools-pipelines` *(new)* | Go concurrency patterns | none (new material) | 100GM #73; Go blog "Pipelines and cancellation"; Rob Pike "Go Concurrency Patterns" (2012) |
 | 10 | `go-http-service-net-http-json-middleware` *(new)* | Build a Go HTTP service | none (new material) | EG ch2; `net/http` docs, Go 1.22 routing and `log/slog` posts on the Go blog |
 | 11 | `go-memory-data-types-slices-maps-strings` *(kept)* | Go memory | old part 4 (slice header, leaks, range) + old part 2 §1–2 internals (24-byte header, SwissTable) | 100GM #25–#35, #38–#41 |
-| 12 | `go-abstractions-interfaces-generics-errors` *(kept)* | Go interfaces deep dive | old part 5 §1–3 + old part 2 §5 `iface`/typed nil; errors section moves to post 5 | 100GM #3–#10, #45, #46 |
+| 12 | `go-abstractions-interfaces-generics-errors` *(kept)* | Go interfaces deep dive | old part 5 §1–3 + old part 2 §5 `iface`/typed nil; errors section moves to post 5 | 100GM #3–#11, #45, #46 |
 | 13 | `go-concurrency-scheduler-channels-context-mutexes` *(kept)* | Go concurrency deep dive | old part 6 (GMP, races, nil channels, etcd deadlock) | 100GM #56, #58, #59, #63, #64, #66, #68, #69, #72; EG ch4 (scheduler) |
 | 14 | `go-production-stdlib-cpu-cache-gc-kubernetes` *(kept)* | Go in production | old part 7 §1 stdlib traps + §4 K8s CFS throttling | 100GM ch10 #75–#81, #100 |
 | 15 | `go-efficiency-workflow-raer-tfbo-hardware-memory` *(kept)* | When to optimize | old part 8 §1–3 (RAER, TFBO) | EG ch1, ch3 |
@@ -105,7 +105,7 @@ Every post follows the `book-to-post` structure: hero, hook, Concepts box, secti
 
 **3. Go collections.** Arrays vs slices as a reader of other languages sees them (`ArrayList`/`list`/`Array`), `make`, `append`, `len`/`cap` at usage level, nil vs empty slice, `copy`. Maps: create, comma-ok, delete, iteration order is random. Slices can share memory: one plain `b := a[1:3]; b[0] = 99` example, the why goes to post 11. Strings are bytes; `rune`; ranging over `"Phở"`. Link forward to post 11 for what happens underneath. Capacity advice stays one rule ("`make` with a capacity when you know the size"); growth tables, allocation counts, map size hints and `strings.Trim*` pitfalls live in post 11. Demo: `append` growth visualiser (usage level).
 
-**4. Go structs and interfaces.** No classes: structs + methods. Value vs pointer receivers (one rule of thumb). Embedding as composition, not inheritance. Interfaces are satisfied implicitly; small interfaces (`io.Reader`, `fmt.Stringer`) as real stdlib cases. Type switches. Generics at usage level (`[T any]`, `slices`, `maps` packages). Link forward to post 12. Demo: "which type satisfies which interface" interactive checker.
+**4. Go structs and interfaces.** No classes: structs + methods. Value vs pointer receivers (one rule of thumb). Embedding as composition, not inheritance. Interfaces are satisfied implicitly; small interfaces (`io.Reader`, `fmt.Stringer`) as real stdlib cases. Type switches. Generics moved to post 12 (2026-11-23: posts 1–10 use no generics). Link forward to post 12. Demo: "which type satisfies which interface" interactive checker.
 
 **5. Go errors.** Errors are values; `if err != nil` and why Go chose it (compare with exceptions). Creating errors, wrapping with `%w`, `errors.Is`/`errors.As`, `errors.Join`. Handle an error once (log or return, not both). Named results and the `err` they silently keep (100GM #43–#44) live here, since their trap is about errors. `defer` for cleanup, `panic`/`recover` and when panic is legitimate. Real case: a sourced incident where swallowed or duplicated errors hid a failure. Demo: error-wrap chain unwinder.
 
@@ -121,7 +121,7 @@ Every post follows the `book-to-post` structure: hero, hook, Concepts box, secti
 
 **11. Go memory (kept slug).** Slice header (pointer, len, cap), shared backing arrays, `append` overwriting a neighbour, slice and substring memory leaks, maps never shrink, SwissTable maps (Go 1.24+), range copies and pointer elements, comparing values, how `append` grows capacity (growth table, allocation counts), map size hints, `strings.Trim*` vs `TrimSuffix`. Starts with a recap box linking posts 3 and 4.
 
-**12. Go interfaces deep dive (kept slug).** Interface values as (type, data); the typed-nil trap; interface pollution; consumer-side interfaces; returning interfaces; `any`; when generics fit and when they do not; type-embedding hazards; using a filename as a function input; `init()` functions and getters/setters (moved from post 2).
+**12. Go interfaces deep dive (kept slug).** Interface values as (type, data); the typed-nil trap; interface pollution; consumer-side interfaces; returning interfaces; `any`; generics at usage level (`[T any]`, a generic `Stack[T]`, `slices`, `maps`; moved from post 4) and when they fit and when they do not; functional options (#11); type-embedding hazards; using a filename as a function input; `init()` functions and getters/setters (moved from post 2).
 
 **13. Go concurrency deep dive (kept slug).** GMP scheduler; why more goroutines can be slower; data race vs race condition; loop variables in goroutines (Go 1.22 change); `select` is random; nil channels; `append` races; `sync.Cond`; the etcd deadlock as the real case.
 

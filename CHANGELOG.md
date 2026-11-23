@@ -3,6 +3,12 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-23 — Series Go: bài 4–10 (draft) và sơ đồ cho bài 1–10
+
+- **Đã làm:** viết bài 4–10 của series Go mới (`draft: true`): structs/interfaces, errors, testing, goroutines/channels, context/mutex, concurrency patterns, HTTP service. Mỗi bài có fact review, test người đọc mới và một vòng sửa. Thêm 51 sơ đồ SVG vẽ trên trang (`src/components/mdx/GoP01*`…`GoP10*`, khoảng 5 sơ đồ mỗi bài) cho cả bài 1–10. Mỗi sơ đồ được kiểm tra sự thật và chụp màn hình sáng/tối. Spec redesign sửa phân bổ sách: post 4 không giữ mục 100GM nào; #11 (functional options) và generics (`Stack[T]`) chuyển sang post 12.
+- **Ai quyết:** user chọn mật độ "vừa" (khoảng 4–6 sơ đồ mỗi bài) và bảo merge; AI chọn nội dung từng sơ đồ.
+- **Chưa chốt:** bài 4–10 vẫn là draft, chờ user bật xuất bản. `series.ts` vẫn là bản cũ tới khi cutover. Bài 11–20 chưa viết lại. Spec/plan sơ đồ ở `docs/superpowers/{specs,plans}/2026-11-23-go-posts-visuals*`.
+
 ## 2026-11-23 — Bật xuất bản bài 1–3 series Go mới
 
 - **Đã làm:** đổi `draft: false` cho `go-first-program-modules-packages`, `go-variables-types-pointers-functions`, `go-slices-maps-strings`.
