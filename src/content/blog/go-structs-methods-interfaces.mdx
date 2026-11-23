@@ -1,0 +1,1222 @@
+---
+title: "Go structs and interfaces"
+title_vi: "Struct và interface trong Go"
+description: "Go has no classes. Structs, methods, embedding, implicit interfaces, type switches and generics, explained for a developer coming from Java, Python or JavaScript."
+description_vi: "Go không có class. Struct, method, embedding, interface ngầm định, type switch và generics, giải thích cho người đến từ Java, Python hay JavaScript."
+date: 2026-11-23
+category: "backend"
+tags: ["golang", "structs", "interfaces", "generics"]
+cover: "../../assets/series/golang/go-gopher-pencil-wrench.jpg"
+cover_alt: "Pencil drawing of the Go gopher holding a wrench, drawn by Renee French"
+draft: true
+sources:
+  - { title: "Go FAQ: Why is there no type inheritance?", author: "The Go Authors", url: "https://go.dev/doc/faq#inheritance" }
+  - { title: "Go Proverbs", author: "Rob Pike", url: "https://go-proverbs.github.io/" }
+  - { title: "io package: Reader", author: "The Go Authors", url: "https://pkg.go.dev/io#Reader" }
+  - { title: "bufio package: ReadWriter", author: "The Go Authors", url: "https://pkg.go.dev/bufio#ReadWriter" }
+  - { title: "strings package: Builder", author: "The Go Authors", url: "https://pkg.go.dev/strings#Builder" }
+  - { title: "net/http package: Handler", author: "The Go Authors", url: "https://pkg.go.dev/net/http#Handler" }
+  - { title: "The Go Programming Language Specification: Method sets", author: "The Go Authors", url: "https://go.dev/ref/spec#Method_sets" }
+  - { title: "Go gopher pencil wrench (CC BY 3.0), used as the cover", author: "Renee French", url: "https://commons.wikimedia.org/wiki/File:Go_gopher_pencil_wrench.jpg" }
+  - { title: "Four way power board Australian plugs.jpg (public domain)", author: "Leon Brooks", url: "https://commons.wikimedia.org/wiki/File:Four_way_power_board_Australian_plugs.jpg" }
+---
+
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import En from '../../components/mdx/En.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import GoSatisfyCheckerDemo from '../../components/mdx/GoSatisfyCheckerDemo.astro';
+import GoP04Embedding from '../../components/mdx/GoP04Embedding.astro';
+import GoP04InterfaceValue from '../../components/mdx/GoP04InterfaceValue.astro';
+import GoP04Receivers from '../../components/mdx/GoP04Receivers.astro';
+import GoP04StructMemory from '../../components/mdx/GoP04StructMemory.astro';
+import GoP04TypeSwitch from '../../components/mdx/GoP04TypeSwitch.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import heroPlugs from '../../assets/blog/go-structs-methods-interfaces/power-board-plugs.jpg';
+
+<En>
+
+<Figure src={heroPlugs} alt="A white four-way power board with its plug resting on top, on a dark table" caption="A socket does not ask what is plugged into it, only whether the plug fits. A Go interface works the same way." sourceTitle="Wikimedia Commons: Four way power board Australian plugs.jpg (public domain, Leon Brooks)" sourceUrl="https://commons.wikimedia.org/wiki/File:Four_way_power_board_Australian_plugs.jpg" />
+
+> "…in Go a type automatically satisfies any interface that specifies a subset of its methods."
+> &mdash; *The Go FAQ*, "Why is there no type inheritance?"
+
+### Go has no class keyword, and no implements
+
+If you open a Java project, a file starts with `class Invoice implements Payable`. Go has neither word. You write a plain record type called a struct, you hang functions on it, and you are done. Nothing says which interfaces it fits.
+
+That sounds like a step back until you look at the standard library. One tiny interface, `io.Reader`, is a single method. Files, network connections, in-memory buffers and compressed streams all fit it, and none of them ever said so. A function that takes an `io.Reader` works with all of them, today and with types that do not exist yet. This post shows how structs, methods and interfaces make that possible, and the few rules that trip up newcomers.
+
+<Callout type="note" title="TL;DR">
+A struct groups fields; a method is a function with a receiver written before its name. Use a pointer receiver (`*T`) when the method changes the value, and a value receiver otherwise, and keep one choice per type. Embedding a struct gives you its fields and methods without inheritance. An interface is a list of methods, and any type that has them fits it without declaring anything. Generics (`[T any]`) cover the case where one function must work on many types.
+</Callout>
+
+## Coming from Java, Python or JavaScript
+
+Here is a quick map from the language you already use to Go.
+
+| You know | Java | Python | JavaScript | Go |
+|---|---|---|---|---|
+| A record with fields | `class` with fields | `class` / `dataclass` | `class` / object | `struct` |
+| A method | method in the class | `def m(self)` | method in the class | `func (r Receiver) m()` |
+| Constructor | `new Invoice(...)` | `Invoice(...)` | `new Invoice(...)` | a plain function `NewInvoice(...)` |
+| Reuse by extending | `extends` | base class | `extends` | embed a struct (composition) |
+| Fit an interface | `implements` | duck typing, checked late | duck typing, checked late | implicit, checked by the compiler |
+| One function for many types | generics (`<T>`) | duck typing | duck typing | generics (`[T any]`) |
+
+Two differences matter most. Go checks "does this type have the methods?" at compile time, but nobody writes it down on the type. And there is no inheritance at all: you combine small pieces instead.
+
+<Concepts>
+
+- **Struct**: a type that groups named fields, like a class with data and no behavior. You write it `type Account struct { ... }`.
+- **Method**: a function attached to a type. The attached value is called the receiver.
+- **Interface**: a type that lists methods. Any value whose type has those methods can be used where the interface is expected.
+
+</Concepts>
+
+---
+
+## Structs
+
+A struct is Go's record type. You declare its fields once, then create values of it. There are no constructors and no `new` keyword for this. You write the type name followed by braces. Fields you leave out get their zero value (`0`, `""`, `false`, `nil`), the same rule from [Go variables, types, pointers and functions](/blog/go-variables-types-pointers-functions/).
+
+```go
+package main
+
+import "fmt"
+
+type Account struct {
+	Owner   string
+	Balance int
+}
+
+func NewAccount(owner string) *Account {
+	return &Account{Owner: owner}
+}
+
+func main() {
+	a := Account{Owner: "Lan", Balance: 100}
+	var zero Account
+	p := &a
+	p.Balance += 50 // no (*p) needed
+
+	fmt.Println(a)
+	fmt.Printf("%v | %+v\n", zero, zero)
+	fmt.Println(p.Owner, NewAccount("Minh"))
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="An unset struct is all zero values. %+v adds the field names. Printing a pointer to a struct shows & in front.">
+```text
+{Lan 150}
+{ 0} | {Owner: Balance:0}
+Lan &{Minh 0}
+```
+</TerminalOutput>
+
+Read it from the top. `Account{Owner: "Lan", Balance: 100}` is a struct literal, and naming the fields keeps it readable when the struct grows. `var zero Account` is a ready-to-use value with `Owner` empty and `Balance` 0. `%+v` is a Printf verb that prints the field names too, and it is the one you will reach for when debugging.
+
+`p := &a` takes a pointer to the struct, and `p.Balance` reaches a field through it. Go follows the pointer for you, so you never write `p->Balance` as in C. `NewAccount` is not a special form: it is a normal function that returns a pointer, and the name `NewX` is only a convention. Use it when the zero value alone is not valid, for example when you must set up a map first.
+
+<GoP04StructMemory />
+
+Lowercase fields (`balance`) are private to the package, uppercase ones (`Balance`) are public. That is the same visibility rule as for functions in [Go first program, modules and packages](/blog/go-first-program-modules-packages/).
+
+<Callout type="tip" title="Make the zero value useful">
+A struct whose zero value works needs no constructor. `var b strings.Builder` and `var wg sync.WaitGroup` are ready to use. This is a Go design rule, and it is why many types have no `New` function at all.
+</Callout>
+
+<Concepts>
+
+- **Struct literal**: a value written in place, like `Account{Owner: "Lan"}`.
+- **`%+v`**: a Printf verb that prints a struct with its field names.
+- **`NewX` function**: a naming convention for a function that builds and returns a value. It is not a language feature.
+
+</Concepts>
+
+---
+
+## Methods and receivers
+
+A method is a function with one extra piece before its name: the receiver, which is the value the method works on. It plays the role of `this` or `self`, but you name it yourself. A short name taken from the type (`a` for `Account`) is the usual choice, not `this` or `self`.
+
+There are two kinds of receiver, and the difference is the most common source of surprise.
+
+```go
+package main
+
+import "fmt"
+
+type Counter struct{ n int }
+
+func (c Counter) IncValue()    { c.n++ }
+func (c *Counter) IncPointer() { c.n++ }
+
+func main() {
+	var c Counter
+	c.IncValue()
+	fmt.Println("after IncValue:  ", c.n)
+	c.IncPointer()
+	fmt.Println("after IncPointer:", c.n)
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="The value receiver changed a copy and the change was thrown away. The pointer receiver changed the real counter.">
+```text
+after IncValue:   0
+after IncPointer: 1
+```
+</TerminalOutput>
+
+A value receiver `(c Counter)` gets a copy of the struct, exactly like a function parameter (Go passes everything by value, see the pointers section of the types post). A pointer receiver `(c *Counter)` gets the address, so it can change the original. You call both the same way, `c.IncPointer()`: Go takes the address for you when `c` is a variable.
+
+<GoP04Receivers />
+
+### One rule of thumb
+
+Use a pointer receiver when the method changes the struct, when the struct holds something that must not be copied (a lock, a buffer), or when the struct is large. Use a value receiver for small, unchanging values such as a point or a duration. Then keep one choice per type: if one method needs a pointer receiver, make them all pointer receivers. Mixing both on one type makes the interface rules below confusing.
+
+| Question | Pointer receiver `(t *T)` | Value receiver `(t T)` |
+|---|---|---|
+| Does the method change the struct? | yes | no |
+| Does the struct contain a lock or buffer? | yes | never |
+| Is it a small, unchanging value? | no | yes |
+| Other methods on the type | all pointer | all value |
+
+The standard library follows this. Here is the real failure when you break it: `strings.Builder` keeps a pointer to itself, so copying it after use is caught at run time.
+
+```go
+package main
+
+import (
+	"fmt"
+	"strings"
+)
+
+func main() {
+	var b strings.Builder
+	b.WriteString("hello")
+	c := b // copies the builder
+	c.WriteString(" world")
+	fmt.Println(c.String())
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="The program stops with a panic. The first line is the reason; the lines after it are the call stack, cut here to the first two. Panics are explained in the errors post.">
+```text
+panic: strings: illegal use of non-zero Builder copied by value
+
+goroutine 1 [running]:
+```
+</TerminalOutput>
+
+<Concepts>
+
+- **Receiver**: the value a method is called on, written in parentheses before the method name.
+- **Pointer receiver**: a receiver of type `*T`. The method can change the original value.
+- **Value receiver**: a receiver of type `T`. The method gets its own copy.
+
+</Concepts>
+
+---
+
+## Embedding
+
+Go replaces inheritance with embedding: you list one struct type inside another without giving it a field name. The outer struct then gets the inner struct's fields and methods as if they were its own. It is composition (one thing contains another) with a shortcut, not a family tree.
+
+```go
+package main
+
+import "fmt"
+
+type Logger struct{ Prefix string }
+
+func (l Logger) Log(msg string) { fmt.Println(l.Prefix + msg) }
+func (l Logger) Name() string   { return "Logger" }
+func (l Logger) Describe()      { fmt.Println("I am", l.Name()) }
+
+type Service struct {
+	Logger // embedded: no field name
+	Port   int
+}
+
+func (s Service) Name() string { return "Service" }
+
+func main() {
+	s := Service{Logger: Logger{Prefix: "[svc] "}, Port: 8080}
+	s.Log("started")      // promoted from Logger
+	fmt.Println(s.Prefix) // promoted field
+	s.Describe()          // runs Logger.Describe
+	fmt.Println(s.Name()) // Service's own method
+	fmt.Println(s.Logger.Name())
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Log and Prefix are promoted, so s uses them directly. Describe still says Logger: the inner type does not know it was embedded, so it never sees Service's Name.">
+```text
+[svc] started
+[svc] 
+I am Logger
+Service
+Logger
+```
+</TerminalOutput>
+
+`Log`, `Describe` and the field `Prefix` are promoted: you call them on `s` directly. If the outer type defines the same name (`Name`), the outer one wins, and the inner one is still reachable as `s.Logger.Name()`. The line `I am Logger` is the key difference from Java. In a Java subclass, `describe()` would call the overridden `name()`. Here `Describe` belongs to `Logger`, which knows nothing about `Service`, so it calls its own `Name`. There is no override.
+
+<GoP04Embedding />
+
+The standard library uses embedding to build bigger types from small ones. The real definition from `go doc bufio.ReadWriter`:
+
+<TerminalOutput command="go doc bufio.ReadWriter" label="Go 1.27.1 · darwin/arm64" caption="A ReadWriter is a Reader and a Writer side by side. Both sets of methods are promoted, so it can be used wherever either one is expected.">
+```text
+type ReadWriter struct {
+	*Reader
+	*Writer
+}
+```
+</TerminalOutput>
+
+Embedding has hazards (a promoted method can leak out of your public API, and promotion can hide an ambiguity). They are covered in [Go interfaces deep dive](/blog/go-abstractions-interfaces-generics-errors/). For now, embed when you want to reuse behavior, and do not embed just to save typing a field name.
+
+<Concepts>
+
+- **Embedding**: putting a type inside a struct without a field name, so its fields and methods are promoted to the outer struct.
+- **Promoted method**: a method of the embedded type that you can call directly on the outer value.
+- **Composition**: building a bigger type by containing smaller ones, instead of inheriting from a parent.
+
+</Concepts>
+
+---
+
+## Interfaces
+
+An interface lists methods. A type satisfies it by having those methods, with the same names and signatures. That is all: no keyword, no registration, and the interface can be written years after the type. This is why the power board in the photo above is a fair picture: the interface is the socket, and any type with the right methods is a plug that fits.
+
+Here is the real case. `io.Reader` has one method: `Read(p []byte) (n int, err error)`. The function below counts lines from anything that is a reader, and the three calls pass three unrelated types.
+
+```go
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+)
+
+// countLines works with anything that has a Read method.
+func countLines(r io.Reader) int {
+	sc := bufio.NewScanner(r)
+	n := 0
+	for sc.Scan() {
+		n++
+	}
+	return n
+}
+
+func main() {
+	fmt.Println(countLines(strings.NewReader("one\ntwo\nthree\n")))
+	fmt.Println(countLines(bytes.NewBufferString("a\nb\n")))
+	fmt.Println(countLines(os.Stdin))
+}
+```
+
+<TerminalOutput command="printf 'x\ny\nz\nw\n' | go run main.go" label="Go 1.27.1 · darwin/arm64" caption="A string reader, a byte buffer and the process's standard input all fit io.Reader. The last call counts four lines piped in from the shell.">
+```text
+3
+2
+4
+```
+</TerminalOutput>
+
+The `Read` method also returns an `error` as a second value. Errors are a normal return value in Go, and the [errors post](/blog/go-errors-defer-panic/) explains them. Here `bufio.Scanner` deals with it for us.
+
+Printing uses the same idea. `fmt.Stringer` is one method, `String() string`, and `Println` calls it when a value has one:
+
+```go
+package main
+
+import "fmt"
+
+type Celsius float64
+
+func (c Celsius) String() string { return fmt.Sprintf("%.1f°C", float64(c)) }
+
+func main() {
+	t := Celsius(36.6)
+	fmt.Println(t) // Println looks for a String method
+	fmt.Printf("%v\n", t)
+	fmt.Printf("%s\n", t)
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Celsius is a float64 underneath, yet all three prints use its String method. Celsius never mentions fmt.Stringer.">
+```text
+36.6°C
+36.6°C
+36.6°C
+```
+</TerminalOutput>
+
+The same pattern holds in the web server: `net/http` defines `Handler` as one method, `ServeHTTP(ResponseWriter, *Request)`, and any type with it can serve requests. Rob Pike's Go proverb says it: "The bigger the interface, the weaker the abstraction." An interface with one or two methods is easy to satisfy and easy to fake in a test. Define interfaces where they are used, keep them small, and let functions accept interfaces while constructors return concrete structs.
+
+### Which type fits which interface
+
+There is one rule that catches almost everyone. A pointer receiver method belongs only to the pointer type. So a value `Counter{}` does not satisfy an interface that needs a pointer-receiver method, but `&Counter{}` does:
+
+```go
+package main
+
+import "fmt"
+
+type Counter struct{ n int }
+
+func (c *Counter) Inc() { c.n++ }
+
+type Incrementer interface{ Inc() }
+
+func main() {
+	var a Incrementer = &Counter{} // pointer: fine
+	a.Inc()
+	var b Incrementer = Counter{} // value: not fine
+	fmt.Println(a, b)
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="This is a compile error, so nothing runs. The last part of the message names the cause: Inc has a pointer receiver.">
+```text
+# command-line-arguments
+./main.go:14:22: cannot use Counter{} (value of struct type Counter) as Incrementer value in variable declaration: Counter does not implement Incrementer (method Inc has pointer receiver)
+```
+</TerminalOutput>
+
+Why this rule? When you put a value into an interface variable, Go stores a copy of it. Say `Counter{}` went in and you called `Inc()`: it would raise `n` on that hidden copy, and your own `Counter` would stay at 0, the same trap as `IncValue` above. That is nearly always a bug, so the compiler refuses. The opposite direction is fine: a pointer's methods include the value-receiver ones. Try every combination below. Each message is the reason part of the real compiler error.
+
+<GoP04InterfaceValue />
+
+<GoSatisfyCheckerDemo />
+
+<Callout type="warning" title="Do not return a typed nil as an interface">
+A function that returns a nil pointer inside an interface value produces an interface that is not equal to `nil`. The interfaces deep dive linked below covers this classic trap.
+</Callout>
+
+<Concepts>
+
+- **Implicit satisfaction**: a type fits an interface just by having its methods. The type never names the interface.
+- **`io.Reader` / `fmt.Stringer` / `http.Handler`**: three standard interfaces with one method each. Most Go code you read is built on them.
+- **Method set**: the methods a type can be used with inside an interface. A plain `Counter` gets only the methods written `(c Counter)`; a `*Counter` gets those plus the ones written `(c *Counter)`.
+
+</Concepts>
+
+---
+
+## Type switches and assertions
+
+Sometimes you hold an interface value and need to know what is inside it. `any` is the interface with no methods, so every type fits it (the older spelling is `interface{}`). A type switch asks "what is the concrete type?" and gives you the value already converted in each branch.
+
+Read `switch v := x.(type)` as: look at the real type inside `x`, run the matching `case`, and call the value `v` with that type. Start with two types:
+
+```go
+package main
+
+import "fmt"
+
+func describe(x any) string {
+	switch v := x.(type) {
+	case int:
+		return fmt.Sprintf("int %d", v+1)
+	case string:
+		return "string of length " + fmt.Sprint(len(v))
+	default:
+		return fmt.Sprintf("something else: %T", v)
+	}
+}
+
+func main() {
+	fmt.Println(describe(41))
+	fmt.Println(describe("Phở"))
+	fmt.Println(describe(3.5))
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Inside case int, v is an int, so v+1 works. Inside case string, v is a string, so len(v) works. 3.5 is a float64 and matches neither case, so default runs." >
+```text
+int 42
+string of length 5
+something else: float64
+```
+</TerminalOutput>
+
+Real programs have more kinds of cases. Here is the same switch with a struct type, an interface (`fmt.Stringer`, any type with a `String()` method) and `nil` added:
+
+```go
+package main
+
+import "fmt"
+
+type Circle struct{ R float64 }
+type Square struct{ Side float64 }
+
+func describe(x any) string {
+	switch v := x.(type) {
+	case int:
+		return fmt.Sprintf("int %d", v+1)
+	case string:
+		return "string of length " + fmt.Sprint(len(v))
+	case Circle:
+		return fmt.Sprintf("circle radius %.1f", v.R)
+	case fmt.Stringer:
+		return "something printable: " + v.String()
+	case nil:
+		return "nothing"
+	default:
+		return fmt.Sprintf("unknown %T", v)
+	}
+}
+
+func main() {
+	fmt.Println(describe(41))
+	fmt.Println(describe("Phở"))
+	fmt.Println(describe(Circle{R: 2}))
+	fmt.Println(describe(Square{Side: 3}))
+	fmt.Println(describe(nil))
+
+	var x any = "hi"
+	n, ok := x.(int)
+	fmt.Println(n, ok)
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Inside case int, v is an int, so v+1 works. Square has no String method, so it falls to default, and %T prints main.Square. The last line is a failed assertion: ok is false instead of a crash.">
+```text
+int 42
+string of length 5
+circle radius 2.0
+unknown main.Square
+nothing
+0 false
+```
+</TerminalOutput>
+
+<GoP04TypeSwitch />
+
+`x.(int)` is a type assertion: it says "I believe this interface holds an int". Always use the two-value form `n, ok := x.(int)`. The single-value form `x.(int)` panics when the guess is wrong. A case can also name an interface (`case fmt.Stringer`), which matches any type that has the method.
+
+Reach for a type switch sparingly. If you find yourself switching on many types, a method on an interface is usually cleaner.
+
+<Concepts>
+
+- **`any`**: the interface with no methods; every value fits it.
+- **Type switch**: `switch v := x.(type)`, which runs the branch that matches the real type and gives you `v` already of that type.
+- **Type assertion**: `x.(T)`, which pulls a concrete type out of an interface. Use the `value, ok` form.
+
+</Concepts>
+
+---
+
+## Generics
+
+An interface answers "what can this value do?". Generics answer a different question: "I wrote the same function for `int` and for `string`, can I write it once?". A generic function has a type parameter in square brackets, and a constraint that says which types are allowed.
+
+```go
+package main
+
+import (
+	"cmp"
+	"fmt"
+	"slices"
+)
+
+// Max works for any type that can be compared with > and <.
+func Max[T cmp.Ordered](a, b T) T {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func main() {
+	fmt.Println(Max(3, 7), Max(2.5, 1.5), Max("go", "java"))
+
+	nums := []int{5, 2, 9}
+	names := []string{"Lan", "An", "Minh"}
+	slices.Sort(nums)
+	slices.Sort(names)
+	fmt.Println(nums, names)
+	fmt.Println(slices.Contains(names, "An"), slices.Index(nums, 9))
+	fmt.Println(slices.Max(nums))
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="One Max serves ints, floats and strings. The slices package does the same for sorting and searching, so you do not write those loops again.">
+```text
+7 2.5 java
+[2 5 9] [An Lan Minh]
+true 2
+9
+```
+</TerminalOutput>
+
+`[T cmp.Ordered]` means: T is any type that supports ordering (numbers and strings). The compiler works out `T` from the arguments, so you rarely write `Max[int](3, 7)`. Before you write your own helper, look in the `slices` and `maps` packages: `slices.Sort`, `slices.Contains`, `slices.Index` and `slices.Max` already exist. A type that does not fit the constraint is rejected at compile time. Here is `Max` called with a struct, using the same `Max` and `Pair` type:
+
+```go
+package main
+
+import (
+	"cmp"
+	"fmt"
+)
+
+func Max[T cmp.Ordered](a, b T) T {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+type Pair struct{ A, B int }
+
+func main() {
+	fmt.Println(Max(Pair{1, 2}, Pair{3, 4}))
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="A struct cannot be compared with > and <, so this fails to compile. The compiler lists every type cmp.Ordered allows; the middle of that list is cut here with …">
+```text
+# command-line-arguments
+./main.go:18:17: Pair does not satisfy cmp.Ordered (Pair missing in ~int | ~int8 | ~int16 | … | ~string)
+```
+</TerminalOutput>
+
+Types can be generic as well, not only functions. A generic `Stack[T]` type is built step by step in the [Go interfaces deep dive](/blog/go-abstractions-interfaces-generics-errors/); for now, using generic functions is enough.
+
+Which one should you pick? A plain rule: use an interface when different types do the same thing in different ways (a database and a fake in a test), and use generics when the same code must run over many types (sorting, finding the largest). Start without generics, and add them when you notice yourself copying a function. The longer discussion of when abstractions help or hurt is in the same post.
+
+<Concepts>
+
+- **Type parameter**: the `T` in `Max[T cmp.Ordered]`. It stands for one type chosen at each call.
+- **Constraint**: the rule after `T` (`any`, `cmp.Ordered`) that limits which types can be used.
+- **`slices` and `maps` packages**: ready-made generic helpers for slices and maps.
+
+</Concepts>
+
+---
+
+## Key takeaways
+
+- Go has structs and methods, not classes: a method is a function with a receiver, and a struct is usable at its zero value.
+- Use a pointer receiver when the method changes the value or the type holds a lock, a value receiver for small unchanging values, and one choice per type.
+- Embedding promotes the inner type's fields and methods, but it is not inheritance: the inner type never sees the outer one.
+- A type satisfies an interface just by having its methods. A value `T` does not get the pointer-receiver methods, only `*T` does.
+- Keep interfaces small and define them where they are used. Use generics when the same code must work on many types.
+
+## Review questions
+
+1. `c.IncValue()` runs without error but `c.n` stays 0. Why, and what do you change? (See "Methods and receivers".)
+2. `Describe` is promoted from `Logger` into `Service`, but it prints `I am Logger` even though `Service` defines its own `Name`. Why does Go not call the outer `Name`? (See "Embedding".)
+3. Why does `var b Incrementer = Counter{}` fail to compile while `&Counter{}` works? (See "Interfaces".)
+4. `x.(int)` crashed your program on a string. How do you write it so it cannot crash? (See "Type switches and assertions".)
+5. You need a function that sorts both `[]int` and `[]string`. Do you write an interface, or use generics, and why? (See "Generics".)
+
+### Coming later in the series
+
+Errors and `panic` are in the [errors post](/blog/go-errors-defer-panic/). The hazards of embedding, how an interface is stored, and the typed nil trap are in [Go interfaces deep dive](/blog/go-abstractions-interfaces-generics-errors/). Locks and mutexes are in [Context and locks](/blog/go-context-timeouts-mutexes/).
+
+</En>
+
+<Vi>
+
+<Figure src={heroPlugs} alt="Ổ cắm điện bốn lỗ màu trắng với phích cắm đặt phía trên, trên mặt bàn tối" caption="Ổ cắm không hỏi thứ cắm vào là gì, chỉ hỏi phích có vừa không. Interface trong Go hoạt động y như vậy." sourceTitle="Wikimedia Commons: Four way power board Australian plugs.jpg (phạm vi công cộng, Leon Brooks)" sourceUrl="https://commons.wikimedia.org/wiki/File:Four_way_power_board_Australian_plugs.jpg" />
+
+> "…trong Go, một kiểu tự động thỏa mọi interface chỉ định một tập con các method của nó."
+> &mdash; *Go FAQ*, "Why is there no type inheritance?"
+
+### Go không có từ khóa class, cũng không có implements
+
+Mở một project Java, file nào cũng bắt đầu bằng `class Invoice implements Payable`. Go không có cả hai từ đó. Bạn viết một kiểu bản ghi đơn giản gọi là struct, gắn hàm vào nó, thế là xong. Không có chỗ nào ghi nó khớp với interface nào.
+
+Nghe như đi lùi, cho đến khi bạn nhìn thư viện chuẩn. Một interface nhỏ xíu, `io.Reader`, chỉ có một method. File, kết nối mạng, buffer trong bộ nhớ và luồng nén đều khớp với nó, và không cái nào từng khai báo điều đó. Hàm nhận `io.Reader` dùng được với tất cả, hôm nay và cả với những kiểu chưa ra đời. Bài này chỉ cách struct, method và interface làm được việc đó, cùng vài quy tắc hay làm người mới vấp.
+
+<Callout type="note" title="TL;DR">
+Struct gom các field lại; method là hàm có receiver viết trước tên. Dùng pointer receiver (`*T`) khi method đổi giá trị, value receiver trong các trường hợp còn lại, và mỗi kiểu chọn một kiểu thôi. Embedding một struct cho bạn field và method của nó mà không cần kế thừa. Interface là danh sách method, và kiểu nào có đủ method đó thì khớp luôn mà không phải khai báo gì. Generics (`[T any]`) dùng khi một hàm phải chạy cho nhiều kiểu.
+</Callout>
+
+## Quen Java, Python hay JavaScript
+
+Đây là bảng quy đổi nhanh từ ngôn ngữ bạn đang dùng sang Go.
+
+| Bạn đã biết | Java | Python | JavaScript | Go |
+|---|---|---|---|---|
+| Bản ghi có field | `class` có field | `class` / `dataclass` | `class` / object | `struct` |
+| Method | method trong class | `def m(self)` | method trong class | `func (r Receiver) m()` |
+| Constructor | `new Invoice(...)` | `Invoice(...)` | `new Invoice(...)` | một hàm thường `NewInvoice(...)` |
+| Tái sử dụng bằng cách mở rộng | `extends` | class cha | `extends` | embed struct (composition) |
+| Khớp interface | `implements` | duck typing, kiểm tra muộn | duck typing, kiểm tra muộn | ngầm định, compiler kiểm tra |
+| Một hàm cho nhiều kiểu | generics (`<T>`) | duck typing | duck typing | generics (`[T any]`) |
+
+Hai điểm khác nhau quan trọng nhất. Go kiểm tra "kiểu này có đủ method không?" lúc biên dịch, nhưng không ai phải ghi điều đó lên kiểu. Và hoàn toàn không có kế thừa: bạn ghép các mảnh nhỏ lại với nhau.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Struct**: kiểu gom các field có tên, giống class chỉ có dữ liệu mà không có hành vi. Viết `type Account struct { ... }`.
+- **Method**: hàm gắn vào một kiểu. Giá trị được gắn vào gọi là receiver.
+- **Interface**: kiểu liệt kê các method. Giá trị nào có các method đó thì dùng được ở chỗ cần interface.
+
+</Concepts>
+
+---
+
+## Struct
+
+Struct là kiểu bản ghi của Go. Bạn khai báo field một lần rồi tạo giá trị từ nó. Không có constructor và không có từ khóa `new` cho việc này. Bạn viết tên kiểu rồi dấu ngoặc nhọn. Field nào bỏ qua sẽ nhận giá trị zero (`0`, `""`, `false`, `nil`), cùng quy tắc trong [Go variables, types, pointers and functions](/blog/go-variables-types-pointers-functions/).
+
+```go
+package main
+
+import "fmt"
+
+type Account struct {
+	Owner   string
+	Balance int
+}
+
+func NewAccount(owner string) *Account {
+	return &Account{Owner: owner}
+}
+
+func main() {
+	a := Account{Owner: "Lan", Balance: 100}
+	var zero Account
+	p := &a
+	p.Balance += 50 // no (*p) needed
+
+	fmt.Println(a)
+	fmt.Printf("%v | %+v\n", zero, zero)
+	fmt.Println(p.Owner, NewAccount("Minh"))
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Struct chưa gán gì toàn giá trị zero. %+v in thêm tên field. In con trỏ tới struct thì có dấu & ở đầu.">
+```text
+{Lan 150}
+{ 0} | {Owner: Balance:0}
+Lan &{Minh 0}
+```
+</TerminalOutput>
+
+Đọc từ trên xuống. `Account{Owner: "Lan", Balance: 100}` là struct literal, và ghi tên field giúp code dễ đọc khi struct lớn dần. `var zero Account` là giá trị dùng được ngay, với `Owner` rỗng và `Balance` bằng 0. `%+v` là verb của Printf in cả tên field, và là cái bạn sẽ dùng khi debug.
+
+`p := &a` lấy con trỏ tới struct, và `p.Balance` chạm field qua nó. Go tự đi theo con trỏ giúp bạn, nên không bao giờ phải viết `p->Balance` như trong C. `NewAccount` không phải cú pháp đặc biệt: nó là hàm thường trả về con trỏ, và tên `NewX` chỉ là quy ước. Dùng nó khi giá trị zero một mình chưa hợp lệ, ví dụ khi phải khởi tạo map trước.
+
+<GoP04StructMemory />
+
+Field chữ thường (`balance`) là riêng tư trong package, chữ hoa (`Balance`) là công khai. Cùng quy tắc hiển thị như với hàm ở [Go first program, modules and packages](/blog/go-first-program-modules-packages/).
+
+<Callout type="tip" title="Làm cho giá trị zero dùng được">
+Struct mà giá trị zero chạy được thì không cần constructor. `var b strings.Builder` và `var wg sync.WaitGroup` dùng được ngay. Đây là một nguyên tắc thiết kế của Go, và là lý do nhiều kiểu không có hàm `New`.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Struct literal**: giá trị viết ngay tại chỗ, như `Account{Owner: "Lan"}`.
+- **`%+v`**: verb của Printf in struct kèm tên field.
+- **Hàm `NewX`**: quy ước đặt tên cho hàm tạo và trả về một giá trị. Không phải tính năng ngôn ngữ.
+
+</Concepts>
+
+---
+
+## Method và receiver
+
+Method là hàm có thêm một phần trước tên: receiver, tức là giá trị mà method làm việc trên đó. Nó đóng vai `this` hay `self`, nhưng bạn tự đặt tên. Thường chọn tên ngắn lấy từ kiểu (`a` cho `Account`), không dùng `this` hay `self`.
+
+Có hai loại receiver, và khác biệt giữa chúng là nguồn bất ngờ phổ biến nhất.
+
+```go
+package main
+
+import "fmt"
+
+type Counter struct{ n int }
+
+func (c Counter) IncValue()    { c.n++ }
+func (c *Counter) IncPointer() { c.n++ }
+
+func main() {
+	var c Counter
+	c.IncValue()
+	fmt.Println("after IncValue:  ", c.n)
+	c.IncPointer()
+	fmt.Println("after IncPointer:", c.n)
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Value receiver sửa bản sao, thay đổi bị bỏ đi. Pointer receiver sửa counter thật.">
+```text
+after IncValue:   0
+after IncPointer: 1
+```
+</TerminalOutput>
+
+Value receiver `(c Counter)` nhận một bản sao của struct, y như tham số hàm (Go truyền mọi thứ theo giá trị, xem phần con trỏ ở bài về kiểu). Pointer receiver `(c *Counter)` nhận địa chỉ, nên sửa được bản gốc. Cách gọi giống nhau, `c.IncPointer()`: Go tự lấy địa chỉ khi `c` là biến.
+
+<GoP04Receivers />
+
+### Một quy tắc ngón tay cái
+
+Dùng pointer receiver khi method đổi struct, khi struct chứa thứ không được copy (lock, buffer), hoặc khi struct lớn. Dùng value receiver cho giá trị nhỏ, không đổi như một điểm hay một khoảng thời gian. Rồi giữ một lựa chọn cho mỗi kiểu: nếu một method cần pointer receiver thì cho tất cả method dùng pointer receiver. Trộn cả hai trên một kiểu làm quy tắc interface bên dưới rất khó hiểu.
+
+| Câu hỏi | Pointer receiver `(t *T)` | Value receiver `(t T)` |
+|---|---|---|
+| Method có đổi struct không? | có | không |
+| Struct có chứa lock hay buffer không? | có | không bao giờ |
+| Là giá trị nhỏ, không đổi? | không | có |
+| Các method khác trên kiểu | đều pointer | đều value |
+
+Thư viện chuẩn theo đúng quy tắc này. Đây là lỗi thật khi vi phạm: `strings.Builder` giữ con trỏ tới chính nó, nên copy sau khi đã dùng sẽ bị bắt lúc chạy.
+
+```go
+package main
+
+import (
+	"fmt"
+	"strings"
+)
+
+func main() {
+	var b strings.Builder
+	b.WriteString("hello")
+	c := b // copies the builder
+	c.WriteString(" world")
+	fmt.Println(c.String())
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Chương trình dừng với panic. Dòng đầu là lý do; các dòng sau là call stack, ở đây cắt còn hai dòng đầu. Panic được giải thích ở bài về lỗi.">
+```text
+panic: strings: illegal use of non-zero Builder copied by value
+
+goroutine 1 [running]:
+```
+</TerminalOutput>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Receiver**: giá trị mà method được gọi trên đó, viết trong ngoặc trước tên method.
+- **Pointer receiver**: receiver kiểu `*T`. Method sửa được giá trị gốc.
+- **Value receiver**: receiver kiểu `T`. Method có bản sao riêng.
+
+</Concepts>
+
+---
+
+## Embedding
+
+Go thay kế thừa bằng embedding: bạn ghi một kiểu struct bên trong struct khác mà không đặt tên field. Struct ngoài khi đó có field và method của struct trong như của chính nó. Đây là composition (cái này chứa cái kia) có thêm lối tắt, không phải cây gia phả.
+
+```go
+package main
+
+import "fmt"
+
+type Logger struct{ Prefix string }
+
+func (l Logger) Log(msg string) { fmt.Println(l.Prefix + msg) }
+func (l Logger) Name() string   { return "Logger" }
+func (l Logger) Describe()      { fmt.Println("I am", l.Name()) }
+
+type Service struct {
+	Logger // embedded: no field name
+	Port   int
+}
+
+func (s Service) Name() string { return "Service" }
+
+func main() {
+	s := Service{Logger: Logger{Prefix: "[svc] "}, Port: 8080}
+	s.Log("started")      // promoted from Logger
+	fmt.Println(s.Prefix) // promoted field
+	s.Describe()          // runs Logger.Describe
+	fmt.Println(s.Name()) // Service's own method
+	fmt.Println(s.Logger.Name())
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Log và Prefix được promote, nên s dùng trực tiếp. Describe vẫn nói Logger: kiểu bên trong không biết mình bị embed, nên không bao giờ thấy Name của Service.">
+```text
+[svc] started
+[svc] 
+I am Logger
+Service
+Logger
+```
+</TerminalOutput>
+
+`Log`, `Describe` và field `Prefix` được promote (đẩy lên): bạn gọi chúng thẳng trên `s`. Nếu kiểu ngoài định nghĩa trùng tên (`Name`), cái ngoài thắng, và cái trong vẫn gọi được qua `s.Logger.Name()`. Dòng `I am Logger` là khác biệt chính so với Java. Trong subclass Java, `describe()` sẽ gọi `name()` đã bị override. Ở đây `Describe` thuộc về `Logger`, mà `Logger` không biết gì về `Service`, nên nó gọi `Name` của chính nó. Không có override.
+
+<GoP04Embedding />
+
+Thư viện chuẩn dùng embedding để dựng kiểu lớn từ kiểu nhỏ. Định nghĩa thật lấy từ `go doc bufio.ReadWriter`:
+
+<TerminalOutput command="go doc bufio.ReadWriter" label="Go 1.27.1 · darwin/arm64" caption="ReadWriter là một Reader và một Writer đứng cạnh nhau. Method của cả hai đều được promote, nên dùng được ở bất cứ chỗ nào cần một trong hai.">
+```text
+type ReadWriter struct {
+	*Reader
+	*Writer
+}
+```
+</TerminalOutput>
+
+Embedding có bẫy (method được promote có thể lộ ra API công khai của bạn, và promote có thể che giấu sự mơ hồ). Phần đó nằm ở [Go interfaces deep dive](/blog/go-abstractions-interfaces-generics-errors/). Hiện tại, hãy embed khi muốn tái sử dụng hành vi, và đừng embed chỉ để đỡ gõ tên field.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Embedding**: đặt một kiểu vào trong struct mà không có tên field, để field và method của nó được promote lên struct ngoài.
+- **Promoted method**: method của kiểu được embed mà bạn gọi thẳng trên giá trị ngoài.
+- **Composition**: dựng kiểu lớn bằng cách chứa các kiểu nhỏ, thay vì kế thừa từ cha.
+
+</Concepts>
+
+---
+
+## Interface
+
+Interface liệt kê các method. Một kiểu thỏa interface khi có các method đó, đúng tên và đúng chữ ký. Chỉ vậy thôi: không từ khóa, không đăng ký, và interface có thể được viết sau kiểu nhiều năm. Vì thế ổ cắm trong ảnh trên là hình ảnh hợp lý: interface là ổ cắm, và kiểu nào có đúng method là phích vừa ổ.
+
+Đây là ca thật. `io.Reader` có một method: `Read(p []byte) (n int, err error)`. Hàm dưới đây đếm số dòng từ bất cứ thứ gì là reader, và ba lời gọi truyền vào ba kiểu không liên quan.
+
+```go
+package main
+
+import (
+	"bufio"
+	"bytes"
+	"fmt"
+	"io"
+	"os"
+	"strings"
+)
+
+// countLines works with anything that has a Read method.
+func countLines(r io.Reader) int {
+	sc := bufio.NewScanner(r)
+	n := 0
+	for sc.Scan() {
+		n++
+	}
+	return n
+}
+
+func main() {
+	fmt.Println(countLines(strings.NewReader("one\ntwo\nthree\n")))
+	fmt.Println(countLines(bytes.NewBufferString("a\nb\n")))
+	fmt.Println(countLines(os.Stdin))
+}
+```
+
+<TerminalOutput command="printf 'x\ny\nz\nw\n' | go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Một string reader, một byte buffer và standard input của tiến trình đều khớp io.Reader. Lời gọi cuối đếm bốn dòng được pipe từ shell vào.">
+```text
+3
+2
+4
+```
+</TerminalOutput>
+
+Method `Read` còn trả về một `error` làm giá trị thứ hai. Lỗi là giá trị trả về bình thường trong Go, và [bài về lỗi](/blog/go-errors-defer-panic/) giải thích chúng. Ở đây `bufio.Scanner` đã lo giúp.
+
+In ra màn hình cũng dùng cùng ý tưởng. `fmt.Stringer` là một method, `String() string`, và `Println` gọi nó khi giá trị có:
+
+```go
+package main
+
+import "fmt"
+
+type Celsius float64
+
+func (c Celsius) String() string { return fmt.Sprintf("%.1f°C", float64(c)) }
+
+func main() {
+	t := Celsius(36.6)
+	fmt.Println(t) // Println looks for a String method
+	fmt.Printf("%v\n", t)
+	fmt.Printf("%s\n", t)
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Bên dưới Celsius là float64, nhưng cả ba lần in đều dùng method String của nó. Celsius không hề nhắc tới fmt.Stringer.">
+```text
+36.6°C
+36.6°C
+36.6°C
+```
+</TerminalOutput>
+
+Mẫu này cũng có ở web server: `net/http` định nghĩa `Handler` là một method, `ServeHTTP(ResponseWriter, *Request)`, và kiểu nào có nó là phục vụ được request. Go proverb của Rob Pike nói đúng điều này: "The bigger the interface, the weaker the abstraction" (interface càng lớn, trừu tượng càng yếu). Interface một hay hai method dễ thỏa và dễ làm hàng giả trong test. Hãy định nghĩa interface ở nơi dùng nó, giữ nhỏ, để hàm nhận interface còn constructor trả về struct cụ thể.
+
+### Kiểu nào khớp interface nào
+
+Có một quy tắc làm vấp gần như tất cả mọi người. Method có pointer receiver chỉ thuộc về kiểu con trỏ. Vì vậy giá trị `Counter{}` không thỏa interface cần method pointer receiver, nhưng `&Counter{}` thì có:
+
+```go
+package main
+
+import "fmt"
+
+type Counter struct{ n int }
+
+func (c *Counter) Inc() { c.n++ }
+
+type Incrementer interface{ Inc() }
+
+func main() {
+	var a Incrementer = &Counter{} // pointer: fine
+	a.Inc()
+	var b Incrementer = Counter{} // value: not fine
+	fmt.Println(a, b)
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Đây là lỗi biên dịch, nên không có gì chạy. Phần cuối thông báo nêu nguyên nhân: Inc có pointer receiver.">
+```text
+# command-line-arguments
+./main.go:14:22: cannot use Counter{} (value of struct type Counter) as Incrementer value in variable declaration: Counter does not implement Incrementer (method Inc has pointer receiver)
+```
+</TerminalOutput>
+
+Vì sao có quy tắc này? Khi bạn đưa một giá trị vào biến interface, Go lưu một bản sao của nó. Giả sử `Counter{}` được đưa vào rồi bạn gọi `Inc()`: nó sẽ tăng `n` trên bản sao ẩn đó, còn `Counter` của bạn vẫn là 0, cùng cái bẫy với `IncValue` ở trên. Gần như luôn là bug, nên compiler từ chối. Chiều ngược lại thì ổn: tập method của con trỏ gồm cả method value receiver. Hãy thử mọi tổ hợp bên dưới. Mỗi thông báo là phần lý do của lỗi compiler thật.
+
+<GoP04InterfaceValue />
+
+<GoSatisfyCheckerDemo />
+
+<Callout type="warning" title="Đừng trả về typed nil trong interface">
+Hàm trả về con trỏ nil bên trong một giá trị interface sẽ cho ra interface không bằng `nil`. Bẫy kinh điển này được giải thích ở bài đào sâu về interface link bên dưới.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Thỏa ngầm định**: kiểu khớp interface chỉ nhờ có các method của nó. Kiểu không bao giờ nêu tên interface.
+- **`io.Reader` / `fmt.Stringer` / `http.Handler`**: ba interface chuẩn, mỗi cái một method. Phần lớn code Go bạn đọc được xây trên chúng.
+- **Method set**: những method mà một kiểu có thể dùng bên trong interface. Một `Counter` thường chỉ có các method viết `(c Counter)`; một `*Counter` có thêm cả các method viết `(c *Counter)`.
+
+</Concepts>
+
+---
+
+## Type switch và type assertion
+
+Đôi khi bạn cầm một giá trị interface và cần biết bên trong là gì. `any` là interface không có method nào, nên kiểu nào cũng khớp (cách viết cũ là `interface{}`). Type switch hỏi "kiểu cụ thể là gì?" và đưa bạn giá trị đã được chuyển sẵn trong mỗi nhánh.
+
+Đọc `switch v := x.(type)` như sau: xem kiểu thật bên trong `x`, chạy `case` khớp, và gọi giá trị đó là `v` với đúng kiểu ấy. Bắt đầu với hai kiểu:
+
+```go
+package main
+
+import "fmt"
+
+func describe(x any) string {
+	switch v := x.(type) {
+	case int:
+		return fmt.Sprintf("int %d", v+1)
+	case string:
+		return "string of length " + fmt.Sprint(len(v))
+	default:
+		return fmt.Sprintf("something else: %T", v)
+	}
+}
+
+func main() {
+	fmt.Println(describe(41))
+	fmt.Println(describe("Phở"))
+	fmt.Println(describe(3.5))
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Trong case int, v là int nên v+1 chạy được. Trong case string, v là string nên len(v) chạy được. 3.5 là float64, không khớp case nào nên default chạy." >
+```text
+int 42
+string of length 5
+something else: float64
+```
+</TerminalOutput>
+
+Chương trình thật có nhiều loại case hơn. Đây là cùng switch đó, thêm một kiểu struct, một interface (`fmt.Stringer`, kiểu nào có method `String()`) và `nil`:
+
+```go
+package main
+
+import "fmt"
+
+type Circle struct{ R float64 }
+type Square struct{ Side float64 }
+
+func describe(x any) string {
+	switch v := x.(type) {
+	case int:
+		return fmt.Sprintf("int %d", v+1)
+	case string:
+		return "string of length " + fmt.Sprint(len(v))
+	case Circle:
+		return fmt.Sprintf("circle radius %.1f", v.R)
+	case fmt.Stringer:
+		return "something printable: " + v.String()
+	case nil:
+		return "nothing"
+	default:
+		return fmt.Sprintf("unknown %T", v)
+	}
+}
+
+func main() {
+	fmt.Println(describe(41))
+	fmt.Println(describe("Phở"))
+	fmt.Println(describe(Circle{R: 2}))
+	fmt.Println(describe(Square{Side: 3}))
+	fmt.Println(describe(nil))
+
+	var x any = "hi"
+	n, ok := x.(int)
+	fmt.Println(n, ok)
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Trong case int, v là int nên v+1 chạy được. Square không có method String nên rơi vào default, và %T in main.Square. Dòng cuối là assertion thất bại: ok là false thay vì crash.">
+```text
+int 42
+string of length 5
+circle radius 2.0
+unknown main.Square
+nothing
+0 false
+```
+</TerminalOutput>
+
+<GoP04TypeSwitch />
+
+`x.(int)` là type assertion: nó nói "tôi tin interface này đang chứa một int". Luôn dùng dạng hai giá trị `n, ok := x.(int)`. Dạng một giá trị `x.(int)` sẽ panic khi đoán sai. Một case cũng có thể nêu tên interface (`case fmt.Stringer`), khớp mọi kiểu có method đó.
+
+Dùng type switch có chừng mực. Nếu thấy mình switch trên nhiều kiểu, thường thì một method trên interface sẽ sạch hơn.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **`any`**: interface không có method; giá trị nào cũng khớp.
+- **Type switch**: `switch v := x.(type)`, chạy nhánh khớp kiểu thật và cho bạn `v` đã đúng kiểu.
+- **Type assertion**: `x.(T)`, lấy một kiểu cụ thể ra khỏi interface. Dùng dạng `value, ok`.
+
+</Concepts>
+
+---
+
+## Generics
+
+Interface trả lời "giá trị này làm được gì?". Generics trả lời một câu khác: "tôi đã viết cùng một hàm cho `int` và cho `string`, có viết một lần được không?". Hàm generic có type parameter trong ngoặc vuông, và một constraint nói kiểu nào được phép.
+
+```go
+package main
+
+import (
+	"cmp"
+	"fmt"
+	"slices"
+)
+
+// Max works for any type that can be compared with > and <.
+func Max[T cmp.Ordered](a, b T) T {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func main() {
+	fmt.Println(Max(3, 7), Max(2.5, 1.5), Max("go", "java"))
+
+	nums := []int{5, 2, 9}
+	names := []string{"Lan", "An", "Minh"}
+	slices.Sort(nums)
+	slices.Sort(names)
+	fmt.Println(nums, names)
+	fmt.Println(slices.Contains(names, "An"), slices.Index(nums, 9))
+	fmt.Println(slices.Max(nums))
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Một Max phục vụ int, float và string. Package slices làm tương tự cho sắp xếp và tìm kiếm, nên bạn khỏi viết lại các vòng lặp đó.">
+```text
+7 2.5 java
+[2 5 9] [An Lan Minh]
+true 2
+9
+```
+</TerminalOutput>
+
+`[T cmp.Ordered]` nghĩa là: T là mọi kiểu hỗ trợ so sánh thứ tự (số và string). Compiler tự suy ra `T` từ đối số, nên hiếm khi bạn phải viết `Max[int](3, 7)`. Trước khi tự viết hàm trợ giúp, hãy xem package `slices` và `maps`: `slices.Sort`, `slices.Contains`, `slices.Index` và `slices.Max` đã có sẵn. Kiểu không hợp constraint bị từ chối lúc biên dịch. Đây là `Max` được gọi với một struct, dùng cùng `Max` và kiểu `Pair`:
+
+```go
+package main
+
+import (
+	"cmp"
+	"fmt"
+)
+
+func Max[T cmp.Ordered](a, b T) T {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+type Pair struct{ A, B int }
+
+func main() {
+	fmt.Println(Max(Pair{1, 2}, Pair{3, 4}))
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Struct không so sánh được bằng > và <, nên không biên dịch được. Compiler liệt kê mọi kiểu cmp.Ordered cho phép; phần giữa danh sách được cắt bằng … ở đây.">
+```text
+# command-line-arguments
+./main.go:18:17: Pair does not satisfy cmp.Ordered (Pair missing in ~int | ~int8 | ~int16 | … | ~string)
+```
+</TerminalOutput>
+
+Kiểu cũng có thể là generic, không chỉ hàm. Kiểu `Stack[T]` generic được xây từng bước trong [Go interfaces deep dive](/blog/go-abstractions-interfaces-generics-errors/); lúc này biết dùng hàm generic là đủ.
+
+Chọn cái nào? Quy tắc đơn giản: dùng interface khi các kiểu khác nhau làm cùng một việc theo cách khác nhau (database thật và bản giả trong test), dùng generics khi cùng một đoạn code phải chạy trên nhiều kiểu (sắp xếp, tìm giá trị lớn nhất). Cứ bắt đầu không dùng generics, và thêm vào khi bạn thấy mình đang copy hàm. Phần bàn kỹ hơn về lúc nào trừu tượng hóa giúp hay hại nằm ở chính bài đó.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Type parameter**: chữ `T` trong `Max[T cmp.Ordered]`. Nó đại diện cho một kiểu được chọn ở mỗi lời gọi.
+- **Constraint**: quy tắc sau `T` (`any`, `cmp.Ordered`) giới hạn kiểu nào được dùng.
+- **Package `slices` và `maps`**: các hàm generic có sẵn cho slice và map.
+
+</Concepts>
+
+---
+
+## Điểm rút ra (Key takeaways)
+
+- Go có struct và method, không có class: method là hàm có receiver, và struct dùng được ngay ở giá trị zero.
+- Dùng pointer receiver khi method đổi giá trị hoặc kiểu chứa lock, value receiver cho giá trị nhỏ không đổi, và mỗi kiểu một lựa chọn.
+- Embedding đẩy field và method của kiểu trong lên, nhưng không phải kế thừa: kiểu trong không bao giờ thấy kiểu ngoài.
+- Kiểu thỏa interface chỉ nhờ có các method của nó. Giá trị `T` không có method pointer receiver, chỉ `*T` mới có.
+- Giữ interface nhỏ và định nghĩa ở nơi dùng. Dùng generics khi cùng một đoạn code phải chạy trên nhiều kiểu.
+
+## Câu hỏi ôn tập (Review questions)
+
+1. `c.IncValue()` chạy không lỗi nhưng `c.n` vẫn bằng 0. Vì sao, và bạn sửa thế nào? (Xem "Method và receiver".)
+2. `Describe` được promote từ `Logger` vào `Service`, nhưng in `I am Logger` dù `Service` có `Name` riêng. Vì sao Go không gọi `Name` của kiểu ngoài? (Xem "Embedding".)
+3. Vì sao `var b Incrementer = Counter{}` không biên dịch được còn `&Counter{}` thì được? (Xem "Interface".)
+4. `x.(int)` làm chương trình crash khi gặp một string. Viết thế nào để không thể crash? (Xem "Type switch và type assertion".)
+5. Bạn cần một hàm sắp xếp cả `[]int` lẫn `[]string`. Viết interface hay dùng generics, và vì sao? (Xem "Generics".)
+
+### Sẽ có ở các bài sau
+
+Lỗi và `panic` nằm ở [bài về lỗi](/blog/go-errors-defer-panic/). Bẫy của embedding, cách interface được lưu và bẫy typed nil nằm ở [Go interfaces deep dive](/blog/go-abstractions-interfaces-generics-errors/). Lock và mutex nằm ở [Context and locks](/blog/go-context-timeouts-mutexes/).
+
+</Vi>
