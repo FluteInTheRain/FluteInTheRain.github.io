@@ -3,6 +3,12 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-23 — Xuất bản bài 4–10 và cutover series Go sang lộ trình 20 bài
+
+- **Đã làm:** bật xuất bản (`draft: false`) cho bài 4–10 của series Go mới. Cutover `golang` trong `src/data/series.ts` từ 12 bài cũ sang lộ trình 20 bài, 5 cấp (`Write Go`, `Run things at once`, `Under the hood & traps`, `Measure, then optimize`, `Check yourself`) và 6 lộ trình đọc (`full`, `new-to-go`, `review`, `performance`, `oncall`, `interview`), đồng thời bổ sung token màu `--act-4` và hỗ trợ 5 cột cho `SeriesMap`/`SeriesCover`/`SeriesCard`/`BookCover`. Thêm `redirects` trong `astro.config.mjs` cho 3 bài fundamentals cũ về bài 1, 4, 7; xoá 3 bài cũ, thư mục ảnh của chúng và 30 component `GoFund*`/demo cũ không còn dùng. Theo góp ý trang series: bỏ khối credit và credit ảnh bìa ở `SeriesCover.astro`, bỏ dòng chú thích hover dưới `SeriesMap.astro`, bỏ giới hạn `65ch` để tiêu đề phụ và mô tả mục lục nằm gọn trên một dòng desktop, nối sơ đồ đọc thành chuỗi mũi tên dọc–ngang gọn (`SeriesMap.astro` vẽ mũi tên thẳng cho bước kế tiếp cùng cột).
+- **Ai quyết:** user duyệt bật xuất bản bài 4–10 và chạy cutover.
+- **Chưa chốt:** bài 11–19 giữ slug cũ chờ viết lại tại chỗ (Task 14–22); bài 20 phỏng vấn (`go-interview-questions-output-live-coding`) đang hiển thị "Sắp có" trên trang series, sẽ viết ở Task 23 sau khi xong bài 11–19.
+
 ## 2026-11-23 — Series Go: bài 4–10 (draft) và sơ đồ cho bài 1–10
 
 - **Đã làm:** viết bài 4–10 của series Go mới (`draft: true`): structs/interfaces, errors, testing, goroutines/channels, context/mutex, concurrency patterns, HTTP service. Mỗi bài có fact review, test người đọc mới và một vòng sửa. Thêm 51 sơ đồ SVG vẽ trên trang (`src/components/mdx/GoP01*`…`GoP10*`, khoảng 5 sơ đồ mỗi bài) cho cả bài 1–10. Mỗi sơ đồ được kiểm tra sự thật và chụp màn hình sáng/tối. Spec redesign sửa phân bổ sách: post 4 không giữ mục 100GM nào; #11 (functional options) và generics (`Stack[T]`) chuyển sang post 12.
