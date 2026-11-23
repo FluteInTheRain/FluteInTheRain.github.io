@@ -3,6 +3,14 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-23 — Series Go: bỏ mục "Coming from Java, Python or JavaScript"; sửa review đợt 4 (bài 11, 12, 13, 16, 17)
+
+- **Đã làm (branch `fix/go-drop-language-comparison`):** xoá mục so sánh với Java/Python/JS (bảng + đoạn "khác biệt lớn nhất", cả EN lẫn VI) ở 10 bài Go 1–10, tổng 20 mục. Giữ lại 3 đoạn ngắn chỉ nói về Go: hướng dẫn đọc của bài concurrency patterns, "goroutine không cần `await`, không có handle" (bài goroutines), "Go không có `assert`, `go test` có sẵn" (bài testing). Description bài 4 bỏ cụm "coming from Java, Python or JavaScript". Spec + plan series Go và 2 brief agent (`.superpowers/sdd/.../common-post-context.md`, `rewrite-common-context.md`) đổi quy ước: người đọc chỉ cần biết lập trình căn bản, không bài nào có mục/bảng so sánh ngôn ngữ.
+- **Sửa review đợt 4 (commit trên từng nhánh `feat/go-post-NN-rewrite`, chưa push):** bài 17: `httpDur :=` ở package scope (không compile), `popcnt(0xdeadbeef)` fold ra 24 chứ không phải 46, dòng `benchmark.go` L480–L491, `r.Pattern` từ Go 1.23, `HeapInuse = objects + unused`, issue #14813 chạy 2e9 lượt. Bài 16: bảng tần suất GC chuẩn hoá theo `GOGC=100` (2x/1x/0.25x), output BCE chạy lại đúng đoạn code trong bài, giải thích RAER/TFBO và nhãn `#9x`. Bài 13: nhãn demo "etcd String() deadlock" → "String() self-deadlock", đoạn `append` race thành chương trình đầy đủ (chạy lại `-race`, khớp dòng 14/19), giải thích deadlock khi `RLock` lồng nhau. Bài 11, 12: thêm giải thích `range` số nguyên, `testing.B`, `maps.Keys` iterator, GCShape.
+- **Ai quyết:** user quyết bỏ mục so sánh ở mọi series ("chỉ cần biết người này đã có kiến thức lập trình căn bản"). Chỉ có series Go có mục này; Backend, DDIA không có. Giữ 3 đoạn Go-only và câu nhắc ngôn ngữ khác thoáng qua trong thân bài là AI quyết. Hai finding của reviewer bị bác: "diff xoá file docs" (do so diff hai chấm) và "icon `ok` là emoji" (icon hợp lệ trong `diagram-icons.ts`).
+- **Kiểm tra:** build + `node --test` sạch trên cả 5 worktree bài và trên nhánh này.
+- **Chưa chốt:** push + PR cho 5 nhánh bài 11–17 và nhánh này, chờ user. Bài 14, 15, 18, 19, 20 chưa viết lại. Link anchor từ bài 17 sang heading CFS của bài 14 sẽ phải kiểm lại khi viết lại bài 14.
+
 ## 2026-11-23 — Trang series: Mục lục dùng nhãn của sơ đồ, bỏ dòng mô tả lộ trình "Đọc hết", đổi tên series backend
 
 - **Đã làm (branch `fix/series-page-contents-topics`):** `SeriesContents.astro` lấy tiêu đề mỗi dòng từ `part.topic` (đúng nhãn ô trong sơ đồ đọc phía trên) thay vì title bài viết — áp dụng cho mọi series vì component dùng chung. Xoá `who` của path `full` ở cả 6 series (vd. "Từ byte đầu tiên của request tới bản deploy không downtime."); `SeriesPath.who` thành optional, `SeriesMap.astro` chỉ render dòng `who` khi có.
