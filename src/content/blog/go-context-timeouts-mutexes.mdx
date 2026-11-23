@@ -1,0 +1,1127 @@
+---
+title: "Context and locks"
+title_vi: "Context và khóa trong Go"
+description: "How Go code stops work that is no longer wanted (context: timeout, cancel, values) and protects shared data (Mutex, RWMutex, WaitGroup), with the mistakes that bite newcomers."
+description_vi: "Cách code Go dừng việc không còn cần (context: timeout, cancel, values) và bảo vệ dữ liệu dùng chung (Mutex, RWMutex, WaitGroup), cùng các lỗi người mới hay dính."
+date: 2026-11-23
+category: "backend"
+tags: ["golang", "context", "mutex", "concurrency", "100-go-mistakes"]
+cover: "../../assets/series/golang/go-gopher-pencil-helmet.jpg"
+cover_alt: "Pencil drawing of the Go gopher wearing a helmet, drawn by Renee French"
+draft: true
+sources:
+  - { title: "100 Go Mistakes and How to Avoid Them", author: "Teiva Harsanyi", chapters: "Mistakes #60, #61, #70, #71, #74", url: "https://100go.co/" }
+  - { title: "golang/go issue #30287: Parent context unexpectedly expires with child", author: "inliquid and odeke-em (GitHub)", url: "https://github.com/golang/go/issues/30287" }
+  - { title: "context package documentation", author: "The Go Authors", url: "https://pkg.go.dev/context" }
+  - { title: "net/http: Request.Context", author: "The Go Authors", url: "https://pkg.go.dev/net/http#Request.Context" }
+  - { title: "sync package documentation", author: "The Go Authors", url: "https://pkg.go.dev/sync" }
+  - { title: "Go Concurrency Patterns: Context", author: "Sameer Ajmani (The Go Blog)", url: "https://go.dev/blog/context" }
+  - { title: "Contexts and structs", author: "Jean de Klerk and Matt T. Proud (The Go Blog)", url: "https://go.dev/blog/context-and-structs" }
+  - { title: "IRONHORSE vs Polish Sports Challenge (public domain, U.S. Army)", author: "U.S. Army 1BCT-1CD, Staff Sgt. Christopher Hammond", url: "https://commons.wikimedia.org/wiki/File:IRONHORSE_vs_Polish_Sports_Challenge_(6621676).jpg" }
+  - { title: "Go gopher pencil helmet (CC BY 3.0), used as the cover", author: "Renee French", url: "https://commons.wikimedia.org/wiki/File:Go_gopher_pencil_helmet.jpg" }
+---
+
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import En from '../../components/mdx/En.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import GoP08BackgroundTimeline from '../../components/mdx/GoP08BackgroundTimeline.astro';
+import GoP08ContextTree from '../../components/mdx/GoP08ContextTree.astro';
+import GoP08MapHeaders from '../../components/mdx/GoP08MapHeaders.astro';
+import GoP08MutexTimeline from '../../components/mdx/GoP08MutexTimeline.astro';
+import GoP08RequestEnd from '../../components/mdx/GoP08RequestEnd.astro';
+import GoP08ValueReceiver from '../../components/mdx/GoP08ValueReceiver.astro';
+import GoTimeoutCascadeDemo from '../../components/mdx/GoTimeoutCascadeDemo.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import heroBaton from '../../assets/blog/go-context-timeouts-mutexes/relay-baton-exchange.jpg';
+
+<En>
+
+<Figure src={heroBaton} alt="Two soldiers in running gear pass a relay baton from one hand to the other on a track" caption="In a relay, the baton goes from runner to runner and every runner knows the same race is still on. A Go context is passed down the same way." sourceTitle="Wikimedia Commons: IRONHORSE vs Polish Sports Challenge (public domain, U.S. Army)" sourceUrl="https://commons.wikimedia.org/wiki/File:IRONHORSE_vs_Polish_Sports_Challenge_(6621676).jpg" />
+
+> "A Context carries a deadline, a cancellation signal, and other values across API boundaries."
+> &mdash; *the `context` package documentation*
+
+### The request is over, but your background work still thinks it is running
+
+The `net/http` documentation says that the context of an incoming request is canceled "when the client's connection closes, the request is canceled (with HTTP/2), or when the ServeHTTP method returns." The last case is the one that surprises people. A handler writes its answer, returns, and any goroutine it started with that context is told to stop, even if it was meant to finish a job after the response.
+
+<GoP08RequestEnd />
+
+This is a real mistake that real developers make. In Go issue [#30287](https://github.com/golang/go/issues/30287), "Parent context unexpectedly expires with child", a user ran `go next.ServeHTTP(w, r)` in a goroutine and found that the request context was canceled as soon as `ServeHTTP` returned. The reply from a Go maintainer: "If you'd like to spawn background work, please derive a new context". It was a question from a developer, not an outage, and the behavior was by design.
+
+That sentence is the whole story of the first half of this post: Go passes a small object called a context down through your calls, and it carries the "please stop now" signal. The second half is about the other danger in concurrent code: two goroutines changing the same data at once. Go's answer there is the mutex, a lock that lets one goroutine at a time in.
+
+You should already know goroutines and channels from [the previous post](/blog/go-goroutines-channels-select/). Here we use them without re-explaining them.
+
+<Callout type="note" title="TL;DR">
+Pass a `context.Context` as the first parameter of any function that waits, and give it a deadline with `context.WithTimeout`. Always call the `cancel` function you get back (use `defer`). Do not use a request's context for work that must outlive the request; `context.WithoutCancel` is for that. Protect shared maps and slices with a `sync.Mutex`, never copy a type from the `sync` package, and call `wg.Add` before starting the goroutine, not inside it.
+</Callout>
+
+## Coming from Java, Python or JavaScript
+
+| You know | Java | Python | JavaScript | Go |
+|---|---|---|---|---|
+| Stop work that took too long | `Future.get(timeout)`, `Thread.interrupt()` | `asyncio.timeout()` | `AbortSignal.timeout()` | `context.WithTimeout` |
+| Cancel on demand | `Future.cancel()` | `task.cancel()` | `AbortController.abort()` | the `cancel` function from `context.WithCancel` |
+| Per-request data | `ThreadLocal` | `contextvars` | `AsyncLocalStorage` | `ctx.Value(key)` |
+| Lock | `synchronized`, `ReentrantLock` | `threading.Lock` | not needed (one thread) | `sync.Mutex` |
+| Wait for several workers | `CountDownLatch` | `Thread.join()` | `Promise.all` | `sync.WaitGroup` |
+
+The big difference: in Go the cancellation signal is an ordinary value you pass as an argument. Nothing is hidden in a thread or in global state, so you can see in a function signature whether it can be stopped.
+
+<Concepts>
+
+- **Context**: a value of type `context.Context` that carries a deadline, a cancel signal and optional values through a chain of function calls.
+- **Deadline / timeout**: the moment after which the context cancels itself. A timeout is a deadline expressed as "this long from now".
+- **Mutex**: short for "mutual exclusion", a lock. Only one goroutine can hold it at a time.
+- **Critical section**: the code between `Lock()` and `Unlock()`.
+- **Data race**: two goroutines touch the same memory at the same time and at least one of them writes.
+
+</Concepts>
+
+---
+
+## context: passing "stop" down the call chain
+
+A context is built once, near the start of a job (usually where a request arrives), and passed as the first argument to every function that does slow work. It is a convention in Go: the first parameter is named `ctx`. A function that gets a context checks `ctx.Done()`, a channel that is closed when the context is canceled or its deadline passes. If you read the [channels and select post](/blog/go-goroutines-channels-select/), you already know the tool for this: `select`.
+
+### A timeout that reaches the innermost call
+
+Three functions call each other: `handle` calls `loadUser`, which calls `queryDB`. The database call is pretend: it takes 400 ms. `handle` creates the context with a 150 ms timeout. Two new pieces of syntax first. `context.WithTimeout(parent, d)` returns a new context and a `cancel` function. `context.Background()` is the empty context you start from when nothing better exists. The `%w` verb wraps an error so the message grows as it travels up (see [the errors post](/blog/go-errors-defer-panic/)).
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"time"
+)
+
+func queryDB(ctx context.Context) error {
+	select {
+	case <-time.After(400 * time.Millisecond): // pretend the query takes 400ms
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func loadUser(ctx context.Context) error {
+	if err := queryDB(ctx); err != nil {
+		return fmt.Errorf("loadUser: %w", err)
+	}
+	return nil
+}
+
+func handle(ctx context.Context) error {
+	if err := loadUser(ctx); err != nil {
+		return fmt.Errorf("handle: %w", err)
+	}
+	return nil
+}
+
+func main() {
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err := handle(ctx)
+	fmt.Println("error:", err)
+	fmt.Println("took about:", time.Since(start).Round(50*time.Millisecond))
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="The call gave up after about 150 ms, not 400 ms. ctx.Err() says why: the deadline passed. The two wrapped prefixes show the path the error took.">
+```text
+error: handle: loadUser: context deadline exceeded
+took about: 150ms
+```
+</TerminalOutput>
+
+Look at what did not happen: `handle` and `loadUser` never mention time. They only pass `ctx` along. The only function that reacts is `queryDB`, the one that actually waits, and it reacts in one place: the `select`. Without the `<-ctx.Done()` case the program would still wait the full 400 ms, because a context only carries the signal. Someone has to listen.
+
+<GoTimeoutCascadeDemo />
+
+Now the `defer cancel()` line. `WithTimeout` starts a timer, and the `cancel` function releases it. The `context` documentation is blunt about this: "Failing to call the CancelFunc leaks the child and its children until the parent is canceled." Calling `cancel` after the work is done is always safe, and `go vet` warns you if you forget. Make `defer cancel()` the line right after `WithTimeout`, every time.
+
+### Canceling on demand
+
+A timeout is one way to stop. The other is to say "stop" yourself, with `context.WithCancel`. Here two workers loop until the context is canceled. `sync.WaitGroup` (from the previous post) lets `main` wait until both have printed their goodbye.
+
+<GoP08ContextTree />
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"time"
+)
+
+func worker(ctx context.Context, id int, wg *sync.WaitGroup) {
+	defer wg.Done()
+	for {
+		select {
+		case <-ctx.Done():
+			fmt.Println("worker", id, "stopping:", ctx.Err())
+			return
+		case <-time.After(30 * time.Millisecond):
+		}
+	}
+}
+
+func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go worker(ctx, 1, &wg)
+	go worker(ctx, 2, &wg)
+
+	time.Sleep(100 * time.Millisecond)
+	cancel() // one call stops both workers
+	wg.Wait()
+	fmt.Println("all stopped")
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="One cancel() reached both workers. They stop in no fixed order, so on another run worker 1 may print first.">
+```text
+worker 2 stopping: context canceled
+worker 1 stopping: context canceled
+all stopped
+```
+</TerminalOutput>
+
+Contexts form a tree. When you derive a child with `WithTimeout`, `WithCancel` or `WithValue`, canceling the parent also cancels every child. That is why one `cancel()` in `main` is enough, and why a request-level timeout also stops everything started below it. This is the habit that stops goroutine leaks: every goroutine that can wait should be listening to a context.
+
+### Values: use sparingly
+
+A context can also carry key-value pairs with `context.WithValue`. The documentation says to use them "only for request-scoped data that transits processes and APIs, not for passing optional parameters to functions". A request ID that every log line should print is the textbook case. A database handle or a feature flag is not.
+
+The key should be a type you define yourself and do not export, so that two packages cannot collide by both using the string `"id"`. Here `type ctxKey string` makes a new type; `requestID` is a constant of that type.
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+)
+
+type ctxKey string
+
+const requestID ctxKey = "requestID"
+
+func logLine(ctx context.Context, msg string) {
+	fmt.Println(ctx.Value(requestID), msg)
+}
+
+func main() {
+	ctx := context.WithValue(context.Background(), requestID, "req-42")
+	logLine(ctx, "start")
+	fmt.Println(context.Background().Value(requestID))
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="The value travels with ctx. A context that never had it returns nil, with no error, so a missing value is easy to miss.">
+```text
+req-42 start
+<nil>
+```
+</TerminalOutput>
+
+`Value` returns an `any`, so the compiler cannot check that the value exists or has the type you expect. That is why the values are a last resort: things a function needs to work should be normal parameters.
+
+### The wrong context: background work that dies with the request
+
+Back to the opening. A handler answers the client, but also wants to kick off background work, for example publishing an event to a message broker. The tempting code starts a goroutine and passes it `r.Context()`, the request's context. Per the `net/http` documentation, that context is canceled the moment the handler returns.
+
+The program below starts a test server (`httptest.NewServer` from the standard library runs a real HTTP server on your machine for the length of the program), sends one request to it, and has the background goroutine report what it sees 50 ms later.
+
+```go
+package main
+
+import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"time"
+)
+
+var seen = make(chan string)
+
+func handler(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	go func() {
+		time.Sleep(50 * time.Millisecond) // background work, e.g. publish an event
+		seen <- fmt.Sprint("background work sees: ", ctx.Err())
+	}()
+	fmt.Fprintln(w, "done")
+}
+
+func main() {
+	srv := httptest.NewServer(http.HandlerFunc(handler))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	resp.Body.Close()
+	fmt.Println("client got its response")
+	fmt.Println(<-seen)
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="The handler had already returned, so its context was canceled before the background work looked at it. A call that takes ctx would have given up immediately.">
+```text
+client got its response
+background work sees: context canceled
+```
+</TerminalOutput>
+
+The fix depends on what the background work needs. If it needs nothing from the request, start it from a fresh `context.Background()`. If it still wants the request's values (a request ID for the logs, say), use `context.WithoutCancel(r.Context())`. It keeps the values and drops the cancellation. The only change to the program is that one line:
+
+```go
+ctx := context.WithoutCancel(r.Context()) // keeps values, drops cancellation
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Same program with that one line changed (and an import of context). The background work now sees no error.">
+```text
+client got its response
+background work sees: <nil>
+```
+</TerminalOutput>
+
+<GoP08BackgroundTimeline />
+
+*100 Go Mistakes* walks through this scenario with a message-broker publish after an HTTP response. Its fix is to write a small custom context type by hand; `context.WithoutCancel` is the standard library's answer to the same need. One warning: work with no cancellation also has no deadline. Give it its own `WithTimeout` so it cannot run forever.
+
+---
+
+## Locks: one goroutine at a time
+
+Two goroutines writing to the same map is a bug. Go's map is not safe for that, and since the runtime notices, it does not quietly lose data like a plain counter would. It stops the whole program. This program starts 100 goroutines that each add 1,000 times to a counter in a map:
+
+```go
+package main
+
+import (
+	"fmt"
+	"sync"
+)
+
+func main() {
+	counts := map[string]int{}
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 1000; j++ {
+				counts["hits"]++
+			}
+		}()
+	}
+	wg.Wait()
+	fmt.Println(counts["hits"])
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="The first lines of the crash. It happens on nearly every run, but not on every run, because it depends on timing. File path shortened.">
+```text
+fatal error: concurrent map writes
+
+goroutine 9 [running]:
+internal/runtime/maps.fatal({0x104f5307b?, 0x1050098e8?})
+	.../runtime/panic.go:1195 +0x20
+main.main.func1()
+	.../main.go:16 +0x68
+created by main.main in goroutine 1
+```
+</TerminalOutput>
+
+A `sync.Mutex` fixes this. `mu.Lock()` waits until nobody else holds the lock, then takes it. `mu.Unlock()` gives it back. Everything between the two calls (the critical section) runs for one goroutine at a time. The zero value of a `Mutex` is ready to use, so `var mu sync.Mutex` is all you need.
+
+<GoP08MutexTimeline />
+
+```go
+package main
+
+import (
+	"fmt"
+	"sync"
+)
+
+func main() {
+	counts := map[string]int{}
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 1000; j++ {
+				mu.Lock()
+				counts["hits"]++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	fmt.Println(counts["hits"])
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="100 goroutines times 1,000 increments is exactly 100000, because only one goroutine at a time reaches the increment.">
+```text
+100000
+```
+</TerminalOutput>
+
+In real code the map and its mutex live together in a struct, and the methods take the lock. Use `defer mu.Unlock()` right after `Lock()` so that an early `return` or a panic cannot leave the lock held forever. If reads are much more common than writes, `sync.RWMutex` lets many readers in together: `RLock`/`RUnlock` for reads, `Lock`/`Unlock` for writes (struct methods are in [the structs post](/blog/go-structs-methods-interfaces/)).
+
+```go
+package main
+
+import (
+	"fmt"
+	"sync"
+)
+
+type Cache struct {
+	mu       sync.RWMutex
+	balances map[string]float64
+}
+
+func (c *Cache) Add(id string, balance float64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.balances[id] = balance
+}
+
+func (c *Cache) Average() float64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	sum := 0.0
+	for _, b := range c.balances {
+		sum += b
+	}
+	return sum / float64(len(c.balances))
+}
+
+func main() {
+	c := &Cache{balances: map[string]float64{}}
+	c.Add("a", 10)
+	c.Add("b", 20)
+	fmt.Println(c.Average())
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="The average of 10 and 20. The interesting part is that every method that touches balances holds the lock.">
+```text
+15
+```
+</TerminalOutput>
+
+### A copy of a map is not a copy of its data
+
+A common attempt to keep the lock short is to copy the map inside the lock and loop over the copy outside it:
+
+```go
+c.mu.RLock()
+balances := c.balances // looks like a copy
+c.mu.RUnlock()
+for _, b := range balances { // still the same map
+    // ...
+}
+```
+
+This is still a data race. Assigning a map (or a slice) copies only the small header that points to the data, as in the slices example in [the collections post](/blog/go-slices-maps-strings/). `balances` and `c.balances` are the same map, so the loop reads while another goroutine writes. There are two honest fixes, both from *100 Go Mistakes*: hold the lock for the whole loop, as `Average` does above, or build a real copy (`make` a new map and copy the entries in a loop) and loop over that. The second one only pays off when the work inside the loop is slow, such as calling a database.
+
+<GoP08MapHeaders />
+
+### Never copy a sync type
+
+Every type in the `sync` package (`Mutex`, `RWMutex`, `WaitGroup`, `Once`, `Cond`, `Pool`, `Map`) must not be copied after first use. A copy has its own separate lock state, so two goroutines holding "the lock" are holding two different locks. The easy way to copy one by accident is a method with a value receiver, which copies the struct on every call.
+
+<GoP08ValueReceiver />
+
+```go
+package main
+
+import (
+	"fmt"
+	"sync"
+)
+
+type Counter struct {
+	mu sync.Mutex
+	n  int
+}
+
+func (c Counter) Inc() { // value receiver: every call gets its own copy of mu
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.n++
+}
+
+func main() {
+	var c Counter
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c.Inc()
+		}()
+	}
+	wg.Wait()
+	fmt.Println("n =", c.n)
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Not 100: the program ran without crashing and printed 0, because each call incremented its own copy of the struct. The mutex was copied too, so it protected nothing.">
+```text
+n = 0
+```
+</TerminalOutput>
+
+`go vet` catches this one for you, which is a good reason to run it (as the first post set up):
+
+<TerminalOutput command="go vet main.go" label="Go 1.27.1 · darwin/arm64" caption="The vet message names the method, the problem and the field. Line 13 is the func Inc line.">
+```text
+main.go:13:9: Inc passes lock by value: command-line-arguments.Counter contains sync.Mutex
+```
+</TerminalOutput>
+
+The fix is a pointer receiver, `func (c *Counter) Inc()`, so every call works on the one shared struct. As a rule, if a struct contains a `sync` type, give all of its methods pointer receivers and pass it around as a pointer.
+
+### WaitGroup: Add before `go`, not inside
+
+A `sync.WaitGroup` is a counter. `Add(n)` raises it, `Done()` lowers it, and `Wait()` blocks until it is back to zero. The bug is to call `Add` inside the new goroutine. Then `Wait` can run before any goroutine has had a chance to call `Add`, sees zero, and returns at once.
+
+```go
+package main
+
+import (
+	"fmt"
+	"sync"
+	"sync/atomic"
+)
+
+func main() {
+	var wg sync.WaitGroup
+	var v atomic.Int64
+
+	for i := 0; i < 3; i++ {
+		go func() {
+			wg.Add(1) // too late: Wait may already have returned
+			v.Add(1)
+			wg.Done()
+		}()
+	}
+
+	wg.Wait()
+	fmt.Println(v.Load())
+}
+```
+
+`atomic.Int64` is a number that is safe to change from several goroutines at once, so the only bug here is the `Add`. The expected answer is 3.
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Ten runs of the built program printed 0 every time on this machine. The answer can be anything from 0 to 3, depending on timing, which is what makes this bug hard to see.">
+```text
+0 0 0 0 0 0 0 0 0 0
+```
+</TerminalOutput>
+
+`go vet` flags this too: `main.go:15:10: WaitGroup.Add called from inside new goroutine`. The fix is to put `wg.Add(1)` before the `go` statement (or `wg.Add(3)` once before the loop), and keep `wg.Done()` inside the goroutine, preferably as `defer wg.Done()`.
+
+### Channel or mutex?
+
+Both are correct tools. They answer different questions:
+
+| Situation | Reach for | Why |
+|---|---|---|
+| Handing a value or a result from one goroutine to another | channel | the data moves, and only one goroutine owns it at a time |
+| Telling goroutines to stop | `context` | one signal reaches a whole tree of callers |
+| Several goroutines read and update the same map, counter or cache | mutex | the data stays in place, and the lock guards each access |
+| Wait until N goroutines finish | `WaitGroup` | a counter, with no data to pass |
+
+If you are passing ownership, use a channel. If you are guarding a shared structure, use a mutex. A struct holding a mutex and a map is the ordinary way to build a cache in Go.
+
+---
+
+## Key takeaways
+
+- A context carries a deadline, a cancel signal and a few values down a chain of calls. Make it the first parameter, named `ctx`, and let only the functions that actually wait react to `ctx.Done()`.
+- `defer cancel()` goes on the line after every `WithTimeout` or `WithCancel`. Forgetting it leaks the timer until the parent is canceled.
+- Canceling a context cancels all its children, which is what lets one signal stop a whole tree of goroutines.
+- An HTTP request's context is canceled when the handler returns. For work that must outlive the request, use `context.WithoutCancel(r.Context())` and give it its own timeout.
+- Guard shared maps and slices with a `Mutex` (or `RWMutex`) and `defer Unlock()`. Assigning a map or slice does not copy its data.
+- Never copy a `sync` type: use pointer receivers. Call `wg.Add` before the `go` statement. `go vet` catches both.
+
+## Review questions
+
+1. `handle` and `loadUser` never mention time, yet the program stopped after about 150 ms. Which function made that happen, and what would change if it lacked the `<-ctx.Done()` case? (See "A timeout that reaches the innermost call".)
+2. A handler starts a goroutine with `r.Context()` to publish an event. Why does the publish fail intermittently, and what are two ways to fix it? (See "The wrong context".)
+3. You copy a map into a local variable inside `RLock` and loop over it after `RUnlock`. Why is that still a race? (See "A copy of a map is not a copy of its data".)
+4. A struct has a `sync.Mutex` and a method with a value receiver. What does the program print, and which tool warns you? (See "Never copy a sync type".)
+5. Why can `wg.Add(1)` inside the goroutine make `Wait` return too early? (See "WaitGroup: Add before go, not inside".)
+
+### Coming later in the series
+
+Running a group of goroutines with shared cancellation and error handling (`errgroup`), worker pools and pipelines are in the [concurrency patterns post](/blog/go-concurrency-patterns-worker-pools-pipelines/). How the scheduler runs goroutines and how the race detector finds races are in the [concurrency deep dive](/blog/go-concurrency-scheduler-channels-context-mutexes/).
+
+</En>
+
+<Vi>
+
+<Figure src={heroBaton} alt="Hai người mặc đồ chạy trao gậy tiếp sức từ tay này sang tay kia trên đường đua" caption="Trong chạy tiếp sức, gậy chuyền từ người này sang người khác và ai cũng biết cuộc đua vẫn đang diễn ra. Context trong Go được truyền xuống theo cách tương tự." sourceTitle="Wikimedia Commons: IRONHORSE vs Polish Sports Challenge (phạm vi công cộng, U.S. Army)" sourceUrl="https://commons.wikimedia.org/wiki/File:IRONHORSE_vs_Polish_Sports_Challenge_(6621676).jpg" />
+
+> "A Context carries a deadline, a cancellation signal, and other values across API boundaries."
+> &mdash; *tài liệu của package `context`*
+
+### Request đã xong, nhưng việc chạy nền vẫn tưởng mình còn sống
+
+Tài liệu `net/http` nói rằng context của một request đến sẽ bị hủy "khi client đóng kết nối, khi request bị hủy (với HTTP/2), hoặc khi ServeHTTP trả về". Trường hợp cuối là chỗ hay gây bất ngờ. Handler viết xong câu trả lời rồi return, và mọi goroutine nó đã khởi động bằng context đó bị báo dừng, kể cả khi nó được định sẵn để làm nốt việc sau khi đã trả lời.
+
+<GoP08RequestEnd />
+
+Đây là lỗi có thật mà lập trình viên thật hay mắc. Trong issue Go [#30287](https://github.com/golang/go/issues/30287), "Parent context unexpectedly expires with child", một người dùng chạy `go next.ServeHTTP(w, r)` trong goroutine và thấy context của request bị hủy ngay khi `ServeHTTP` trả về. Maintainer của Go trả lời: "If you'd like to spawn background work, please derive a new context" (nếu muốn chạy việc nền, hãy tạo một context mới từ context cũ). Đây là câu hỏi của một lập trình viên chứ không phải sự cố, và hành vi đó là có chủ đích.
+
+Câu đó là toàn bộ câu chuyện của nửa đầu bài: Go truyền một object nhỏ gọi là context xuống qua các lời gọi hàm, và nó mang theo tín hiệu "dừng lại đi". Nửa sau nói về mối nguy còn lại của code đồng thời: hai goroutine sửa cùng một dữ liệu cùng lúc. Cách Go xử lý là mutex, một cái khóa chỉ cho một goroutine vào mỗi lần.
+
+Bạn nên đã biết goroutine và channel từ [bài trước](/blog/go-goroutines-channels-select/). Ở đây mình dùng chúng mà không giải thích lại.
+
+<Callout type="note" title="TL;DR">
+Truyền `context.Context` làm tham số đầu tiên cho mọi hàm có chờ đợi, và đặt deadline bằng `context.WithTimeout`. Luôn gọi hàm `cancel` nhận về (dùng `defer`). Đừng dùng context của request cho việc phải sống lâu hơn request; dùng `context.WithoutCancel`. Bảo vệ map và slice dùng chung bằng `sync.Mutex`, không bao giờ copy kiểu thuộc package `sync`, và gọi `wg.Add` trước khi chạy goroutine chứ không phải bên trong nó.
+</Callout>
+
+## Quen Java, Python hay JavaScript
+
+| Bạn đã biết | Java | Python | JavaScript | Go |
+|---|---|---|---|---|
+| Dừng việc chạy quá lâu | `Future.get(timeout)`, `Thread.interrupt()` | `asyncio.timeout()` | `AbortSignal.timeout()` | `context.WithTimeout` |
+| Hủy khi muốn | `Future.cancel()` | `task.cancel()` | `AbortController.abort()` | hàm `cancel` của `context.WithCancel` |
+| Dữ liệu theo từng request | `ThreadLocal` | `contextvars` | `AsyncLocalStorage` | `ctx.Value(key)` |
+| Khóa | `synchronized`, `ReentrantLock` | `threading.Lock` | không cần (một luồng) | `sync.Mutex` |
+| Chờ nhiều worker | `CountDownLatch` | `Thread.join()` | `Promise.all` | `sync.WaitGroup` |
+
+Khác biệt lớn: trong Go, tín hiệu hủy là một giá trị bình thường được truyền qua tham số. Không có gì giấu trong thread hay biến toàn cục, nên nhìn chữ ký hàm là biết hàm đó có dừng được hay không.
+
+<Concepts>
+
+- **Context**: giá trị kiểu `context.Context` mang deadline, tín hiệu hủy và các giá trị tùy chọn đi qua một chuỗi lời gọi hàm.
+- **Deadline / timeout**: thời điểm context tự hủy. Timeout là deadline viết dưới dạng "sau chừng này thời gian".
+- **Mutex**: viết tắt của "mutual exclusion" (loại trừ lẫn nhau), tức một cái khóa. Mỗi lúc chỉ một goroutine giữ được.
+- **Critical section** (vùng găng): đoạn code nằm giữa `Lock()` và `Unlock()`.
+- **Data race**: hai goroutine cùng chạm vào một vùng nhớ cùng lúc và ít nhất một bên ghi.
+
+</Concepts>
+
+---
+
+## context: truyền "dừng" xuống chuỗi lời gọi
+
+Context được tạo một lần, gần đầu một công việc (thường là chỗ request đến), rồi truyền làm tham số đầu tiên cho mọi hàm làm việc chậm. Đây là quy ước của Go: tham số đầu tiên tên là `ctx`. Hàm nhận context sẽ kiểm tra `ctx.Done()`, một channel bị đóng khi context bị hủy hoặc quá deadline. Nếu bạn đã đọc [bài về channel và select](/blog/go-goroutines-channels-select/), bạn biết công cụ để làm việc này: `select`.
+
+### Timeout chạm tới lời gọi trong cùng
+
+Ba hàm gọi nhau: `handle` gọi `loadUser`, `loadUser` gọi `queryDB`. Lời gọi database là giả: nó mất 400 ms. `handle` tạo context với timeout 150 ms. Có hai cú pháp mới. `context.WithTimeout(parent, d)` trả về một context mới và một hàm `cancel`. `context.Background()` là context rỗng để bắt đầu khi chưa có gì tốt hơn. Verb `%w` bọc một lỗi để thông báo dài ra khi đi lên (xem [bài về lỗi](/blog/go-errors-defer-panic/)).
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"time"
+)
+
+func queryDB(ctx context.Context) error {
+	select {
+	case <-time.After(400 * time.Millisecond): // pretend the query takes 400ms
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func loadUser(ctx context.Context) error {
+	if err := queryDB(ctx); err != nil {
+		return fmt.Errorf("loadUser: %w", err)
+	}
+	return nil
+}
+
+func handle(ctx context.Context) error {
+	if err := loadUser(ctx); err != nil {
+		return fmt.Errorf("handle: %w", err)
+	}
+	return nil
+}
+
+func main() {
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+
+	start := time.Now()
+	err := handle(ctx)
+	fmt.Println("error:", err)
+	fmt.Println("took about:", time.Since(start).Round(50*time.Millisecond))
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Lời gọi bỏ cuộc sau khoảng 150 ms, không phải 400 ms. ctx.Err() cho biết lý do: đã quá deadline. Hai tiền tố được bọc cho thấy đường đi của lỗi.">
+```text
+error: handle: loadUser: context deadline exceeded
+took about: 150ms
+```
+</TerminalOutput>
+
+Hãy để ý điều không xảy ra: `handle` và `loadUser` không hề nhắc đến thời gian. Chúng chỉ chuyển `ctx` đi tiếp. Hàm duy nhất phản ứng là `queryDB`, hàm thật sự chờ, và nó phản ứng ở đúng một chỗ: câu `select`. Nếu thiếu nhánh `<-ctx.Done()`, chương trình vẫn chờ đủ 400 ms, vì context chỉ mang tín hiệu. Phải có ai đó lắng nghe.
+
+<GoTimeoutCascadeDemo />
+
+Giờ đến dòng `defer cancel()`. `WithTimeout` bật một bộ đếm giờ, và hàm `cancel` giải phóng nó. Tài liệu `context` nói rất thẳng: "Failing to call the CancelFunc leaks the child and its children until the parent is canceled." Gọi `cancel` sau khi xong việc luôn an toàn, và `go vet` sẽ cảnh báo nếu bạn quên. Hãy luôn viết `defer cancel()` ngay dòng sau `WithTimeout`.
+
+### Hủy khi cần
+
+Timeout là một cách dừng. Cách kia là tự nói "dừng", bằng `context.WithCancel`. Ở đây hai worker lặp cho tới khi context bị hủy. `sync.WaitGroup` (từ bài trước) cho `main` chờ đến khi cả hai in xong lời chào tạm biệt.
+
+<GoP08ContextTree />
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"time"
+)
+
+func worker(ctx context.Context, id int, wg *sync.WaitGroup) {
+	defer wg.Done()
+	for {
+		select {
+		case <-ctx.Done():
+			fmt.Println("worker", id, "stopping:", ctx.Err())
+			return
+		case <-time.After(30 * time.Millisecond):
+		}
+	}
+}
+
+func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go worker(ctx, 1, &wg)
+	go worker(ctx, 2, &wg)
+
+	time.Sleep(100 * time.Millisecond)
+	cancel() // one call stops both workers
+	wg.Wait()
+	fmt.Println("all stopped")
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Một lần cancel() tới được cả hai worker. Chúng dừng không theo thứ tự cố định, nên lần chạy khác worker 1 có thể in trước.">
+```text
+worker 2 stopping: context canceled
+worker 1 stopping: context canceled
+all stopped
+```
+</TerminalOutput>
+
+Context tạo thành một cái cây. Khi bạn tạo context con bằng `WithTimeout`, `WithCancel` hay `WithValue`, hủy context cha sẽ hủy mọi context con. Vì vậy một lần `cancel()` trong `main` là đủ, và timeout ở mức request cũng dừng mọi thứ được khởi động bên dưới. Đây là thói quen giúp tránh rò rỉ goroutine: mọi goroutine có thể phải chờ đều nên lắng nghe một context.
+
+### Values: dùng ít thôi
+
+Context còn mang được cặp key-value bằng `context.WithValue`. Tài liệu bảo chỉ dùng chúng cho "only for request-scoped data that transits processes and APIs, not for passing optional parameters to functions". Request ID mà mọi dòng log đều cần in là ví dụ điển hình. Database handle hay feature flag thì không.
+
+Key nên là kiểu bạn tự định nghĩa và không export, để hai package không thể va nhau khi cùng dùng chuỗi `"id"`. Ở đây `type ctxKey string` tạo một kiểu mới; `requestID` là hằng số thuộc kiểu đó.
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+)
+
+type ctxKey string
+
+const requestID ctxKey = "requestID"
+
+func logLine(ctx context.Context, msg string) {
+	fmt.Println(ctx.Value(requestID), msg)
+}
+
+func main() {
+	ctx := context.WithValue(context.Background(), requestID, "req-42")
+	logLine(ctx, "start")
+	fmt.Println(context.Background().Value(requestID))
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Giá trị đi cùng ctx. Context chưa từng có nó trả về nil, không báo lỗi, nên thiếu giá trị rất dễ bị bỏ sót.">
+```text
+req-42 start
+<nil>
+```
+</TerminalOutput>
+
+`Value` trả về `any`, nên compiler không kiểm tra được giá trị có tồn tại hay đúng kiểu bạn mong. Vì thế values là phương án cuối: thứ hàm cần để chạy nên là tham số bình thường.
+
+### Sai context: việc chạy nền chết cùng request
+
+Quay lại phần mở đầu. Handler trả lời client, nhưng cũng muốn chạy nền một việc, ví dụ publish một event lên message broker. Đoạn code dễ nghĩ ra là khởi động goroutine và truyền cho nó `r.Context()`, context của request. Theo tài liệu `net/http`, context đó bị hủy ngay khi handler return.
+
+Chương trình dưới đây khởi động một test server (`httptest.NewServer` của thư viện chuẩn chạy một HTTP server thật trên máy bạn trong suốt chương trình), gửi một request tới nó, và để goroutine chạy nền báo lại nó thấy gì sau 50 ms.
+
+```go
+package main
+
+import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"time"
+)
+
+var seen = make(chan string)
+
+func handler(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	go func() {
+		time.Sleep(50 * time.Millisecond) // background work, e.g. publish an event
+		seen <- fmt.Sprint("background work sees: ", ctx.Err())
+	}()
+	fmt.Fprintln(w, "done")
+}
+
+func main() {
+	srv := httptest.NewServer(http.HandlerFunc(handler))
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	resp.Body.Close()
+	fmt.Println("client got its response")
+	fmt.Println(<-seen)
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Handler đã return, nên context bị hủy trước khi việc chạy nền kịp nhìn. Một lời gọi nhận ctx sẽ bỏ cuộc ngay.">
+```text
+client got its response
+background work sees: context canceled
+```
+</TerminalOutput>
+
+Cách sửa tùy việc chạy nền cần gì. Nếu nó không cần gì từ request, hãy khởi động từ một `context.Background()` mới. Nếu nó vẫn cần các giá trị của request (ví dụ request ID cho log), dùng `context.WithoutCancel(r.Context())`: giữ values, bỏ việc hủy. Chương trình chỉ đổi đúng một dòng đó:
+
+```go
+ctx := context.WithoutCancel(r.Context()) // keeps values, drops cancellation
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Cùng chương trình với một dòng đổi (và thêm import context). Việc chạy nền giờ không thấy lỗi.">
+```text
+client got its response
+background work sees: <nil>
+```
+</TerminalOutput>
+
+<GoP08BackgroundTimeline />
+
+Tình huống này được sách *100 Go Mistakes* phân tích với việc publish lên message broker sau khi trả HTTP response. Cách sửa ở đó là tự viết một kiểu context riêng; `context.WithoutCancel` là câu trả lời của thư viện chuẩn cho cùng nhu cầu. Một lưu ý: việc không bị hủy cũng không có deadline. Hãy cho nó một `WithTimeout` riêng để nó không chạy mãi.
+
+---
+
+## Khóa: mỗi lần một goroutine
+
+Hai goroutine cùng ghi vào một map là lỗi. Map của Go không an toàn cho việc đó, và vì runtime phát hiện được, nó không âm thầm mất dữ liệu như một biến đếm thường. Nó dừng cả chương trình. Chương trình này chạy 100 goroutine, mỗi cái cộng 1.000 lần vào một bộ đếm trong map:
+
+```go
+package main
+
+import (
+	"fmt"
+	"sync"
+)
+
+func main() {
+	counts := map[string]int{}
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 1000; j++ {
+				counts["hits"]++
+			}
+		}()
+	}
+	wg.Wait()
+	fmt.Println(counts["hits"])
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Vài dòng đầu của vụ crash. Nó xảy ra ở gần như mọi lần chạy, nhưng không phải mọi lần, vì phụ thuộc thời điểm. Đường dẫn file đã rút gọn.">
+```text
+fatal error: concurrent map writes
+
+goroutine 9 [running]:
+internal/runtime/maps.fatal({0x104f5307b?, 0x1050098e8?})
+	.../runtime/panic.go:1195 +0x20
+main.main.func1()
+	.../main.go:16 +0x68
+created by main.main in goroutine 1
+```
+</TerminalOutput>
+
+`sync.Mutex` sửa được lỗi này. `mu.Lock()` chờ đến khi không ai giữ khóa rồi lấy nó. `mu.Unlock()` trả khóa lại. Mọi thứ giữa hai lời gọi (vùng găng) chạy mỗi lần cho một goroutine. Giá trị zero của `Mutex` dùng được ngay, nên `var mu sync.Mutex` là đủ.
+
+<GoP08MutexTimeline />
+
+```go
+package main
+
+import (
+	"fmt"
+	"sync"
+)
+
+func main() {
+	counts := map[string]int{}
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 1000; j++ {
+				mu.Lock()
+				counts["hits"]++
+				mu.Unlock()
+			}
+		}()
+	}
+	wg.Wait()
+	fmt.Println(counts["hits"])
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="100 goroutine nhân 1.000 lần cộng ra đúng 100000, vì mỗi lúc chỉ một goroutine tới được phép cộng.">
+```text
+100000
+```
+</TerminalOutput>
+
+Trong code thật, map và mutex của nó nằm chung trong một struct, và các method lấy khóa. Dùng `defer mu.Unlock()` ngay sau `Lock()` để `return` sớm hay panic không thể để khóa bị giữ mãi. Nếu đọc nhiều hơn ghi rất nhiều, `sync.RWMutex` cho nhiều người đọc vào cùng lúc: `RLock`/`RUnlock` cho đọc, `Lock`/`Unlock` cho ghi (method của struct nằm ở [bài về struct](/blog/go-structs-methods-interfaces/)).
+
+```go
+package main
+
+import (
+	"fmt"
+	"sync"
+)
+
+type Cache struct {
+	mu       sync.RWMutex
+	balances map[string]float64
+}
+
+func (c *Cache) Add(id string, balance float64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.balances[id] = balance
+}
+
+func (c *Cache) Average() float64 {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	sum := 0.0
+	for _, b := range c.balances {
+		sum += b
+	}
+	return sum / float64(len(c.balances))
+}
+
+func main() {
+	c := &Cache{balances: map[string]float64{}}
+	c.Add("a", 10)
+	c.Add("b", 20)
+	fmt.Println(c.Average())
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Trung bình của 10 và 20. Điểm đáng chú ý là mọi method đụng tới balances đều giữ khóa.">
+```text
+15
+```
+</TerminalOutput>
+
+### Copy map không có nghĩa là copy dữ liệu
+
+Một cách hay thử để giữ khóa ngắn là copy map trong lúc có khóa rồi lặp trên bản copy bên ngoài khóa:
+
+```go
+c.mu.RLock()
+balances := c.balances // looks like a copy
+c.mu.RUnlock()
+for _, b := range balances { // still the same map
+    // ...
+}
+```
+
+Cách này vẫn là data race. Gán một map (hay slice) chỉ copy cái header nhỏ trỏ tới dữ liệu, như ví dụ slice ở [bài về collection](/blog/go-slices-maps-strings/). `balances` và `c.balances` là cùng một map, nên vòng lặp đọc trong lúc goroutine khác ghi. Có hai cách sửa đúng, cả hai từ *100 Go Mistakes*: giữ khóa suốt cả vòng lặp như `Average` ở trên, hoặc tạo bản copy thật (`make` một map mới rồi copy từng phần tử bằng vòng lặp) và lặp trên bản đó. Cách thứ hai chỉ đáng khi việc trong vòng lặp chậm, ví dụ gọi database.
+
+<GoP08MapHeaders />
+
+### Không bao giờ copy kiểu thuộc sync
+
+Mọi kiểu trong package `sync` (`Mutex`, `RWMutex`, `WaitGroup`, `Once`, `Cond`, `Pool`, `Map`) không được copy sau lần dùng đầu. Bản copy có trạng thái khóa riêng, nên hai goroutine tưởng đang giữ "cái khóa" thật ra giữ hai cái khác nhau. Cách dễ copy nhầm nhất là method có value receiver, vì nó copy struct ở mỗi lần gọi.
+
+<GoP08ValueReceiver />
+
+```go
+package main
+
+import (
+	"fmt"
+	"sync"
+)
+
+type Counter struct {
+	mu sync.Mutex
+	n  int
+}
+
+func (c Counter) Inc() { // value receiver: every call gets its own copy of mu
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.n++
+}
+
+func main() {
+	var c Counter
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c.Inc()
+		}()
+	}
+	wg.Wait()
+	fmt.Println("n =", c.n)
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Không phải 100: chương trình chạy không crash và in 0, vì mỗi lần gọi cộng vào bản copy riêng của struct. Mutex cũng bị copy nên chẳng bảo vệ được gì.">
+```text
+n = 0
+```
+</TerminalOutput>
+
+`go vet` bắt được lỗi này, là một lý do tốt để chạy nó (như bài đầu đã thiết lập):
+
+<TerminalOutput command="go vet main.go" label="Go 1.27.1 · darwin/arm64" caption="Thông báo của vet nêu tên method, vấn đề và field. Dòng 13 là dòng func Inc.">
+```text
+main.go:13:9: Inc passes lock by value: command-line-arguments.Counter contains sync.Mutex
+```
+</TerminalOutput>
+
+Cách sửa là dùng pointer receiver, `func (c *Counter) Inc()`, để mọi lần gọi làm việc trên cùng một struct. Quy tắc chung: nếu struct chứa một kiểu `sync`, cho mọi method của nó pointer receiver và truyền nó bằng con trỏ.
+
+### WaitGroup: Add trước `go`, không phải bên trong
+
+`sync.WaitGroup` là một bộ đếm. `Add(n)` tăng nó, `Done()` giảm, và `Wait()` chặn đến khi nó về không. Lỗi là gọi `Add` bên trong goroutine mới. Khi đó `Wait` có thể chạy trước khi goroutine nào kịp gọi `Add`, thấy số không và return ngay.
+
+```go
+package main
+
+import (
+	"fmt"
+	"sync"
+	"sync/atomic"
+)
+
+func main() {
+	var wg sync.WaitGroup
+	var v atomic.Int64
+
+	for i := 0; i < 3; i++ {
+		go func() {
+			wg.Add(1) // too late: Wait may already have returned
+			v.Add(1)
+			wg.Done()
+		}()
+	}
+
+	wg.Wait()
+	fmt.Println(v.Load())
+}
+```
+
+`atomic.Int64` là một số an toàn khi nhiều goroutine cùng đổi, nên lỗi duy nhất ở đây là chỗ `Add`. Kết quả mong đợi là 3.
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Mười lần chạy chương trình đã build đều in 0 trên máy này. Kết quả có thể là bất kỳ số nào từ 0 đến 3 tùy thời điểm, và đó là lý do lỗi này khó thấy.">
+```text
+0 0 0 0 0 0 0 0 0 0
+```
+</TerminalOutput>
+
+`go vet` cũng báo lỗi này: `main.go:15:10: WaitGroup.Add called from inside new goroutine`. Cách sửa là đặt `wg.Add(1)` trước câu lệnh `go` (hoặc `wg.Add(3)` một lần trước vòng lặp), và giữ `wg.Done()` bên trong goroutine, tốt nhất là `defer wg.Done()`.
+
+### Channel hay mutex?
+
+Cả hai đều là công cụ đúng. Chúng trả lời những câu hỏi khác nhau:
+
+| Tình huống | Dùng | Vì sao |
+|---|---|---|
+| Chuyển một giá trị hay kết quả từ goroutine này sang goroutine khác | channel | dữ liệu di chuyển, và mỗi lúc chỉ một goroutine sở hữu nó |
+| Báo goroutine dừng lại | `context` | một tín hiệu tới được cả cây các hàm gọi |
+| Nhiều goroutine đọc và cập nhật cùng một map, bộ đếm hay cache | mutex | dữ liệu đứng yên, khóa canh từng lần truy cập |
+| Chờ N goroutine xong | `WaitGroup` | một bộ đếm, không có dữ liệu để chuyển |
+
+Nếu bạn chuyển quyền sở hữu thì dùng channel. Nếu bạn canh một cấu trúc dùng chung thì dùng mutex. Một struct chứa mutex và map là cách quen thuộc để xây cache trong Go.
+
+---
+
+## Điểm rút ra (Key takeaways)
+
+- Context mang deadline, tín hiệu hủy và vài giá trị xuống một chuỗi lời gọi. Đặt nó làm tham số đầu tiên, tên `ctx`, và chỉ để hàm thật sự chờ phản ứng với `ctx.Done()`.
+- `defer cancel()` nằm ở dòng sau mỗi `WithTimeout` hay `WithCancel`. Quên nó thì bộ đếm giờ bị giữ cho đến khi context cha bị hủy.
+- Hủy một context sẽ hủy mọi context con, nhờ đó một tín hiệu dừng được cả cây goroutine.
+- Context của HTTP request bị hủy khi handler return. Với việc phải sống lâu hơn request, dùng `context.WithoutCancel(r.Context())` và cho nó timeout riêng.
+- Bảo vệ map và slice dùng chung bằng `Mutex` (hoặc `RWMutex`) và `defer Unlock()`. Gán một map hay slice không copy dữ liệu của nó.
+- Không bao giờ copy kiểu `sync`: dùng pointer receiver. Gọi `wg.Add` trước câu lệnh `go`. `go vet` bắt được cả hai.
+
+## Câu hỏi ôn tập (Review questions)
+
+1. `handle` và `loadUser` không hề nhắc đến thời gian, vậy mà chương trình dừng sau khoảng 150 ms. Hàm nào làm việc đó, và điều gì đổi nếu nó thiếu nhánh `<-ctx.Done()`? (Xem "Timeout chạm tới lời gọi trong cùng".)
+2. Một handler khởi động goroutine với `r.Context()` để publish event. Vì sao việc publish thất bại lúc được lúc không, và có hai cách sửa nào? (Xem "Sai context".)
+3. Bạn copy một map vào biến cục bộ trong `RLock` và lặp trên nó sau `RUnlock`. Vì sao vẫn là race? (Xem "Copy map không có nghĩa là copy dữ liệu".)
+4. Một struct có `sync.Mutex` và một method với value receiver. Chương trình in ra gì, và công cụ nào cảnh báo bạn? (Xem "Không bao giờ copy kiểu thuộc sync".)
+5. Vì sao `wg.Add(1)` bên trong goroutine có thể làm `Wait` return quá sớm? (Xem "WaitGroup: Add trước go, không phải bên trong".)
+
+### Sẽ có ở các bài sau
+
+Chạy một nhóm goroutine với hủy chung và xử lý lỗi (`errgroup`), worker pool và pipeline nằm ở [bài về concurrency pattern](/blog/go-concurrency-patterns-worker-pools-pipelines/). Cách scheduler chạy goroutine và cách race detector tìm race nằm ở [bài concurrency chuyên sâu](/blog/go-concurrency-scheduler-channels-context-mutexes/).
+
+</Vi>
