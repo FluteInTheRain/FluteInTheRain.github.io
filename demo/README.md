@@ -29,3 +29,4 @@ uv run --python 3.13 --with 'fastapi==0.165.0' --with 'uvicorn[standard]' \
 | `trace_demo.py` | `backend-http-request-lifecycle` | One `/cases/{case_id}` endpoint plus an HTTP middleware printing the ASGI `scope`, the dispatch chain, and the response round trip |
 | `station_timing.py` | `backend-http-request-lifecycle` | Raw-socket walk paying each station of one HTTPS request separately: DNS, TCP, TLS, then the first response bytes |
 | `reuse_timing.py` | `backend-http-request-lifecycle` | First vs second `GET` on one pooled `httpx.Client` connection — what keep-alive buys |
+| `schemas.py` | `backend-validation-schemas` | clue.api case intake behind typed boundaries: a Pydantic v2 `CaseCreate` with length/pattern/range constraints, an untyped `POST /cases/raw` twin for contrast, and a `CaseOut` response model that filters internal fields out of the 201 |
