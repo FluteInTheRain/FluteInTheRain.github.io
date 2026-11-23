@@ -93,6 +93,7 @@ Notice why **Duration** must be a **Histogram**, never a plain average or a Prom
 
 ```go
 // Add RED middleware alongside statusRecorder from the Todo service (Post 10).
+// prometheus = github.com/prometheus/client_golang/prometheus
 var httpDur = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 	Name:    "http_request_duration_seconds",
 	Help:    "Request duration per route pattern and status class.",
@@ -140,7 +141,7 @@ Second, Kubernetes OOM-kills pods based on `container_memory_working_set_bytes` 
 
 <GoP17MemoryLayers />
 
-Inside Go itself, prefer the `runtime/metrics` package (introduced in Go 1.16) over `runtime.ReadMemStats` in hot diagnostic paths: `runtime.ReadMemStats` triggers a brief Stop-The-World pause to snapshot every stat at once, whereas `runtime/metrics` reads individual runtime counters cheaply. Here is a real Go 1.27.1 comparison after allocating `20 MiB` of live byte slices and running one `runtime.GC()`:
+Inside Go itself, prefer the `runtime/metrics` package (introduced in Go 1.16) over `runtime.ReadMemStats` in hot diagnostic paths: `runtime.ReadMemStats` triggers a brief Stop-The-World pause to snapshot every stat at once, whereas `runtime/metrics` reads individual runtime counters cheaply. Here is a real Go 1.27.1 comparison after allocating `20 MiB` of live byte slices and running one `runtime.GC()`: (`for range 20` just repeats the body 20 times, Go 1.22+ shorthand from [Go memory](/blog/go-memory-data-types-slices-maps-strings/).)
 
 ```go
 package main
@@ -229,7 +230,7 @@ Unit tests check correctness on edge cases; **microbenchmarks** (`func Benchmark
 
 <Figure src={chronometerImg} alt="Brass marine chronometer suspended inside its gimbaled wooden box" caption="Marine chronometers rode inside gimbaled rings to stay level against rolling seas—microbenchmarks need the same discipline around timers, sinks, and machine stability." sourceTitle="Wikimedia Commons: Marine chronometer, Joseph Sewill (Liverpool, c. 1870)" sourceUrl="https://commons.wikimedia.org/wiki/File:Marine_chronometer,_Joseph_Sewill,_Liverpool_(c._1870).JPG" />
 
-Every Go microbenchmark lives in a `*_test.go` file, takes `*testing.B`, and runs via `go test`. Always pass `-run '^$'` so functional unit tests do not run and pollute output, and pass `-benchmem` (or call `b.ReportAllocs()`) so heap bytes (`B/op`) and allocation counts (`allocs/op`) print beside latency (`ns/op`). Just as importantly, check errors inside your benchmark (`if err != nil { b.Fatal(err) }`): benchmarking an error path that returns early in 20 ns because a fixture path was misspelled is a fast way to celebrate a fake speedup.
+Every Go microbenchmark lives in a `*_test.go` file, takes `*testing.B`, and runs via `go test`. Always pass `-run '^$'` so functional unit tests do not run and pollute output, and pass `-benchmem` (or call `b.ReportAllocs()`) so heap bytes (`B/op`) and allocation counts (`allocs/op`) print beside latency (`ns/op`). Just as importantly, check errors inside your benchmark (`if err != nil { b.Fatal(err) }`): benchmarking an error path that returns early in 20 ns because a fixture path was misspelled is a fast way to celebrate a fake speedup. Two more flags appear below: `-count=N` repeats the whole benchmark `N` times, and `-benchtime` sets how long each run lasts (`2s` for two seconds, `200x` for exactly 200 iterations). In the older loop style, `b.N` is the iteration count that Go chooses for you and `b.ResetTimer()` zeroes the clock and allocation counters.
 
 Even with `-benchmem` on and errors checked, four classic mistakes (`#89` in *100 Go Mistakes*) silently turn `go test -bench` into fiction.
 
@@ -237,7 +238,7 @@ Even with `-benchmem` on and errors checked, four classic mistakes (`#89` in *10
 
 ### 1. Letting setup leak into the timer
 
-Suppose you want to measure how fast a single lookup in a 100,000-entry `Todo` index runs. Building that index inside the benchmark without resetting the clock mixes 3 milliseconds of map allocation into early calibration iterations:
+Suppose you want to measure how fast a single lookup in a 100,000-entry `Todo` index runs. Building that index inside the benchmark without resetting the clock mixes 3 milliseconds of map allocation into early calibration iterations: Here `buildTodoIndex(n)` is a small helper (not shown) that builds a `map[int]string` with `n` entries:
 
 ```go
 var LookupSink string
@@ -298,7 +299,7 @@ What if setup must happen on *every* iteration? You can wrap per-iteration setup
 
 ### 2. Compiler dead-code elimination vs `for b.Loop()`
 
-Come back to Go issue #14813's `popcnt` bit-counter. Under `for i := 0; i < b.N; i++`, calling a pure inlineable function without using its result lets Go's SSA compiler prove the loop body has zero observable side effects and strip it down to an empty loop counter:
+Come back to Go issue #14813's `popcnt` bit-counter. Under `for i := 0; i < b.N; i++`, calling a pure inlineable function without using its result lets Go's SSA compiler prove the loop body has zero observable side effects and strip it down to an empty loop counter: (`popcnt(x)` is a plain-Go helper, not shown, that counts the `1` bits in `x` with a few shifts, masks and one multiply.)
 
 ```go
 var GlobalSink uint64
@@ -344,7 +345,7 @@ BenchmarkPopcntBLoop-8     	227317034	         2.548 ns/op	       0 B/op	       
 ```
 </TerminalOutput>
 
-Inspecting ARM64 assembly (`go test -c -gcflags='-S'`) confirms what happened: `BenchmarkPopcntIgnored` compiled down to `ADD $1; CMP; BLT`—zero `LSR`/`AND`/`MUL` instructions—and hit Go's `1,000,000,000` maximum iteration cap, a red flag that a benchmark is measuring empty loop overhead. Meanwhile, `BenchmarkPopcntSink` kept the work alive via one post-loop write to `GlobalSink` (never write to a package global on every iteration, which adds memory store cost inside the hot loop).
+Inspecting ARM64 assembly (`go test -c -gcflags='-S'`, where `-S` prints the generated assembly) confirms what happened: `BenchmarkPopcntIgnored` compiled down to `ADD $1; CMP; BLT`—zero `LSR`/`AND`/`MUL` instructions—and hit Go's `1,000,000,000` maximum iteration cap, a red flag that a benchmark is measuring empty loop overhead. Meanwhile, `BenchmarkPopcntSink` kept the work alive via one post-loop write to `GlobalSink` (never write to a package global on every iteration, which adds memory store cost inside the hot loop).
 
 Go 1.24's **`for b.Loop()`** replaces both `b.ResetTimer()` and manual sink boilerplate for almost all benchmarks. Look straight into Go 1.27.1's `src/testing/benchmark.go` to see its contract:
 
@@ -365,11 +366,11 @@ Go 1.24's **`for b.Loop()`** replaces both `b.ResetTimer()` and manual sink boil
 ```
 </GitHubCode>
 
-Two details in Go 1.27.1 are worth noticing in the numbers above. First, `b.Loop()` adds ~1.4 ns of stack spill and loop-check overhead compared with `GlobalSink` on sub-nanosecond functions, which vanishes once a benchmarked operation takes tens of nanoseconds or more. Second, `for b.Loop()` blocks dead-code elimination of the call's *result*, yet if you pass a local constant right above the loop (`x := uint64(0xdeadbeef); for b.Loop() { popcnt(x) }`), Go's SSA pass can still constant-fold `popcnt(x)` to `24` before `runtime.KeepAlive` runs; vary the input (`x++`) or read it from a package variable when testing pure arithmetic.
+Two details in Go 1.27.1 are worth noticing in the numbers above. First, `b.Loop()` adds ~1.4 ns of stack spill and loop-check overhead compared with `GlobalSink` on sub-nanosecond functions, which vanishes once a benchmarked operation takes tens of nanoseconds or more. Second, `for b.Loop()` blocks dead-code elimination of the call's *result*, yet if you pass a local constant right above the loop (`x := uint64(0xdeadbeef); for b.Loop() { popcnt(x) }`), Go's SSA pass can still constant-fold `popcnt(x)` to `24` before `runtime.KeepAlive` runs; vary the input (`x++`) or read it from a package variable when testing pure arithmetic. (`runtime.KeepAlive(x)` is a standard-library call that marks `x` as still in use at that point, so the compiler cannot delete the work that produced it.)
 
 ### 3. Observer effect and CPU cache warming
 
-Observing a function in a tight loop can change the hardware state itself. Suppose you compare summing the first 8 columns of two 1,000-row matrices (`calculateSum512` with `[][512]int64` vs `calculateSum513` with `[][513]int64`, from `#89`). When a benchmark allocates the matrix once and reuses it across thousands of iterations, the active columns stay warm inside CPU L1/L2 cache:
+Observing a function in a tight loop can change the hardware state itself. Suppose you compare summing the first 8 columns of two 1,000-row matrices (`calculateSum512` with `[][512]int64` vs `calculateSum513` with `[][513]int64`, from `#89`). When a benchmark allocates the matrix once and reuses it across thousands of iterations, the active columns stay warm inside CPU L1/L2 cache: Both functions are plain nested loops that add `s[i][j]` for `j < 8` over every row. The `Reuse` benchmarks build the matrix once before the loop; the `Fresh` ones build a new matrix on every iteration (with the timer stopped while building).
 
 <TerminalOutput command="go test -run '^$' -bench 'BenchmarkSum51' -benchtime=200x -count=3 -benchmem" label="Apple M2 · Go 1.27.1" caption="Real Go 1.27.1 matrix stride test: reusing the same matrix keeps active columns warm in cache (~4.1–7.4 µs/op), roughly twice as fast as reading freshly allocated cold matrices (~6.1–12.8 µs/op).">
 ```text
@@ -426,7 +427,7 @@ AtomicStore-8   2.107n ± 3%   2.103n ± 12%  ~ (p=0.853 n=10)
 ```
 </TerminalOutput>
 
-Now compare an actual code change in our [Todo HTTP service](/blog/go-http-service-net-http-json-middleware/): replacing `json.NewEncoder` reflection in `encodeTodosEncoder` (`v1.txt`) with a pre-sized `[]byte` JSON builder using `strconv.AppendInt` / `strconv.AppendQuote` / `strconv.AppendBool` (`v2.txt`) across `items=10` and `items=200` sub-benchmarks:
+Now compare an actual code change in our [Todo HTTP service](/blog/go-http-service-net-http-json-middleware/): replacing `json.NewEncoder` reflection in `encodeTodosEncoder` (`v1.txt`) with a pre-sized `[]byte` JSON builder using `strconv.AppendInt` / `strconv.AppendQuote` / `strconv.AppendBool` (`v2.txt`) across `items=10` and `items=200` sub-benchmarks: Two small helpers, written only for this benchmark and not shown, make it work: `newSeededStore(n)` fills a Todo store with `n` items and `listRecent(n)` returns copies of the last `n`. `encodeTodos` stands for whichever version is being measured, `v1` or `v2`.
 
 ```go
 func BenchmarkEncodeTodos(b *testing.B) {
@@ -500,9 +501,9 @@ Even a flawless `benchstat` win on one function can disappoint in production. A 
 
 <YouTube id="wv97cPiqYSU" title="P99 CONF 2023 | The Art of Macro Benchmarking by Bartłomiej Płotka" start={382} end={450} caption="From 6:22 to 7:30, Bartłomiej Płotka contrasts microbenchmarks, macrobenchmarks, and production benchmarking—and why end-to-end realism exposes bottlenecks unit benchmarks miss." sourceTitle="ScyllaDB P99 CONF — Bartłomiej Płotka" />
 
-**Macrobenchmarks** treat the entire compiled service binary (ideally inside a container with realistic cgroup CPU/RAM limits and dependencies, the model behind `efficientgo/e2e`) as a closed system and drive HTTP or gRPC traffic from outside:
+**Macrobenchmarks** treat the entire compiled service binary (ideally inside a container with realistic cgroup CPU/RAM limits and dependencies, the model behind `efficientgo/e2e`, a Go library that starts a service and its dependencies in containers from test code) as a closed system and drive HTTP or gRPC traffic from outside:
 
-- **`k6` (Grafana Labs)**: Go-powered load generator scripted in JavaScript, ideal for multi-step flows (`POST /todos` -> `GET /todos` -> `GET /todos/{id}`), warmup stages, status assertions, and CI p99 thresholds.
+- **`k6` (Grafana Labs)**: Go-powered load generator driven by a script file, ideal for multi-step flows (`POST /todos` -> `GET /todos` -> `GET /todos/{id}`), warmup stages, status assertions, and CI p99 thresholds.
 - **`vegeta`**: Go CLI and library focused on constant arrival-rate (`RPS`) HTTP attacks so server stalls cannot slow down the client's sending pace (avoiding *coordinated omission* in closed-loop VU tests).
 - **`ghz`**: purpose-built Go CLI for gRPC load testing with protobuf reflection and gRPC status histograms.
 
@@ -540,32 +541,15 @@ reqs=4000 dur=110ms rps=36503 errors=0 p50=131µs p95=653µs p99=898µs gc_cycle
 
 Look at what that single end-to-end run uncovered that `BenchmarkEncodeTodos` missed completely: `p50` sat at `131 µs`, while `p99` jumped **6.9x** to `898 µs` because `POST /todos` holds `store.mu.Lock()` across writes while `GET` readers wait, and 95 concurrent GC cycles ran across `3,704 KiB` of active heap spans (`2.7x` the `1,377 KiB` of live objects).
 
-When running `k6` or `vegeta` against containers in staging, enforce five habits so your macrobenchmark stays honest:
+A minimal constant-rate run with `vegeta` is one shell pipeline: send `GET /todos` at 200 requests per second for three minutes, then print the latency percentiles (the target `todo-api:8080` is a placeholder for your staging service). Five habits then keep any macrobenchmark, `k6` or `vegeta`, honest:
 
-```javascript
-// todo-load.js — minimal k6 script with warmup, realistic read/write mix, and status checks
-import http from 'k6/http';
-import { check } from 'k6';
-
-export const options = {
-  scenarios: {
-    steady: {
-      executor: 'constant-arrival-rate',
-      rate: 200, timeUnit: '1s', duration: '3m', preAllocatedVUs: 20,
-    },
-  },
-  thresholds: { http_req_duration: ['p(99)<50'], http_req_failed: ['rate<0.01'] },
-};
-
-export default function () {
-  const res = http.get('http://todo-api:8080/todos');
-  check(res, { 'status 200': (r) => r.status === 200, 'json array': (r) => r.body.startsWith('[') });
-}
+```text
+echo "GET http://todo-api:8080/todos" | vegeta attack -rate=200/1s -duration=3m | vegeta report
 ```
 
 1. **Warm up first, measure second**: exclude connection handshakes, initial cache fills, and span growth before recording percentiles.
 2. **Use realistic traffic mix and arrival rate**: open-loop (`constant-arrival-rate` in `k6`, or `vegeta -rate`) keeps firing at target RPS even when the server slows down, exposing real queue buildup.
-3. **Assert status codes and payload shape**: `check()` ensures an endpoint returning `500` in `0.2 ms` never looks like a throughput record.
+3. **Assert status codes and payload shape**: a `k6` `check()` or the `resp.StatusCode >= 400` counter in the Go driver above ensures an endpoint returning `500` in `0.2 ms` never looks like a throughput record.
 4. **Watch the load generator itself**: check client CPU, file descriptors (`ulimit -n`), and ephemeral ports so you do not benchmark a starved client.
 5. **Run long enough for GC and Prometheus scrapes**: run multi-minute tests rather than milliseconds so `15s` scrapes and steady-state GC cycles appear in your RED/USE dashboards.
 
@@ -649,6 +633,7 @@ Chỗ dễ sập bẫy nhất là cách đo **Duration**: luôn phải dùng **H
 
 ```go
 // Gắn middleware RED cùng statusRecorder từ Todo service (Bài 10).
+// prometheus = github.com/prometheus/client_golang/prometheus
 var httpDur = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 	Name:    "http_request_duration_seconds",
 	Help:    "Đo độ trễ theo pattern route và mã HTTP.",
@@ -696,7 +681,7 @@ Thứ hai, Kubernetes giết pod (OOMKill) dựa trên `container_memory_working
 
 <GoP17MemoryLayers />
 
-Bên trong Go, hãy ưu tiên gói `runtime/metrics` (có từ Go 1.16) thay vì gọi `runtime.ReadMemStats` ở đường nóng: `ReadMemStats` buộc dừng mọi goroutine (STW) một nhịp ngắn để chụp ảnh toàn bộ thống kê, còn `runtime/metrics` đọc từng chỉ số rất nhẹ. Đây là kết quả chạy thật trên Go 1.27.1 sau khi cấp phát `20 MiB` byte slice sống và gọi một lượt `runtime.GC()`:
+Bên trong Go, hãy ưu tiên gói `runtime/metrics` (có từ Go 1.16) thay vì gọi `runtime.ReadMemStats` ở đường nóng: `ReadMemStats` buộc dừng mọi goroutine (STW) một nhịp ngắn để chụp ảnh toàn bộ thống kê, còn `runtime/metrics` đọc từng chỉ số rất nhẹ. Đây là kết quả chạy thật trên Go 1.27.1 sau khi cấp phát `20 MiB` byte slice sống và gọi một lượt `runtime.GC()`: (`for range 20` chỉ lặp thân vòng 20 lần, cú pháp Go 1.22+ đã nhắc ở bài [Go memory](/blog/go-memory-data-types-slices-maps-strings/).)
 
 ```go
 package main
@@ -785,7 +770,7 @@ Unit test trả lời hàm có chạy đúng với các ca biên hay không; **m
 
 <Figure src={chronometerImg} alt="Đồng hồ cơ hàng hải Joseph Sewill thế kỷ 19 treo trong hộp cân bằng hai trục" caption="Đồng hồ hàng hải phải đặt trong vòng treo chống lắc để giữ mặt phẳng đo chuẩn — microbenchmark Go cũng cần kỷ luật về timer, sink và độ tĩnh của máy đo." sourceTitle="Wikimedia Commons: Marine chronometer, Joseph Sewill (Liverpool, c. 1870)" sourceUrl="https://commons.wikimedia.org/wiki/File:Marine_chronometer,_Joseph_Sewill,_Liverpool_(c._1870).JPG" />
 
-Microbenchmark nằm trong file `*_test.go`, nhận tham số `*testing.B` và chạy bằng `go test`. Luôn thêm `-run '^$'` để không chạy nhầm unit test bình thường làm nhiễu đầu ra, và bật `-benchmem` (hoặc gọi `b.ReportAllocs()`) để thấy luôn `B/op` và `allocs/op` cạnh `ns/op`. Một thói quen nữa hay bị bỏ quên: luôn kiểm tra lỗi ngay trong benchmark (`if err != nil { b.Fatal(err) }`), kẻo gõ nhầm đường dẫn file khiến hàm trả lỗi sớm trong 20 ns rồi hí hửng tưởng mình vừa tối ưu xong!
+Microbenchmark nằm trong file `*_test.go`, nhận tham số `*testing.B` và chạy bằng `go test`. Luôn thêm `-run '^$'` để không chạy nhầm unit test bình thường làm nhiễu đầu ra, và bật `-benchmem` (hoặc gọi `b.ReportAllocs()`) để thấy luôn `B/op` và `allocs/op` cạnh `ns/op`. Một thói quen nữa hay bị bỏ quên: luôn kiểm tra lỗi ngay trong benchmark (`if err != nil { b.Fatal(err) }`), kẻo gõ nhầm đường dẫn file khiến hàm trả lỗi sớm trong 20 ns rồi hí hửng tưởng mình vừa tối ưu xong! Bên dưới còn hai cờ nữa: `-count=N` chạy lại toàn bộ benchmark `N` lần, và `-benchtime` đặt thời gian mỗi lượt chạy (`2s` là hai giây, `200x` là đúng 200 vòng). Trong kiểu vòng lặp cũ, `b.N` là số vòng do Go tự chọn cho bạn, còn `b.ResetTimer()` đưa đồng hồ và bộ đếm cấp phát về 0.
 
 Ngay cả khi đã bật `-benchmem` và kiểm tra lỗi, bốn cái bẫy kinh điển (`#89` trong *100 Go Mistakes*) vẫn âm thầm bẻ cong kết quả đo.
 
@@ -793,7 +778,7 @@ Ngay cả khi đã bật `-benchmem` và kiểm tra lỗi, bốn cái bẫy kinh
 
 ### 1. Để phần chuẩn bị dữ liệu lọt vào đồng hồ đo
 
-Giả sử mình muốn đo tốc độ tra cứu 1 khóa trong bảng chỉ mục 100.000 mục `Todo`. Nếu dựng bảng chỉ mục trước vòng lặp mà quên reset đồng hồ, 3 mili-giây dựng map sẽ tràn thẳng vào các lượt đo đầu tiên:
+Giả sử mình muốn đo tốc độ tra cứu 1 khóa trong bảng chỉ mục 100.000 mục `Todo`. Nếu dựng bảng chỉ mục trước vòng lặp mà quên reset đồng hồ, 3 mili-giây dựng map sẽ tràn thẳng vào các lượt đo đầu tiên: Ở đây `buildTodoIndex(n)` là hàm phụ nhỏ (không trình bày) dựng một `map[int]string` có `n` phần tử:
 
 ```go
 var LookupSink string
@@ -854,7 +839,7 @@ Nếu đoạn setup bắt buộc phải chạy *trong mỗi vòng lặp* thì sa
 
 ### 2. Trình biên dịch xóa code chết (dead-code elimination) vs `for b.Loop()`
 
-Quay lại ví dụ `popcnt` của issue #14813. Với vòng lặp kiểu cũ `for i := 0; i < b.N; i++`, hễ hàm thuần túy được inline mà kết quả không ai đọc, pha tối ưu SSA kết luận thân vòng lặp không có tác dụng phụ và xóa sạch toàn bộ phép tính:
+Quay lại ví dụ `popcnt` của issue #14813. Với vòng lặp kiểu cũ `for i := 0; i < b.N; i++`, hễ hàm thuần túy được inline mà kết quả không ai đọc, pha tối ưu SSA kết luận thân vòng lặp không có tác dụng phụ và xóa sạch toàn bộ phép tính: (`popcnt(x)` là hàm Go thường, không trình bày ở đây, đếm số bit `1` của `x` bằng vài phép dịch, mặt nạ và một phép nhân.)
 
 ```go
 var GlobalSink uint64
@@ -900,7 +885,7 @@ BenchmarkPopcntBLoop-8     	227317034	         2.548 ns/op	       0 B/op	       
 ```
 </TerminalOutput>
 
-Soi mã assembly ARM64 (`go test -c -gcflags='-S'`) thấy rõ rành rành: `BenchmarkPopcntIgnored` chỉ còn đúng ba lệnh `ADD $1; CMP; BLT` — không còn một lệnh dịch bit hay nhân nào — và chạm trần tối đa `1.000.000.000` lượt của `go test` (dấu hiệu kinh điển của benchmark rỗng!). Trong khi đó `BenchmarkPopcntSink` giữ được phép tính nhờ dồn vào biến cục bộ rồi mới gán ra `GlobalSink` một lần sau vòng lặp (đừng gán thẳng ra biến toàn cục mỗi vòng lặp kẻo tốn thêm chi phí ghi bộ nhớ vào điểm nóng).
+Soi mã assembly ARM64 (`go test -c -gcflags='-S'`, cờ `-S` in ra mã assembly sinh ra) thấy rõ rành rành: `BenchmarkPopcntIgnored` chỉ còn đúng ba lệnh `ADD $1; CMP; BLT` — không còn một lệnh dịch bit hay nhân nào — và chạm trần tối đa `1.000.000.000` lượt của `go test` (dấu hiệu kinh điển của benchmark rỗng!). Trong khi đó `BenchmarkPopcntSink` giữ được phép tính nhờ dồn vào biến cục bộ rồi mới gán ra `GlobalSink` một lần sau vòng lặp (đừng gán thẳng ra biến toàn cục mỗi vòng lặp kẻo tốn thêm chi phí ghi bộ nhớ vào điểm nóng).
 
 Từ Go 1.24+, **`for b.Loop()`** giải quyết gọn cả hai chuyện `b.ResetTimer()` lẫn bẫy xóa code chết. Nhìn thẳng vào cam kết của nó trong mã nguồn chuẩn Go 1.27.1 (`src/testing/benchmark.go`):
 
@@ -921,11 +906,11 @@ Từ Go 1.24+, **`for b.Loop()`** giải quyết gọn cả hai chuyện `b.Rese
 ```
 </GitHubCode>
 
-Có hai chi tiết nhỏ trên Go 1.27.1 đáng lưu ý từ bảng đo trên. Thứ nhất, `b.Loop()` thêm khoảng ~1,4 ns chi phí spill stack và kiểm tra điều kiện lặp so với `GlobalSink` trên các hàm siêu nhỏ dưới 5 ns — với hàm thực tế vài chục nano-giây trở lên thì mức này không đáng kể. Thứ hai, `for b.Loop()` bảo vệ *kết quả* không bị xóa, nhưng nếu bạn truyền hẳn một hằng số cục bộ ngay trước vòng lặp (`x := uint64(0xdeadbeef); for b.Loop() { popcnt(x) }`), compiler vẫn có thể tính gộp trước `popcnt(x)` thành `24` (constant folding) trước khi `KeepAlive` giữ số `24` đó lại; hãy cho biến đầu vào thay đổi (`x++`) hoặc đọc từ biến package khi đo các hàm số học thuần túy.
+Có hai chi tiết nhỏ trên Go 1.27.1 đáng lưu ý từ bảng đo trên. Thứ nhất, `b.Loop()` thêm khoảng ~1,4 ns chi phí spill stack và kiểm tra điều kiện lặp so với `GlobalSink` trên các hàm siêu nhỏ dưới 5 ns — với hàm thực tế vài chục nano-giây trở lên thì mức này không đáng kể. Thứ hai, `for b.Loop()` bảo vệ *kết quả* không bị xóa, nhưng nếu bạn truyền hẳn một hằng số cục bộ ngay trước vòng lặp (`x := uint64(0xdeadbeef); for b.Loop() { popcnt(x) }`), compiler vẫn có thể tính gộp trước `popcnt(x)` thành `24` (constant folding) trước khi `KeepAlive` giữ số `24` đó lại; hãy cho biến đầu vào thay đổi (`x++`) hoặc đọc từ biến package khi đo các hàm số học thuần túy. (`runtime.KeepAlive(x)` là hàm thư viện chuẩn đánh dấu `x` vẫn còn được dùng tại điểm đó, nên trình biên dịch không thể xóa phép tính tạo ra nó.)
 
 ### 3. Hiệu ứng người quan sát (observer effect) và CPU cache ấm ảo
 
-Đo một hàm lặp đi lặp lại trong vòng kín có thể tự làm thay đổi trạng thái phần cứng. Chẳng hạn bài toán kinh điển từ `#89`: cộng 8 cột đầu tiên của hai ma trận 1.000 hàng (`calculateSum512` dùng `[][512]int64` vs `calculateSum513` dùng `[][513]int64`). Nếu bạn chỉ tạo ma trận một lần rồi dùng lại suốt hàng nghìn lượt, 8 cột đầu sẽ nằm gọn trong L1/L2 cache của CPU:
+Đo một hàm lặp đi lặp lại trong vòng kín có thể tự làm thay đổi trạng thái phần cứng. Chẳng hạn bài toán kinh điển từ `#89`: cộng 8 cột đầu tiên của hai ma trận 1.000 hàng (`calculateSum512` dùng `[][512]int64` vs `calculateSum513` dùng `[][513]int64`). Nếu bạn chỉ tạo ma trận một lần rồi dùng lại suốt hàng nghìn lượt, 8 cột đầu sẽ nằm gọn trong L1/L2 cache của CPU: Cả hai hàm đều là vòng lặp lồng nhau thường, cộng `s[i][j]` với `j < 8` trên mọi hàng. Các benchmark `Reuse` dựng ma trận một lần trước vòng lặp; các benchmark `Fresh` dựng ma trận mới ở mỗi vòng (tắt đồng hồ trong lúc dựng).
 
 <TerminalOutput command="go test -run '^$' -bench 'BenchmarkSum51' -benchtime=200x -count=3 -benchmem" label="Apple M2 · Go 1.27.1" caption="Đo thật trên Go 1.27.1: dùng lại cùng một ma trận giữ dữ liệu nóng trong cache (~4,1–7,4 µs/op), nhanh gần gấp đôi so với đọc ma trận mới cấp phát (~6,1–12,8 µs/op).">
 ```text
@@ -982,7 +967,7 @@ AtomicStore-8   2.107n ± 3%   2.103n ± 12%  ~ (p=0.853 n=10)
 ```
 </TerminalOutput>
 
-Giờ thử một tối ưu thật trên [Todo HTTP service](/blog/go-http-service-net-http-json-middleware/): thay `json.NewEncoder` dùng reflection ở `encodeTodosEncoder` (`v1.txt`) bằng hàm tự ghép byte JSON trên slice cấp phát sẵn dung lượng qua `strconv.AppendInt` / `strconv.AppendQuote` / `strconv.AppendBool` (`v2.txt`) cho `items=10` và `items=200`:
+Giờ thử một tối ưu thật trên [Todo HTTP service](/blog/go-http-service-net-http-json-middleware/): thay `json.NewEncoder` dùng reflection ở `encodeTodosEncoder` (`v1.txt`) bằng hàm tự ghép byte JSON trên slice cấp phát sẵn dung lượng qua `strconv.AppendInt` / `strconv.AppendQuote` / `strconv.AppendBool` (`v2.txt`) cho `items=10` và `items=200`: Hai hàm phụ nhỏ, viết riêng cho benchmark này và không trình bày, giúp nó chạy được: `newSeededStore(n)` nạp `n` mục vào store Todo và `listRecent(n)` trả bản sao `n` mục cuối. `encodeTodos` là tên gọi chung cho phiên bản đang đo, `v1` hoặc `v2`.
 
 ```go
 func BenchmarkEncodeTodos(b *testing.B) {
@@ -1056,9 +1041,9 @@ Ngay cả khi `benchstat` xanh rì trên một hàm, đẩy lên server vẫn c�
 
 <YouTube id="wv97cPiqYSU" title="P99 CONF 2023 | The Art of Macro Benchmarking — Bartłomiej Płotka" start={382} end={450} caption="Từ 6:22 đến 7:30, Bartłomiej Płotka phân biệt microbenchmark, macrobenchmark và production benchmark — vì sao thử nghiệm toàn hệ thống mới lộ ra những điểm nghẽn mà microbenchmark bỏ sót." sourceTitle="ScyllaDB P99 CONF — Bartłomiej Płotka" />
 
-**Macrobenchmark** chạy nguyên binary service hoàn chỉnh (tốt nhất nằm trong container có giới hạn CPU/RAM giống thật, như tư duy của bộ `efficientgo/e2e`) rồi bắn tải HTTP hoặc gRPC từ bên ngoài vào:
+**Macrobenchmark** chạy nguyên binary service hoàn chỉnh (tốt nhất nằm trong container có giới hạn CPU/RAM giống thật, như tư duy của `efficientgo/e2e`, một thư viện Go dựng service cùng các thành phần phụ thuộc trong container ngay từ code test) rồi bắn tải HTTP hoặc gRPC từ bên ngoài vào:
 
-- **`k6` (Grafana Labs)**: công cụ viết bằng Go cho phép kịch bản tải bằng JavaScript, rất hợp kiểm tra luồng nhiều bước (`POST /todos` -> `GET /todos` -> `GET /todos/{id}`), chia pha warmup, kiểm tra nội dung trả về và gắn ngưỡng fail cho CI.
+- **`k6` (Grafana Labs)**: công cụ viết bằng Go chạy kịch bản tải từ một file script, rất hợp kiểm tra luồng nhiều bước (`POST /todos` -> `GET /todos` -> `GET /todos/{id}`), chia pha warmup, kiểm tra nội dung trả về và gắn ngưỡng fail cho CI.
 - **`vegeta`**: công cụ CLI/thư viện Go chuyên bắn tải HTTP ở tốc độ RPS cố định, giúp giữ nhịp bắn ngay cả khi server bị chậm (tránh lỗi sai số *coordinated omission* của tải vòng kín).
 - **`ghz`**: phiên bản chuyên trị gRPC viết bằng Go, hỗ trợ protobuf reflection và xuất phân bố độ trễ theo mã trạng thái gRPC.
 
@@ -1096,32 +1081,15 @@ reqs=4000 dur=110ms rps=36503 errors=0 p50=131µs p95=653µs p99=898µs gc_cycle
 
 Nhìn con số thật đó sẽ thấy ngay những điều `BenchmarkEncodeTodos` hoàn toàn mù tịt: `p50` chỉ mất `131 µs`, nhưng `p99` nhảy vọt **6,9 lần** lên `898 µs` do `POST /todos` giữ `store.mu.Lock()` khiến các luồng `GET` phải xếp hàng đợi, kèm theo `95` chu kỳ GC chạy nền trên `3.704 KiB` heap span (`gấp 2,7 lần` lượng `1.377 KiB` object sống).
 
-Khi dựng bài bắn tải `k6` hoặc `vegeta` trong container staging, giữ năm thói quen sau để số liệu đừng đánh lừa bạn:
+Một lượt bắn tải tốc độ đều với `vegeta` chỉ là một dòng pipeline shell: gửi `GET /todos` với 200 request mỗi giây trong ba phút rồi in ra các phân vị độ trễ (`todo-api:8080` là chỗ giữ chỗ cho service staging của bạn). Sau đó năm thói quen dưới đây giữ cho mọi macrobenchmark, dù dùng `k6` hay `vegeta`, không đánh lừa bạn:
 
-```javascript
-// todo-load.js — kịch bản k6 tối thiểu có bắn tốc độ đều và kiểm tra phản hồi
-import http from 'k6/http';
-import { check } from 'k6';
-
-export const options = {
-  scenarios: {
-    steady: {
-      executor: 'constant-arrival-rate',
-      rate: 200, timeUnit: '1s', duration: '3m', preAllocatedVUs: 20,
-    },
-  },
-  thresholds: { http_req_duration: ['p(99)<50'], http_req_failed: ['rate<0.01'] },
-};
-
-export default function () {
-  const res = http.get('http://todo-api:8080/todos');
-  check(res, { 'status 200': (r) => r.status === 200, 'json array': (r) => r.body.startsWith('[') });
-}
+```text
+echo "GET http://todo-api:8080/todos" | vegeta attack -rate=200/1s -duration=3m | vegeta report
 ```
 
 1. **Làm ấm (warmup) trước, tính số liệu sau**: loại bỏ pha mở pool TCP, làm đầy cache và nở span ban đầu khỏi bảng phân vị.
 2. **Dùng tải vòng hở (open-loop) theo RPS mục tiêu**: dùng `constant-arrival-rate` trong `k6` hoặc `vegeta -rate` để client tiếp tục gửi đúng nhịp ngay cả khi server bị khựng, lộ đúng độ dồn hàng đợi.
-3. **Bắt buộc kiểm tra mã HTTP và payload**: không có `check()`, một endpoint lỗi `500` trả lời trong `0,2 ms` sẽ trông như kỷ lục tốc độ!
+3. **Bắt buộc kiểm tra mã HTTP và payload**: nếu không có `check()` của `k6` hay bộ đếm `resp.StatusCode >= 400` trong driver Go ở trên, một endpoint lỗi `500` trả lời trong `0,2 ms` sẽ trông như kỷ lục tốc độ!
 4. **Đừng để chính máy bắn tải bị nghẽn**: kiểm tra CPU máy bắn tải, giới hạn file descriptor (`ulimit -n`) và cổng ephemeral trước khi đổ lỗi cho server.
 5. **Chạy đủ lâu để GC và Prometheus kịp ghi nhận**: chạy vài phút thay vì vài trăm mili-giây để quét qua nhiều chu kỳ scrape `15s` và nhìn thấy nhịp GC ổn định trên biểu đồ RED/USE.
 
