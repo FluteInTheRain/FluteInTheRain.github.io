@@ -47,8 +47,27 @@ Khang picked exactly 5 of the 6 proposed diagram subjects (TLS 1.2-vs-1.3 reject
 - [ ] Task 6: Screenshot review via `scripts/figures/figshot.sh` (or the SKILL.md tmp-prev trick): light + dark, VI labels, 375 px phone width. Fix any clipped/overlapping text.
 - [ ] Task 7: Final gate (`npm run build` + `node --test`), Khang eyeballs on the running dev server, `CHANGELOG.md` entry, commit, push, open PR → **wait for Khang's verdict on the voice** (only he flips `draft: false`).
 
-## Review Focus
+## Round 2 (2026-11-23, same branch) — icons, richer figures, Python demos
 
+Khang's read of round 1: use the installed drawing skills' design principles, add real icons to the diagrams, avoid any text-on-figure overlap, and demo Python wherever a demo fits.
+
+- **Decision (question):** figures stay **on-page SVG** (dark mode, one figure for both languages, site font) but are redesigned with the excalidraw-diagram skill's principles (generous whitespace, free-floating text, no cramped labels, small markers, one accent). Real colour icons land via `<image href="/icons/flow/...">` following the AnimatedFlow convention. Excalidraw PNG was rejected (white background breaks dark mode, needs EN+VI duplicates, renderer cannot embed icons, off-site font).
+- **New icons** (downloaded from Iconify per `public/icons/flow/README.md`): `python.svg` (logos:python), `fastapi.svg` (logos:fastapi), `curl.svg` (logos:curl), plus pictograms (globe, lock, envelope, magnifier, log) from fluent-emoji-flat. Each gets a README row. Dark-mode rule: a dark logo sits on a light disc (background circle) as in AnimatedFlow.
+- **Python demos (real captures only):**
+  - `demo/station_timing.py` — times DNS (getaddrinfo), TCP (create_connection), TLS (wrap_socket) and the first response bytes with raw sockets against `fastapi.tiangolo.com`; capture goes into §1.
+  - §2 shows the actual `trace_middleware` source (12 lines from `demo/trace_demo.py`) beside the existing uvicorn capture.
+  - `demo/reuse_timing.py` — an `httpx.Client` making two GETs; prints first vs second request times; capture goes into §3.
+  - `demo/README.md` lists both new scripts.
+
+- [x] Task R1: update this plan (this section).
+- [x] Task R2: download icons into `public/icons/flow/`, add README rows, verify dark-mode disc handling.
+- [x] Task R3: write `demo/station_timing.py` + `demo/reuse_timing.py`, run both for real, save captures, update `demo/README.md`.
+- [x] Task R4: redesign the five `BeP01*` figures (icons + excalidraw principles + generous spacing).
+- [x] Task R5: insert demos into `<En>` and `<Vi>` (§1 code + capture, §2 middleware excerpt, §3 code + capture), symmetric lead-ins.
+- [x] Task R6: figshot + vision review (light EN / light VI / dark VI) until clean; build + `node --test`.
+- [x] Task R7: CHANGELOG entry, commit, push (PR #40), Khang re-reads.
+
+## Review Focus
 - A figure that shows a concept the post has not taught (e.g. DNS recursion internals, TLS message contents).
 - Numbers in figures that differ from the traces/output shown next to them.
 - EN/VI labels that say different things; VI labels that read as word-by-word translation.
