@@ -43,8 +43,8 @@ export interface SeriesPart {
 export interface SeriesPath {
   id: string;
   label: L10n;
-  /** who it is for */
-  who: L10n;
+  /** who it is for; the default "read it all" path leaves it out */
+  who?: L10n;
   /** slugs in reading order */
   order: string[];
 }
@@ -237,10 +237,6 @@ const refactoringUi: Series = {
     {
       id: 'full',
       label: { en: 'Read it all', vi: 'Đọc trọn bộ' },
-      who: {
-        en: 'You have an evening or two and want the whole system, in the order it builds up.',
-        vi: 'Bạn có một hai buổi tối và muốn nắm cả hệ thống, theo đúng thứ tự xây dần.',
-      },
       order: [
         'design-before-you-prompt',
         'visual-hierarchy-rank-before-you-style',
@@ -545,10 +541,6 @@ const ddia: Series = {
     {
       id: 'full',
       label: { en: 'Read it all', vi: 'Đọc trọn bộ' },
-      who: {
-        en: 'You want the whole picture, from one disk up to systems built from logs.',
-        vi: 'Bạn muốn nắm cả bức tranh, từ một ổ đĩa tới hệ thống dựng từ log.',
-      },
       order: Object.values(D),
     },
     {
@@ -905,10 +897,6 @@ const golang: Series = {
     {
       id: 'full',
       label: { en: 'Read it all (20 parts)', vi: 'Đọc trọn bộ (20 bài)' },
-      who: {
-        en: 'Climb the whole ladder from your first Go program to concurrency, runtime traps, profiling, and interview prep.',
-        vi: 'Đi trọn lộ trình từ chương trình Go đầu tiên qua concurrency, bẫy runtime, tối ưu số đo tới ôn phỏng vấn.',
-      },
       order: [
         G.basics, G.types, G.collections, G.structs, G.errors, G.testing,
         G.goroutines, G.context, G.concurrencyPatterns, G.httpService,
@@ -1169,10 +1157,6 @@ const stocksBasics: Series = {
     {
       id: 'full',
       label: { en: 'Read it all', vi: 'Đọc trọn bộ' },
-      who: {
-        en: 'You have an evening or two and want the whole picture, in the order it builds up.',
-        vi: 'Bạn có một hai buổi tối và muốn thấy bức tranh trọn vẹn, theo đúng thứ tự xây dần.',
-      },
       order: [S.ownership, S.account, S.orders, S.settlement, S.dividends, S.statements, S.ratios, S.macro, S.risk, S.plan],
     },
     {
@@ -1415,10 +1399,6 @@ const backend: Series = {
     {
       id: 'full',
       label: { en: 'Read it all', vi: 'Đọc cả 12 bài' },
-      who: {
-        en: 'From the first byte of a request to a zero-downtime deploy.',
-        vi: 'Từ byte đầu tiên của request tới bản deploy không downtime.',
-      },
       order: [B.lifecycle, B.rest, B.validation, B.layering, B.data, B.async, B.auth, B.caching, B.testing, B.observability, B.perf, B.deploy],
     },
     {
@@ -1775,10 +1755,6 @@ const aiTrading: Series = {
     {
       id: 'full',
       label: { en: 'Read it all', vi: 'Đọc hết series' },
-      who: {
-        en: 'From zero to the agent team, in order.',
-        vi: 'Từ số 0 tới đội agent, theo đúng thứ tự.',
-      },
       order: Object.values(AT),
     },
     {
