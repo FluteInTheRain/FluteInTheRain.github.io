@@ -128,7 +128,20 @@ exit status 2
 ```
 </TerminalOutput>
 
-Taking a piece with `a[1:3]`, which you will do often, does not copy either. The piece looks at the same items as the original, so changing one changes the other:
+You can take a piece of a slice with `a[low:high]`. It starts at index `low` and stops just before index `high`, so `a[1:3]` is the items at index 1 and 2. Leave `low` out to start at the beginning (`a[:n]`), or leave `high` out to go to the end (`a[n:]`):
+
+```go
+n := []int{10, 20, 30, 40, 50}
+fmt.Println(n[1:3], n[:2], n[3:])
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="n[1:3] is the items at index 1 and 2. n[:2] is the first two. n[3:] is everything from index 3 on.">
+```text
+[20 30] [10 20] [40 50]
+```
+</TerminalOutput>
+
+Taking a piece does not copy either. The piece looks at the same items as the original, so changing one changes the other:
 
 ```go
 a := []int{1, 2, 3, 4}
@@ -162,17 +175,22 @@ If you have not met variables, types or the `:=` shorthand yet, they are in [Go 
 
 When a slice is full and you `append`, Go reserves a bigger block, copies the items over and carries on. You never ask for this, but it explains why `cap` jumps around. Start with an empty slice and append one item at a time, and the capacity changes in steps, not on every append.
 
-The step sizes are not a fixed rule. The Go 1.18 release notes say `append` "now uses a slightly different formula" that is "less prone to sudden transitions in allocation behavior". So do not memorize doubling. The demo below uses numbers from a real Go 1.27.1 run.
+The demo below shows that capacity grows ahead of length: Go reserves extra room so most appends cost nothing. For small slices the capacity roughly doubles. Once a slice passes about 256 elements (since Go 1.18) it grows by a smaller factor each time. The Go 1.18 release notes say `append` "now uses a slightly different formula" that is "less prone to sudden transitions in allocation behavior". The exact numbers vary, so do not memorize them. The demo uses numbers from a real Go 1.27.1 run.
 
 <GoSliceGrowthDemo />
 
 <Callout type="note" title="Your own numbers may differ">
-The steps depend on the element type, the Go version and what the rest of your program does with the slice. Read `cap` when you need it. Do not hard-code it. The reasons behind the steps are in [Go memory: slices, maps and strings underneath](/blog/go-memory-data-types-slices-maps-strings/).
+The steps depend on the element type, the Go version and what the rest of your program does with the slice. Read `cap` when you need it. Do not hard-code it.
 </Callout>
 
-If you know the final size, tell Go. Making room once is cheaper than growing many times. `make([]int, 0, n)` reserves room and keeps `len` at zero, so you still use `append`. `make([]int, n)` creates `n` zero values, and you fill them by index. Here the size comes from another slice:
+If you know the final size, tell Go. Making room once is cheaper than growing many times, so preallocate with `make` when you know the size. `make([]int, 0, n)` reserves room and keeps `len` at zero, so you still use `append`. `make([]int, n)` creates `n` zero values, and you fill them by index. Here the size comes from another slice:
 
 ```go
+import (
+    "fmt"
+    "strings"
+)
+
 names := []string{"go", "java", "python"}
 upper := make([]string, 0, len(names)) // room for every name
 for _, n := range names {
@@ -186,8 +204,6 @@ fmt.Println(upper, len(upper), cap(upper))
 [GO JAVA PYTHON] 3 3
 ```
 </TerminalOutput>
-
-How much this saves, measured in allocations, is in the memory post: [Go memory: slices, maps and strings underneath](/blog/go-memory-data-types-slices-maps-strings/).
 
 Reserving room is not always worth the extra line. If you do not know the size, or the loop is not hot, a plain `append` is fine. When the code that fills the slice reads more clearly with `append`, keep `append`.
 
@@ -203,7 +219,11 @@ Reserving room is not always worth the extra line. If you do not know the size, 
 
 A slice you declare but never create, `var s []string`, is nil. It has `len` 0, you can `append` to it, and you can loop over it. A nil slice is a normal, working empty list. An empty slice made with `[]string{}` or `make([]string, 0)` also has `len` 0, but it is not nil.
 
+The `show` helper below prints with format verbs: `%d` is a whole number, `%t` is true or false, and `\n` ends the line. The table in [Go variables, types, pointers and functions](/blog/go-variables-types-pointers-functions/) lists every verb this series uses.
+
 ```go
+import "fmt"
+
 func show(i int, s []string) {
     fmt.Printf("%d: len=%d nil=%t\n", i, len(s), s == nil)
 }
@@ -300,7 +320,7 @@ fmt.Println(m["x"], len(m))
 m["x"] = 1                    // panic
 ```
 
-<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="This is the one place where a nil collection bites: a nil map reads fine and refuses writes. The program stops at the write.">
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="This is the one place where a nil collection bites: a nil map reads fine and refuses writes. The program stops at the write, and `exit status 2` is `go run` reporting the crash.">
 ```text
 0 0
 panic: assignment to entry in nil map
@@ -308,12 +328,18 @@ panic: assignment to entry in nil map
 goroutine 1 [running]:
 main.main()
 	.../main.go:8 +0xa4
+exit status 2
 ```
 </TerminalOutput>
 
 The loop order is not stable. The Go blog says the iteration order "is not specified and is not guaranteed to be the same from one iteration to the next". It really does change. This program loops over the same eight-key map three times, then sorts the keys. The output of one real run (yours will differ, that is the point):
 
 ```go
+import (
+    "fmt"
+    "sort"
+)
+
 big := map[int]bool{}
 for i := 0; i < 8; i++ {
     big[i] = true
@@ -344,7 +370,7 @@ fmt.Println(keys)
 If you need order, copy the keys into a slice and sort them, as the code does. The last line of the output is that result. Never write a test that depends on the order of a map loop.
 
 
-Like slices, a map grows as you add keys. If you know roughly how many entries to expect, `make` takes a size hint; how that works is in the memory post: [Go memory: slices, maps and strings underneath](/blog/go-memory-data-types-slices-maps-strings/).
+Like slices, a map grows as you add keys. If you know roughly how many entries to expect, `make` takes a size hint.
 
 Maps are also not safe to use from several goroutines at once. The fix is in [Go goroutines, channels and select](/blog/go-goroutines-channels-select/).
 
@@ -362,9 +388,14 @@ Maps are also not safe to use from several goroutines at once. The fix is in [Go
 
 A string in Go is a read-only sequence of bytes. Go source code is UTF-8, so a literal such as `"Phở"` is stored as UTF-8 bytes. UTF-8 spends one byte on plain English letters and up to four on other characters. That is why the length of "Phở" is not 3.
 
-A rune is Go's name for a single Unicode character (a code point). It is an alias of `int32`. `len(s)` counts bytes. To count characters, use `utf8.RuneCountInString(s)`.
+A rune is Go's name for a single Unicode character (a code point). It is an alias of `int32`. `len(s)` counts bytes. To count characters, use `utf8.RuneCountInString(s)`. To see the bytes themselves, `[]byte(s)` turns the string into a list of its raw bytes, and the verb `% x` prints each byte as two hex digits (hex is base 16) with a space between them.
 
 ```go
+import (
+    "fmt"
+    "unicode/utf8"
+)
+
 s := "Phở"
 fmt.Println(len(s), utf8.RuneCountInString(s))   // 5 3
 fmt.Printf("% x\n", []byte(s))                    // 50 68 e1 bb 9f
@@ -379,7 +410,7 @@ fmt.Printf("% x\n", []byte(s))                    // 50 68 e1 bb 9f
 
 <GoStringBytes />
 
-Indexing gives a byte, not a character. `s[0]` is `P` stored as the byte `0x50`, and `s[2]` is only the first byte of the `ở`. The `range` loop is different: it decodes the string one rune at a time. It gives you the position where each rune starts, and the rune itself.
+Indexing gives a byte, not a character. `s[0]` is `P` stored as the byte `0x50`, and `s[2]` is only the first byte of the `ở`. The `range` loop is different: it decodes the string one rune at a time. It gives you the position where each rune starts, and the rune itself. In the `Printf` below, `%c` prints a rune as the character, and `U+%04X` prints its Unicode number in hex, padded to four digits.
 
 ```go
 for i, r := range s {
@@ -397,9 +428,14 @@ for i, r := range s {
 
 The Go blog says that "a for range loop, by contrast, decodes one UTF-8-encoded rune on each iteration". The common mistake is to loop with `for i := range s` and then print `s[i]`. That prints single bytes, so a character such as `ê` turns into garbage. Use the second value from `range`.
 
-You can also convert to a slice of runes with `[]rune(s)` to pick the n-th character: `string([]rune(s)[:2])` gives `Ph`. It copies the whole string, so use it for random access, and use `range` to walk once. Cutting a string with `s[:3]` cuts bytes, and can slice a character in half:
+To pick the n-th character, convert the string to a list of characters with `[]rune(s)`, slice that, and convert back: `string([]rune(s)[:2])` gives `Ph`. The conversion copies the whole string, so use it for random access, and use `range` to walk once. Cutting a string directly with `s[:3]` cuts bytes, and can slice a character in half. In the output, `%q` prints the text in quotes and shows bytes that are not a plain character as `\x` escapes:
 
 ```go
+import (
+    "fmt"
+    "unicode/utf8"
+)
+
 fmt.Println(string([]rune(s)[:2]))   // first two characters
 fmt.Printf("%q\n", s[:3])             // first three bytes
 fmt.Println(utf8.ValidString(s[:3])) // is that still valid text?
@@ -412,8 +448,6 @@ Ph
 false
 ```
 </TerminalOutput>
-
-The `strings` package has look-alike pairs such as `TrimRight` and `TrimSuffix` that do different jobs. They are compared in the memory post: [Go memory: slices, maps and strings underneath](/blog/go-memory-data-types-slices-maps-strings/).
 
 How strings are laid out in memory, how substrings keep big buffers alive and why `strings.Builder` exists are for the memory post: [Go memory: slices, maps and strings underneath](/blog/go-memory-data-types-slices-maps-strings/).
 
@@ -543,7 +577,20 @@ exit status 2
 ```
 </TerminalOutput>
 
-Cắt một đoạn bằng `a[1:3]`, việc bạn sẽ làm thường xuyên, cũng không copy. Đoạn đó nhìn vào đúng các phần tử của bản gốc, nên sửa bên này là bên kia đổi theo:
+Bạn có thể lấy một đoạn của slice bằng `a[low:high]`. Đoạn bắt đầu ở index `low` và dừng ngay trước index `high`, nên `a[1:3]` là các phần tử ở index 1 và 2. Bỏ `low` thì bắt đầu từ đầu (`a[:n]`), bỏ `high` thì đi tới cuối (`a[n:]`):
+
+```go
+n := []int{10, 20, 30, 40, 50}
+fmt.Println(n[1:3], n[:2], n[3:])
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="n[1:3] là các phần tử ở index 1 và 2. n[:2] là hai phần tử đầu. n[3:] là mọi thứ từ index 3 trở đi.">
+```text
+[20 30] [10 20] [40 50]
+```
+</TerminalOutput>
+
+Lấy một đoạn cũng không copy. Đoạn đó nhìn vào đúng các phần tử của bản gốc, nên sửa bên này là bên kia đổi theo:
 
 ```go
 a := []int{1, 2, 3, 4}
@@ -577,17 +624,22 @@ Nếu bạn chưa gặp biến, kiểu hay cú pháp `:=`, chúng nằm trong [G
 
 Khi slice đầy mà bạn `append`, Go dành một khối lớn hơn, chép phần tử sang rồi chạy tiếp. Bạn không yêu cầu điều đó, nhưng nó giải thích vì sao `cap` nhảy loạn. Bắt đầu từ slice rỗng và append từng phần tử, sức chứa đổi theo từng bậc, không phải mỗi lần append.
 
-Kích thước các bậc không phải luật cố định. Ghi chú phát hành Go 1.18 nói `append` "now uses a slightly different formula" và công thức mới "less prone to sudden transitions in allocation behavior". Nên đừng học thuộc "gấp đôi". Demo dưới dùng số lấy từ một lần chạy thật trên Go 1.27.1.
+Demo dưới cho thấy capacity lớn lên trước length: Go dành thêm chỗ để phần lớn lần append không tốn gì. Với slice nhỏ, capacity gần như gấp đôi. Khi slice vượt khoảng 256 phần tử (từ Go 1.18), mỗi lần nó lớn theo hệ số nhỏ hơn. Ghi chú phát hành Go 1.18 nói `append` "now uses a slightly different formula" và công thức mới "less prone to sudden transitions in allocation behavior". Số cụ thể thay đổi, nên đừng học thuộc. Demo dùng số lấy từ một lần chạy thật trên Go 1.27.1.
 
 <GoSliceGrowthDemo />
 
 <Callout type="note" title="Số của bạn có thể khác">
-Các bậc phụ thuộc kiểu phần tử, phiên bản Go và phần còn lại của chương trình làm gì với slice. Cần thì đọc `cap`, đừng gõ cứng. Lý do đằng sau các bậc nằm trong [Go memory: slices, maps and strings underneath](/blog/go-memory-data-types-slices-maps-strings/).
+Các bậc phụ thuộc kiểu phần tử, phiên bản Go và phần còn lại của chương trình làm gì với slice. Cần thì đọc `cap`, đừng gõ cứng.
 </Callout>
 
-Nếu biết trước kích thước cuối, hãy báo cho Go. Dành chỗ một lần rẻ hơn lớn dần nhiều lần. `make([]int, 0, n)` dành chỗ và giữ `len` bằng 0, nên bạn vẫn dùng `append`. `make([]int, n)` tạo sẵn `n` giá trị 0, rồi bạn điền theo index. Ở đây kích thước lấy từ một slice khác:
+Nếu biết trước kích thước cuối, hãy báo cho Go. Dành chỗ một lần rẻ hơn lớn dần nhiều lần, nên hãy dành sẵn bằng `make` khi biết kích thước. `make([]int, 0, n)` dành chỗ và giữ `len` bằng 0, nên bạn vẫn dùng `append`. `make([]int, n)` tạo sẵn `n` giá trị 0, rồi bạn điền theo index. Ở đây kích thước lấy từ một slice khác:
 
 ```go
+import (
+    "fmt"
+    "strings"
+)
+
 names := []string{"go", "java", "python"}
 upper := make([]string, 0, len(names)) // room for every name
 for _, n := range names {
@@ -601,8 +653,6 @@ fmt.Println(upper, len(upper), cap(upper))
 [GO JAVA PYTHON] 3 3
 ```
 </TerminalOutput>
-
-Tiết kiệm được bao nhiêu, đo bằng số lần cấp phát, nằm trong bài về bộ nhớ: [Go memory: slices, maps and strings underneath](/blog/go-memory-data-types-slices-maps-strings/).
 
 Không phải lúc nào dành chỗ trước cũng đáng thêm một dòng. Nếu không biết kích thước, hoặc vòng lặp không nóng, `append` thuần là đủ. Khi code điền slice đọc rõ hơn với `append`, cứ giữ `append`.
 
@@ -618,7 +668,11 @@ Không phải lúc nào dành chỗ trước cũng đáng thêm một dòng. N�
 
 Slice bạn khai báo mà chưa tạo, `var s []string`, là nil. Nó có `len` 0, bạn `append` được, và lặp qua được. Slice nil là một list rỗng dùng bình thường. Slice rỗng tạo bằng `[]string{}` hoặc `make([]string, 0)` cũng có `len` 0, nhưng không phải nil.
 
+Hàm `show` dưới đây in bằng format verb: `%d` là số nguyên, `%t` là true hoặc false, và `\n` xuống dòng. Bảng trong [Go variables, types, pointers and functions](/blog/go-variables-types-pointers-functions/) liệt kê mọi verb mà series này dùng.
+
 ```go
+import "fmt"
+
 func show(i int, s []string) {
     fmt.Printf("%d: len=%d nil=%t\n", i, len(s), s == nil)
 }
@@ -715,7 +769,7 @@ fmt.Println(m["x"], len(m))
 m["x"] = 1                    // panic
 ```
 
-<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Đây là chỗ duy nhất collection nil cắn bạn: map nil đọc được nhưng từ chối ghi. Chương trình dừng ngay ở lệnh ghi.">
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Đây là chỗ duy nhất collection nil cắn bạn: map nil đọc được nhưng từ chối ghi. Chương trình dừng ngay ở lệnh ghi, còn `exit status 2` là `go run` báo chương trình đã crash.">
 ```text
 0 0
 panic: assignment to entry in nil map
@@ -723,12 +777,18 @@ panic: assignment to entry in nil map
 goroutine 1 [running]:
 main.main()
 	.../main.go:8 +0xa4
+exit status 2
 ```
 </TerminalOutput>
 
 Thứ tự khi lặp không ổn định. Go blog nói thứ tự duyệt "is not specified and is not guaranteed to be the same from one iteration to the next". Thứ tự này còn đổi thật. Chương trình này lặp ba lần trên cùng một map tám key, rồi sort key. Output của một lần chạy thật (của bạn sẽ khác, đó chính là ý chính):
 
 ```go
+import (
+    "fmt"
+    "sort"
+)
+
 big := map[int]bool{}
 for i := 0; i < 8; i++ {
     big[i] = true
@@ -759,7 +819,7 @@ fmt.Println(keys)
 Cần thứ tự thì chép key ra một slice rồi sort. Dòng cuối của output chính là kết quả đó. Đừng bao giờ viết test phụ thuộc vào thứ tự của vòng lặp map.
 
 
-Giống slice, map lớn dần khi bạn thêm key. Nếu đã biết khoảng bao nhiêu phần tử, `make` nhận một gợi ý kích thước; nó hoạt động ra sao nằm trong bài về bộ nhớ: [Go memory: slices, maps and strings underneath](/blog/go-memory-data-types-slices-maps-strings/).
+Giống slice, map lớn dần khi bạn thêm key. Nếu đã biết khoảng bao nhiêu phần tử, `make` nhận một gợi ý kích thước.
 
 Map cũng không an toàn khi nhiều goroutine dùng cùng lúc. Cách xử lý nằm ở [Go goroutines, channels and select](/blog/go-goroutines-channels-select/).
 
@@ -777,9 +837,14 @@ Map cũng không an toàn khi nhiều goroutine dùng cùng lúc. Cách xử lý
 
 String trong Go là dãy byte chỉ đọc. Source code Go là UTF-8, nên literal như `"Phở"` được lưu bằng byte UTF-8. UTF-8 dùng một byte cho chữ cái tiếng Anh thường và tới bốn byte cho ký tự khác. Vì vậy độ dài của "Phở" không phải 3.
 
-Rune là tên Go đặt cho một ký tự Unicode (code point). Nó là alias của `int32`. `len(s)` đếm byte. Muốn đếm ký tự, dùng `utf8.RuneCountInString(s)`.
+Rune là tên Go đặt cho một ký tự Unicode (code point). Nó là alias của `int32`. `len(s)` đếm byte. Muốn đếm ký tự, dùng `utf8.RuneCountInString(s)`. Muốn xem chính các byte, `[]byte(s)` đổi string thành danh sách byte thô, và verb `% x` in mỗi byte thành hai chữ số hex (hex là hệ cơ số 16), cách nhau bằng dấu cách.
 
 ```go
+import (
+    "fmt"
+    "unicode/utf8"
+)
+
 s := "Phở"
 fmt.Println(len(s), utf8.RuneCountInString(s))   // 5 3
 fmt.Printf("% x\n", []byte(s))                    // 50 68 e1 bb 9f
@@ -794,7 +859,7 @@ fmt.Printf("% x\n", []byte(s))                    // 50 68 e1 bb 9f
 
 <GoStringBytes />
 
-Index cho ra một byte, không phải ký tự. `s[0]` là `P` lưu bằng byte `0x50`, còn `s[2]` chỉ là byte đầu của chữ `ở`. Vòng `range` thì khác: nó giải mã string theo từng rune. Nó đưa bạn vị trí nơi mỗi rune bắt đầu, và chính rune đó.
+Index cho ra một byte, không phải ký tự. `s[0]` là `P` lưu bằng byte `0x50`, còn `s[2]` chỉ là byte đầu của chữ `ở`. Vòng `range` thì khác: nó giải mã string theo từng rune. Nó đưa bạn vị trí nơi mỗi rune bắt đầu, và chính rune đó. Trong `Printf` dưới đây, `%c` in rune thành ký tự, còn `U+%04X` in số Unicode của nó dạng hex, đệm đủ bốn chữ số.
 
 ```go
 for i, r := range s {
@@ -812,9 +877,14 @@ for i, r := range s {
 
 Go blog nói "a for range loop, by contrast, decodes one UTF-8-encoded rune on each iteration". Lỗi hay gặp là lặp bằng `for i := range s` rồi in `s[i]`. Cách đó in từng byte rời, nên ký tự như `ê` thành rác. Hãy dùng giá trị thứ hai của `range`.
 
-Bạn cũng có thể đổi sang slice rune bằng `[]rune(s)` để lấy ký tự thứ n: `string([]rune(s)[:2])` cho ra `Ph`. Cách này copy cả string, nên dùng cho truy cập ngẫu nhiên, còn đi qua một lượt thì dùng `range`. Cắt string bằng `s[:3]` là cắt byte, và có thể cắt đôi một ký tự:
+Để lấy ký tự thứ n, đổi string thành danh sách ký tự bằng `[]rune(s)`, cắt danh sách đó rồi đổi ngược lại: `string([]rune(s)[:2])` cho ra `Ph`. Phép đổi copy cả string, nên dùng cho truy cập ngẫu nhiên, còn đi qua một lượt thì dùng `range`. Cắt thẳng string bằng `s[:3]` là cắt byte, và có thể cắt đôi một ký tự. Trong output, `%q` in văn bản trong dấu nháy kép và hiện byte không phải ký tự thường dưới dạng `\x`:
 
 ```go
+import (
+    "fmt"
+    "unicode/utf8"
+)
+
 fmt.Println(string([]rune(s)[:2]))   // first two characters
 fmt.Printf("%q\n", s[:3])             // first three bytes
 fmt.Println(utf8.ValidString(s[:3])) // is that still valid text?
@@ -827,8 +897,6 @@ Ph
 false
 ```
 </TerminalOutput>
-
-Package `strings` có những cặp tên giống nhau như `TrimRight` và `TrimSuffix` nhưng làm việc khác nhau. Chúng được so sánh trong bài về bộ nhớ: [Go memory: slices, maps and strings underneath](/blog/go-memory-data-types-slices-maps-strings/).
 
 String nằm trong bộ nhớ ra sao, vì sao substring giữ cả buffer lớn sống mãi và `strings.Builder` sinh ra để làm gì đều thuộc bài về bộ nhớ: [Go memory: slices, maps and strings underneath](/blog/go-memory-data-types-slices-maps-strings/).
 
