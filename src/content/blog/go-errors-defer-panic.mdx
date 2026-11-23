@@ -14,8 +14,9 @@ sources:
   - { title: "Errors are values", author: "Rob Pike (The Go Blog)", url: "https://go.dev/blog/errors-are-values" }
   - { title: "Working with Errors in Go 1.13", author: "Damien Neil and Jonathan Amsterdam (The Go Blog)", url: "https://go.dev/blog/go1.13-errors" }
   - { title: "Defer, Panic, and Recover", author: "Andrew Gerrand (The Go Blog)", url: "https://go.dev/blog/defer-panic-and-recover" }
+  - { title: "gVisor issue #16043: gofer: fsync(2)/close(2) drop deferred write errors for files on FUSE/NFS bind mounts", author: "google/gvisor contributors", url: "https://github.com/google/gvisor/issues/16043" }
   - { title: "gVisor pull request #16044: gofer: report deferred write errors on fsync(2) and close(2)", author: "google/gvisor contributors", url: "https://github.com/google/gvisor/pull/16044" }
-  - { title: "gVisor pull request #15979: gofer: propagate sync errors from syncRemoteFileLocked", author: "google/gvisor contributors", url: "https://github.com/gvisor/gvisor/pull/15979" }
+  - { title: "gVisor pull request #15979: gofer: propagate sync errors from syncRemoteFileLocked", author: "google/gvisor contributors", url: "https://github.com/google/gvisor/pull/15979" }
   - { title: "Don't defer Close() on writable files", author: "Joe Shaw", url: "https://www.joeshaw.org/dont-defer-close-on-writable-files/" }
   - { title: "errors package documentation", author: "The Go Authors", url: "https://pkg.go.dev/errors" }
   - { title: "net/http package documentation (Handler)", author: "The Go Authors", url: "https://pkg.go.dev/net/http#Handler" }
@@ -41,11 +42,11 @@ import heroSmoke from '../../assets/blog/go-errors-defer-panic/smoke-detector.jp
 
 ### fsync returned 0, and the data was gone
 
-[gVisor](https://github.com/google/gvisor) is a sandbox for containers, written in Go. In October 2026 a contributor reported that a program inside it could write past its disk quota and never find out. On a normal Linux system, `fsync` and `close` returned the quota error (`EDQUOT`). Under gVisor they returned 0, which means "success", and the extra data was thrown away.
+[gVisor](https://github.com/google/gvisor) is a sandbox for containers, written in Go. In October 2026 a contributor reported ([issue #16043](https://github.com/google/gvisor/issues/16043)) that a program inside it, writing to a FUSE or NFS mount with a disk quota (JuiceFS, for example), could go over the quota and never find out. On JuiceFS itself, `fsync` and `close` return the quota error (`EDQUOT`). Under gVisor they returned 0, which means "success", and the extra data was lost.
 
-The cause was in the Go code, in three places. One function that syncs a file to the host dropped the result and always returned `nil`. Another never reached the host's flush at all. A third discarded the result of closing the host file. The maintainers pointed to [pull request #15979](https://github.com/gvisor/gvisor/pull/15979), "propagate sync errors from `syncRemoteFileLocked`", merged on 25 October 2026, as the fix for the report. The full list of dropped errors is in the reporter's [pull request #16044](https://github.com/google/gvisor/pull/16044).
+The cause was in the Go code, in three places. One function that syncs a file to the host dropped the result and always returned `nil`. Another never reached the host's flush at all. A third discarded the result of closing the host file. The reporter's [pull request #16044](https://github.com/google/gvisor/pull/16044) listed all three dropped errors, but it was closed without being merged and the issue is still open. A maintainer pointed to [pull request #15979](https://github.com/google/gvisor/pull/15979), "propagate sync errors from `syncRemoteFileLocked`", merged on 25 October 2026. That one fixes the `fsync` path only, which is one of the three places.
 
-Nothing crashed, and no test failed. An error was produced, then ignored. Go gives you a simple way to handle errors, and a few traps that look harmless.
+An error was produced, then ignored. Go gives you a simple way to handle errors, and a few traps that look harmless.
 
 <Callout type="note" title="TL;DR">
 A Go function reports failure by returning an `error` value, and the caller checks it with `if err != nil`. Add context when you pass an error up (`fmt.Errorf` with `%w`), compare with `errors.Is` and `errors.As`, and handle each error once: log it or return it, not both. Use `defer` for cleanup, and check the error of `Close` on files you wrote. Use `panic` only for bugs and impossible states, never for expected failures.
@@ -61,7 +62,7 @@ In those languages a failure jumps out of the function and lands in a `catch` bl
 | Handle it | `try / catch` | `try / except` | `try / catch` | `if err != nil { ... }` right after the call |
 | Cleanup | `finally`, try-with-resources | `with`, `finally` | `finally` | `defer` |
 | A bug that should never happen | unchecked exception | uncaught exception | uncaught exception | `panic` |
-| Where the failure can come from | any line may throw | any line may raise | any line may throw | only calls that return an `error` |
+| Where the failure can come from | any line may throw | any line may raise | any line may throw | every call that can fail returns an `error` (a bug can still `panic`) |
 
 The big difference is the last row. When you read Go code, every place that can fail is written out, and you can see it without opening the called function.
 
@@ -209,7 +210,7 @@ load: not found false
 ```
 </TerminalOutput>
 
-So when should you wrap with `%w`, and when `%v`? Wrapping makes the inner error part of your function's public behavior: callers can now depend on it, so a later change to the inner error can break them. Use `%w` when callers should be able to test for the cause. Use `%v` when you want to hide the implementation detail, for example to avoid leaking a database driver's error type through your API.
+So when should you wrap with `%w`, and when `%v`? Use `%w` when callers should be able to test for the cause, and `%v` when you want to hide an implementation detail, such as a database driver's error type.
 
 ### `errors.As`: when the error carries data
 
@@ -455,18 +456,18 @@ msg="" err=<nil>
 ```
 </TerminalOutput>
 
-The author meant to return `e`. The code compiles and passes go vet, because `err` is a perfectly valid variable, and its value is the zero value `nil`. With unnamed results, this line would have been a compile error, since no `err` would exist. The fix is to assign to the named result, not to a new variable:
+Read the `if` carefully. `e` holds the failure, but the line returns `err`, the named result, which nobody has set. The author meant to return `e`. The code compiles and passes go vet, because `err` is a perfectly valid variable, and its value is the zero value `nil`. With unnamed results, this line would have been a compile error, since no `err` would exist. The fix is to assign to the named result with plain `=`, not to create a new variable with `:=`. This is the same shadowing trap as in [the variables post](/blog/go-variables-types-pointers-functions/), and `:=` here would hide the named `err` in the same way:
 
 ```go
 func check(n int) (msg string, err error) {
 	if err = validate(n); err != nil {
-		return
+		return "", err
 	}
 	return "ok", nil
 }
 ```
 
-Running this fixed version with `check(-5)` prints `msg="" err=negative input`. Notice the bare `return` here. Mixing bare returns with `return "ok", nil` in the same function is confusing, so keep named results for short functions, or use them only for the signature and the `defer` trick below.
+With the same `main`, `check(-5)` now prints `msg="" err=negative input`. A bare `return` (no values) is legal here too, but it hides which values go out, so write them out and keep named results for the signature and the `defer` trick below.
 
 ### Check the error from Close on files you wrote
 
@@ -518,7 +519,9 @@ good: close: disk full
 ```
 </TerminalOutput>
 
-The `if ... err == nil` part keeps the first error: if the write already failed, that is the more useful one to report, and a later `Close` error must not hide it. Writing `file` as a struct with methods is covered in [Go structs and interfaces](/blog/go-structs-methods-interfaces/).
+Take the closure apart in three steps, starting with the `if` line. An `if` can run a short statement before its test, separated by `;`: `if cerr := f.Close(); err == nil` first calls `Close` and stores its result in `cerr`, then tests `err == nil`. Second, `err` is the named result of `saveGood`, so the closure can change what the function returns. Third, `defer func() { ... }()` is the closure from the section above: it runs when `saveGood` is about to return, after `f.Write("data")` has produced its value. Put together: the write result is returned, then `Close` runs, and if the write succeeded (`err == nil`) the `Close` error becomes the result.
+
+The `err == nil` check keeps the first error: if the write already failed, that is the more useful one to report, and a later `Close` error must not hide it. Writing `file` as a struct with methods is covered in [Go structs and interfaces](/blog/go-structs-methods-interfaces/).
 
 ## panic and recover
 
@@ -612,11 +615,11 @@ How an `error` that is a nil pointer can still be non-nil, and how errors travel
 
 ### fsync trả về 0, và dữ liệu biến mất
 
-[gVisor](https://github.com/google/gvisor) là một sandbox cho container, viết bằng Go. Tháng 10/2026, một contributor báo rằng chương trình chạy bên trong nó có thể ghi vượt hạn mức đĩa mà không bao giờ biết. Trên Linux bình thường, `fsync` và `close` trả về lỗi quota (`EDQUOT`). Dưới gVisor chúng trả về 0, nghĩa là "thành công", và phần dữ liệu thừa bị bỏ đi.
+[gVisor](https://github.com/google/gvisor) là một sandbox cho container, viết bằng Go. Tháng 10/2026, một contributor báo ([issue #16043](https://github.com/google/gvisor/issues/16043)) rằng chương trình chạy bên trong nó, khi ghi vào mount FUSE hoặc NFS có hạn mức đĩa (ví dụ JuiceFS), có thể ghi vượt hạn mức mà không bao giờ biết. Trên chính JuiceFS, `fsync` và `close` trả về lỗi quota (`EDQUOT`). Dưới gVisor chúng trả về 0, nghĩa là "thành công", và phần dữ liệu thừa bị mất.
 
-Nguyên nhân nằm trong code Go, ở ba chỗ. Một hàm đồng bộ file xuống host bỏ kết quả và luôn trả `nil`. Một chỗ khác không bao giờ chạm tới lệnh flush của host. Chỗ thứ ba vứt kết quả khi đóng file của host. Các maintainer chỉ tới [pull request #15979](https://github.com/gvisor/gvisor/pull/15979), "propagate sync errors from `syncRemoteFileLocked`", merge ngày 25/10/2026, như bản sửa cho báo cáo này. Danh sách đầy đủ các lỗi bị bỏ nằm trong [pull request #16044](https://github.com/google/gvisor/pull/16044) của người báo.
+Nguyên nhân nằm trong code Go, ở ba chỗ. Một hàm đồng bộ file xuống host bỏ kết quả và luôn trả `nil`. Một chỗ khác không bao giờ chạm tới lệnh flush của host. Chỗ thứ ba vứt kết quả khi đóng file của host. [Pull request #16044](https://github.com/google/gvisor/pull/16044) của người báo liệt kê cả ba lỗi bị bỏ, nhưng nó bị đóng mà không merge và issue vẫn còn mở. Một maintainer chỉ tới [pull request #15979](https://github.com/google/gvisor/pull/15979), "propagate sync errors from `syncRemoteFileLocked`", merge ngày 25/10/2026. PR đó chỉ sửa đường `fsync`, tức một trong ba chỗ.
 
-Không có gì sập, không test nào fail. Lỗi được tạo ra rồi bị bỏ qua. Go cho bạn một cách xử lý lỗi đơn giản, và vài cái bẫy trông vô hại.
+Lỗi được tạo ra rồi bị bỏ qua. Go cho bạn một cách xử lý lỗi đơn giản, và vài cái bẫy trông vô hại.
 
 <Callout type="note" title="TL;DR">
 Hàm Go báo thất bại bằng cách trả về một giá trị `error`, và nơi gọi kiểm tra bằng `if err != nil`. Thêm ngữ cảnh khi chuyển lỗi lên trên (`fmt.Errorf` với `%w`), so sánh bằng `errors.Is` và `errors.As`, và xử lý mỗi lỗi một lần: log hoặc return, không làm cả hai. Dùng `defer` để dọn dẹp, và kiểm tra lỗi của `Close` với file bạn đã ghi. Chỉ dùng `panic` cho bug và trạng thái không thể xảy ra, không bao giờ cho lỗi dự kiến được.
@@ -632,7 +635,7 @@ Hàm Go báo thất bại bằng cách trả về một giá trị `error`, và 
 | Xử lý | `try / catch` | `try / except` | `try / catch` | `if err != nil { ... }` ngay sau lời gọi |
 | Dọn dẹp | `finally`, try-with-resources | `with`, `finally` | `finally` | `defer` |
 | Bug không bao giờ nên xảy ra | unchecked exception | exception không bắt | exception không bắt | `panic` |
-| Lỗi có thể đến từ đâu | dòng nào cũng có thể throw | dòng nào cũng có thể raise | dòng nào cũng có thể throw | chỉ từ lời gọi có trả `error` |
+| Lỗi có thể đến từ đâu | dòng nào cũng có thể throw | dòng nào cũng có thể raise | dòng nào cũng có thể throw | mọi lời gọi có thể lỗi đều trả `error` (bug vẫn có thể `panic`) |
 
 Khác biệt lớn nằm ở hàng cuối. Khi đọc code Go, mọi chỗ có thể thất bại đều được viết ra, bạn thấy ngay mà không phải mở hàm được gọi.
 
@@ -780,7 +783,7 @@ load: not found false
 ```
 </TerminalOutput>
 
-Vậy khi nào bọc bằng `%w`, khi nào `%v`? Bọc làm lỗi bên trong trở thành một phần hành vi công khai của hàm bạn: nơi gọi có thể dựa vào nó, nên sau này đổi lỗi bên trong có thể làm họ hỏng. Dùng `%w` khi nơi gọi nên kiểm tra được nguyên nhân. Dùng `%v` khi bạn muốn giấu chi tiết cài đặt, ví dụ để không làm lộ kiểu lỗi của driver database qua API của mình.
+Vậy khi nào bọc bằng `%w`, khi nào `%v`? Dùng `%w` khi nơi gọi nên kiểm tra được nguyên nhân, và `%v` khi bạn muốn giấu chi tiết cài đặt, như kiểu lỗi của driver database.
 
 ### `errors.As`: khi lỗi mang theo dữ liệu
 
@@ -1026,18 +1029,18 @@ msg="" err=<nil>
 ```
 </TerminalOutput>
 
-Tác giả định trả `e`. Code biên dịch được và qua go vet, vì `err` là một biến hợp lệ, và giá trị của nó là zero value `nil`. Với kết quả không tên, dòng này sẽ là lỗi biên dịch, vì không có `err` nào. Cách sửa là gán cho named result, đừng tạo biến mới:
+Đọc kỹ dòng `if`. `e` giữ lỗi, nhưng dòng đó trả `err`, named result chưa ai gán. Tác giả định trả `e`. Code biên dịch được và qua go vet, vì `err` là một biến hợp lệ, và giá trị của nó là zero value `nil`. Với kết quả không tên, dòng này sẽ là lỗi biên dịch, vì không có `err` nào. Cách sửa là gán cho named result bằng `=` thường, đừng tạo biến mới bằng `:=`. Đây chính là cái bẫy shadowing trong [bài về biến](/blog/go-variables-types-pointers-functions/), và `:=` ở đây sẽ che `err` có tên theo cùng cách:
 
 ```go
 func check(n int) (msg string, err error) {
 	if err = validate(n); err != nil {
-		return
+		return "", err
 	}
 	return "ok", nil
 }
 ```
 
-Chạy bản đã sửa với `check(-5)` in ra `msg="" err=negative input`. Để ý `return` trần ở đây. Trộn return trần với `return "ok", nil` trong cùng một hàm gây rối, nên chỉ dùng named result cho hàm ngắn, hoặc chỉ để làm tài liệu chữ ký và cho mẹo `defer` dưới đây.
+Với cùng `main`, `check(-5)` giờ in ra `msg="" err=negative input`. `return` trần (không kèm giá trị) ở đây cũng hợp lệ, nhưng nó giấu việc giá trị nào được trả ra, nên hãy viết rõ ra, và chỉ giữ named result cho chữ ký và mẹo `defer` dưới đây.
 
 ### Kiểm tra lỗi của Close với file bạn đã ghi
 
@@ -1089,7 +1092,9 @@ good: close: disk full
 ```
 </TerminalOutput>
 
-Phần `if ... err == nil` giữ lỗi đầu tiên: nếu việc ghi đã lỗi thì đó là lỗi hữu ích hơn để báo, và lỗi `Close` sau đó không được che nó. Cách viết `file` thành struct có method nằm ở [Go structs và interface](/blog/go-structs-methods-interfaces/).
+Hãy tách closure thành ba bước, bắt đầu từ dòng `if`. Một `if` có thể chạy một câu lệnh ngắn trước phép thử, ngăn cách bằng `;`: `if cerr := f.Close(); err == nil` gọi `Close` trước và lưu kết quả vào `cerr`, rồi mới thử `err == nil`. Thứ hai, `err` là named result của `saveGood`, nên closure có thể đổi giá trị hàm trả về. Thứ ba, `defer func() { ... }()` là closure ở phần trên: nó chạy khi `saveGood` sắp return, sau khi `f.Write("data")` đã cho ra giá trị. Gộp lại: kết quả ghi được trả về, rồi `Close` chạy, và nếu việc ghi thành công (`err == nil`) thì lỗi `Close` thành kết quả.
+
+Phép thử `err == nil` giữ lỗi đầu tiên: nếu việc ghi đã lỗi thì đó là lỗi hữu ích hơn để báo, và lỗi `Close` sau đó không được che nó. Cách viết `file` thành struct có method nằm ở [Go structs và interface](/blog/go-structs-methods-interfaces/).
 
 ## panic và recover
 
