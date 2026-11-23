@@ -1,0 +1,1251 @@
+---
+title: "Go concurrency patterns"
+title_vi: "Các mẫu concurrency trong Go"
+description: "Worker pools, pipelines, fan-out and fan-in, semaphores, rate limiting and errgroup in Go, each with the code and the path that shuts it down cleanly."
+description_vi: "Worker pool, pipeline, fan-out và fan-in, semaphore, giới hạn tốc độ và errgroup trong Go, mỗi mẫu kèm code và đường tắt gọn gàng."
+date: 2026-11-23
+category: "backend"
+tags: ["golang", "concurrency", "worker-pool", "pipeline", "errgroup", "100-go-mistakes"]
+cover: "../../assets/series/golang/go-gopher-biplane.jpg"
+cover_alt: "Illustration of the Go gopher flying a biplane, drawn by Renee French"
+draft: true
+sources:
+  - { title: "100 Go Mistakes and How to Avoid Them", author: "Teiva Harsanyi", chapters: "Mistake #73 (Not using errgroup)", url: "https://100go.co/" }
+  - { title: "Go Concurrency Patterns: Pipelines and cancellation", author: "Sameer Ajmani (The Go Blog, 2014)", url: "https://go.dev/blog/pipelines" }
+  - { title: "Go Concurrency Patterns (talk)", author: "Rob Pike (Google I/O, 2012)", url: "https://go.dev/talks/2012/concurrency.slide" }
+  - { title: "kube-controller-manager command line reference (--concurrent-deployment-syncs)", author: "The Kubernetes Authors", url: "https://kubernetes.io/docs/reference/command-line-tools-reference/kube-controller-manager/" }
+  - { title: "golang.org/x/sync/errgroup package documentation", author: "The Go Authors", url: "https://pkg.go.dev/golang.org/x/sync/errgroup" }
+  - { title: "golang.org/x/time/rate package documentation", author: "The Go Authors", url: "https://pkg.go.dev/golang.org/x/time/rate" }
+  - { title: "time.Ticker documentation", author: "The Go Authors", url: "https://pkg.go.dev/time#Ticker" }
+  - { title: "Aldi Süd supermarket checkout lanes in Franklin, North Carolina, US 15.jpg (CC BY 4.0)", author: "Harrison Keely", url: "https://commons.wikimedia.org/wiki/File:Aldi_S%C3%BCd_supermarket_checkout_lanes_in_Franklin,_North_Carolina,_US_15.jpg" }
+  - { title: "Go gopher biplane (CC BY 3.0), used as the cover", author: "Renee French", url: "https://commons.wikimedia.org/wiki/File:Go_gopher_biplane.jpg" }
+---
+
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import En from '../../components/mdx/En.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import GoWorkerPoolDemo from '../../components/mdx/GoWorkerPoolDemo.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import heroCheckout from '../../assets/blog/go-concurrency-patterns-worker-pools-pipelines/checkout-lanes.jpg';
+
+<En>
+
+<Figure src={heroCheckout} alt="A row of supermarket checkout lanes seen from the front of the store, some lanes staffed and some empty" caption="Checkout lanes are a worker pool: shoppers join one queue, and a fixed number of open lanes serve them. Opening more lanes shortens the queue, until the lanes cost more than they help." sourceTitle="Wikimedia Commons: Aldi Süd supermarket checkout lanes in Franklin, North Carolina, US 15.jpg (CC BY 4.0, Harrison Keely)" sourceUrl="https://commons.wikimedia.org/wiki/File:Aldi_S%C3%BCd_supermarket_checkout_lanes_in_Franklin,_North_Carolina,_US_15.jpg" />
+
+> "Goroutines are not garbage collected; they must exit on their own."
+> &mdash; *Sameer Ajmani*, The Go Blog
+
+### Kubernetes has a knob for how many workers to run
+
+Kubernetes runs its built-in controllers inside one program, `kube-controller-manager`. Each controller has a queue of objects to look at and a fixed number of workers that take from it. The number is a command-line flag. For deployments, `--concurrent-deployment-syncs` defaults to 5, and the reference page describes the trade-off in one line: "Larger number = more responsive deployments, but more CPU (and network) load." The same flag exists for replica sets and many other objects.
+
+Concurrency in Go means choosing a shape for the work: how many workers, how they hand data to each other, and how they stop. Done well, load stays bounded and nothing is left running by mistake. [Post 7](/blog/go-goroutines-channels-select/) taught the pieces: goroutines, channels, `select`. This post puts them together into the six shapes you will meet most often, and for each one it shows how the program shuts down.
+
+<Callout type="note" title="TL;DR">
+A worker pool is N goroutines reading one jobs channel. A pipeline is stages connected by channels, and it needs a cancellation signal so an early exit does not strand the stages. Fan-out is several goroutines reading one channel, and fan-in merges several channels into one. A buffered channel of empty structs works as a semaphore that limits concurrency. A ticker, or `rate.Limiter`, limits speed. `errgroup` runs a group of tasks, returns the first error, and cancels the rest. In every pattern, the sender closes channels and something cancels the goroutines that are still waiting.
+</Callout>
+
+## Coming from Java, Python or JavaScript
+
+You probably already have a name for most of these shapes. Go builds them from channels instead of from a library class.
+
+| You want to | Java | Python | JavaScript | Go |
+|---|---|---|---|---|
+| Fixed number of workers on a queue | `Executors.newFixedThreadPool(n)` | `ThreadPoolExecutor(max_workers=n)` | a library such as `p-limit` | N goroutines reading one channel |
+| Limit how many run at once | `Semaphore` | `asyncio.Semaphore` | a library such as `p-limit` | buffered `chan struct{}` |
+| Stages that feed each other | streams, `BlockingQueue` between threads | generators, `asyncio.Queue` | async iterators | stages connected by channels |
+| Limit calls per second | Guava `RateLimiter` | a library such as `ratelimit` | a library such as `bottleneck` | `time.Ticker` or `rate.Limiter` |
+| Run a group, stop on first error | `ExecutorCompletionService` and manual cancel | `asyncio.TaskGroup` (cancels the rest) | `Promise.all` rejects, but the others keep running | `errgroup` |
+
+The big difference is where the pool lives. In Java the pool is an object you configure. In Go the pool is only a loop in each goroutine and a channel they share, so there is nothing to configure and nothing to hide: you can read the whole pattern in twenty lines.
+
+<Concepts>
+
+- **Worker pool**: a fixed number of goroutines that all take jobs from one channel. The number of workers caps how much work runs at once.
+- **Pipeline**: stages connected by channels. Each stage receives values from the stage before it, does one step, and sends the result to the stage after it.
+- **Fan-out and fan-in**: fan-out means several goroutines read from the same channel to share the work. Fan-in means merging the outputs of several channels into one.
+- **Semaphore**: a counter that lets at most N holders in at once. In Go, a buffered channel does the job.
+- **Backpressure**: when a slow stage makes the stage before it wait, instead of letting work pile up without limit.
+
+</Concepts>
+
+---
+
+## A worker pool
+
+A worker pool starts a fixed number of goroutines that each loop on the same channel of jobs. Whichever worker is free takes the next job. If there are more jobs than workers, the extra jobs wait in the channel, and that waiting is the backpressure that keeps load bounded.
+
+```go
+package main
+
+import (
+	"fmt"
+	"sync"
+	"time"
+)
+
+type result struct {
+	job    int
+	square int
+}
+
+func run(workers int) (int, time.Duration) {
+	start := time.Now()
+	jobs := make(chan int)
+	results := make(chan result)
+
+	var wg sync.WaitGroup
+	for w := 1; w <= workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for n := range jobs {
+				time.Sleep(50 * time.Millisecond) // pretend work
+				results <- result{job: n, square: n * n}
+			}
+		}()
+	}
+
+	go func() {
+		for n := 1; n <= 9; n++ {
+			jobs <- n
+		}
+		close(jobs)
+	}()
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	sum := 0
+	for r := range results {
+		sum += r.square
+	}
+	return sum, time.Since(start).Round(50 * time.Millisecond)
+}
+
+func main() {
+	for _, workers := range []int{1, 3} {
+		sum, took := run(workers)
+		fmt.Printf("%d worker(s): sum of squares %d in %v\n", workers, sum, took)
+	}
+}
+```
+
+Read it in four parts. The three workers each run `for n := range jobs`, which keeps taking jobs until `jobs` is closed and empty (that is the `range`-over-a-channel rule from post 7). One more goroutine feeds the numbers 1 to 9 into `jobs` and then calls `close(jobs)`. Each worker sends its answer on `results`. And `main` loops over `results` and adds the numbers up.
+
+The goroutine that feeds `jobs` is separate on purpose. If `main` fed the jobs itself, it would block on a send while the workers block on sending results back, and nobody would be reading. Both sides would wait for each other forever.
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="One real run. The sum is always 285, but the times come from sleeping, so expect them to wobble by a few milliseconds. Three workers take about a third of the time of one.">
+```text
+1 worker(s): sum of squares 285 in 450ms
+3 worker(s): sum of squares 285 in 150ms
+```
+</TerminalOutput>
+
+Nine jobs of 50 ms take 450 ms on one worker and 150 ms on three. That is the point of the pool, and it also shows its limit: the speed-up stops when the workers outnumber the jobs, or when the real bottleneck (a database, a CPU core, an API with a quota) is saturated. A common starting point is one worker per CPU core for CPU-bound work, and more for work that mostly waits on a network. Measure, then change the number.
+
+Shutdown path: Closing `jobs` ends every worker's `range` loop. Each worker's `defer wg.Done()` fires. A small goroutine waits on the `WaitGroup` and then closes `results`, which ends the loop in `main`. The rule behind this is the one from post 7: the sender closes. Here the producer closes `jobs`, and the closer goroutine closes `results` because it is the only one that knows when every worker is done. If `main` stopped reading `results` early, the workers would block on their next send and never exit, and the pipeline section below shows how to prevent that.
+
+Since Go 1.25 a `WaitGroup` also has a `Go` method, so `wg.Go(func() { ... })` replaces the `Add(1)`, `go` and `defer wg.Done()` triple. This post keeps the long form so each step is visible.
+
+### Try it: change the worker count
+
+The simulator below sends jobs into a pool. Raise the arrival rate or the time per job, and watch the queue and the throughput as you change the number of workers.
+
+<GoWorkerPoolDemo />
+
+The pool's capacity is the number of workers times how many jobs one worker finishes per second. While the arrival rate is below that capacity, throughput matches the arrival rate and the queue stays short. Once arrivals exceed it, throughput is stuck at the capacity and the queue grows for as long as the overload lasts. Adding workers beyond what the arrival rate needs buys nothing.
+
+---
+
+## Pipelines and cancellation
+
+A pipeline is a chain of stages, each one a goroutine that reads from an input channel, does one step, and writes to an output channel. The Go blog puts it this way: "There's no formal definition of a pipeline in Go; it's just one of many kinds of concurrent programs." What you get from the shape is that each stage is small, and the channels between them give you backpressure for free: a slow stage makes the stage before it wait.
+
+Before the code, two bits of syntax. `nums ...int` is a variadic parameter: the caller can pass any number of `int` values, and inside the function `nums` is a slice. `<-chan int` is a receive-only channel: the function returns a channel that the caller can read from but not send on, which makes it clear who owns the sending.
+
+Here is a two-stage pipeline: `gen` sends numbers, and `square` squares them. The `main` function reads two results and then stops, the way a caller does when it only needed the first few.
+
+```go
+package main
+
+import (
+	"fmt"
+	"runtime"
+	"time"
+)
+
+func gen(nums ...int) <-chan int {
+	out := make(chan int)
+	go func() {
+		for _, n := range nums {
+			out <- n
+		}
+		close(out)
+	}()
+	return out
+}
+
+func square(in <-chan int) <-chan int {
+	out := make(chan int)
+	go func() {
+		for n := range in {
+			out <- n * n
+		}
+		close(out)
+	}()
+	return out
+}
+
+func main() {
+	out := square(gen(1, 2, 3, 4, 5, 6))
+	fmt.Println(<-out, <-out) // take two values, then stop reading
+
+	time.Sleep(100 * time.Millisecond)
+	fmt.Println("goroutines still alive:", runtime.NumGoroutine())
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="One real run. Three goroutines are still alive: main, and two stages that will never finish. The first line shows the squares of 1 and 2.">
+```text
+1 4
+goroutines still alive: 3
+```
+</TerminalOutput>
+
+`runtime.NumGoroutine()` is just a counter of live goroutines, which is enough to show the problem. After `main` reads two values, `square` is stuck trying to send the third, and `gen` is stuck trying to send to `square`. Nobody will ever receive, so both wait forever. That is the leak the Go blog warns about, and it is the same kind of bug as the one in post 7.
+
+The fix is to give every stage a way to hear "stop". The standard tool is a `context`: it carries a `Done()` channel that closes when somebody calls `cancel()`. [Post 8](/blog/go-context-timeouts-mutexes/) covers `context` in full. For now you only need three pieces. `context.WithCancel` returns a context and a `cancel` function. Every send becomes a `select` between sending and `<-ctx.Done()`. And `main` calls `cancel()` when it is finished.
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"runtime"
+	"time"
+)
+
+func gen(ctx context.Context, nums ...int) <-chan int {
+	out := make(chan int)
+	go func() {
+		defer close(out)
+		for _, n := range nums {
+			select {
+			case out <- n:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return out
+}
+
+func square(ctx context.Context, in <-chan int) <-chan int {
+	out := make(chan int)
+	go func() {
+		defer close(out)
+		for n := range in {
+			select {
+			case out <- n * n:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return out
+}
+
+func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	out := square(ctx, gen(ctx, 1, 2, 3, 4, 5, 6))
+	fmt.Println(<-out, <-out) // take two values, then stop reading
+	cancel()                  // tell every stage to stop
+
+	time.Sleep(100 * time.Millisecond)
+	fmt.Println("goroutines still alive:", runtime.NumGoroutine())
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="One real run. After cancel, only main is left, so the count is 1.">
+```text
+1 4
+goroutines still alive: 1
+```
+</TerminalOutput>
+
+Each stage uses `defer close(out)`, so its output channel closes no matter which path it leaves by. Now the two unfinished stages see `ctx.Done()` close, return, and the count drops to 1.
+
+Shutdown path: There are two exits, and a good pipeline handles both. On the normal path the first stage runs out of input and closes its channel, and the close travels down the chain as each stage's `range` loop ends. On the early path somebody cancels the context, and each stage leaves through its `ctx.Done()` case. The habit to build is to check `ctx.Done()` at every point where a goroutine can block on a channel.
+
+---
+
+## Fan-out and fan-in
+
+If one stage is the slow one, you can run several copies of it. Fan-out means several goroutines read from the same channel: each value goes to exactly one of them, so the work is shared. Fan-in means merging the outputs of those copies back into one channel so the next stage has a single place to read from. The worker pool above is fan-out and fan-in in one piece. Here the same idea is applied to a pipeline stage.
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"time"
+)
+
+func gen(ctx context.Context, nums ...int) <-chan int {
+	out := make(chan int)
+	go func() {
+		defer close(out)
+		for _, n := range nums {
+			select {
+			case out <- n:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return out
+}
+
+func square(ctx context.Context, in <-chan int) <-chan int {
+	out := make(chan int)
+	go func() {
+		defer close(out)
+		for n := range in {
+			time.Sleep(50 * time.Millisecond) // a slow stage
+			select {
+			case out <- n * n:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return out
+}
+
+func merge(ctx context.Context, cs ...<-chan int) <-chan int {
+	out := make(chan int)
+	var wg sync.WaitGroup
+	for _, c := range cs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for n := range c {
+				select {
+				case out <- n:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+	go func() {
+		wg.Wait()
+		close(out)
+	}()
+	return out
+}
+
+func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	start := time.Now()
+	in := gen(ctx, 1, 2, 3, 4, 5, 6, 7, 8, 9)
+
+	// fan out: three copies of the slow stage read from the same channel
+	a, b, c := square(ctx, in), square(ctx, in), square(ctx, in)
+
+	// fan in: merge their outputs into one channel
+	sum := 0
+	for n := range merge(ctx, a, b, c) {
+		sum += n
+	}
+	fmt.Println("sum of squares:", sum, "in", time.Since(start).Round(50*time.Millisecond))
+}
+```
+
+`merge` starts one goroutine per input channel, each copying values to `out`. It uses a `WaitGroup` for the same reason the pool did: only after every copier is finished is it safe to close `out`. In `main`, three copies of `square` all read from the same `in` channel (fan-out), and `merge` turns their three outputs into one (fan-in). Each copy sleeps 50 ms per value to stand in for slow work.
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="One real run. Nine values at 50 ms each would take 450 ms in one stage, and three copies take about 150 ms. The sum is always 285. The order in which values come out of merge is not fixed, which is why the program only adds them up.">
+```text
+sum of squares: 285 in 150ms
+```
+</TerminalOutput>
+
+The price of fan-out is order. Values can finish in a different order than they went in, because a copy that got a quick value overtakes one that got a slow value. If the order matters, attach an index to each value and sort at the end, or do not fan out that stage.
+
+Shutdown path: Cancellation reaches every copier through the same `ctx`, and the `defer cancel()` in `main` guarantees it fires even when the loop ends early. The normal path is the close chain again: `gen` closes `in`, each `square` closes its output, and the `WaitGroup` in `merge` closes `out` once all three have.
+
+---
+
+## Bounding concurrency with a semaphore
+
+Sometimes you do not want a pool of long-lived workers. You have a list of tasks, you are happy to start one goroutine per task, and you only need to cap how many do real work at the same time. A buffered channel of empty structs does it. The channel's capacity is the limit. Sending into it takes a slot, and receiving from it gives the slot back.
+
+```go
+package main
+
+import (
+	"fmt"
+	"sync"
+	"time"
+)
+
+func main() {
+	sem := make(chan struct{}, 3) // at most 3 tasks at once
+	var wg sync.WaitGroup
+
+	for i := 1; i <= 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}        // take a slot; blocks when all 3 are taken
+			defer func() { <-sem }() // give the slot back
+			fmt.Println("task", i, "running, slots in use:", len(sem))
+			time.Sleep(100 * time.Millisecond)
+		}()
+	}
+	wg.Wait()
+	fmt.Println("done")
+}
+```
+
+`chan struct{}` is a channel whose values carry no data (an empty struct takes no memory), which is the usual way to write "just a token". With capacity 3, the fourth `sem <- struct{}{}` blocks until some task runs `<-sem`. The `defer func() { <-sem }()` line returns the slot even if the task exits early. And `len(sem)` is the number of slots in use right now, which the program prints so you can see the limit at work.
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="One real run. The slot count climbs to 3 and stays there. The order of the tasks is different every run, and the count printed next to a task can read one step stale because the other tasks are taking and releasing slots at the same time.">
+```text
+task 8 running, slots in use: 1
+task 4 running, slots in use: 2
+task 1 running, slots in use: 3
+task 2 running, slots in use: 3
+task 3 running, slots in use: 3
+task 6 running, slots in use: 3
+task 5 running, slots in use: 3
+task 7 running, slots in use: 3
+done
+```
+</TerminalOutput>
+
+In this version all 8 goroutines start immediately, and 5 of them wait at the `sem <-` line. That is fine for a few hundred tasks. For a million, move `sem <- struct{}{}` above the `go` statement, so the loop itself blocks and only 3 goroutines exist at any moment.
+
+When to use which? A worker pool is the better fit when each worker has setup cost (a database connection, a buffer) that you want to reuse, or when you want a queue in front of the workers. A semaphore is the better fit for "do these N things, at most K at a time" with no state to share.
+
+Shutdown path: The `defer` that releases the slot is the whole shutdown story: whether a task finishes, returns early or panics, its slot comes back. The `WaitGroup` tells `main` when every task is done. To stop waiting for a slot when the caller gives up, replace the plain send with a `select` that also listens to `<-ctx.Done()`, as in the pipeline.
+
+---
+
+## Rate limiting
+
+Bounding concurrency limits how many calls are in flight. Rate limiting limits how often calls start. They are different problems: an API that allows 5 requests per second does not care that only 2 are in flight if you send them in a burst of 50 in the first second.
+
+The standard library already has the simplest version. A `time.Ticker` sends the current time on its channel `C` at a fixed interval, so receiving from `C` is "wait until the next slot".
+
+```go
+package main
+
+import (
+	"fmt"
+	"time"
+)
+
+func main() {
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	start := time.Now()
+	for i := 1; i <= 5; i++ {
+		<-ticker.C // wait for the next tick
+		fmt.Printf("call %d at %v\n", i, time.Since(start).Round(50*time.Millisecond))
+	}
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="One real run. The calls are spaced 200 ms apart. Times are rounded to the nearest 50 ms, since real sleeps never land exactly on the interval.">
+```text
+call 1 at 200ms
+call 2 at 400ms
+call 3 at 600ms
+call 4 at 800ms
+call 5 at 1s
+```
+</TerminalOutput>
+
+`defer ticker.Stop()` releases the ticker when the function returns. A ticker does not pile up ticks for a slow receiver: its channel holds one tick, and further ticks are dropped until the receiver catches up. So a ticker gives you a steady pace, not a catch-up burst.
+
+When you need bursts, or a limit shared by many goroutines, use the `rate` package. It lives in `golang.org/x/time`, an extension repository maintained by the Go team but not part of the standard library, so you add it to your module first with `go get` (the same command from [post 1](/blog/go-first-program-modules-packages/)).
+
+```text
+go get golang.org/x/time/rate
+```
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"golang.org/x/time/rate"
+)
+
+func main() {
+	// one call every 200ms, bursts of at most 1
+	limiter := rate.NewLimiter(rate.Every(200*time.Millisecond), 1)
+	ctx := context.Background()
+
+	start := time.Now()
+	for i := 1; i <= 5; i++ {
+		if err := limiter.Wait(ctx); err != nil {
+			fmt.Println("stopped:", err)
+			return
+		}
+		fmt.Printf("call %d at %v\n", i, time.Since(start).Round(50*time.Millisecond))
+	}
+}
+```
+
+`rate.NewLimiter(rate.Every(200*time.Millisecond), 1)` allows one event every 200 ms with a burst of 1. A burst of 5 would let five calls go at once after a quiet spell. `limiter.Wait(ctx)` blocks until the next call is allowed, and it returns an error if the context is cancelled first.
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="One real run, using golang.org/x/time v0.16.0. The first call goes out at once, and the rest follow every 200 ms.">
+```text
+call 1 at 0s
+call 2 at 200ms
+call 3 at 400ms
+call 4 at 600ms
+call 5 at 800ms
+```
+</TerminalOutput>
+
+Shutdown path: The ticker version stops with `ticker.Stop()`. The limiter has no goroutine or timer of its own to stop, so the exit is the context you pass to `Wait`: cancel it and `Wait` returns an error instead of blocking, which lets a caller leave a long queue of waiting requests.
+
+---
+
+## errgroup: run a group and stop on the first error
+
+The pool and the pipeline have a gap. If one task fails, how do the others find out? You could add an error channel, a shared variable behind a lock, and a cancel function, and wire all of them correctly. The 100 Go Mistakes book lists doing this by hand as a mistake, because the Go team already ships the package: `errgroup`.
+
+Like `rate`, it lives in `golang.org/x`, so add it with `go get`.
+
+```text
+go get golang.org/x/sync/errgroup
+```
+
+An `errgroup.Group` has two methods you need. `g.Go(f)` runs `f`, a function that returns an `error`, in a new goroutine. `g.Wait()` blocks until all of them finish and returns the first non-nil error. `errgroup.WithContext` also gives you a context that is cancelled when any function returns an error, so the other tasks can stop early. `g.SetLimit(3)` caps how many run at once, and it makes `g.Go` block when the limit is reached, so the semaphore from the previous section comes built in.
+
+```go
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"golang.org/x/sync/errgroup"
+)
+
+func fetch(ctx context.Context, id int) error {
+	select {
+	case <-time.After(time.Duration(id) * 100 * time.Millisecond):
+		if id == 2 {
+			return errors.New("fetch 2: upstream returned 503")
+		}
+		fmt.Println("fetch", id, "ok")
+		return nil
+	case <-ctx.Done():
+		fmt.Println("fetch", id, "cancelled:", ctx.Err())
+		return ctx.Err()
+	}
+}
+
+func main() {
+	g, ctx := errgroup.WithContext(context.Background())
+	g.SetLimit(3) // at most 3 goroutines at once
+
+	for id := 1; id <= 5; id++ {
+		g.Go(func() error {
+			return fetch(ctx, id)
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		fmt.Println("group failed:", err)
+	}
+}
+```
+
+Task `id` takes `id` times 100 ms. Task 2 fails after 200 ms, with 3, 4 and 5 still waiting or about to start. The failure cancels `ctx`, and each task is waiting in a `select` that includes `<-ctx.Done()`, so it leaves at once instead of sitting out its full time.
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="One real run, using golang.org/x/sync v0.25.0. Which of tasks 3, 4 and 5 print their cancel line first can change between runs, but fetch 2 is the error Wait returns, and the three others are cancelled.">
+```text
+fetch 1 ok
+fetch 4 cancelled: context canceled
+fetch 5 cancelled: context canceled
+fetch 3 cancelled: context canceled
+group failed: fetch 2: upstream returned 503
+```
+</TerminalOutput>
+
+One thing to remember: cancelling the context only helps tasks that look at it. A function that ignores `ctx` runs to the end no matter what, so every function you pass to `g.Go` should pass `ctx` down to whatever it calls (an HTTP request, a database query) or `select` on it.
+
+Shutdown path: `g.Wait()` returns only after every goroutine has returned, so nothing is left behind. The group's context is cancelled when a task fails or when `Wait` returns, whichever comes first. Task 5 shows the edge: it only got a free slot after task 2 failed, so it started with an already-cancelled context and left right away.
+
+---
+
+## Choosing a pattern
+
+| Pattern | Problem it solves | Stops when | Watch for |
+|---|---|---|---|
+| Worker pool | Cap how much runs at once, with a queue in front | the jobs channel is closed, or the context is cancelled | a consumer that stops reading `results` and strands the workers |
+| Pipeline | Split work into small steps with backpressure | the first stage closes, or the context is cancelled | a stage with a send that does not also select on `ctx.Done()` |
+| Fan-out and fan-in | Speed up one slow stage | every copy has returned, then the merge closes | output order is no longer the input order |
+| Semaphore channel | At most K tasks do real work at once | each task releases its slot with `defer` | acquiring the slot inside the goroutine still starts every goroutine |
+| Ticker or `rate.Limiter` | Limit how often calls start | `Stop()`, or the context given to `Wait` | confusing a rate limit with a concurrency limit |
+| `errgroup` | Run a group and keep the first error | `Wait` returns after all tasks return | tasks that ignore the cancelled `ctx` |
+
+Whichever you pick, ask the same two questions that post 7 ended on. Who closes each channel? And what makes each goroutine leave if the caller walks away?
+
+### Coming later in the series
+
+Stopping a whole HTTP service cleanly on a signal, so that its goroutines get the same cancel-and-wait treatment as the patterns above, comes in [post 10](/blog/go-http-service-net-http-json-middleware/).
+
+## Key takeaways
+
+- A worker pool is N goroutines ranging over one jobs channel. The worker count is the cap on concurrent work, and the channel is the queue in front of it.
+- The producer closes the jobs channel. A separate goroutine waits on a `WaitGroup` and then closes the results channel.
+- In a pipeline, every send that can block also selects on `ctx.Done()`. A stage that does not leaves goroutines stuck when the consumer quits early.
+- Fan-out shares one channel between several goroutines. Fan-in merges several channels into one, and it does not keep the input order.
+- A buffered `chan struct{}` is a semaphore: send to take a slot, receive to give it back, and release with `defer`.
+- Limiting concurrency and limiting rate are different. Use a `time.Ticker` or `rate.Limiter` for rate.
+- `errgroup` runs a group, returns the first error, and cancels the group's context. Its tasks must watch that context for the cancel to matter. `golang.org/x/sync` and `golang.org/x/time` are separate modules you add with `go get`.
+
+## Review questions
+
+1. Your worker pool has three workers and the consumer returns after the first result. What happens to the workers, and which change in the pipeline section fixes it? (See "A worker pool" and "Pipelines and cancellation".)
+2. Why is the goroutine that closes `results` separate from the workers, and what does it wait on? (See "A worker pool".)
+3. A pipeline stage does `out <- n * n` inside its loop. Why can that line leak the goroutine, and what replaces it? (See "Pipelines and cancellation".)
+4. You fan out a stage across three goroutines and the output order changes. Is that a bug, and what are two ways to cope? (See "Fan-out and fan-in".)
+5. An API allows 10 requests per second. Does a semaphore of size 10 respect that limit? Which tool does? (See "Bounding concurrency with a semaphore" and "Rate limiting".)
+6. In an `errgroup`, one task fails but the others keep running for 30 seconds. What is the most likely cause? (See "errgroup".)
+
+</En>
+
+<Vi>
+
+<Figure src={heroCheckout} alt="Một dãy quầy thanh toán siêu thị nhìn từ phía cửa, vài quầy có nhân viên và vài quầy trống" caption="Quầy thanh toán là một worker pool: khách xếp một hàng, và số quầy đang mở phục vụ dần. Mở thêm quầy thì hàng ngắn đi, cho đến lúc quầy tốn nhiều hơn lợi." sourceTitle="Wikimedia Commons: Aldi Süd supermarket checkout lanes in Franklin, North Carolina, US 15.jpg (CC BY 4.0, Harrison Keely)" sourceUrl="https://commons.wikimedia.org/wiki/File:Aldi_S%C3%BCd_supermarket_checkout_lanes_in_Franklin,_North_Carolina,_US_15.jpg" />
+
+> "Goroutines are not garbage collected; they must exit on their own."
+> &mdash; *Sameer Ajmani*, The Go Blog (tạm dịch: goroutine không được thu gom rác, chúng phải tự thoát)
+
+### Kubernetes có một núm vặn cho số worker
+
+Kubernetes chạy các controller dựng sẵn trong một chương trình là `kube-controller-manager`. Mỗi controller có một hàng đợi các đối tượng cần xử lý và một số worker cố định lấy việc từ hàng đợi đó. Con số này là một cờ dòng lệnh. Với deployment, `--concurrent-deployment-syncs` mặc định là 5, và trang tham chiếu tóm tắt sự đánh đổi trong một dòng: "Larger number = more responsive deployments, but more CPU (and network) load" (số lớn hơn thì deployment phản hồi nhanh hơn, nhưng tốn thêm CPU và mạng). Cờ tương tự có cho replica set và nhiều loại đối tượng khác.
+
+Concurrency trong Go là chọn một hình dạng cho công việc: bao nhiêu worker, chúng chuyển dữ liệu cho nhau thế nào, chúng dừng ra sao. Làm tốt thì tải luôn bị chặn trên và không có gì chạy sót. [Bài 7](/blog/go-goroutines-channels-select/) đã dạy các mảnh ghép: goroutine, channel, `select`. Bài này ghép chúng thành sáu hình dạng bạn gặp nhiều nhất, và với mỗi hình nó chỉ ra chương trình tắt thế nào.
+
+<Callout type="note" title="Tóm tắt nhanh">
+Worker pool là N goroutine cùng đọc một channel jobs. Pipeline là các stage nối nhau bằng channel, và cần một tín hiệu hủy để thoát sớm không làm các stage kẹt lại. Fan-out là nhiều goroutine cùng đọc một channel, fan-in gộp nhiều channel thành một. Channel có buffer chứa struct rỗng dùng được như semaphore để giới hạn số việc chạy cùng lúc. Ticker hoặc `rate.Limiter` giới hạn tốc độ. `errgroup` chạy một nhóm việc, trả về lỗi đầu tiên và hủy phần còn lại. Ở mẫu nào cũng vậy: bên gửi đóng channel, và có thứ gì đó hủy các goroutine còn đang chờ.
+</Callout>
+
+## Quen Java, Python hay JavaScript
+
+Bạn có lẽ đã có tên cho hầu hết các hình dạng này. Go dựng chúng từ channel thay vì từ một class thư viện.
+
+| Bạn muốn | Java | Python | JavaScript | Go |
+|---|---|---|---|---|
+| Số worker cố định lấy việc từ hàng đợi | `Executors.newFixedThreadPool(n)` | `ThreadPoolExecutor(max_workers=n)` | thư viện như `p-limit` | N goroutine đọc một channel |
+| Giới hạn số việc chạy cùng lúc | `Semaphore` | `asyncio.Semaphore` | thư viện như `p-limit` | `chan struct{}` có buffer |
+| Các bước nối nhau | stream, `BlockingQueue` giữa các thread | generator, `asyncio.Queue` | async iterator | các stage nối bằng channel |
+| Giới hạn số lệnh gọi mỗi giây | Guava `RateLimiter` | thư viện như `ratelimit` | thư viện như `bottleneck` | `time.Ticker` hoặc `rate.Limiter` |
+| Chạy một nhóm, dừng khi có lỗi đầu tiên | `ExecutorCompletionService` và tự hủy | `asyncio.TaskGroup` (hủy phần còn lại) | `Promise.all` báo lỗi nhưng các việc kia vẫn chạy | `errgroup` |
+
+Khác biệt lớn nhất là chỗ pool nằm ở đâu. Trong Java, pool là một đối tượng bạn cấu hình. Trong Go, pool chỉ là một vòng lặp trong mỗi goroutine cộng một channel dùng chung, nên không có gì để cấu hình và không có gì bị giấu: bạn đọc hết mẫu này trong hai chục dòng.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Worker pool**: một số goroutine cố định cùng lấy job từ một channel. Số worker là mức trần cho lượng việc chạy cùng lúc.
+- **Pipeline**: các stage nối nhau bằng channel. Mỗi stage nhận giá trị từ stage trước, làm một bước, rồi gửi kết quả cho stage sau.
+- **Fan-out và fan-in**: fan-out là nhiều goroutine cùng đọc một channel để chia việc. Fan-in là gộp đầu ra của nhiều channel thành một.
+- **Semaphore**: một bộ đếm cho tối đa N bên vào cùng lúc. Trong Go, một channel có buffer làm được việc này.
+- **Backpressure**: khi một stage chậm bắt stage đứng trước phải chờ, thay vì để việc chất đống không giới hạn.
+
+</Concepts>
+
+---
+
+## Worker pool
+
+Worker pool mở một số goroutine cố định, mỗi cái lặp trên cùng một channel job. Worker nào rảnh sẽ lấy job kế tiếp. Nếu job nhiều hơn worker, phần dư chờ trong channel, và sự chờ đó là backpressure giữ cho tải bị chặn trên.
+
+```go
+package main
+
+import (
+	"fmt"
+	"sync"
+	"time"
+)
+
+type result struct {
+	job    int
+	square int
+}
+
+func run(workers int) (int, time.Duration) {
+	start := time.Now()
+	jobs := make(chan int)
+	results := make(chan result)
+
+	var wg sync.WaitGroup
+	for w := 1; w <= workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for n := range jobs {
+				time.Sleep(50 * time.Millisecond) // pretend work
+				results <- result{job: n, square: n * n}
+			}
+		}()
+	}
+
+	go func() {
+		for n := 1; n <= 9; n++ {
+			jobs <- n
+		}
+		close(jobs)
+	}()
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	sum := 0
+	for r := range results {
+		sum += r.square
+	}
+	return sum, time.Since(start).Round(50 * time.Millisecond)
+}
+
+func main() {
+	for _, workers := range []int{1, 3} {
+		sum, took := run(workers)
+		fmt.Printf("%d worker(s): sum of squares %d in %v\n", workers, sum, took)
+	}
+}
+```
+
+Đọc nó theo bốn phần. Ba worker mỗi cái chạy `for n := range jobs`, vòng này cứ lấy job cho đến khi `jobs` đóng và hết dữ liệu (quy tắc `range` trên channel từ bài 7). Một goroutine khác đưa các số từ 1 đến 9 vào `jobs` rồi gọi `close(jobs)`. Mỗi worker gửi đáp án lên `results`. Còn `main` lặp trên `results` và cộng các số lại.
+
+Goroutine đưa job vào là một goroutine riêng, có chủ đích. Nếu `main` tự đưa job, nó sẽ bị chặn ở lệnh gửi trong khi các worker bị chặn ở lệnh gửi kết quả về, mà không ai đang đọc. Hai bên chờ nhau mãi mãi.
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Một lần chạy thật. Tổng luôn là 285, nhưng thời gian đến từ lệnh sleep nên có thể lệch vài mili giây. Ba worker tốn khoảng một phần ba thời gian của một worker.">
+```text
+1 worker(s): sum of squares 285 in 450ms
+3 worker(s): sum of squares 285 in 150ms
+```
+</TerminalOutput>
+
+Chín job, mỗi job 50 ms, mất 450 ms với một worker và 150 ms với ba worker. Đó là cái lợi của pool, và nó cũng cho thấy giới hạn: tốc độ ngừng tăng khi worker nhiều hơn job, hoặc khi chỗ nghẽn thật (một database, một nhân CPU, một API có hạn mức) đã bão hòa. Điểm xuất phát hay dùng là một worker cho mỗi nhân CPU với việc nặng tính toán, và nhiều hơn với việc chủ yếu chờ mạng. Hãy đo rồi mới đổi số.
+
+Đường tắt: Đóng `jobs` làm vòng `range` của mọi worker kết thúc. `defer wg.Done()` của từng worker chạy. Một goroutine nhỏ chờ `WaitGroup` rồi đóng `results`, nhờ đó vòng lặp trong `main` kết thúc. Quy tắc phía sau là quy tắc từ bài 7: bên gửi đóng. Ở đây producer đóng `jobs`, còn goroutine đóng `results` là vì chỉ nó biết khi nào mọi worker đã xong. Nếu `main` ngừng đọc `results` sớm, các worker sẽ bị chặn ở lệnh gửi kế tiếp và không bao giờ thoát, và phần pipeline bên dưới chỉ cách ngăn chuyện đó.
+
+Từ Go 1.25, `WaitGroup` còn có phương thức `Go`, nên `wg.Go(func() { ... })` thay cho bộ ba `Add(1)`, `go` và `defer wg.Done()`. Bài này giữ dạng dài để từng bước nhìn thấy được.
+
+### Thử đi: đổi số worker
+
+Trình mô phỏng bên dưới đưa job vào một pool. Hãy tăng tốc độ job đến hoặc thời gian mỗi job, rồi xem hàng đợi và thông lượng khi bạn đổi số worker.
+
+<GoWorkerPoolDemo />
+
+Sức chứa của pool bằng số worker nhân với số job một worker xong mỗi giây. Khi tốc độ job đến còn dưới mức đó, thông lượng bằng tốc độ job đến và hàng đợi ngắn. Khi job đến vượt mức đó, thông lượng dừng ở sức chứa và hàng đợi dài ra suốt thời gian quá tải. Thêm worker vượt mức tốc độ đến cần thì chẳng được gì.
+
+---
+
+## Pipeline và việc hủy
+
+Pipeline là một chuỗi các stage, mỗi stage là một goroutine đọc từ channel đầu vào, làm một bước và ghi ra channel đầu ra. Go blog nói: "There's no formal definition of a pipeline in Go; it's just one of many kinds of concurrent programs" (Go không có định nghĩa chính thức cho pipeline; nó chỉ là một trong nhiều kiểu chương trình concurrent). Cái bạn có từ hình dạng này là mỗi stage nhỏ, và các channel giữa chúng cho bạn backpressure miễn phí: stage chậm khiến stage đứng trước phải chờ.
+
+Trước khi xem code, hai chỗ cú pháp. `nums ...int` là tham số variadic: bên gọi truyền bao nhiêu giá trị `int` cũng được, và trong hàm `nums` là một slice. `<-chan int` là channel chỉ-nhận: hàm trả về một channel mà bên gọi chỉ đọc được, không gửi vào được, nên rõ ràng ai sở hữu phía gửi.
+
+Đây là pipeline hai stage: `gen` gửi các số, `square` bình phương chúng. Hàm `main` đọc hai kết quả rồi dừng, như một bên gọi chỉ cần vài giá trị đầu.
+
+```go
+package main
+
+import (
+	"fmt"
+	"runtime"
+	"time"
+)
+
+func gen(nums ...int) <-chan int {
+	out := make(chan int)
+	go func() {
+		for _, n := range nums {
+			out <- n
+		}
+		close(out)
+	}()
+	return out
+}
+
+func square(in <-chan int) <-chan int {
+	out := make(chan int)
+	go func() {
+		for n := range in {
+			out <- n * n
+		}
+		close(out)
+	}()
+	return out
+}
+
+func main() {
+	out := square(gen(1, 2, 3, 4, 5, 6))
+	fmt.Println(<-out, <-out) // take two values, then stop reading
+
+	time.Sleep(100 * time.Millisecond)
+	fmt.Println("goroutines still alive:", runtime.NumGoroutine())
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Một lần chạy thật. Còn ba goroutine: main và hai stage sẽ không bao giờ kết thúc. Dòng đầu là bình phương của 1 và 2.">
+```text
+1 4
+goroutines still alive: 3
+```
+</TerminalOutput>
+
+`runtime.NumGoroutine()` chỉ là bộ đếm số goroutine đang sống, đủ để cho thấy vấn đề. Sau khi `main` đọc hai giá trị, `square` kẹt ở lệnh gửi giá trị thứ ba, và `gen` kẹt ở lệnh gửi sang `square`. Sẽ không ai nhận nữa, nên cả hai chờ mãi. Đó là lỗi leak mà Go blog cảnh báo, cùng loại với lỗi trong bài 7.
+
+Cách sửa là cho mỗi stage một cách nghe thấy "dừng". Công cụ chuẩn là `context`: nó mang một channel `Done()` đóng lại khi có người gọi `cancel()`. [Bài 8](/blog/go-context-timeouts-mutexes/) nói đầy đủ về `context`. Lúc này bạn chỉ cần ba mảnh. `context.WithCancel` trả về một context và một hàm `cancel`. Mỗi lệnh gửi trở thành một `select` giữa việc gửi và `<-ctx.Done()`. Và `main` gọi `cancel()` khi xong.
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"runtime"
+	"time"
+)
+
+func gen(ctx context.Context, nums ...int) <-chan int {
+	out := make(chan int)
+	go func() {
+		defer close(out)
+		for _, n := range nums {
+			select {
+			case out <- n:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return out
+}
+
+func square(ctx context.Context, in <-chan int) <-chan int {
+	out := make(chan int)
+	go func() {
+		defer close(out)
+		for n := range in {
+			select {
+			case out <- n * n:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return out
+}
+
+func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+
+	out := square(ctx, gen(ctx, 1, 2, 3, 4, 5, 6))
+	fmt.Println(<-out, <-out) // take two values, then stop reading
+	cancel()                  // tell every stage to stop
+
+	time.Sleep(100 * time.Millisecond)
+	fmt.Println("goroutines still alive:", runtime.NumGoroutine())
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Một lần chạy thật. Sau khi cancel chỉ còn main, nên số đếm là 1.">
+```text
+1 4
+goroutines still alive: 1
+```
+</TerminalOutput>
+
+Mỗi stage dùng `defer close(out)`, nên channel đầu ra của nó đóng dù thoát bằng đường nào. Giờ hai stage còn dang dở thấy `ctx.Done()` đóng, return, và số đếm giảm về 1.
+
+Đường tắt: Có hai lối thoát, và một pipeline tốt xử lý cả hai. Ở đường bình thường, stage đầu hết đầu vào và đóng channel của nó, rồi việc đóng lan xuống chuỗi khi vòng `range` của từng stage kết thúc. Ở đường thoát sớm, có người hủy context, và mỗi stage thoát qua nhánh `ctx.Done()` của nó. Thói quen cần tập là kiểm tra `ctx.Done()` ở mọi chỗ mà một goroutine có thể bị chặn trên channel.
+
+---
+
+## Fan-out và fan-in
+
+Nếu một stage là stage chậm, bạn có thể chạy nhiều bản sao của nó. Fan-out nghĩa là nhiều goroutine cùng đọc một channel: mỗi giá trị đến đúng một trong số đó, nên việc được chia. Fan-in nghĩa là gộp đầu ra của các bản sao đó về một channel để stage sau chỉ có một chỗ để đọc. Worker pool ở trên chính là fan-out và fan-in trong một khối. Ở đây ta áp ý đó cho một stage của pipeline.
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"sync"
+	"time"
+)
+
+func gen(ctx context.Context, nums ...int) <-chan int {
+	out := make(chan int)
+	go func() {
+		defer close(out)
+		for _, n := range nums {
+			select {
+			case out <- n:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return out
+}
+
+func square(ctx context.Context, in <-chan int) <-chan int {
+	out := make(chan int)
+	go func() {
+		defer close(out)
+		for n := range in {
+			time.Sleep(50 * time.Millisecond) // a slow stage
+			select {
+			case out <- n * n:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+	return out
+}
+
+func merge(ctx context.Context, cs ...<-chan int) <-chan int {
+	out := make(chan int)
+	var wg sync.WaitGroup
+	for _, c := range cs {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for n := range c {
+				select {
+				case out <- n:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+	}
+	go func() {
+		wg.Wait()
+		close(out)
+	}()
+	return out
+}
+
+func main() {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	start := time.Now()
+	in := gen(ctx, 1, 2, 3, 4, 5, 6, 7, 8, 9)
+
+	// fan out: three copies of the slow stage read from the same channel
+	a, b, c := square(ctx, in), square(ctx, in), square(ctx, in)
+
+	// fan in: merge their outputs into one channel
+	sum := 0
+	for n := range merge(ctx, a, b, c) {
+		sum += n
+	}
+	fmt.Println("sum of squares:", sum, "in", time.Since(start).Round(50*time.Millisecond))
+}
+```
+
+`merge` mở một goroutine cho mỗi channel đầu vào, mỗi cái chép giá trị sang `out`. Nó dùng `WaitGroup` với cùng lý do như pool: chỉ khi mọi goroutine chép đã xong mới an toàn để đóng `out`. Trong `main`, ba bản `square` cùng đọc từ một channel `in` (fan-out), và `merge` biến ba đầu ra thành một (fan-in). Mỗi bản ngủ 50 ms cho mỗi giá trị để đại diện cho việc chậm.
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Một lần chạy thật. Chín giá trị, mỗi giá trị 50 ms, mất 450 ms nếu chỉ có một stage, ba bản sao mất khoảng 150 ms. Tổng luôn là 285. Thứ tự giá trị ra khỏi merge không cố định, nên chương trình chỉ cộng chúng lại.">
+```text
+sum of squares: 285 in 150ms
+```
+</TerminalOutput>
+
+Cái giá của fan-out là thứ tự. Giá trị có thể xong theo thứ tự khác với lúc vào, vì bản sao nhận giá trị nhanh sẽ vượt bản nhận giá trị chậm. Nếu thứ tự quan trọng, hãy gắn chỉ số vào mỗi giá trị rồi sắp xếp ở cuối, hoặc đừng fan-out stage đó.
+
+Đường tắt: Việc hủy đến mọi goroutine chép qua cùng một `ctx`, và `defer cancel()` trong `main` đảm bảo nó chạy kể cả khi vòng lặp kết thúc sớm. Đường bình thường lại là chuỗi đóng channel: `gen` đóng `in`, mỗi `square` đóng đầu ra của nó, và `WaitGroup` trong `merge` đóng `out` khi cả ba đã xong.
+
+---
+
+## Giới hạn số việc chạy cùng lúc bằng semaphore
+
+Đôi khi bạn không cần một pool worker sống lâu. Bạn có một danh sách việc, bạn thoải mái mở một goroutine cho mỗi việc, và chỉ cần giới hạn có bao nhiêu việc thật sự làm cùng lúc. Một channel có buffer chứa struct rỗng làm được. Dung lượng channel là giới hạn. Gửi vào là lấy một slot, nhận ra là trả slot.
+
+```go
+package main
+
+import (
+	"fmt"
+	"sync"
+	"time"
+)
+
+func main() {
+	sem := make(chan struct{}, 3) // at most 3 tasks at once
+	var wg sync.WaitGroup
+
+	for i := 1; i <= 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}        // take a slot; blocks when all 3 are taken
+			defer func() { <-sem }() // give the slot back
+			fmt.Println("task", i, "running, slots in use:", len(sem))
+			time.Sleep(100 * time.Millisecond)
+		}()
+	}
+	wg.Wait()
+	fmt.Println("done")
+}
+```
+
+`chan struct{}` là channel mà giá trị không mang dữ liệu (struct rỗng không tốn bộ nhớ), cách quen thuộc để viết "chỉ là một cái thẻ". Với dung lượng 3, lệnh `sem <- struct{}{}` thứ tư bị chặn cho đến khi một task chạy `<-sem`. Dòng `defer func() { <-sem }()` trả slot kể cả khi task thoát sớm. Còn `len(sem)` là số slot đang dùng ngay lúc này, chương trình in ra để bạn thấy giới hạn hoạt động.
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Một lần chạy thật. Số slot tăng lên 3 rồi giữ nguyên. Thứ tự các task khác nhau mỗi lần chạy, và số đếm in cạnh một task có thể cũ một nhịp vì các task khác đang lấy và trả slot cùng lúc.">
+```text
+task 8 running, slots in use: 1
+task 4 running, slots in use: 2
+task 1 running, slots in use: 3
+task 2 running, slots in use: 3
+task 3 running, slots in use: 3
+task 6 running, slots in use: 3
+task 5 running, slots in use: 3
+task 7 running, slots in use: 3
+done
+```
+</TerminalOutput>
+
+Ở bản này cả 8 goroutine được mở ngay, và 5 cái chờ ở dòng `sem <-`. Với vài trăm task thì ổn. Với một triệu task, hãy chuyển `sem <- struct{}{}` lên trên câu lệnh `go`, để chính vòng lặp bị chặn và tại mỗi thời điểm chỉ có 3 goroutine.
+
+Khi nào dùng cái nào? Worker pool hợp hơn khi mỗi worker có chi phí khởi tạo (một kết nối database, một buffer) mà bạn muốn tái dùng, hoặc khi bạn muốn có hàng đợi trước các worker. Semaphore hợp hơn với kiểu "làm N việc này, mỗi lần tối đa K việc" và không có trạng thái nào để chia sẻ.
+
+Đường tắt: Câu `defer` trả slot chính là toàn bộ câu chuyện tắt: task xong, return sớm hay panic thì slot đều được trả. `WaitGroup` báo cho `main` biết khi mọi task đã xong. Để thôi chờ slot khi bên gọi bỏ cuộc, hãy thay lệnh gửi trơn bằng một `select` có thêm `<-ctx.Done()`, như trong pipeline.
+
+---
+
+## Giới hạn tốc độ
+
+Giới hạn số việc chạy cùng lúc chặn số lệnh gọi đang bay. Giới hạn tốc độ chặn tần suất lệnh gọi bắt đầu. Hai bài toán khác nhau: một API cho 5 request mỗi giây không quan tâm bạn chỉ có 2 request đang bay, nếu bạn gửi một loạt 50 request trong giây đầu.
+
+Thư viện chuẩn đã có bản đơn giản nhất. `time.Ticker` gửi thời điểm hiện tại lên channel `C` sau mỗi khoảng cố định, nên nhận từ `C` nghĩa là "chờ đến slot kế tiếp".
+
+```go
+package main
+
+import (
+	"fmt"
+	"time"
+)
+
+func main() {
+	ticker := time.NewTicker(200 * time.Millisecond)
+	defer ticker.Stop()
+
+	start := time.Now()
+	for i := 1; i <= 5; i++ {
+		<-ticker.C // wait for the next tick
+		fmt.Printf("call %d at %v\n", i, time.Since(start).Round(50*time.Millisecond))
+	}
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Một lần chạy thật. Các lệnh gọi cách nhau 200 ms. Thời gian được làm tròn tới 50 ms gần nhất vì sleep thật không bao giờ rơi đúng vào khoảng cách đó.">
+```text
+call 1 at 200ms
+call 2 at 400ms
+call 3 at 600ms
+call 4 at 800ms
+call 5 at 1s
+```
+</TerminalOutput>
+
+`defer ticker.Stop()` giải phóng ticker khi hàm return. Ticker không dồn các tick lại cho bên nhận chậm: channel của nó chứa một tick, và các tick sau bị bỏ cho đến khi bên nhận theo kịp. Nên ticker cho bạn nhịp đều, không phải một loạt bù.
+
+Khi cần cho phép bùng nổ, hoặc một giới hạn dùng chung cho nhiều goroutine, hãy dùng package `rate`. Nó nằm trong `golang.org/x/time`, một repo mở rộng do đội Go duy trì nhưng không thuộc thư viện chuẩn, nên bạn thêm nó vào module bằng `go get` trước (cùng lệnh từ [bài 1](/blog/go-first-program-modules-packages/)).
+
+```text
+go get golang.org/x/time/rate
+```
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"golang.org/x/time/rate"
+)
+
+func main() {
+	// one call every 200ms, bursts of at most 1
+	limiter := rate.NewLimiter(rate.Every(200*time.Millisecond), 1)
+	ctx := context.Background()
+
+	start := time.Now()
+	for i := 1; i <= 5; i++ {
+		if err := limiter.Wait(ctx); err != nil {
+			fmt.Println("stopped:", err)
+			return
+		}
+		fmt.Printf("call %d at %v\n", i, time.Since(start).Round(50*time.Millisecond))
+	}
+}
+```
+
+`rate.NewLimiter(rate.Every(200*time.Millisecond), 1)` cho phép một sự kiện mỗi 200 ms, burst là 1. Burst là 5 thì sau một lúc yên ắng cho năm lệnh gọi đi cùng lúc. `limiter.Wait(ctx)` chặn đến khi lệnh gọi kế tiếp được phép, và trả về lỗi nếu context bị hủy trước.
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Một lần chạy thật, dùng golang.org/x/time v0.16.0. Lệnh gọi đầu đi ngay, các lệnh sau cách nhau 200 ms.">
+```text
+call 1 at 0s
+call 2 at 200ms
+call 3 at 400ms
+call 4 at 600ms
+call 5 at 800ms
+```
+</TerminalOutput>
+
+Đường tắt: Bản ticker dừng bằng `ticker.Stop()`. Limiter không có goroutine hay timer riêng để dừng, nên lối thoát là context bạn truyền cho `Wait`: hủy nó thì `Wait` trả về lỗi thay vì chặn, giúp bên gọi rời khỏi một hàng dài các request đang chờ.
+
+---
+
+## errgroup: chạy một nhóm và dừng khi có lỗi đầu tiên
+
+Worker pool và pipeline có một lỗ hổng. Nếu một task lỗi, các task khác biết bằng cách nào? Bạn có thể thêm một channel lỗi, một biến dùng chung sau một cái khóa, và một hàm cancel, rồi nối tất cả cho đúng. Sách 100 Go Mistakes xếp việc tự làm tay này vào danh sách lỗi, vì đội Go đã có sẵn package cho việc đó: `errgroup`.
+
+Giống `rate`, nó nằm trong `golang.org/x`, nên thêm bằng `go get`.
+
+```text
+go get golang.org/x/sync/errgroup
+```
+
+`errgroup.Group` có hai phương thức bạn cần. `g.Go(f)` chạy `f`, một hàm trả về `error`, trong một goroutine mới. `g.Wait()` chặn đến khi tất cả xong và trả về lỗi khác nil đầu tiên. `errgroup.WithContext` còn cho bạn một context bị hủy khi có hàm nào trả về lỗi, để các task khác dừng sớm. `g.SetLimit(3)` giới hạn số task chạy cùng lúc, và làm `g.Go` bị chặn khi chạm giới hạn, nên semaphore ở phần trước có sẵn trong đó.
+
+```go
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"time"
+
+	"golang.org/x/sync/errgroup"
+)
+
+func fetch(ctx context.Context, id int) error {
+	select {
+	case <-time.After(time.Duration(id) * 100 * time.Millisecond):
+		if id == 2 {
+			return errors.New("fetch 2: upstream returned 503")
+		}
+		fmt.Println("fetch", id, "ok")
+		return nil
+	case <-ctx.Done():
+		fmt.Println("fetch", id, "cancelled:", ctx.Err())
+		return ctx.Err()
+	}
+}
+
+func main() {
+	g, ctx := errgroup.WithContext(context.Background())
+	g.SetLimit(3) // at most 3 goroutines at once
+
+	for id := 1; id <= 5; id++ {
+		g.Go(func() error {
+			return fetch(ctx, id)
+		})
+	}
+
+	if err := g.Wait(); err != nil {
+		fmt.Println("group failed:", err)
+	}
+}
+```
+
+Task `id` mất `id` nhân 100 ms. Task 2 lỗi sau 200 ms, khi 3, 4 và 5 còn đang chờ hoặc sắp bắt đầu. Lỗi đó hủy `ctx`, và mỗi task đang chờ trong một `select` có `<-ctx.Done()`, nên nó thoát ngay thay vì ngồi hết thời gian của mình.
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Một lần chạy thật, dùng golang.org/x/sync v0.25.0. Task nào trong 3, 4, 5 in dòng hủy trước có thể đổi giữa các lần chạy, nhưng fetch 2 là lỗi mà Wait trả về, và ba task còn lại bị hủy.">
+```text
+fetch 1 ok
+fetch 4 cancelled: context canceled
+fetch 5 cancelled: context canceled
+fetch 3 cancelled: context canceled
+group failed: fetch 2: upstream returned 503
+```
+</TerminalOutput>
+
+Một điều cần nhớ: hủy context chỉ giúp được những task có nhìn vào nó. Hàm bỏ qua `ctx` sẽ chạy đến hết bất kể chuyện gì, nên mọi hàm bạn đưa cho `g.Go` phải truyền `ctx` xuống thứ nó gọi (một HTTP request, một câu truy vấn database) hoặc tự `select` trên nó.
+
+Đường tắt: `g.Wait()` chỉ return sau khi mọi goroutine đã return, nên không có gì bị bỏ lại. Context của nhóm bị hủy khi một task lỗi hoặc khi `Wait` return, cái nào đến trước. Task 5 cho thấy trường hợp biên: nó chỉ có slot trống sau khi task 2 lỗi, nên bắt đầu với một context đã bị hủy và thoát ngay.
+
+---
+
+## Chọn mẫu nào
+
+| Mẫu | Giải quyết việc gì | Dừng khi | Cần để ý |
+|---|---|---|---|
+| Worker pool | Giới hạn lượng việc chạy cùng lúc, có hàng đợi phía trước | channel jobs bị đóng, hoặc context bị hủy | bên tiêu thụ ngừng đọc `results` làm worker kẹt lại |
+| Pipeline | Chia việc thành các bước nhỏ có backpressure | stage đầu đóng, hoặc context bị hủy | stage có lệnh gửi mà không `select` thêm `ctx.Done()` |
+| Fan-out và fan-in | Tăng tốc một stage chậm | mọi bản sao đã return, rồi merge đóng | thứ tự đầu ra không còn là thứ tự đầu vào |
+| Semaphore channel | Tối đa K task làm việc thật cùng lúc | mỗi task trả slot bằng `defer` | lấy slot bên trong goroutine vẫn mở hết các goroutine |
+| Ticker hoặc `rate.Limiter` | Giới hạn tần suất lệnh gọi bắt đầu | `Stop()`, hoặc context đưa cho `Wait` | nhầm giới hạn tốc độ với giới hạn số việc chạy cùng lúc |
+| `errgroup` | Chạy một nhóm và giữ lỗi đầu tiên | `Wait` return sau khi mọi task return | task bỏ qua `ctx` đã bị hủy |
+
+Chọn mẫu nào thì cũng hỏi hai câu mà bài 7 đã kết thúc bằng. Ai đóng từng channel? Và điều gì khiến từng goroutine rời đi nếu bên gọi bỏ đi?
+
+### Coming later in the series
+
+Tắt gọn cả một HTTP service khi nhận tín hiệu, để các goroutine của nó được hủy và chờ giống như các mẫu ở trên, nằm ở [bài 10](/blog/go-http-service-net-http-json-middleware/).
+
+## Key takeaways
+
+- Worker pool là N goroutine cùng `range` trên một channel jobs. Số worker là mức trần của lượng việc chạy cùng lúc, và channel là hàng đợi phía trước.
+- Producer đóng channel jobs. Một goroutine riêng chờ `WaitGroup` rồi đóng channel results.
+- Trong pipeline, mỗi lệnh gửi có thể bị chặn đều `select` thêm `ctx.Done()`. Stage nào không làm vậy sẽ để goroutine kẹt lại khi bên tiêu thụ bỏ đi sớm.
+- Fan-out chia một channel cho nhiều goroutine. Fan-in gộp nhiều channel thành một, và không giữ thứ tự đầu vào.
+- `chan struct{}` có buffer là một semaphore: gửi để lấy slot, nhận để trả slot, và trả bằng `defer`.
+- Giới hạn số việc chạy cùng lúc và giới hạn tốc độ là hai chuyện khác nhau. Dùng `time.Ticker` hoặc `rate.Limiter` cho tốc độ.
+- `errgroup` chạy một nhóm, trả về lỗi đầu tiên và hủy context của nhóm. Task phải nhìn vào context đó thì việc hủy mới có tác dụng. `golang.org/x/sync` và `golang.org/x/time` là các module riêng, thêm bằng `go get`.
+
+## Review questions
+
+1. Worker pool của bạn có ba worker và bên tiêu thụ return sau kết quả đầu tiên. Chuyện gì xảy ra với các worker, và thay đổi nào trong phần pipeline sửa được? (Xem "Worker pool" và "Pipeline và việc hủy".)
+2. Vì sao goroutine đóng `results` là goroutine riêng chứ không phải các worker, và nó chờ cái gì? (Xem "Worker pool".)
+3. Một stage của pipeline viết `out <- n * n` trong vòng lặp. Vì sao dòng đó có thể làm leak goroutine, và nên thay bằng gì? (Xem "Pipeline và việc hủy".)
+4. Bạn fan-out một stage ra ba goroutine và thứ tự đầu ra đổi. Đó có phải bug không, và có hai cách xử lý nào? (Xem "Fan-out và fan-in".)
+5. Một API cho 10 request mỗi giây. Semaphore cỡ 10 có tôn trọng giới hạn đó không? Công cụ nào làm được? (Xem "Giới hạn số việc chạy cùng lúc bằng semaphore" và "Giới hạn tốc độ".)
+6. Trong một `errgroup`, một task lỗi nhưng các task khác vẫn chạy thêm 30 giây. Nguyên nhân khả dĩ nhất là gì? (Xem "errgroup".)
+
+</Vi>
