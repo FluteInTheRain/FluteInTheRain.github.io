@@ -117,6 +117,59 @@ The three packets, in order:
 
 **HTTP is the message inside the pipe.** `GET / HTTP/2` with a few headers. Notice `cf-ray: ...-SIN` in the response: Cloudflare's Singapore edge answered. Your request's station list depends on geography, not on your code.
 
+You can pay each station yourself, with nothing but the standard library — this is `demo/station_timing.py`:
+
+```python
+import socket
+import ssl
+import time
+
+HOST = "fastapi.tiangolo.com"
+
+
+def ms(since: float) -> float:
+    return (time.perf_counter() - since) * 1000
+
+
+# Station 1: DNS — a name becomes an address.
+t = time.perf_counter()
+addr = socket.getaddrinfo(HOST, 443, proto=socket.IPPROTO_TCP)[0][4][0]
+print(f"DNS   {ms(t):7.1f} ms   {HOST} -> {addr}")
+
+# Station 2: TCP — the three-way handshake opens the pipe.
+t = time.perf_counter()
+sock = socket.create_connection((HOST, 443))
+print(f"TCP   {ms(t):7.1f} ms   connected to {addr}:443")
+
+# Station 3: TLS — keys agreed, certificate checked.
+t = time.perf_counter()
+tls = ssl.create_default_context().wrap_socket(sock, server_hostname=HOST)
+print(f"TLS   {ms(t):7.1f} ms   {tls.version()}")
+
+# Station 4 + 5: HTTP is the letter inside the pipe; the first bytes back
+# are one more round trip. This is the only station your profiler ever sees.
+t = time.perf_counter()
+tls.sendall(
+    b"GET / HTTP/1.1\r\n"
+    + f"Host: {HOST}\r\n".encode()
+    + b"User-Agent: station-timing\r\n"
+    + b"Accept: */*\r\n"
+    + b"Connection: close\r\n\r\n"
+)
+status = tls.recv(256).split(b"\r\n")[0].decode()
+print(f"HTTP  {ms(t):7.1f} ms   {status}")
+tls.close()
+```
+
+<TerminalOutput command="uv run --python 3.13 station_timing.py" label="Python 3.13 · captured Nov 2026" caption="Each handshake lands near one round trip to Singapore (≈50–70 ms); the request itself adds the server's own round trip. Your profiler only ever sees the last line.">
+```text
+DNS      53.4 ms   fastapi.tiangolo.com -> 172.66.45.21
+TCP      52.8 ms   connected to 172.66.45.21:443
+TLS      69.9 ms   TLSv1.3
+HTTP    157.5 ms   HTTP/1.1 200 OK
+```
+</TerminalOutput>
+
 <Figure src={networkMap} alt="An 1870s map of the Paris pneumatic tube network: dozens of post offices linked by tubes crossing the city" caption="The Paris pneumatic network as drawn in the 1870s. Nobody drew a new map for each letter — the stations existed first, and letters just rode them. Your request rides DNS, TCP, TLS and HTTP the same way: the infrastructure predates your payload, and it is the same for every API you will ever ship." sourceTitle="Wikimedia Commons: Réseau pneumatique de Paris (Louis Figuier)" sourceUrl="https://commons.wikimedia.org/wiki/File:T5-_d520_-_Fig._425._%E2%80%94_R%C3%A9seau_pneumatique_de_Paris.png" />
 
 <Concepts>
@@ -136,6 +189,25 @@ Everything above happens before your process is involved. What does "running the
 uvicorn owns the socket. It parses bytes, closes handshakes, decodes HTTP — and calls one thing of yours: an ASGI app. The whole ASGI contract is one callable: `async def app(scope, receive, send)`. A request arrives as a `scope` dict; you read the body by awaiting `receive()`; you push the response by awaiting `send()`. FastAPI is a very large, very organized version of that callable, with routing, validation and docs riding on top.
 
 Here is the series' tiny demo service with one middleware printing what it sees:
+
+```python
+@app.middleware("http")
+async def trace_middleware(request: Request, call_next):
+    scope = request.scope
+    print(
+        f"ASGI scope: type={scope['type']} scheme={scope['scheme']}"
+        f" http_version={scope.get('http_version')}"
+    )
+    print(f"app -> router -> endpoint: {request.method} {request.url.path}")
+    started = time.perf_counter()
+    response = await call_next(request)
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    print(
+        f"endpoint returned, response back through the stack:"
+        f" {response.status_code} in {elapsed_ms:.2f} ms"
+    )
+    return response
+```
 
 <TerminalOutput command="uvicorn trace_demo:app — then: curl http://127.0.0.1:4324/cases/42" label="Python 3.13 · FastAPI 0.165 · captured locally" caption="The server's own view of one request: ASGI scope in, your endpoint in the middle, status code out — the rest is uvicorn's business.">
 ```text
@@ -178,6 +250,40 @@ Keep this in your head as a budget: the first request on a fresh connection pays
 That budget, drawn to scale:
 
 <BeP01ReuseCost />
+
+Run the pair yourself — this is `demo/reuse_timing.py`:
+
+```python
+import time
+
+import httpx
+
+URL = "https://fastapi.tiangolo.com/"
+
+
+def ms(since: float) -> float:
+    return (time.perf_counter() - since) * 1000
+
+
+with httpx.Client() as client:
+    t = time.perf_counter()
+    client.get(URL)
+    first = ms(t)
+
+    t = time.perf_counter()
+    client.get(URL)
+    second = ms(t)
+
+print(f"first request:  {first:7.1f} ms   (fresh connection)")
+print(f"second request:  {second:7.1f} ms   (connection reused)")
+```
+
+<TerminalOutput command="uv run --python 3.13 --with httpx reuse_timing.py" label="Python 3.13 · httpx · captured Nov 2026" caption="One httpx.Client, two GETs: the first pays DNS, TCP and TLS before its first byte; the second rides the same connection. The gap is the setup tax from the budget above.">
+```text
+first request:    293.7 ms   (fresh connection)
+second request:    131.2 ms   (connection reused)
+```
+</TerminalOutput>
 
 ---
 
@@ -279,6 +385,59 @@ Ba gói tin, theo thứ tự:
 
 **HTTP là lá thư bỏ trong ống.** `GET / HTTP/2` kèm vài header. Để ý dòng `cf-ray: ...-SIN` trong response: edge của Cloudflare ở Singapore trả lời bạn đấy. Request đi qua những trạm nào tuỳ vào bạn đứng ở đâu trên bản đồ, chứ không tuỳ code của bạn.
 
+Bạn có thể tự tay trả tiền từng trạm, không cần framework nào ngoài standard library — đây là `demo/station_timing.py`:
+
+```python
+import socket
+import ssl
+import time
+
+HOST = "fastapi.tiangolo.com"
+
+
+def ms(since: float) -> float:
+    return (time.perf_counter() - since) * 1000
+
+
+# Station 1: DNS — a name becomes an address.
+t = time.perf_counter()
+addr = socket.getaddrinfo(HOST, 443, proto=socket.IPPROTO_TCP)[0][4][0]
+print(f"DNS   {ms(t):7.1f} ms   {HOST} -> {addr}")
+
+# Station 2: TCP — the three-way handshake opens the pipe.
+t = time.perf_counter()
+sock = socket.create_connection((HOST, 443))
+print(f"TCP   {ms(t):7.1f} ms   connected to {addr}:443")
+
+# Station 3: TLS — keys agreed, certificate checked.
+t = time.perf_counter()
+tls = ssl.create_default_context().wrap_socket(sock, server_hostname=HOST)
+print(f"TLS   {ms(t):7.1f} ms   {tls.version()}")
+
+# Station 4 + 5: HTTP is the letter inside the pipe; the first bytes back
+# are one more round trip. This is the only station your profiler ever sees.
+t = time.perf_counter()
+tls.sendall(
+    b"GET / HTTP/1.1\r\n"
+    + f"Host: {HOST}\r\n".encode()
+    + b"User-Agent: station-timing\r\n"
+    + b"Accept: */*\r\n"
+    + b"Connection: close\r\n\r\n"
+)
+status = tls.recv(256).split(b"\r\n")[0].decode()
+print(f"HTTP  {ms(t):7.1f} ms   {status}")
+tls.close()
+```
+
+<TerminalOutput command="uv run --python 3.13 station_timing.py" label="Python 3.13 · chụp tháng 11/2026" caption="Mỗi handshake ngang khoảng một round trip tới Singapore (≈50–70 ms); bản thân request cộng thêm round trip của server. Profiler của bạn chỉ nhìn thấy dòng cuối cùng.">
+```text
+DNS      53.4 ms   fastapi.tiangolo.com -> 172.66.45.21
+TCP      52.8 ms   connected to 172.66.45.21:443
+TLS      69.9 ms   TLSv1.3
+HTTP    157.5 ms   HTTP/1.1 200 OK
+```
+</TerminalOutput>
+
 <Figure src={networkMap} alt="Bản đồ mạng ống khí nén Paris thập niên 1870: hàng chục bưu điện nối với nhau bằng ống chạy khắp thành phố" caption="Mạng pneumatic Paris như vẽ thập niên 1870. Không ai vẽ lại bản đồ cho từng lá thư — trạm có trước, thư chỉ việc chạy theo. Request của bạn chạy trên DNS, TCP, TLS và HTTP y như vậy: hạ tầng có trước payload của bạn, và nó như nhau với mọi API bạn sẽ viết." sourceTitle="Wikimedia Commons: Réseau pneumatique de Paris (Louis Figuier)" sourceUrl="https://commons.wikimedia.org/wiki/File:T5-_d520_-_Fig._425._%E2%80%94_R%C3%A9seau_pneumatique_de_Paris.png" />
 
 <Concepts title="Mấy thuật ngữ phía trên, nói dễ hiểu">
@@ -298,6 +457,25 @@ Tất cả những gì phía trên diễn ra khi process của bạn còn chưa 
 uvicorn nắm socket. Nó parse byte, đóng các handshake, giải mã HTTP — rồi gọi đúng một thứ của bạn thôi: một app ASGI. Cả giao diện ASGI gói gọn trong một callable: `async def app(scope, receive, send)`. Request tới dưới dạng dict `scope`; muốn đọc body thì await `receive()`; muốn đẩy response thì await `send()`. FastAPI, suy cho cùng, cũng chỉ là một phiên bản cực lớn và cực có tổ chức của đúng callable đó — routing, validation, docs cài sẵn phía trên.
 
 Dưới đây là demo service của series với một middleware in ra những gì nó nhìn thấy:
+
+```python
+@app.middleware("http")
+async def trace_middleware(request: Request, call_next):
+    scope = request.scope
+    print(
+        f"ASGI scope: type={scope['type']} scheme={scope['scheme']}"
+        f" http_version={scope.get('http_version')}"
+    )
+    print(f"app -> router -> endpoint: {request.method} {request.url.path}")
+    started = time.perf_counter()
+    response = await call_next(request)
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    print(
+        f"endpoint returned, response back through the stack:"
+        f" {response.status_code} in {elapsed_ms:.2f} ms"
+    )
+    return response
+```
 
 <TerminalOutput command="uvicorn trace_demo:app — rồi: curl http://127.0.0.1:4324/cases/42" label="Python 3.13 · FastAPI 0.165 · chạy trên máy" caption="Góc nhìn của chính server về một request: ASGI scope vào, endpoint của bạn ở giữa, status code ra — phần còn lại là chuyện của uvicorn.">
 ```text
@@ -340,6 +518,40 @@ Giữ cái ngân sách này trong đầu: request đầu tiên trên một conne
 Ngân sách đó, vẽ đúng tỉ lệ:
 
 <BeP01ReuseCost />
+
+Chạy thử cặp này ngay — đây là `demo/reuse_timing.py`:
+
+```python
+import time
+
+import httpx
+
+URL = "https://fastapi.tiangolo.com/"
+
+
+def ms(since: float) -> float:
+    return (time.perf_counter() - since) * 1000
+
+
+with httpx.Client() as client:
+    t = time.perf_counter()
+    client.get(URL)
+    first = ms(t)
+
+    t = time.perf_counter()
+    client.get(URL)
+    second = ms(t)
+
+print(f"first request:  {first:7.1f} ms   (fresh connection)")
+print(f"second request:  {second:7.1f} ms   (connection reused)")
+```
+
+<TerminalOutput command="uv run --python 3.13 --with httpx reuse_timing.py" label="Python 3.13 · httpx · chụp tháng 11/2026" caption="Một httpx.Client, hai GET: request đầu trả DNS, TCP và TLS trước byte đầu tiên; request hai chạy trên đúng connection đó. Khoảng chênh chính là tiền setup trong ngân sách phía trên.">
+```text
+first request:    293.7 ms   (fresh connection)
+second request:    131.2 ms   (connection reused)
+```
+</TerminalOutput>
 
 ---
 
