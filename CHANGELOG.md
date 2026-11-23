@@ -3,6 +3,18 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-23 — Series Go: viết bài 1–3 (draft) và chỉnh lại theo bài test người đọc
+
+- **Đã làm:** 3 agent Sonnet viết bài 1–3 trên 3 nhánh `feat/go-post-01-basics`, `feat/go-post-02-types`, `feat/go-post-03-collections` (chưa push). Mỗi bài qua review nội dung + 1 vòng sửa, rồi 1 lượt humanizer. Bài test người đọc (agent đóng vai dev Java chưa viết Go) chấm cả 3 bài "Mostly easy": ví dụ dùng thứ chưa học (`recover`, closure, struct, `context`), bài 2 ôm ~8 chủ đề, bài 3 đi sâu vào tăng capacity/benchmark.
+- **Ai quyết:** user chọn phương án A — sửa mọi ví dụ chỉ dùng thứ đã học và dời phần sâu sang bài sau. Spec cập nhật: #3/#4 (`init`, getter) 2→12, #43/#44 (named results) 2→5, #27/#38 (size hint map, Trim) 3→11, Docker `FROM scratch` 1→10; thêm luật viết "ví dụ chỉ dùng thứ bài trước đã dạy". Sách đọc qua text tách sẵn trong `books/_extract/` thay vì `/book-to-skill` (tiết kiệm token, AI quyết).
+- **Chưa chốt:** Khang duyệt kỹ bài 1 (pilot) sau khi sửa; push/PR sau khi duyệt.
+
+## 2026-11-23 — Thiết kế lại series Go: 20 bài, từ cơ bản đến phỏng vấn
+
+- **Đã làm:** spec `docs/superpowers/specs/2026-11-23-go-series-redesign-design.md` (nhánh `chore/go-series-redesign-spec`). Series `golang` 12 bài chia lại thành 20 bài, 5 cấp: Viết Go (1–6) → Chạy song song (7–10) → Bên trong & bẫy (11–14) → Đo & tối ưu (15–19) → Phỏng vấn (20). Mỗi chủ đề chỉ có một bài "nhà"; 100 lỗi của *100 Go Mistakes* được phân đủ, mỗi lỗi đúng một bài (kiểm bằng script).
+- **Ai quyết:** user — người đọc là dev đã biết ngôn ngữ khác nhưng chưa viết Go; chọn phương án A (một series, một lộ trình); bài được viết dài; sách là nguồn tham khảo chính; thêm 3 bài (concurrency patterns, HTTP service, phỏng vấn); dàn ý trong spec coi như đã duyệt, chỉ duyệt kỹ bài 1 (pilot). AI quyết: bài 11–19 giữ slug cũ và viết lại tại chỗ; 3 bài fundamentals cũ redirect khi cutover; thứ tự làm sao cho bài live không bao giờ link tới draft.
+- **Chưa chốt:** plan triển khai (bước tiếp theo). Hai cuốn *100 Go Mistakes* và *Efficient Go* chưa import bằng `/book-to-skill`.
+
 ## 2026-11-22 — Bài 1 series stocks-basics: "Cổ phiếu thật ra là gì"
 
 - **Đã làm:** publish bài 1 series `stocks-basics` (`/blog/what-is-a-stock-ownership-dividends/`, `draft: false`): body song ngữ EN/VI (5 mục + key takeaways + 5 câu ôn tập), hero chứng khoán 1863 (Wikimedia CC0), demo island "Your slice" (Task 3), quiz 8 bộ câu hỏi (`/quiz/`, Task 4), số liệu thật FPT/VNM tài chính 2025 từ 2 báo cáo thường niên đã kiểm toán + VSDC (cổ tức) + HOSE (ex-date) — đủ nguồn trong frontmatter `sources`. Bài publish khiến series card `stocks-basics` hiện trên blog index (thứ 4) và part 1 trên trang cover chuyển thành link "Bắt đầu từ Bài 1 →".
