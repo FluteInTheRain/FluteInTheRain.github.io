@@ -3,6 +3,13 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-23 — Xuất bản pilot backend: bài 1 series "How backend actually works" lên sóng
+
+- **Đã làm (branch `feat/publish-backend-pilot`, sau khi merge PR #40 vào main):** flip `draft: true` → `false` cho `backend-http-request-lifecycle` — bài đầu tiên của series backend lên production, deploy GitHub Pages tự chạy sau khi merge. Merge PR #40 trước đó cần resolve conflict `CHANGELOG.md` với PR #39 (cutover Go, main chạy trước) — giữ cả ba entry cùng ngày theo thứ tự thời gian. Build 63 → 68 pages (trang post + trang `/blog/category/backend/` build lần đầu; phần còn lại từ delta cutover Go đã theo merge vào nhánh), 47 test pass.
+- **Ai quyết:** user duyệt xong vòng 2 (icon + demo) — "OKE" cho cả flow: merge PR #40 → flip `draft: false` → viết plan 11 bài còn lại.
+- **Hiệu ứng kèm theo:** bài publish khiến series card `backend` xuất hiện trên blog index (filter `publishedCount > 0`), và part 1 trên trang cover `/blog/series/backend/` thành link "Bắt đầu từ Bài 1".
+- **Chưa chốt:** plan triển khai 11 bài còn lại (việc tiếp theo ngay sau entry này); quiz defer theo pattern DDIA.
+
 ## 2026-11-23 — Backend pilot vòng 2: icon thật + thiết kế lại 5 sơ đồ + demo Python
 
 - **Đã làm (cộng thêm vào PR #40):** vẽ lại 5 sơ đồ `BeP01*` theo nguyên tắc excalidraw (khoảng trắng thoáng, chữ tự do không đè hình) + **icon màu thật** vào node: tải 12 icon mới từ Iconify theo đúng convention `public/icons/flow/` (`python`/`fastapi`/`curl` từ logos CC0 + pictogram fluent-emoji-flat MIT), icon tối (curl) và icon chìm nền tối (plug) được che bằng đĩa sáng chỉ hiện ở dark mode (pattern `AnimatedFlow` dùng `.disc` + `:global([data-theme='dark'])`). `BackendLifecycleDiagram` (red box) cũng gắn icon đồng bộ — không phá layout cũ, chỉ dịch chữ xuống. Thêm **3 demo Python thật**: `demo/station_timing.py` (đo từng trạm bằng raw socket — capture thật 53.4/52.8/69.9/157.5 ms), show luôn middleware 16 dòng của `trace_demo.py` ở mục 2, `demo/reuse_timing.py` (httpx 2 GET — capture thật 293.7 vs 131.2 ms). Code trong bài diff-khớp 100% file demo (script verify), số liệu là capture thật hôm nay.
