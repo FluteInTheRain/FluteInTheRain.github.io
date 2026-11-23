@@ -1,0 +1,1233 @@
+---
+title: "Don't let your endpoints lie"
+title_vi: "Đừng để endpoint nói dối"
+description: "Resources, verbs, status codes, pagination, idempotency, versioning — the contract every endpoint signs, the habits AI-generated code gets wrong, traced live on a FastAPI router."
+description_vi: "URL là hợp đồng, verb là hành động, status code là lời khai thật. Tài nguyên, phân trang, idempotency, versioning — và mấy thói quen AI hay viết sai, chạy thật trên FastAPI."
+date: 2026-11-23
+category: "backend"
+tags: ["backend", "python", "fastapi", "rest", "api-design"]
+cover: "../../assets/blog/backend-rest-api-design/swagger-docs-cover.png"
+cover_alt: "Swagger UI page of the clue.api demo service listing its five /v1/cases operations: GET and POST on the collection, then GET, PUT and DELETE on one case"
+draft: true
+sources:
+  - { title: "FastAPI: Modern Python Web Development", author: "Bill Lubanovic", chapters: "Ch. 3, 8", url: "https://www.oreilly.com/library/view/fastapi/9781098135091/" }
+  - { title: "HTTP response status codes", author: "MDN Web Docs", url: "https://developer.mozilla.org/en-US/docs/Web/HTTP/Status" }
+  - { title: "Idempotent (HTTP glossary)", author: "MDN Web Docs", url: "https://developer.mozilla.org/en-US/docs/Glossary/Idempotent" }
+  - { title: "Bigger Applications - Multiple Files", author: "FastAPI documentation", url: "https://fastapi.tiangolo.com/tutorial/bigger-applications/" }
+  - { title: "Query Parameters and String Validations", author: "FastAPI documentation", url: "https://fastapi.tiangolo.com/tutorial/query-params-str-validations/" }
+  - { title: "Response Status Code", author: "FastAPI documentation", url: "https://fastapi.tiangolo.com/tutorial/response-status-code/" }
+  - { title: "Handling Errors", author: "FastAPI documentation", url: "https://fastapi.tiangolo.com/tutorial/handling-errors/" }
+  - { title: "Header Parameters", author: "FastAPI documentation", url: "https://fastapi.tiangolo.com/tutorial/header-params/" }
+  - { title: "Response Headers", author: "FastAPI documentation", url: "https://fastapi.tiangolo.com/advanced/response-headers/" }
+  - { title: "Idempotent requests", author: "Stripe API documentation", url: "https://docs.stripe.com/api/idempotent_requests" }
+  - { title: "Upgrade your integration (API versioning)", author: "Stripe documentation", url: "https://docs.stripe.com/upgrades" }
+  - { title: "Using pagination in the REST API", author: "GitHub REST API documentation", url: "https://docs.github.com/en/rest/using-the-rest-api/using-pagination-in-the-rest-api" }
+  - { title: "Pagination (cursor-based list requests)", author: "Stripe API documentation", url: "https://docs.stripe.com/api/pagination" }
+  - { title: "REST APIs must be hypertext-driven (Oct 2008)", author: "Roy T. Fielding", url: "https://roy.gbiv.com/untangled/2008/rest-apis-must-be-hypertext-driven" }
+---
+
+import En from '../../components/mdx/En.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
+import BeP02UrlAnatomy from '../../components/mdx/BeP02UrlAnatomy.astro';
+import BeP02VerbsBeforeAfter from '../../components/mdx/BeP02VerbsBeforeAfter.astro';
+import BeP02StatusLanes from '../../components/mdx/BeP02StatusLanes.astro';
+import BeP02OffsetCursor from '../../components/mdx/BeP02OffsetCursor.astro';
+import BeP02RetryTimeline from '../../components/mdx/BeP02RetryTimeline.astro';
+import BeP02VersionPaths from '../../components/mdx/BeP02VersionPaths.astro';
+
+<En>
+
+> "REST is software design on the scale of decades: every detail is intended to promote software longevity and independent evolution."
+> &mdash; *Roy T. Fielding, in the 2008 discussion under ["REST APIs must be hypertext-driven"](https://roy.gbiv.com/untangled/2008/rest-apis-must-be-hypertext-driven)*
+
+### The hook: thirty seconds of generated endpoints
+
+Ask any model for "a small case-tracking API" and you'll have a working FastAPI service in under a minute: routers, models, tests, even a README. The code runs. What the model cannot hand you is the judgment behind the surface it picked — and that surface *is* the product. Leave it unreviewed and the generated defaults sneak in: one verb for every operation, one status code for every outcome, failures wrapped politely inside a 200, and a list endpoint that returns the whole table because nobody chose a page size.
+
+None of that is a code bug. The service works right up until a client retries a create after a flaky timeout and files the same case twice, or your uptime dashboard glows green while every request fails quietly. They are contract bugs, and the contract is the one thing the code generator never sees.
+
+This post grows the series' demo service — the one-URL trace service from [the pilot post](/blog/backend-http-request-lifecycle/) — into a versioned, resource-shaped API, and walks the five decisions that make an HTTP API honest:
+
+1. **Resources** — the URL names a thing.
+2. **Verbs and status codes** — the method is the action, the code is the receipt.
+3. **Pagination** — every list ends somewhere.
+4. **Idempotency** — what a retry is allowed to do.
+5. **Versioning** — a version is a promise.
+
+Every terminal block below is real output from `demo/rest_api.py`, captured on the stack in its label — run the file yourself and you will see the same lines.
+
+---
+
+## 1. The URL names a thing
+
+Start from the one thing every client must hold: the URL. In a well-shaped API a URL is not a function name. It is the address of a thing — a resource. That single decision drives everything else in this post, which is why Fielding put longevity first: as he put it in that same 2008 thread, "implementations change, but cool URIs don't."
+
+Three naming rules fall out:
+
+- **Nouns, not verbs.** `/v1/cases`, not `/v1/getCases`. The verb slot is already taken — by the HTTP method.
+- **Plural nouns for collections.** `/v1/cases` is every case; `/v1/cases/3` is one of them.
+- **The id names the item, nothing else.** `/v1/cases/3` addresses case 3 no matter what you plan to do with it — read it, change it, delete it. The *what* never enters the URL.
+
+Here is the read side of the demo service — the models that define what a case *is*, and one router that owns every `/v1/cases` path. This is `demo/rest_api.py`:
+
+```python
+class CaseIn(BaseModel):
+    """What a caller may send — the request body."""
+
+    title: str
+    priority: str
+
+
+class Case(CaseIn):
+    """What the API returns — the stored case, with the id its URL names."""
+
+    case_id: int
+
+
+# One resource, one router, one version prefix. In a bigger service this
+# router would live in its own module (routers/cases.py) and be included
+# by the main app; the pattern and the code stay the same.
+cases_router = APIRouter(prefix="/v1/cases", tags=["cases"])
+```
+
+The `APIRouter` is FastAPI's pattern for exactly this: a "mini app" that owns one resource's paths, which the main app then includes with `app.include_router(cases_router)` — the same pattern the framework's own [bigger-applications guide](https://fastapi.tiangolo.com/tutorial/bigger-applications/) uses to split users, items and admin into modules. The store behind it is a plain in-memory dict seeded with twelve cases; a later post in this series swaps it for a database, and none of the URLs will change.
+
+Fetching one case reads the way it sounds:
+
+```python
+@cases_router.get("/{case_id}")
+def get_case(case_id: int) -> Case:
+    """Fetch one case — or admit it isn't there."""
+    case = cases.get(case_id)
+    if case is None:
+        raise HTTPException(status_code=404, detail="case not found")
+    return Case(**case)
+```
+
+<TerminalOutput command="curl -i http://127.0.0.1:4326/v1/cases/3" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · captured Nov 2026" caption="One GET, one thing. The URL named a case; the response is that case.">
+```text
+HTTP/1.1 200 OK
+date: Mon, 23 Nov 2026 07:39:25 GMT
+server: uvicorn
+content-length: 64
+content-type: application/json
+
+{"title":"Missing garden gnome","priority":"normal","case_id":3}
+```
+</TerminalOutput>
+
+The `prefix="/v1/cases"` on the router is the whole naming decision in one string: every decorator below it only writes the part *after* the prefix (`""` for the collection, `"/{case_id}"` for one item), so the noun and the version are typed exactly once. And `{case_id}` in a path is not just a placeholder. Because the function declares `case_id: int`, FastAPI converts the segment to an integer before your code runs, and rejects anything else on its own:
+
+<TerminalOutput command="curl -i http://127.0.0.1:4332/v1/cases/abc" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · captured Nov 2026" caption="A path that is not an id never reaches get_case: FastAPI answers 422 and names the exact place (&quot;path&quot;, &quot;case_id&quot;) that failed. The same typed-parameter machinery drives section 3.">
+```text
+HTTP/1.1 422 Unprocessable Content
+date: Mon, 23 Nov 2026 08:49:32 GMT
+server: uvicorn
+content-length: 152
+content-type: application/json
+
+{"detail":[{"type":"int_parsing","loc":["path","case_id"],"msg":"Input should be a valid integer, unable to parse string as an integer","input":"abc"}]}
+```
+</TerminalOutput>
+
+Read that URL the way a client does:
+
+<BeP02UrlAnatomy />
+
+<Concepts>
+- **Resource**: the thing a URL names — one case, one user, one payment. The URL is its identity: same URL, same thing, every time.
+- **Collection**: a resource that holds other resources. Plural noun in the path — `/v1/cases` is all the cases.
+- **APIRouter**: FastAPI's "mini app" for one resource. Declare its paths once with a prefix and tags, then include it into the main app.
+</Concepts>
+
+---
+
+## 2. The verb is the action, the code is the receipt
+
+With the nouns fixed, HTTP hands you exactly four verbs for the basic shape: GET reads, POST creates, PUT replaces, DELETE removes. Each verb carries promises we'll cash in section 4 — for now, watch what each one *answers*.
+
+The generated habit and the resource contract, side by side:
+
+<BeP02VerbsBeforeAfter />
+
+A create, done honestly:
+
+```python
+@cases_router.post("", status_code=status.HTTP_201_CREATED)
+def create_case(case: CaseIn, response: Response) -> Case:
+    """Create a case; the response says 201 and where the new case lives."""
+    global next_id
+    case_id = next_id
+    next_id += 1
+    new_case = Case(case_id=case_id, title=case.title, priority=case.priority)
+    cases[case_id] = new_case.model_dump()
+    response.headers["Location"] = f"/v1/cases/{case_id}"
+    return new_case
+```
+
+FastAPI's default for a POST is 200, so the code says `201 Created` out loud, and adds the one header a receipt needs: `Location`, the address of the thing that just came into existence. Fielding described the same exchange in that 2008 thread — a resource-creating POST results in a 201 response with the new resource's URI.
+
+<TerminalOutput command="curl -i -X POST http://127.0.0.1:4326/v1/cases -H 'Content-Type: application/json' -d '{&quot;title&quot;: &quot;The humming letterbox&quot;, &quot;priority&quot;: &quot;high&quot;}'" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · captured Nov 2026" caption="The receipt of a create: 201 Created, plus a Location header pointing at case 13 — the client never has to guess where the new thing lives.">
+```text
+HTTP/1.1 201 Created
+date: Mon, 23 Nov 2026 07:39:25 GMT
+server: uvicorn
+content-length: 64
+content-type: application/json
+location: /v1/cases/13
+
+{"title":"The humming letterbox","priority":"high","case_id":13}
+```
+</TerminalOutput>
+
+Follow the Location and the loop closes:
+
+<TerminalOutput command="curl -i http://127.0.0.1:4326/v1/cases/13" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · captured Nov 2026" caption="The address from the Location header answers 200 with the case itself.">
+```text
+HTTP/1.1 200 OK
+date: Mon, 23 Nov 2026 07:39:25 GMT
+server: uvicorn
+content-length: 64
+content-type: application/json
+
+{"title":"The humming letterbox","priority":"high","case_id":13}
+```
+</TerminalOutput>
+
+A PUT replaces the whole case — the body carries the complete new state, not a diff:
+
+```python
+@cases_router.put("/{case_id}")
+def replace_case(case_id: int, case: CaseIn) -> Case:
+    """Full replacement of one case. Same request twice, same result."""
+    if case_id not in cases:
+        raise HTTPException(status_code=404, detail="case not found")
+    updated = Case(case_id=case_id, title=case.title, priority=case.priority)
+    cases[case_id] = updated.model_dump()
+    return updated
+
+
+@cases_router.delete("/{case_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_case(case_id: int) -> None:
+    """Delete one case. Nothing to return — 204 and an empty body."""
+    if case_id not in cases:
+        raise HTTPException(status_code=404, detail="case not found")
+    del cases[case_id]
+```
+
+<TerminalOutput command="curl -i -X PUT http://127.0.0.1:4326/v1/cases/13 -H 'Content-Type: application/json' -d '{&quot;title&quot;: &quot;The humming letterbox&quot;, &quot;priority&quot;: &quot;low&quot;}'" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · captured Nov 2026" caption="The same case with its priority replaced — the body carried the whole new state, and the response carries the stored result.">
+```text
+HTTP/1.1 200 OK
+date: Mon, 23 Nov 2026 07:39:25 GMT
+server: uvicorn
+content-length: 63
+content-type: application/json
+
+{"title":"The humming letterbox","priority":"low","case_id":13}
+```
+</TerminalOutput>
+
+Read the three decorators as three promises. `status_code=status.HTTP_201_CREATED` on the POST and `HTTP_204_NO_CONTENT` on the DELETE change what FastAPI reports on success, because its default is 200 for everything. Declaring a `response: Response` parameter asks FastAPI to hand you the response it is about to send, so you can add the `Location` header without building a whole response object by hand. And a missing case is `raise HTTPException(status_code=404, ...)`, which stops the function and turns into the 404 below. The trap generated code falls into is the opposite: it `return`s `{"error": "case not found"}`, which FastAPI dutifully sends as a 200, and the lie is complete. The `-> None` on the delete matters too: a 204 must have an empty body, and FastAPI sends it empty.
+
+Now the two honest failures. First, a URL whose case was never there:
+
+<TerminalOutput command="curl -i http://127.0.0.1:4326/v1/cases/999" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · captured Nov 2026" caption="404 as MDN defines it for an API: the endpoint is valid, the resource itself does not exist — and the body is machine-readable JSON, not an HTML error page.">
+```text
+HTTP/1.1 404 Not Found
+date: Mon, 23 Nov 2026 07:39:25 GMT
+server: uvicorn
+content-length: 27
+content-type: application/json
+
+{"detail":"case not found"}
+```
+</TerminalOutput>
+
+Second, the delete — 204 No Content, headers only, nothing in the body, because there is nothing left to show:
+
+<TerminalOutput command="curl -i -X DELETE http://127.0.0.1:4326/v1/cases/13" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · captured Nov 2026" caption="The delete's receipt: 204, no body. The absence is the answer.">
+```text
+HTTP/1.1 204 No Content
+date: Mon, 23 Nov 2026 07:39:25 GMT
+server: uvicorn
+content-type: application/json
+
+```
+</TerminalOutput>
+
+And the same URL, asked again:
+
+<TerminalOutput command="curl -i http://127.0.0.1:4326/v1/cases/13" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · captured Nov 2026" caption="The address outlived the data: the URL still names exactly where case 13 used to live, and answers 404.">
+```text
+HTTP/1.1 404 Not Found
+date: Mon, 23 Nov 2026 07:39:25 GMT
+server: uvicorn
+content-length: 27
+content-type: application/json
+
+{"detail":"case not found"}
+```
+</TerminalOutput>
+
+<Callout type="warning" title="The AI habits to break">
+Two defaults show up in generated endpoints again and again. **POST everything** — generated code reaches for POST because it always works, but POST is the one verb a client may not blindly retry, and the one shared caches refuse by default; when reads hide inside POSTs you lose half of HTTP for free. **200-only** — when failures also come back `200` with an error tucked in the body, every monitor, load balancer and retry loop reads your service as healthy, because the status line is the one field all of them already parse.
+</Callout>
+
+HTTP groups status codes into five families, and the first digit is the whole sentence — the detail can wait until you need it:
+
+<BeP02StatusLanes />
+
+Ask a resource for a verb it does not offer, and it tells you that too — in the status line, and in the `allow` header, which lists what it *does* offer:
+
+<TerminalOutput command="curl -i -X PATCH http://127.0.0.1:4326/v1/cases/3" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · captured Nov 2026" caption="405: the case exists, but PATCH is not one of its verbs — and the allow header says which verbs are.">
+```text
+HTTP/1.1 405 Method Not Allowed
+date: Mon, 23 Nov 2026 07:42:30 GMT
+server: uvicorn
+allow: GET
+content-length: 31
+content-type: application/json
+
+{"detail":"Method Not Allowed"}
+```
+</TerminalOutput>
+
+The same tour, as the server's own log sees it — this is the receipt column every proxy and dashboard reads:
+
+<TerminalOutput command="uvicorn rest_api:app — the seven-request tour of section 2, as uvicorn logs it" label="server terminal · Python 3.13 · uvicorn (FastAPI 0.165) · captured Nov 2026" caption="Seven requests, four different status codes, and every line says what actually happened. This is what 200-only code throws away.">
+```text
+INFO:     127.0.0.1:64661 - "GET /v1/cases/3 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64662 - "POST /v1/cases HTTP/1.1" 201 Created
+INFO:     127.0.0.1:64663 - "GET /v1/cases/13 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64664 - "PUT /v1/cases/13 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64665 - "GET /v1/cases/999 HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:64666 - "DELETE /v1/cases/13 HTTP/1.1" 204 No Content
+INFO:     127.0.0.1:64667 - "GET /v1/cases/13 HTTP/1.1" 404 Not Found
+```
+</TerminalOutput>
+
+<Concepts>
+- **Safe method**: GET and HEAD — the caller intends to change nothing, so caches may store the answer and clients may retry freely.
+- **Location header**: on a 201, the address of the thing just created — the receipt's "where to find it" line.
+- **204 No Content**: done, and there is nothing to show you — headers only, empty body.
+- **405 Method Not Allowed**: the resource exists but does not offer that verb; the `allow` header lists the ones it does.
+</Concepts>
+
+---
+
+## 3. Every list ends somewhere
+
+A collection endpoint has one more honesty rule: it never returns everything. An unbounded list is a slow query that becomes an outage on someone's busiest day — which is why GitHub's own API returns 30 issues at a time even when the repository has over 1,600 open ones, and caps `per_page` at 100, quietly reducing anything larger ([GitHub REST docs](https://docs.github.com/en/rest/using-the-rest-api/using-pagination-in-the-rest-api)).
+
+The demo ships pages the simplest way — skip some, take some:
+
+```python
+@cases_router.get("")
+def list_cases(
+    limit: int = Query(20, ge=1, le=100), offset: int = Query(0, ge=0)
+) -> list[Case]:
+    """One page of the collection, ordered by case_id."""
+    ids = sorted(cases)
+    return [Case(**cases[i]) for i in ids[offset : offset + limit]]
+```
+
+Twelve cases are seeded, so ask for five at a time:
+
+<TerminalOutput command="curl -i 'http://127.0.0.1:4326/v1/cases?limit=5'" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · captured Nov 2026" caption="Page one: five cases, ids 1 to 5. The cap is set by the server, not by whoever calls.">
+```text
+HTTP/1.1 200 OK
+date: Mon, 23 Nov 2026 07:39:25 GMT
+server: uvicorn
+content-length: 313
+content-type: application/json
+
+[{"title":"Vanishing teapot","priority":"normal","case_id":1},{"title":"Ghost in the library","priority":"high","case_id":2},{"title":"Missing garden gnome","priority":"normal","case_id":3},{"title":"The silent piano","priority":"low","case_id":4},{"title":"Footprints on the roof","priority":"high","case_id":5}]
+```
+</TerminalOutput>
+
+And the last page comes up short, exactly as it should:
+
+<TerminalOutput command="curl -i 'http://127.0.0.1:4326/v1/cases?limit=5&offset=10'" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · captured Nov 2026" caption="Page three of a twelve-case list: two cases. The short page is the honest answer, not an error.">
+```text
+HTTP/1.1 200 OK
+date: Mon, 23 Nov 2026 07:39:25 GMT
+server: uvicorn
+content-length: 136
+content-type: application/json
+
+[{"title":"Vanished fountain pen","priority":"normal","case_id":11},{"title":"The unlocked bike shed","priority":"normal","case_id":12}]
+```
+</TerminalOutput>
+
+The bounds live in the signature. `Query(20, ge=1, le=100)` gives `limit` a default of 20 and says it must be between 1 and 100; `offset` must be 0 or more. FastAPI checks them before `list_cases` runs, so no `if limit > 100` appears in your code. Here is what a client that asks for a lot gets:
+
+<TerminalOutput command="curl -i 'http://127.0.0.1:4332/v1/cases?limit=10000'" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · captured Nov 2026" caption="limit=10000 is refused with 422 and a body that says why. GitHub quietly lowers an oversized per_page to 100; this demo refuses it instead. Either way the list has a ceiling the server owns.">
+```text
+HTTP/1.1 422 Unprocessable Content
+date: Mon, 23 Nov 2026 08:49:32 GMT
+server: uvicorn
+content-length: 146
+content-type: application/json
+
+{"detail":[{"type":"less_than_equal","loc":["query","limit"],"msg":"Input should be less than or equal to 100","input":"10000","ctx":{"le":100}}]}
+```
+</TerminalOutput>
+
+Refusing is a choice, and a fair one: the client learns the rule on the first try. Clamping silently, as GitHub does, is the other choice, and generated code often does neither, which leaves `limit` an unchecked `int` and the ceiling missing.
+
+Offset is easy arithmetic: page *N* is `offset = (N - 1) * limit`, and a short page (or an empty one) means the end. Clients can build "page 7 of 23" with it, and admins can jump straight to the middle — that's worth something.
+
+Its cost is that **the offset is a position, and positions lie when the list moves**. The classic case is a newest-first feed:
+
+<BeP02OffsetCursor />
+
+To be clear about our own demo: `list_cases` sorts by `case_id` ascending, and new cases get bigger ids — offsets there are stable, and that's a legitimate choice for admin tables and small bounded sets. The moment your list is "newest first" — feeds, activity, comments, the default for anything humans watch — an offset quietly serves duplicates and skips rows whenever anything lands or leaves above the page.
+
+The fix is to stop counting positions and anchor to the data: a **cursor** says "start after id 8", so the next page is whatever follows id 8, whenever it is requested. Insertions above can't move that anchor. GitHub's REST API goes one step further for clients: every paginated response carries a `link` header with ready-made URLs — `rel="next"`, `rel="prev"`, `rel="last"` — so the client never counts pages at all; it follows the URL the server hands back. Stripe's list endpoints work the same way with `starting_after` cursors.
+
+When to pick which: offset when the list is stable and humans want page numbers; cursor when the list moves and clients just want "everything since I last looked". The tradeoff is the lesson — a generated endpoint ships whichever one the model defaulted to, and never notices the list was a feed.
+
+<Concepts>
+- **Offset pagination**: "skip N, take the next page." The client counts positions. Simple, supports jumping to page 7 — and lies the moment rows move around.
+- **Cursor pagination**: "start after this item." The client holds a marker into the data itself. Immune to insertions and deletions above it; page numbers are harder.
+- **Link header**: a response header carrying ready-made next/previous page URLs — GitHub's REST API does this so clients follow instead of counting.
+</Concepts>
+
+---
+
+## 4. What a retry may do
+
+[The pilot post](/blog/backend-http-request-lifecycle/) traced one request across six stations outside your code. Here is the station failure that shapes API design: **a timeout is ambiguous.** The request may have died on the way out — or it may have arrived, done its work, and lost the response on the way back. The only safe client assumption is "it might have happened", so networks retry: browsers, mobile OSes, proxies, the SDK in your own codebase.
+
+So the question every write endpoint answers implicitly: what is a retry allowed to *do*?
+
+Watch what a retry of our create does — this is exactly the two POSTs a client sends when the first answer times out:
+
+<TerminalOutput command="curl -i -X POST http://127.0.0.1:4326/v1/cases -H 'Content-Type: application/json' -d '{&quot;title&quot;: &quot;Ghost in the greenhouse&quot;, &quot;priority&quot;: &quot;normal&quot;}'" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · captured Nov 2026" caption="The first create: case 14.">
+```text
+HTTP/1.1 201 Created
+date: Mon, 23 Nov 2026 07:39:25 GMT
+server: uvicorn
+content-length: 68
+content-type: application/json
+location: /v1/cases/14
+
+{"title":"Ghost in the greenhouse","priority":"normal","case_id":14}
+```
+</TerminalOutput>
+
+<TerminalOutput command="curl -i -X POST http://127.0.0.1:4326/v1/cases -H 'Content-Type: application/json' -d '{&quot;title&quot;: &quot;Ghost in the greenhouse&quot;, &quot;priority&quot;: &quot;normal&quot;}'" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · captured Nov 2026" caption="The retry — byte-identical request, and a *second* case exists now. One intent, two rows; case 15 sits in the store until someone cleans it up.">
+```text
+HTTP/1.1 201 Created
+date: Mon, 23 Nov 2026 07:39:25 GMT
+server: uvicorn
+content-length: 68
+content-type: application/json
+location: /v1/cases/15
+
+{"title":"Ghost in the greenhouse","priority":"normal","case_id":15}
+```
+</TerminalOutput>
+
+That is the whole reason the verb choices from section 2 are not style points. The HTTP spec divides methods by what retries may assume:
+
+- **Safe** — GET, HEAD: the caller intends to change nothing. Retry as often as you like.
+- **Idempotent** — GET, PUT, DELETE: one request or several identical ones leave the server in the same state ([MDN](https://developer.mozilla.org/en-US/docs/Glossary/Idempotent)). Retry freely; the second PUT in section 2 would have returned the same case 13 either way.
+- **Neither** — POST: every delivery creates a new thing. Retry unprotected and you just watched it happen: cases 14 *and* 15.
+
+Idempotent does not mean "the same response", though. Delete case 14 (a 204, exactly like the one in section 2), then let the timeout force the client to retry the delete:
+
+<TerminalOutput command="curl -i -X DELETE http://127.0.0.1:4326/v1/cases/14" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · captured Nov 2026" caption="The retried DELETE answers 404 — no harm done to the data (case 14 is gone either way), but the client cannot tell 'I deleted it' from 'it was never there'. The state is identical; that is all idempotency promises.">
+```text
+HTTP/1.1 404 Not Found
+date: Mon, 23 Nov 2026 07:39:25 GMT
+server: uvicorn
+content-length: 27
+content-type: application/json
+
+{"detail":"case not found"}
+```
+</TerminalOutput>
+
+MDN's own glossary example makes the same point: a first DELETE answers 200 (ours answers 204), the retries answer 404, and all of that is fine — idempotency is about the state left behind, not about matching status codes.
+
+So what do you do about POST, which you cannot give up — payments, orders, case creation are POSTs because each one genuinely creates something? You make the *operation* idempotent instead of the method, with an **idempotency key**:
+
+<BeP02RetryTimeline />
+
+The client generates a unique key per operation — Stripe suggests a UUID — and sends it along with the POST. The server executes once, saves the response under that key, and replays the saved answer to any retry carrying the same key. Stripe runs exactly this for every POST: the saved response includes its status code and body, keys are pruned after about 24 hours, and their docs are blunt that you don't send keys on GET and DELETE — those are idempotent by definition already.
+
+FastAPI has no built-in idempotency feature, so the key is ours to build, and it is short. The header arrives as a typed parameter, `Header()`, and FastAPI turns `idempotency_key` into the header name `Idempotency-Key` for you. A dict plays the saved-answers table. This is `demo/p02_idempotency.py`, with the same create as section 2 plus the key:
+
+```python
+cases: dict[int, Case] = {}
+next_id = 1
+# key -> the case that key already created
+replays: dict[str, Case] = {}
+
+
+@app.post("/v1/cases", status_code=status.HTTP_201_CREATED)
+def create_case(
+    case: CaseIn,
+    response: Response,
+    idempotency_key: str | None = Header(default=None),
+) -> Case:
+    """Create a case once per Idempotency-Key; replay the saved answer on retries."""
+    global next_id
+    if idempotency_key is not None and idempotency_key in replays:
+        saved = replays[idempotency_key]
+        response.headers["Location"] = f"/v1/cases/{saved.case_id}"
+        response.headers["Idempotent-Replayed"] = "true"
+        return saved
+    new_case = Case(case_id=next_id, **case.model_dump())
+    next_id += 1
+    cases[new_case.case_id] = new_case
+    if idempotency_key is not None:
+        replays[idempotency_key] = new_case
+    response.headers["Location"] = f"/v1/cases/{new_case.case_id}"
+    return new_case
+```
+
+On the first POST the key is unknown, so the function creates case 1 and remembers it under that key. On the second POST, byte-identical and carrying the same key, it finds the saved case and returns it without creating anything:
+
+<TerminalOutput command="curl -i -X POST http://127.0.0.1:4332/v1/cases -H 'Content-Type: application/json' -H 'Idempotency-Key: 7f3c9a10' -d '{&quot;title&quot;: &quot;Ghost in the greenhouse&quot;, &quot;priority&quot;: &quot;normal&quot;}'" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · captured Nov 2026" caption="First delivery with Idempotency-Key 7f3c9a10: 201 Created, case 1.">
+```text
+HTTP/1.1 201 Created
+date: Mon, 23 Nov 2026 08:49:40 GMT
+server: uvicorn
+content-length: 67
+content-type: application/json
+location: /v1/cases/1
+
+{"title":"Ghost in the greenhouse","priority":"normal","case_id":1}
+```
+</TerminalOutput>
+
+<TerminalOutput command="curl -i -X POST http://127.0.0.1:4332/v1/cases -H 'Content-Type: application/json' -H 'Idempotency-Key: 7f3c9a10' -d '{&quot;title&quot;: &quot;Ghost in the greenhouse&quot;, &quot;priority&quot;: &quot;normal&quot;}'" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · captured Nov 2026" caption="The retry, same key: the same 201 and the same case 1, plus an idempotent-replayed header so the client can tell. Compare with cases 14 and 15 above.">
+```text
+HTTP/1.1 201 Created
+date: Mon, 23 Nov 2026 08:49:40 GMT
+server: uvicorn
+content-length: 67
+content-type: application/json
+location: /v1/cases/1
+idempotent-replayed: true
+
+{"title":"Ghost in the greenhouse","priority":"normal","case_id":1}
+```
+</TerminalOutput>
+
+<TerminalOutput command="curl -i http://127.0.0.1:4332/v1/cases" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · captured Nov 2026" caption="One intent, one row. The store holds a single case, however many times the POST was delivered.">
+```text
+HTTP/1.1 200 OK
+date: Mon, 23 Nov 2026 08:49:40 GMT
+server: uvicorn
+content-length: 69
+content-type: application/json
+
+[{"title":"Ghost in the greenhouse","priority":"normal","case_id":1}]
+```
+</TerminalOutput>
+
+Two traps in this small version are real. The dict lives in one process and vanishes on restart, so a production service keeps keys in a database or Redis and expires them. And two requests with the same key arriving at the same instant could both pass the `in replays` check; a real implementation locks the key. The shape, header in, saved answer out, stays the same.
+
+None of this is exotic. It's the difference between "the network hiccuped and we charged one card twice" and "the network hiccuped".
+
+<Concepts>
+- **Safe method**: read-only for the caller's intent — GET, HEAD. Caches may serve it; retries are free.
+- **Idempotent**: one request or several identical ones leave the same state. GET, PUT and DELETE are; POST is not. Responses may differ — only the resulting state must not.
+- **Idempotency key**: a client-generated unique key on a POST; the server executes once and replays the saved response to retries with the same key.
+</Concepts>
+
+---
+
+## 5. A version is a promise
+
+Every URL in this post has carried a `/v1` that we never discussed. It is load-bearing: it names the version of the contract the client is depending on.
+
+**A version is a promise: responses under this prefix keep their shape.** Same field names, same types, same meaning. The day you quietly rename a field under a live version, every client that coded against it breaks at once — and most of them won't even get an error, just silently wrong data. That is the nastiest failure an API can hand out, and a version prefix is how you promise it won't happen:
+
+<BeP02VersionPaths />
+
+In FastAPI a version is one more `APIRouter` with a different prefix, and both can be included in the same app. This is `demo/p02_versions.py`: v1 keeps its promise, v2 carries the rename (`title` becomes `name`):
+
+```python
+v1 = APIRouter(prefix="/v1/cases", tags=["v1"])
+v2 = APIRouter(prefix="/v2/cases", tags=["v2"])
+
+
+@v1.get("/{case_id}")
+def get_case_v1(case_id: int) -> CaseV1:
+    if case_id not in STORE:
+        raise HTTPException(status_code=404, detail="case not found")
+    return CaseV1(case_id=case_id, **STORE[case_id])
+
+
+@v2.get("/{case_id}")
+def get_case_v2(case_id: int) -> CaseV2:
+    if case_id not in STORE:
+        raise HTTPException(status_code=404, detail="case not found")
+    row = STORE[case_id]
+    return CaseV2(case_id=case_id, name=row["title"], priority=row["priority"])
+
+
+app.include_router(v1)
+app.include_router(v2)
+```
+
+Each router has its own response model, `CaseV1` and `CaseV2`, and the `-> CaseV1` / `-> CaseV2` return annotation is what pins the shape of what leaves the service. Ask for the same case under both prefixes:
+
+<TerminalOutput command="curl -i http://127.0.0.1:4332/v1/cases/3" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · captured Nov 2026" caption="v1 answers as it always has: title.">
+```text
+HTTP/1.1 200 OK
+date: Mon, 23 Nov 2026 08:49:48 GMT
+server: uvicorn
+content-length: 64
+content-type: application/json
+
+{"case_id":3,"title":"Missing garden gnome","priority":"normal"}
+```
+</TerminalOutput>
+
+<TerminalOutput command="curl -i http://127.0.0.1:4332/v2/cases/3" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · captured Nov 2026" caption="v2 answers the same case with the renamed field. Clients on /v1 never noticed; clients that opt into /v2 adapt on their own schedule.">
+```text
+HTTP/1.1 200 OK
+date: Mon, 23 Nov 2026 08:49:48 GMT
+server: uvicorn
+content-length: 63
+content-type: application/json
+
+{"case_id":3,"name":"Missing garden gnome","priority":"normal"}
+```
+</TerminalOutput>
+
+The AI habit to watch for is the opposite: renaming `title` inside `CaseV1` because the new name is nicer. Nothing fails, the tests that only check the status code stay green, and every client reading `title` gets a missing key.
+
+Where the version lives is a real design choice, and serious APIs disagree:
+
+- **In the URL path** — this demo's `/v1/cases`. Blunt, visible in every log, cacheable per version.
+- **In a request header** — GitHub's REST API keeps its paths bare and pins the version in `X-GitHub-Api-Version` instead.
+- **Pinned per account** — Stripe dates every version (the current one reads like `2026-11-18.endive`), pins it to your account, and only moves you when *your* code opts in via the `Stripe-Version` header or a pinned SDK ([Stripe upgrades guide](https://docs.stripe.com/upgrades)).
+
+Pick whichever fits your callers; the rule is the same behind all three: **a breaking change ships under a new version, never under a live one.** And know what counts as breaking: a renamed field, a removed field, a changed type — anything a running client cannot ignore.
+
+One honest caveat, because versioning also has a cost: if you own both ends — one client, one server, deployed together from the same repo — a version prefix is usually ceremony. The promise matters the moment you don't control the callers.
+
+<Concepts>
+- **Versioning**: pinning the shape of responses so clients can depend on it — in the URL path, a request header, or a dated version pinned per account.
+- **Breaking change**: anything a running client cannot ignore — a renamed field, a removed field, a changed type. It ships under a new version, never a live one.
+</Concepts>
+
+---
+
+## 6. The two-minute wire audit
+
+None of the five decisions above is hard to *check*, which is the point. The model wrote your endpoints in seconds; reading the contract it produced takes minutes, and the whole audit is three curls:
+
+1. **Run each operation once with `curl -i`** — fresh case, missing case, existing case. The pairs must line up: 201 + `Location` on create, 204 with an empty body on delete, 404 with a machine-readable body on missing, `allow` on the verbs you don't offer.
+2. **Send the create twice** — the two-minute version of section 4. Count the rows that come back. If two identical POSTs made two things, decide *now* whether that's acceptable, because the network will do it for you eventually.
+3. **Read one screen of the access log** — the receipt column from section 2. If every line says 200 while your own curls said 201, 204 and 404, the surface is lying to everything that watches it.
+
+The contract is on the wire, not in the code review. Read it before your clients do.
+
+</En>
+
+<Vi>
+
+> "REST là thiết kế phần mềm tính bằng thập kỷ: từng chi tiết đều nhằm thúc đẩy tuổi thọ và sự tiến hoá độc lập của phần mềm."
+> &mdash; *Roy T. Fielding, trong bài thảo luận 2008 ["REST APIs must be hypertext-driven"](https://roy.gbiv.com/untangled/2008/rest-apis-must-be-hypertext-driven)*
+
+### Mở đầu: ba mươi giây đã có một bộ endpoint
+
+Nhờ bất kỳ model nào viết "một API quản lý vụ việc nhỏ", chưa tới một phút bạn đã có service FastAPI chạy ngon: router, model, test, đến cả README. Code chạy thật. Cái model không đưa nổi cho bạn là phán đoán đằng sau bề mặt nó chọn — mà bề mặt đó *chính là* sản phẩm. Không soi lại thì mặc định của AI lại lọt vào: một verb cho mọi thao tác, một status code cho mọi kết quả, lỗi cũng được gói gọn lịch sự trong 200, và một endpoint trả nguyên cả bảng dữ liệu vì chẳng ai chọn page size.
+
+Không cái nào trong đó là bug code. Service vẫn chạy ngon cho tới khi một client retry create sau cú timeout chập chờn và ghi lệch một vụ thứ hai, hoặc dashboard uptime của bạn xanh mướt trong khi mọi request đang fail câm lặng. Đó là bug *hợp đồng*, và hợp đồng là thứ duy nhất mà code generator không bao giờ nhìn thấy.
+
+Bài này lớn hoá demo service của series — service một URL trong [bài mở màn](/blog/backend-http-request-lifecycle/) — thành một API có version, có hình dạng tài nguyên, và đi qua năm quyết định làm cho một HTTP API biết nói thật:
+
+1. **Tài nguyên** — URL gọi tên một thứ.
+2. **Verb và status code** — method là hành động, code là biên lai.
+3. **Phân trang** — mọi danh sách đều phải dừng ở đâu đó.
+4. **Idempotency** — một lần retry được phép làm gì.
+5. **Versioning** — một phiên bản là một lời hứa.
+
+Mọi terminal block dưới đây là output thật từ `demo/rest_api.py`, chụp đúng theo stack ghi trong nhãn — bạn chạy lại file này sẽ thấy y hệt từng dòng.
+
+---
+
+## 1. URL gọi tên một thứ
+
+Bắt đầu từ thứ duy nhất mọi client đều phải nắm giữ: URL. Trong một API thiết kế đúng, URL không phải tên hàm. Nó là địa chỉ của một thứ — một tài nguyên (resource). Quyết định nhỏ đó kéo theo cả bài viết này, và đó là lý do Fielding đặt "sống lâu" lên hàng đầu: như ông nói trong chính thread 2008 đó, "implementations change, but cool URIs don't" — bản cài đặt thay đổi, URI ngon thì không.
+
+Ba quy tắc đặt tên rơi ra từ đó:
+
+- **Danh từ, không phải động từ.** `/v1/cases`, không phải `/v1/getCases`. Ô verb đã có chủ rồi — HTTP method.
+- **Danh từ số nhiều cho bộ sưu tập.** `/v1/cases` là mọi vụ việc; `/v1/cases/3` là một trong số đó.
+- **Id chỉ gọi tên item, không hơn.** `/v1/cases/3` trỏ tới vụ số 3 bất kể bạn định làm gì với nó — đọc, sửa, xoá. Cái *làm gì* không bao giờ lọt vào URL.
+
+Đây là phần đọc của demo service — model định nghĩa vụ việc *là gì*, và một router sở hữu mọi đường dẫn `/v1/cases`. Đây là `demo/rest_api.py`:
+
+```python
+class CaseIn(BaseModel):
+    """What a caller may send — the request body."""
+
+    title: str
+    priority: str
+
+
+class Case(CaseIn):
+    """What the API returns — the stored case, with the id its URL names."""
+
+    case_id: int
+
+
+# One resource, one router, one version prefix. In a bigger service this
+# router would live in its own module (routers/cases.py) and be included
+# by the main app; the pattern and the code stay the same.
+cases_router = APIRouter(prefix="/v1/cases", tags=["cases"])
+```
+
+`APIRouter` là pattern FastAPI dùng cho đúng việc này: một "mini app" sở hữu đường dẫn của một tài nguyên, rồi app chính gắn vào bằng `app.include_router(cases_router)` — y như [hướng dẫn bigger-applications](https://fastapi.tiangolo.com/tutorial/bigger-applications/) của chính framework tách users, items, admin thành từng module. Cái store phía sau là một dict trong bộ nhớ, gieo sẵn mười hai vụ việc; một bài sau trong series sẽ thay nó bằng database, và không URL nào phải đổi.
+
+Đọc một vụ việc nghe đúng như câu nói của nó:
+
+```python
+@cases_router.get("/{case_id}")
+def get_case(case_id: int) -> Case:
+    """Fetch one case — or admit it isn't there."""
+    case = cases.get(case_id)
+    if case is None:
+        raise HTTPException(status_code=404, detail="case not found")
+    return Case(**case)
+```
+
+<TerminalOutput command="curl -i http://127.0.0.1:4326/v1/cases/3" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · chụp tháng 11/2026" caption="Một GET, một thứ. URL gọi tên một vụ việc; response chính là vụ việc đó.">
+```text
+HTTP/1.1 200 OK
+date: Mon, 23 Nov 2026 07:39:25 GMT
+server: uvicorn
+content-length: 64
+content-type: application/json
+
+{"title":"Missing garden gnome","priority":"normal","case_id":3}
+```
+</TerminalOutput>
+
+`prefix="/v1/cases"` trên router chính là cả quyết định đặt tên gói trong một chuỗi: mọi decorator bên dưới chỉ viết phần *sau* prefix (`""` cho bộ sưu tập, `"/{case_id}"` cho một item), nên danh từ và version chỉ gõ đúng một lần. Còn `{case_id}` trong path không chỉ là chỗ trống. Vì hàm khai báo `case_id: int`, FastAPI ép đoạn đó thành số nguyên trước khi code của bạn chạy, và tự từ chối mọi thứ khác:
+
+<TerminalOutput command="curl -i http://127.0.0.1:4332/v1/cases/abc" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · chụp tháng 11/2026" caption="Path không phải id thì không bao giờ tới được get_case: FastAPI trả 422 và chỉ rõ chỗ hỏng (&quot;path&quot;, &quot;case_id&quot;). Cùng cơ chế tham số có kiểu này chạy luôn mục 3.">
+```text
+HTTP/1.1 422 Unprocessable Content
+date: Mon, 23 Nov 2026 08:49:32 GMT
+server: uvicorn
+content-length: 152
+content-type: application/json
+
+{"detail":[{"type":"int_parsing","loc":["path","case_id"],"msg":"Input should be a valid integer, unable to parse string as an integer","input":"abc"}]}
+```
+</TerminalOutput>
+
+Đọc URL đó bằng con mắt của client:
+
+<BeP02UrlAnatomy />
+
+<Concepts title="Mấy thuật ngữ phía trên, nói dễ hiểu">
+- **Resource (tài nguyên)**: thứ mà một URL gọi tên — một vụ việc, một user, một payment. URL là danh tính của nó: cùng URL, cùng thứ, mọi lúc.
+- **Collection (bộ sưu tập)**: tài nguyên chứa các tài nguyên khác. Danh từ số nhiều trong path — `/v1/cases` là toàn bộ vụ việc.
+- **APIRouter**: "mini app" của FastAPI cho một tài nguyên. Khai báo path một lần kèm prefix và tags, rồi include vào app chính.
+</Concepts>
+
+---
+
+## 2. Verb là hành động, code là biên lai
+
+Danh từ đã chốt, HTTP đưa sẵn đúng bốn verb cho hình cơ bản: GET đọc, POST tạo, PUT thay thế, DELETE xoá. Mỗi verb kèm lời hứa mình sẽ xử lý ở mục 4 — giờ hãy xem mỗi verb *trả lời* cái gì.
+
+Thói quen của code AI và hợp đồng tài nguyên, đặt cạnh nhau:
+
+<BeP02VerbsBeforeAfter />
+
+Một thao tác tạo, làm cho tử tế:
+
+```python
+@cases_router.post("", status_code=status.HTTP_201_CREATED)
+def create_case(case: CaseIn, response: Response) -> Case:
+    """Create a case; the response says 201 and where the new case lives."""
+    global next_id
+    case_id = next_id
+    next_id += 1
+    new_case = Case(case_id=case_id, title=case.title, priority=case.priority)
+    cases[case_id] = new_case.model_dump()
+    response.headers["Location"] = f"/v1/cases/{case_id}"
+    return new_case
+```
+
+Mặc định của FastAPI cho POST là 200, nên code phải nói `201 Created` ra mặt chữ, kèm đúng một header mà biên lai cần: `Location`, địa chỉ của thứ vừa mới tồn tại. Fielding tả y hệt trao đổi này trong thread 2008 — một POST tạo tài nguyên trả về 201 kèm URI của tài nguyên mới.
+
+<TerminalOutput command="curl -i -X POST http://127.0.0.1:4326/v1/cases -H 'Content-Type: application/json' -d '{&quot;title&quot;: &quot;The humming letterbox&quot;, &quot;priority&quot;: &quot;high&quot;}'" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · chụp tháng 11/2026" caption="Biên lai của một create: 201 Created, kèm Location trỏ tới vụ 13 — client không bao giờ phải đoán cái mới sống ở đâu.">
+```text
+HTTP/1.1 201 Created
+date: Mon, 23 Nov 2026 07:39:25 GMT
+server: uvicorn
+content-length: 64
+content-type: application/json
+location: /v1/cases/13
+
+{"title":"The humming letterbox","priority":"high","case_id":13}
+```
+</TerminalOutput>
+
+Theo đúng Location đó, vòng khép lại:
+
+<TerminalOutput command="curl -i http://127.0.0.1:4326/v1/cases/13" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · chụp tháng 11/2026" caption="Địa chỉ lấy từ Location header trả về 200 cùng chính vụ việc đó.">
+```text
+HTTP/1.1 200 OK
+date: Mon, 23 Nov 2026 07:39:25 GMT
+server: uvicorn
+content-length: 64
+content-type: application/json
+
+{"title":"The humming letterbox","priority":"high","case_id":13}
+```
+</TerminalOutput>
+
+PUT thay thế toàn bộ vụ việc — body mang state mới trọn vẹn, không phải phần diff:
+
+```python
+@cases_router.put("/{case_id}")
+def replace_case(case_id: int, case: CaseIn) -> Case:
+    """Full replacement of one case. Same request twice, same result."""
+    if case_id not in cases:
+        raise HTTPException(status_code=404, detail="case not found")
+    updated = Case(case_id=case_id, title=case.title, priority=case.priority)
+    cases[case_id] = updated.model_dump()
+    return updated
+
+
+@cases_router.delete("/{case_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_case(case_id: int) -> None:
+    """Delete one case. Nothing to return — 204 and an empty body."""
+    if case_id not in cases:
+        raise HTTPException(status_code=404, detail="case not found")
+    del cases[case_id]
+```
+
+<TerminalOutput command="curl -i -X PUT http://127.0.0.1:4326/v1/cases/13 -H 'Content-Type: application/json' -d '{&quot;title&quot;: &quot;The humming letterbox&quot;, &quot;priority&quot;: &quot;low&quot;}'" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · chụp tháng 11/2026" caption="Cùng vụ việc với priority đã được thay — body mang state mới trọn vẹn, response mang kết quả đã lưu.">
+```text
+HTTP/1.1 200 OK
+date: Mon, 23 Nov 2026 07:39:25 GMT
+server: uvicorn
+content-length: 63
+content-type: application/json
+
+{"title":"The humming letterbox","priority":"low","case_id":13}
+```
+</TerminalOutput>
+
+Đọc ba decorator như ba lời hứa. `status_code=status.HTTP_201_CREATED` trên POST và `HTTP_204_NO_CONTENT` trên DELETE đổi cái FastAPI báo khi thành công, vì mặc định của nó là 200 cho mọi thứ. Khai báo tham số `response: Response` là xin FastAPI đưa cho bạn chính response sắp gửi, nhờ vậy thêm header `Location` mà không phải tự dựng cả response. Còn thiếu vụ việc thì `raise HTTPException(status_code=404, ...)`: nó dừng hàm và biến thành cái 404 bên dưới. Cái bẫy code do AI sinh ra hay dính thì ngược lại: nó `return {"error": "case not found"}`, FastAPI cứ thế gửi đi với 200, và lời nói dối hoàn chỉnh. `-> None` ở hàm xoá cũng có nghĩa: 204 phải có body rỗng, và FastAPI gửi rỗng thật.
+
+Giờ tới hai kiểu thất bại nói thật. Thứ nhất, một URL chưa bao giờ có vụ việc:
+
+<TerminalOutput command="curl -i http://127.0.0.1:4326/v1/cases/999" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · chụp tháng 11/2026" caption="404 đúng như MDN định nghĩa cho API: endpoint hợp lệ, tài nguyên thì không tồn tại — và body là JSON máy đọc được, không phải trang lỗi HTML.">
+```text
+HTTP/1.1 404 Not Found
+date: Mon, 23 Nov 2026 07:39:25 GMT
+server: uvicorn
+content-length: 27
+content-type: application/json
+
+{"detail":"case not found"}
+```
+</TerminalOutput>
+
+Thứ hai, delete — 204 No Content, chỉ có header, body rỗng, vì chẳng còn gì để đưa:
+
+<TerminalOutput command="curl -i -X DELETE http://127.0.0.1:4326/v1/cases/13" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · chụp tháng 11/2026" caption="Biên lai của delete: 204, không body. Sự vắng mặt chính là câu trả lời.">
+```text
+HTTP/1.1 204 No Content
+date: Mon, 23 Nov 2026 07:39:25 GMT
+server: uvicorn
+content-type: application/json
+
+```
+</TerminalOutput>
+
+Và cũng URL đó, hỏi lại lần nữa:
+
+<TerminalOutput command="curl -i http://127.0.0.1:4326/v1/cases/13" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · chụp tháng 11/2026" caption="Địa chỉ sống lâu hơn dữ liệu: URL vẫn trỏ đúng chỗ vụ 13 từng sống, và trả lời 404.">
+```text
+HTTP/1.1 404 Not Found
+date: Mon, 23 Nov 2026 07:39:25 GMT
+server: uvicorn
+content-length: 27
+content-type: application/json
+
+{"detail":"case not found"}
+```
+</TerminalOutput>
+
+<Callout type="warning" title="Hai thói quen AI cần bỏ">
+Hai mặc định xuất hiện hoài trong endpoint do AI sinh. **POST cho mọi thứ** — code sinh ra với tới POST vì nó luôn chạy được, nhưng POST là verb duy nhất client không được phép retry bừa, và là verb duy nhất cache chung từ chối phục vụ mặc định; đọc mà giấu trong POST là tự mất nửa HTTP miễn phí. **Chỉ có 200** — khi lỗi cũng về `200` kèm error nhét trong body, mọi monitor, load balancer, retry loop đều đọc service của bạn là khoẻ mạnh, vì status line là trường duy nhất mà tất cả bọn chúng đều parse sẵn.
+</Callout>
+
+HTTP chia status code thành năm nhóm, và chữ số đầu tiên là trọn câu — chi tiết để khi cần hẵng bàn:
+
+<BeP02StatusLanes />
+
+Hỏi một tài nguyên xin verb nó không hỗ trợ, nó nói thẳng luôn — bằng status line, và bằng header `allow` liệt kê những verb nó *có*:
+
+<TerminalOutput command="curl -i -X PATCH http://127.0.0.1:4326/v1/cases/3" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · chụp tháng 11/2026" caption="405: vụ việc có thật, nhưng PATCH không phải verb của nó — còn allow nói rõ verb nào mới là.">
+```text
+HTTP/1.1 405 Method Not Allowed
+date: Mon, 23 Nov 2026 07:42:30 GMT
+server: uvicorn
+allow: GET
+content-length: 31
+content-type: application/json
+
+{"detail":"Method Not Allowed"}
+```
+</TerminalOutput>
+
+Cả tour phía trên, qua mắt log của chính server — đây là cột biên lai mà mọi proxy và dashboard đều đọc:
+
+<TerminalOutput command="uvicorn rest_api:app — tour bảy request ở mục 2, như uvicorn ghi lại" label="terminal của server · Python 3.13 · uvicorn (FastAPI 0.165) · chụp tháng 11/2026" caption="Bảy request, bốn status code khác nhau, dòng nào cũng nói đúng chuyện gì đã xảy ra. Đây là thứ code '200-only' vứt đi.">
+```text
+INFO:     127.0.0.1:64661 - "GET /v1/cases/3 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64662 - "POST /v1/cases HTTP/1.1" 201 Created
+INFO:     127.0.0.1:64663 - "GET /v1/cases/13 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64664 - "PUT /v1/cases/13 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:64665 - "GET /v1/cases/999 HTTP/1.1" 404 Not Found
+INFO:     127.0.0.1:64666 - "DELETE /v1/cases/13 HTTP/1.1" 204 No Content
+INFO:     127.0.0.1:64667 - "GET /v1/cases/13 HTTP/1.1" 404 Not Found
+```
+</TerminalOutput>
+
+<Concepts title="Mấy thuật ngữ phía trên, nói dễ hiểu">
+- **Safe method (phương thức an toàn)**: GET và HEAD — ý định của người gọi là không thay đổi gì, nên cache được phép lưu câu trả lời và client được phép retry thoải mái.
+- **Location header**: đi kèm 201, là địa chỉ của thứ vừa tạo — dòng "tìm ở đây" trên biên lai.
+- **204 No Content**: xong việc, và không có gì để đưa — chỉ header, body rỗng.
+- **405 Method Not Allowed**: tài nguyên có thật nhưng không hỗ trợ verb đó; header `allow` liệt kê những verb nó có.
+</Concepts>
+
+---
+
+## 3. Mọi danh sách đều phải có điểm dừng
+
+Endpoint của bộ sưu tập còn một quy tắc nói thật nữa: không bao giờ trả tất cả. Danh sách không giới hạn là một query chậm chờ ngày trở thành sự cố vào lúc ai đó bận nhất — vì thế API của chính GitHub trả mỗi lần 30 issue dù repo có hơn 1.600 issue mở, và chặn `per_page` ở 100, giá trị lớn hơn bị hạ xuống âm thầm ([GitHub REST docs](https://docs.github.com/en/rest/using-the-rest-api/using-pagination-in-the-rest-api)).
+
+Demo đóng gói theo cách đơn giản nhất — bỏ qua vài dòng, lấy vài dòng:
+
+```python
+@cases_router.get("")
+def list_cases(
+    limit: int = Query(20, ge=1, le=100), offset: int = Query(0, ge=0)
+) -> list[Case]:
+    """One page of the collection, ordered by case_id."""
+    ids = sorted(cases)
+    return [Case(**cases[i]) for i in ids[offset : offset + limit]]
+```
+
+Có sẵn mười hai vụ việc, nên xin mỗi trang năm:
+
+<TerminalOutput command="curl -i 'http://127.0.0.1:4326/v1/cases?limit=5'" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · chụp tháng 11/2026" caption="Trang một: năm vụ, id từ 1 tới 5. Mức trần do server đặt, không phải do người gọi.">
+```text
+HTTP/1.1 200 OK
+date: Mon, 23 Nov 2026 07:39:25 GMT
+server: uvicorn
+content-length: 313
+content-type: application/json
+
+[{"title":"Vanishing teapot","priority":"normal","case_id":1},{"title":"Ghost in the library","priority":"high","case_id":2},{"title":"Missing garden gnome","priority":"normal","case_id":3},{"title":"The silent piano","priority":"low","case_id":4},{"title":"Footprints on the roof","priority":"high","case_id":5}]
+```
+</TerminalOutput>
+
+Trang cuối ngắn hơn dự kiến, đúng như nó phải thế:
+
+<TerminalOutput command="curl -i 'http://127.0.0.1:4326/v1/cases?limit=5&offset=10'" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · chụp tháng 11/2026" caption="Trang ba của danh sách mười hai vụ: còn hai vụ. Trang ngắn là câu trả lời thật, không phải lỗi.">
+```text
+HTTP/1.1 200 OK
+date: Mon, 23 Nov 2026 07:39:25 GMT
+server: uvicorn
+content-length: 136
+content-type: application/json
+
+[{"title":"Vanished fountain pen","priority":"normal","case_id":11},{"title":"The unlocked bike shed","priority":"normal","case_id":12}]
+```
+</TerminalOutput>
+
+Giới hạn nằm ngay trong chữ ký hàm. `Query(20, ge=1, le=100)` cho `limit` mặc định 20 và buộc nó nằm trong khoảng 1 đến 100; `offset` phải từ 0 trở lên. FastAPI kiểm trước khi `list_cases` chạy, nên không có dòng `if limit > 100` nào trong code của bạn. Client đòi nhiều quá sẽ nhận:
+
+<TerminalOutput command="curl -i 'http://127.0.0.1:4332/v1/cases?limit=10000'" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · chụp tháng 11/2026" caption="limit=10000 bị từ chối bằng 422 kèm body nói rõ lý do. GitHub lặng lẽ hạ per_page quá lớn xuống 100; demo này từ chối thẳng. Dù cách nào, danh sách vẫn có trần do server nắm.">
+```text
+HTTP/1.1 422 Unprocessable Content
+date: Mon, 23 Nov 2026 08:49:32 GMT
+server: uvicorn
+content-length: 146
+content-type: application/json
+
+{"detail":[{"type":"less_than_equal","loc":["query","limit"],"msg":"Input should be less than or equal to 100","input":"10000","ctx":{"le":100}}]}
+```
+</TerminalOutput>
+
+Từ chối là một lựa chọn, và là lựa chọn công bằng: client học được luật ngay lần đầu. Hạ âm thầm như GitHub là lựa chọn kia, còn code AI sinh ra hay không làm cái nào, để `limit` là một `int` không ai kiểm và trần biến mất.
+
+Offset là phép tính vui: trang *N* là `offset = (N - 1) * limit`, và trang ngắn (hoặc rỗng) nghĩa là hết. Client xây được "trang 7 trên 23", admin nhảy thẳng vào giữa — đáng giá thật.
+
+Cái giá của nó: **offset là một vị trí, mà vị trí biết nói dối khi danh sách di chuyển**. Kinh điển nhất là feed mới-nhất-trên-đầu:
+
+<BeP02OffsetCursor />
+
+Nói rõ về chính demo của mình: `list_cases` sắp theo `case_id` tăng dần, vụ mới sinh id lớn hơn — offset ở đó ổn, và đó là lựa chọn hợp lệ cho bảng admin hay tập dữ liệu nhỏ có giới hạn. Nhưng danh sách của bạn thành "mới trước" — feed, activity, comment, mặc định của bất cứ gì con người xem — thì offset lặng lẽ trả trùng và sót mỗi khi có thứ thêm vào hoặc rời đi phía trên trang.
+
+Cách sửa là thôi đếm vị trí, neo vào dữ liệu: một **con trỏ (cursor)** nói "bắt đầu sau id 8", nên trang kế là những gì đi sau id 8, bất kể lúc nào hỏi. Chèn bao nhiêu phía trên cũng không xê dịch mốc neo. REST API của GitHub đi xa hơn một bước cho client: mỗi response phân trang mang header `link` chứa sẵn URL — `rel="next"`, `rel="prev"`, `rel="last"` — nên client không phải đếm trang nào hết; chỉ việc theo URL server đưa. Endpoint dạng list của Stripe chạy y như vậy với cursor `starting_after`.
+
+Chọn cái nào: offset khi danh sách ổn định và người cần số trang; cursor khi danh sách di chuyển và client chỉ cần "mọi thứ từ lần xem trước". Sự đánh đổi chính là bài học — endpoint do AI sinh sẽ mặc định cái nào model quen, và không bao giờ nhận ra danh sách kia là một feed.
+
+<Concepts title="Mấy thuật ngữ phía trên, nói dễ hiểu">
+- **Offset pagination (phân trang theo vị trí)**: "bỏ qua N dòng, lấy trang kế." Client đếm vị trí. Đơn giản, nhảy được tới trang 7 — và nói dối ngay khi dữ liệu xê dịch.
+- **Cursor pagination (phân trang bằng con trỏ)**: "bắt đầu sau item này." Client giữ mốc neo vào chính dữ liệu. Miễn nhiễm với chèn/xoá phía trên; đánh số trang khó hơn.
+- **Link header**: response header chứa sẵn URL trang trước/sau — REST API của GitHub dùng để client theo link thay vì tự đếm.
+</Concepts>
+
+---
+
+## 4. Một lần retry được phép làm gì
+
+[Bài mở màn](/blog/backend-http-request-lifecycle/) đã truy vết một request qua sáu trạm ngoài code của bạn. Đây là kiểu trạm hỏng định hình nên thiết kế API: **timeout là tín hiệu mơ hồ.** Request có thể đã chết lúc gửi đi — hoặc đã tới nơi, làm xong việc, và mất response trên đường về. Giả định an toàn duy nhất của client là "có thể nó đã xảy ra", nên mạng luôn retry: browser, mobile OS, proxy, SDK trong chính repo bạn.
+
+Thế nên câu hỏi ngầm sau mỗi endpoint ghi dữ liệu: một lần retry được phép *làm gì*?
+
+Hãy xem thử retry của create — đúng hai POST mà một client sẽ gửi khi câu trả lời đầu timed out:
+
+<TerminalOutput command="curl -i -X POST http://127.0.0.1:4326/v1/cases -H 'Content-Type: application/json' -d '{&quot;title&quot;: &quot;Ghost in the greenhouse&quot;, &quot;priority&quot;: &quot;normal&quot;}'" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · chụp tháng 11/2026" caption="Create lần một: vụ 14.">
+```text
+HTTP/1.1 201 Created
+date: Mon, 23 Nov 2026 07:39:25 GMT
+server: uvicorn
+content-length: 68
+content-type: application/json
+location: /v1/cases/14
+
+{"title":"Ghost in the greenhouse","priority":"normal","case_id":14}
+```
+</TerminalOutput>
+
+<TerminalOutput command="curl -i -X POST http://127.0.0.1:4326/v1/cases -H 'Content-Type: application/json' -d '{&quot;title&quot;: &quot;Ghost in the greenhouse&quot;, &quot;priority&quot;: &quot;normal&quot;}'" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · chụp tháng 11/2026" caption="Lần retry — request y hệt từng byte, và giờ có *thêm một* vụ nữa. Một ý định, hai dòng dữ liệu; vụ 15 nằm đó chờ ai đó dọn.">
+```text
+HTTP/1.1 201 Created
+date: Mon, 23 Nov 2026 07:39:25 GMT
+server: uvicorn
+content-length: 68
+content-type: application/json
+location: /v1/cases/15
+
+{"title":"Ghost in the greenhouse","priority":"normal","case_id":15}
+```
+</TerminalOutput>
+
+Đó là toàn bộ lý do các lựa chọn verb ở mục 2 không phải gu thẩm mỹ. HTTP chia method theo thứ retry được phép tin:
+
+- **Safe** — GET, HEAD: ý định của người gọi là không đổi gì. Retry thoải mái.
+- **Idempotent (lũy đẳng)** — GET, PUT, DELETE: một request hay nhiều request giống hệt nhau để lại cùng một state ([MDN](https://developer.mozilla.org/en-US/docs/Glossary/Idempotent)). Retry thoải mái; PUT thứ hai ở mục 2 cũng trả lại vụ 13 y như thế.
+- **Không phải cái nào** — POST: mỗi lần giao hàng tạo một thứ mới. Retry không bảo vệ thì bạn vừa thấy hậu quả: vụ 14 *và* vụ 15.
+
+Idempotent không đồng nghĩa "response giống nhau" đâu nhé. Xoá vụ 14 (một 204, y như cái ở mục 2), rồi để timeout ép client retry cú xoá:
+
+<TerminalOutput command="curl -i -X DELETE http://127.0.0.1:4326/v1/cases/14" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · chụp tháng 11/2026" caption="DELETE retry trả 404 — dữ liệu chẳng hề hại (vụ 14 đã mất dù sao đi nữa), nhưng client phân biệt không nổi 'tôi xoá nó' với 'nó chưa từng có'. State y hệt nhau; idempotency chỉ hứa nhiêu đó.">
+```text
+HTTP/1.1 404 Not Found
+date: Mon, 23 Nov 2026 07:39:25 GMT
+server: uvicorn
+content-length: 27
+content-type: application/json
+
+{"detail":"case not found"}
+```
+</TerminalOutput>
+
+Chính ví dụ trong glossary MDN cũng nói vậy: DELETE đầu trả 200 (bản demo trả 204), các lần retry trả 404, và tất cả đều ổn — idempotency là về state để lại, không phải về status code khớp nhau.
+
+Thế còn POST — thứ bạn không bỏ được — thì sao? Payment, order, tạo vụ việc đều là POST vì mỗi cái thật sự tạo ra một thứ. Giải pháp: làm cho *thao tác* idempotent, thay vì method, bằng một **idempotency key**:
+
+<BeP02RetryTimeline />
+
+Client sinh một khoá duy nhất cho mỗi thao tác — Stripe gợi ý UUID — gửi kèm theo POST. Server chạy đúng một lần, lưu response theo khoá đó, rồi phát lại câu đã lưu cho bất kỳ retry nào mang cùng khoá. Stripe chạy nguyên cái này cho mọi POST: response lưu trọn status code lẫn body, khoá được dọn sau khoảng 24 giờ, và docs của họ nói thẳng đừng gửi khoá trên GET với DELETE — hai thứ đó idempotent sẵn rồi.
+
+FastAPI không có sẵn tính năng idempotency, nên cái khoá do mình tự dựng, và nó ngắn thôi. Header đến như một tham số có kiểu, `Header()`, và FastAPI tự đổi `idempotency_key` thành tên header `Idempotency-Key`. Một dict đóng vai bảng lưu câu trả lời. Đây là `demo/p02_idempotency.py`, cùng thao tác tạo như mục 2 cộng thêm khoá:
+
+```python
+cases: dict[int, Case] = {}
+next_id = 1
+# key -> the case that key already created
+replays: dict[str, Case] = {}
+
+
+@app.post("/v1/cases", status_code=status.HTTP_201_CREATED)
+def create_case(
+    case: CaseIn,
+    response: Response,
+    idempotency_key: str | None = Header(default=None),
+) -> Case:
+    """Create a case once per Idempotency-Key; replay the saved answer on retries."""
+    global next_id
+    if idempotency_key is not None and idempotency_key in replays:
+        saved = replays[idempotency_key]
+        response.headers["Location"] = f"/v1/cases/{saved.case_id}"
+        response.headers["Idempotent-Replayed"] = "true"
+        return saved
+    new_case = Case(case_id=next_id, **case.model_dump())
+    next_id += 1
+    cases[new_case.case_id] = new_case
+    if idempotency_key is not None:
+        replays[idempotency_key] = new_case
+    response.headers["Location"] = f"/v1/cases/{new_case.case_id}"
+    return new_case
+```
+
+POST đầu tiên, khoá chưa biết, nên hàm tạo vụ 1 và nhớ nó dưới khoá đó. POST thứ hai, giống hệt từng byte và mang cùng khoá, tìm thấy vụ đã lưu và trả lại mà không tạo thêm gì:
+
+<TerminalOutput command="curl -i -X POST http://127.0.0.1:4332/v1/cases -H 'Content-Type: application/json' -H 'Idempotency-Key: 7f3c9a10' -d '{&quot;title&quot;: &quot;Ghost in the greenhouse&quot;, &quot;priority&quot;: &quot;normal&quot;}'" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · chụp tháng 11/2026" caption="Lần gửi đầu với Idempotency-Key 7f3c9a10: 201 Created, vụ 1.">
+```text
+HTTP/1.1 201 Created
+date: Mon, 23 Nov 2026 08:49:40 GMT
+server: uvicorn
+content-length: 67
+content-type: application/json
+location: /v1/cases/1
+
+{"title":"Ghost in the greenhouse","priority":"normal","case_id":1}
+```
+</TerminalOutput>
+
+<TerminalOutput command="curl -i -X POST http://127.0.0.1:4332/v1/cases -H 'Content-Type: application/json' -H 'Idempotency-Key: 7f3c9a10' -d '{&quot;title&quot;: &quot;Ghost in the greenhouse&quot;, &quot;priority&quot;: &quot;normal&quot;}'" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · chụp tháng 11/2026" caption="Lần retry, cùng khoá: cùng 201 và cùng vụ 1, thêm header idempotent-replayed để client biết. So với vụ 14 và 15 ở trên.">
+```text
+HTTP/1.1 201 Created
+date: Mon, 23 Nov 2026 08:49:40 GMT
+server: uvicorn
+content-length: 67
+content-type: application/json
+location: /v1/cases/1
+idempotent-replayed: true
+
+{"title":"Ghost in the greenhouse","priority":"normal","case_id":1}
+```
+</TerminalOutput>
+
+<TerminalOutput command="curl -i http://127.0.0.1:4332/v1/cases" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · chụp tháng 11/2026" caption="Một ý định, một dòng. Store chỉ giữ một vụ, dù POST được giao bao nhiêu lần.">
+```text
+HTTP/1.1 200 OK
+date: Mon, 23 Nov 2026 08:49:40 GMT
+server: uvicorn
+content-length: 69
+content-type: application/json
+
+[{"title":"Ghost in the greenhouse","priority":"normal","case_id":1}]
+```
+</TerminalOutput>
+
+Hai cái bẫy của bản nhỏ này là thật. Dict sống trong một process và mất khi restart, nên service thật giữ khoá trong database hoặc Redis rồi cho hết hạn. Và hai request cùng khoá tới đúng một lúc có thể cùng qua được bước kiểm `in replays`; bản thật phải khoá (lock) cái key. Hình dạng thì giữ nguyên: header vào, câu trả lời đã lưu ra.
+
+Không gì trong này là cao siêu. Đó là toàn bộ khoảng cách giữa "mạng bùng một cái và mình quẹt thẻ hai lần" với "mạng bùng một cái".
+
+<Concepts title="Mấy thuật ngữ phía trên, nói dễ hiểu">
+- **Safe method (phương thức an toàn)**: chỉ đọc theo ý định người gọi — GET, HEAD. Cache phục vụ được; retry miễn phí.
+- **Idempotent (lũy đẳng)**: một hay nhiều request giống hệt nhau để lại cùng một state. GET, PUT, DELETE là idempotent; POST thì không. Response có thể khác — chỉ state kết quả là phải giống.
+- **Idempotency key (khoá chống lặp)**: khoá duy nhất do client sinh ra gắn vào POST; server chạy một lần rồi phát lại response đã lưu cho mọi retry mang cùng khoá.
+</Concepts>
+
+---
+
+## 5. Một phiên bản là một lời hứa
+
+Mọi URL trong bài này đều mang `/v1` mà mình chưa một lần bàn tới. Nó không phải trang trí: nó gọi tên phiên bản của hợp đồng mà client đang dựa vào.
+
+**Một phiên bản là một lời hứa: response dưới prefix này giữ nguyên hình dạng.** Cũng field đó, cũng kiểu đó, cũng nghĩa đó. Ngày bạn lặng lẽ đổi tên field dưới một version đang sống, mọi client đã code theo nó gãy cùng lúc — và đa số chẳng nhận được error nào, chỉ nhận dữ liệu sai im lặng. Đó là kiểu hỏng xấu nhất một API có thể trao cho người dùng, và prefix version là cách hứa nó không xảy ra:
+
+<BeP02VersionPaths />
+
+Trong FastAPI, một version chỉ là thêm một `APIRouter` với prefix khác, và cả hai include vào cùng một app. Đây là `demo/p02_versions.py`: v1 giữ lời hứa, v2 mang việc đổi tên (`title` thành `name`):
+
+```python
+v1 = APIRouter(prefix="/v1/cases", tags=["v1"])
+v2 = APIRouter(prefix="/v2/cases", tags=["v2"])
+
+
+@v1.get("/{case_id}")
+def get_case_v1(case_id: int) -> CaseV1:
+    if case_id not in STORE:
+        raise HTTPException(status_code=404, detail="case not found")
+    return CaseV1(case_id=case_id, **STORE[case_id])
+
+
+@v2.get("/{case_id}")
+def get_case_v2(case_id: int) -> CaseV2:
+    if case_id not in STORE:
+        raise HTTPException(status_code=404, detail="case not found")
+    row = STORE[case_id]
+    return CaseV2(case_id=case_id, name=row["title"], priority=row["priority"])
+
+
+app.include_router(v1)
+app.include_router(v2)
+```
+
+Mỗi router có response model riêng, `CaseV1` và `CaseV2`, và annotation trả về `-> CaseV1` / `-> CaseV2` chính là thứ ghim hình dạng của cái rời khỏi service. Hỏi cùng một vụ dưới hai prefix:
+
+<TerminalOutput command="curl -i http://127.0.0.1:4332/v1/cases/3" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · chụp tháng 11/2026" caption="v1 trả lời như mọi khi: title.">
+```text
+HTTP/1.1 200 OK
+date: Mon, 23 Nov 2026 08:49:48 GMT
+server: uvicorn
+content-length: 64
+content-type: application/json
+
+{"case_id":3,"title":"Missing garden gnome","priority":"normal"}
+```
+</TerminalOutput>
+
+<TerminalOutput command="curl -i http://127.0.0.1:4332/v2/cases/3" label="macOS · curl 8.7.1 · Python 3.13 · FastAPI 0.165 · chụp tháng 11/2026" caption="v2 trả lời cùng vụ đó với field đã đổi tên. Client trên /v1 không hề hay biết; client chọn sang /v2 tự thích nghi theo lịch của mình.">
+```text
+HTTP/1.1 200 OK
+date: Mon, 23 Nov 2026 08:49:48 GMT
+server: uvicorn
+content-length: 63
+content-type: application/json
+
+{"case_id":3,"name":"Missing garden gnome","priority":"normal"}
+```
+</TerminalOutput>
+
+Thói quen AI cần canh thì ngược lại: đổi tên `title` ngay trong `CaseV1` vì tên mới nghe hay hơn. Không gì fail, test chỉ kiểm status code vẫn xanh, và mọi client đọc `title` nhận về key không tồn tại.
+
+Version sống ở đâu là một lựa chọn thiết kế thật, và các API nghiêm túc không thống nhất với nhau:
+
+- **Trong URL path** — `/v1/cases` của demo. Thẳng thắn, nhìn thấy trong mọi log, cache được theo từng version.
+- **Trong request header** — REST API của GitHub để path trần và ghim version vào `X-GitHub-Api-Version`.
+- **Ghim theo account** — Stripe gắn ngày cho mỗi version (bản mới nhất đọc kiểu `2026-11-18.endive`), ghim vào account của bạn, và chỉ dời bạn khi *code của bạn* chủ động xin qua header `Stripe-Version` hay một SDK đã ghim ([hướng dẫn upgrade của Stripe](https://docs.stripe.com/upgrades)).
+
+Chọn kiểu nào hợp với người gọi của bạn; quy tắc sau cả ba là một: **thay đổi phá vỡ (breaking change) phát hành dưới version mới, không bao giờ dưới version đang sống.** Và phải biết cái gì mới là breaking: đổi tên field, bỏ field, đổi kiểu dữ liệu — bất cứ thứ gì một client đang chạy không thể làm ngơ.
+
+Một lời thẳng thẳn, vì versioning cũng có giá của nó: nếu bạn sở hữu cả hai đầu — một client, một server, deploy chung từ một repo — thì prefix version thường chỉ là nghi thức. Lời hứa chỉ quan trọng từ khoảnh khắc bạn không còn kiểm soát người gọi.
+
+<Concepts title="Mấy thuật ngữ phía trên, nói dễ hiểu">
+- **Versioning (đánh phiên bản)**: ghim hình dạng response để client dựa vào được — trong URL path, trong request header, hay version có ngày ghim theo account.
+- **Breaking change (thay đổi phá vỡ)**: thứ mà client đang chạy không thể làm ngơ — đổi tên field, bỏ field, đổi kiểu. Phát hành dưới version mới, không bao giờ dưới version đang sống.
+</Concepts>
+
+---
+
+## 6. Soi lại bản tin HTTP trong hai phút
+
+Không quyết định nào trong năm cái trên là khó *kiểm tra*, và đó chính là điểm mấu chốt. Model viết endpoint cho bạn trong vài giây; đọc lại hợp đồng nó tạo ra mất vài phút, và toàn bộ cuộc soi là ba cú curl:
+
+1. **Chạy từng thao tác một lần với `curl -i`** — vụ mới, vụ thiếu, vụ có thật. Các cặp phải khớp: 201 + `Location` khi tạo, 204 body rỗng khi xoá, 404 kèm body máy đọc được khi thiếu, `allow` cho những verb bạn không hỗ trợ.
+2. **Gửi create hai lần** — bản hai phút của mục 4. Đếm số dòng quay về. Nếu hai POST giống hệt tạo ra hai thứ, quyết định *ngay bây giờ* có chấp nhận không — vì mạng sẽ làm điều đó giúp bạn sớm muộn gì.
+3. **Đọc một màn hình access log** — cột biên lai ở mục 2. Nếu dòng nào cũng 200 trong khi cú curl của chính bạn nói 201, 204, 404, nghĩa là bề mặt API đang nói dối mọi thứ đứng coi nó.
+
+Hợp đồng nằm trên bản tin HTTP, không nằm trong code review. Đọc nó trước khi client của bạn đọc.
+
+</Vi>
