@@ -1,0 +1,834 @@
+---
+title: "Go basics"
+title_vi: "Go cơ bản"
+description: "Go builds one static file you can copy anywhere. How go run, go build, go.mod, packages, internal/ and gofmt fit together, with real Go 1.27 output."
+description_vi: "Go build ra đúng một file chạy được ở đâu cũng được. go run, go build, go.mod, package, internal/ và gofmt khớp nhau thế nào, kèm output thật trên Go 1.27."
+date: 2026-11-23
+category: "backend"
+tags: ["golang", "basics", "modules", "packages", "tooling", "100-go-mistakes"]
+cover: "../../assets/series/golang/go-gopher-pencil-wrench.jpg"
+cover_alt: "Pencil drawing of the Go gopher holding a wrench, drawn by Renee French"
+draft: true
+sources:
+  - { title: "100 Go Mistakes and How to Avoid Them", author: "Teiva Harsanyi", chapters: "Ch. 2 (#12 project organization, #13 utility packages, #14 package name collisions, #15 documentation, #16 linters)", url: "https://100go.co/" }
+  - { title: "Efficient Go", author: "Bartłomiej Płotka", chapters: "Ch. 2 (Go basics, packages and modules, tooling, runtime)", url: "https://www.oreilly.com/library/view/efficient-go/9781098105709/" }
+  - { title: "Go at Google: Language Design in the Service of Software Engineering", author: "Rob Pike", url: "https://go.dev/talks/2012/splash.article" }
+  - { title: "Organizing a Go module", author: "The Go Authors", url: "https://go.dev/doc/modules/layout" }
+  - { title: "go fmt your code", author: "Andrew Gerrand (The Go Blog)", url: "https://go.dev/blog/gofmt" }
+  - { title: "Go Modules Reference", author: "The Go Authors", url: "https://go.dev/ref/mod" }
+  - { title: "Go Proverbs", author: "Rob Pike", url: "https://go-proverbs.github.io/" }
+  - { title: "Go gopher pencil wrench (CC BY 3.0)", author: "Renee French", url: "https://commons.wikimedia.org/wiki/File:Go_gopher_pencil_wrench.jpg" }
+  - { title: "CSCL Saturn, Container Ships in Hamburg (CC BY 2.0)", author: "Glyn Lowe", url: "https://commons.wikimedia.org/wiki/File:CSCL_Saturn,_Container_Ships_in_Hamburg_(10901085226).jpg" }
+---
+
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import DemoFrame from '../../components/mdx/DemoFrame.astro';
+import En from '../../components/mdx/En.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import GoBuildToBinaryDemo from '../../components/mdx/GoBuildToBinaryDemo.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import heroContainers from '../../assets/blog/go-first-program-modules-packages/container-stack.jpg';
+
+<En>
+
+<Figure src={heroContainers} alt="A tall stack of colourful shipping containers on a container ship in Hamburg" caption="A shipping container is a standard sealed box: it travels by ship, rail or truck without anyone opening it. A Go binary aims to be the same for your program: one self-contained file you can move to any machine of the right type." sourceTitle="Wikimedia Commons: CSCL Saturn, Container Ships in Hamburg (Glyn Lowe, CC BY 2.0)" sourceUrl="https://commons.wikimedia.org/wiki/File:CSCL_Saturn,_Container_Ships_in_Hamburg_(10901085226).jpg" />
+
+> "When builds are slow, there is time to think."
+> &mdash; *Rob Pike*, *Go at Google*
+
+### Go started as a way to stop waiting for builds
+
+In 2007, building one major Google C++ binary was slow. Rob Pike writes that the 2007 binary "took 45 minutes using a precursor distributed build system" and that "the origin myth for Go states that it was during one of those 45 minute builds that Go was conceived." He traces the wait to how C++ handles dependencies.
+
+Go was designed to avoid that. Pike says Go's approach to dependency management "is the single biggest reason why Go compilations are faster." Most of the small rules you will meet in this post follow from that: compile fast, produce one file, keep the project layout boring so any Go developer can read yours.
+
+Before writing real Go you need to know how to run and build a program, how `go.mod` describes a project, how code splits into packages, what stays private, and which two tools every Go project runs on save and in CI (`gofmt`, `go vet`). Every command output below was captured on Go 1.27.1.
+
+### Coming from Java, Python or JavaScript
+
+| | Java | Python | JavaScript / Node | Go |
+|---|---|---|---|---|
+| Run during development | `java Main.java` or an IDE | `python app.py` | `node app.js` | `go run .` |
+| What you build | `.jar`, runs on a JVM | nothing, or a wheel | nothing, or a bundle | one executable file |
+| What the server needs | a JRE plus your jar | Python plus your packages | Node plus `node_modules` | nothing but the file |
+| Dependency list | `pom.xml` or `build.gradle` | `requirements.txt` or `pyproject.toml` | `package.json` | `go.mod` |
+| Integrity file | no standard one | `pip --require-hashes` (optional) | `package-lock.json` | `go.sum` |
+| Private vs public | `public` / `private` keywords | `_name` by convention only | `export` keyword | capital first letter = public |
+| Code formatter | many, pick one | black, many others | prettier, many others | `gofmt`, built in, one style |
+| Unit of code reuse | package + class | module (file) | module (file) | package (folder) |
+
+<Callout type="note" title="TL;DR">
+`go build` turns your code into one file with the Go runtime inside it, so a server needs nothing else installed. `go.mod` lists the modules you depend on and `go.sum` records their checksums. A package is a folder, a capital first letter exports a name, and `internal/` hides a package from other modules. `gofmt` fixes layout, `go vet` finds suspicious code the compiler allows.
+</Callout>
+
+<Concepts>
+
+- **Compiled language**: your code is translated to machine instructions before it runs, not while it runs. The translation step is `go build`.
+- **Static binary**: one executable that carries everything it needs. You can copy it to another machine of the same OS and CPU type and run it.
+- **Module**: a project in Go terms: a folder tree with a `go.mod` file at its root. It is what you version and publish.
+- **Package**: one folder of `.go` files. It is the unit you import.
+
+</Concepts>
+
+---
+
+## Run, build, install
+
+Go has three commands for turning code into something that runs. `go run` compiles and starts the program in one go and throws the result away; use it while you are editing. `go build` leaves an executable file in your folder. `go install` builds it and copies it into a folder on your `PATH`, so you can type its name anywhere.
+
+The example project for this post is a tiny greeter. It is one *module* (Go's word for a project) named `example.com/greeter`; you set that name once with `go mod init example.com/greeter`, shown in "Modules and `go.mod`" below. In `main.go` you will see the import path `example.com/greeter/internal/greet`: the module name, then the folder that holds the package. Its code lives in two files:
+
+```go
+// internal/greet/greet.go
+// Package greet builds greeting messages.
+package greet
+
+import "fmt"
+
+const defaultName = "world"
+
+// Hello returns a greeting for name. An empty name falls back to "world".
+func Hello(name string) string {
+	if name == "" {
+		name = defaultName
+	}
+	return fmt.Sprintf("Hello, %s!", name)
+}
+```
+
+```go
+// cmd/greeter/main.go
+package main
+
+import (
+	"fmt"
+	"os"
+
+	"example.com/greeter/internal/greet"
+)
+
+func main() {
+	name := ""
+	if len(os.Args) > 1 {
+		name = os.Args[1]
+	}
+	fmt.Println(greet.Hello(name))
+}
+```
+
+`package main` with a `func main()` is the entry point, like `public static void main` in Java. Everything else, such as the `greet` package, is a library the program imports.
+
+<TerminalOutput command="go run ./cmd/greeter Khang" label="Go 1.27.1 · macOS arm64" caption="go run compiles into a temporary folder, runs the program and cleans up. Nothing is left behind.">
+```text
+Hello, Khang!
+```
+</TerminalOutput>
+
+<TerminalOutput command="go build -o greeter ./cmd/greeter && ls -l greeter" label="Go 1.27.1 · macOS arm64" caption="One program file for macOS, about 2.4 MB. The Go runtime (memory manager, scheduler) is linked inside it.">
+```text
+-rwxr-xr-x@ 1 nguyennhatkhang  staff  2429954 Nov 23 09:40 greeter
+```
+</TerminalOutput>
+
+Two megabytes for a greeting looks large, but a one-line program that only calls `println("hi")` also comes out at 1,831,794 bytes on the same machine, so most of the size is the runtime, not your code.
+
+### One file, nothing to install
+
+Because the file needs nothing else, you can copy it to a bare server or an empty container image and it runs. It is tied to the OS and CPU it was built for, though: a file built on a Mac will not start on Linux. How to build for another platform and pack it into a container is in the [HTTP service post](/blog/go-http-service-net-http-json-middleware/).
+
+<DemoFrame title="From source to one file you can copy" titleVi="Từ mã nguồn tới một file chép đi đâu cũng được">
+<GoBuildToBinaryDemo />
+</DemoFrame>
+
+`go install` does the build and the copy in one step. It puts the binary in `~/go/bin` by default, or in the folder named by `GOBIN`, an environment variable that tells `go install` where to put the file. Here `GOBIN=$PWD/bin` points it at a local `bin` folder for this one command:
+
+<TerminalOutput command="GOBIN=$PWD/bin go install ./cmd/greeter && ls bin && ./bin/greeter install" label="Go 1.27.1" caption="Use go install for command-line tools you want on your PATH.">
+```text
+greeter
+Hello, install!
+```
+</TerminalOutput>
+
+<Callout type="tip" title="The compiler is strict on purpose">
+Go refuses to build when an import or a local variable is unused. This annoys people for the first week, then keeps code clean for years.
+
+<TerminalOutput command="go build ." label="Go 1.27.1" caption="Two errors reported at once, both fatal.">
+```text
+# example.com/unused
+./main.go:5:2: "os" imported and not used
+./main.go:9:2: declared and not used: count
+```
+</TerminalOutput>
+</Callout>
+
+<Concepts>
+
+- **`go run`**: compile to a temporary place and run. For quick feedback, not for shipping.
+- **`go build`**: compile and leave an executable file. This is what you ship.
+- **`go install`**: build and copy the executable into a bin folder (`~/go/bin` by default).
+
+</Concepts>
+
+---
+
+## Modules and `go.mod`
+
+A module is the whole project, and `go.mod` is its identity card. You create it once with `go mod init`, giving it a name. By convention the name is where the code would live online, such as `github.com/you/greeter`; for a private or throwaway project any name works.
+
+<TerminalOutput command="go mod init example.com/greeter && cat go.mod" label="Go 1.27.1" caption="Three lines. The go line records the Go version the module was written with.">
+```text
+go: creating new go.mod: module example.com/greeter
+go: to add module requirements and sums:
+	go mod tidy
+module example.com/greeter
+
+go 1.27.1
+```
+</TerminalOutput>
+
+The module name is the prefix of every import inside the project. That is why `main.go` imports `example.com/greeter/internal/greet`: module name, then the folder path.
+
+### Adding a dependency
+
+Say you want a third-party package. Add the import to your code, then fetch it:
+
+<TerminalOutput command="go build ./cmd/greeter   # before the dependency is fetched" label="Go 1.27.1" caption="The error also tells you the fix.">
+```text
+cmd/greeter/main.go:8:2: no required module provides package rsc.io/quote; to add it:
+	go get rsc.io/quote
+```
+</TerminalOutput>
+
+<TerminalOutput command="go get rsc.io/quote@v1.5.2 && go mod tidy && cat go.mod" label="Go 1.27.1" caption="go get downloads the module and records the version. go mod tidy cleans the file up.">
+```text
+module example.com/greeter
+
+go 1.27.1
+
+require rsc.io/quote v1.5.2
+
+require (
+	golang.org/x/text v0.0.0-20170915032832-14c0d48ead0c // indirect
+	rsc.io/sampler v1.3.0 // indirect
+)
+```
+</TerminalOutput>
+
+`rsc.io/quote` is the one you asked for. The two `// indirect` lines are modules that `rsc.io/quote` itself needs. Right after `go get`, `rsc.io/quote` itself was also marked `// indirect` even though the code imports it directly, so the marking is only correct after `go mod tidy`. Run `go mod tidy` whenever you add or remove imports: it adds what is missing and deletes what nothing uses.
+
+Next to `go.mod` there is now a `go.sum` file with six lines. Each line holds the checksum of one module version, and Go compares every download against it. If I change one character of a checksum, the build stops:
+
+<TerminalOutput command="go build ./cmd/greeter 2>&1 | head -1   # after editing one character of a checksum in go.sum" label="Go 1.27.1" caption="A changed download fails the build instead of running silently.">
+```text
+verifying rsc.io/quote@v1.5.2: checksum mismatch
+```
+</TerminalOutput>
+
+Commit both `go.mod` and `go.sum`. You never edit `go.sum` by hand; the tool maintains it.
+
+#### Why the versions do not move
+
+In `go.mod` you wrote an exact version, `v1.5.2`, not a range like "1.5 or newer", so building the same commit next year gives the same versions. You upgrade on purpose, with `go get example.com/pkg@latest` for one module or `go get -u ./...` for all of them.
+
+<Concepts>
+
+- **`go.mod`**: the file at the root of a module. It holds the module name, the Go version and the required modules with exact versions.
+- **`go.sum`**: a list of checksums for every module version used. It makes tampered downloads fail the build.
+- **`go mod init`**: creates `go.mod`. Run it once per project.
+- **`go get`**: downloads a module and records its version in `go.mod`.
+- **`go mod tidy`**: syncs `go.mod` and `go.sum` with the imports your code really uses.
+- **Indirect dependency**: a module you did not import yourself but one of your dependencies needs. Marked `// indirect`.
+
+</Concepts>
+
+---
+
+## Packages: folders with a visibility rule
+
+A package is a folder of `.go` files. Every file starts with `package <name>`, and all files in one folder must use the same name. You import a package by its folder path, and you use it by its package name: `greet.Hello`. There are no subpackages in Go. The standard library's `net` and `net/http` are two unrelated packages that happen to sit in nested folders, and `net/http` gets no special access to `net`.
+
+There is no `public` or `private` keyword. **A name that starts with a capital letter is exported**, usable from other packages. A name that starts with a lowercase letter is private to its package. In `greet.go`, `Hello` is exported and `defaultName` is not. Trying to reach a private name from outside fails at compile time:
+
+<TerminalOutput command="go build ./cmd/greeter   # main.go changed to use greet.defaultName" label="Go 1.27.1" caption="From outside the package, the private name does not exist.">
+```text
+# example.com/greeter/cmd/greeter
+cmd/greeter/main.go:15:20: undefined: greet.defaultName
+```
+</TerminalOutput>
+
+Export less than you think you need. A name you do not export can be renamed or deleted later without breaking anyone; an exported name is a promise. One exception: a struct field must start with a capital letter if the `encoding/json` package is to read or write it. You will meet that in the HTTP service post.
+
+### `internal/`: a folder other modules cannot import
+
+Capital letters hide names inside a package. A folder called `internal` hides whole packages from other *modules*. Any package under `internal/` can be imported only by code inside the same parent folder tree. The Go tool enforces this. I created a second module that points at the greeter and tried to import its `internal/greet`:
+
+<TerminalOutput command="go build .   # in a different module that imports example.com/greeter/internal/greet" label="Go 1.27.1" caption="The Go tool rejects the import. No flag turns this off.">
+```text
+package example.com/other
+	main.go:6:2: use of internal package example.com/greeter/internal/greet not allowed
+```
+</TerminalOutput>
+
+Put code in `internal/` by default unless you are writing a library meant for others. The Go team's module-layout guide advises to "keep packages in `internal` as much as possible," because it "prevents other modules from depending on packages we don't necessarily want to expose."
+
+### Naming packages
+
+Name a package after what it provides, in one short lowercase word. Two traps from *100 Go Mistakes*:
+
+- **Do not create `util`, `common` or `base`.** A package called `util` tells the reader nothing, and everything ends up in it. A string set with a `New` and a `Sort` function belongs in a package called `stringset`, used as `stringset.New(...)`.
+- **Do not name a variable like a package you use.** If you write `greet := greet.Hello("x")`, the name `greet` now refers to the variable for the rest of that scope, and the package is out of reach. Rename the variable (`msg`) or alias the import.
+
+### Comment what you export
+
+Every exported name gets a comment that starts with the name and says what it does. `go doc` reads those comments, and editors show them as tooltips:
+
+<TerminalOutput command="go doc ./internal/greet Hello" label="Go 1.27.1" caption="The comment above Hello becomes its documentation.">
+```text
+package greet // import "example.com/greeter/internal/greet"
+
+func Hello(name string) string
+    Hello returns a greeting for name. An empty name falls back to "world".
+```
+</TerminalOutput>
+
+<Concepts>
+
+- **Exported name**: a function, type, constant or field that starts with a capital letter. Other packages can use it.
+- **`internal/`**: a folder name with a rule. Packages inside can be imported only from within the module tree that contains it.
+- **Package main**: the one package that becomes a program. Its `func main()` is where execution starts.
+- **Doc comment**: a comment directly above an exported name, starting with that name. `go doc` prints it.
+
+</Concepts>
+
+---
+
+## Project layout
+
+There is no mandatory layout. The author of *100 Go Mistakes* describes a common one and also says what matters most: agree on a layout and stay consistent, and do not split into dozens of tiny packages before you know what the project contains. The Go team's guide shows the same shape for a server. Ours is that shape:
+
+```text
+greeter/
+  go.mod
+  cmd/
+    greeter/
+      main.go          package main: parses arguments, calls into internal/
+  internal/
+    greet/
+      greet.go         package greet: the real logic
+```
+
+- `cmd/<name>/main.go` holds one program each. The folder name becomes the binary name, and a project with several programs gets several folders.
+- `internal/` holds everything else. Put most of the code here and keep `main.go` short.
+- A small script can be just `go.mod` and one `main.go` in the root. Start flat and add folders when a file starts to carry two separate jobs.
+
+`go list ./...` lists every package in the module, and `go build ./...` builds all of them:
+
+<TerminalOutput command="go list ./..." label="Go 1.27.1" caption="Two packages: one program, one library.">
+```text
+example.com/greeter/cmd/greeter
+example.com/greeter/internal/greet
+```
+</TerminalOutput>
+
+The later post [Build a Go HTTP service](/blog/go-http-service-net-http-json-middleware/) uses this exact layout for a real JSON API.
+
+<Concepts>
+
+- **`cmd/`**: by convention, one subfolder per program in the module, each with its own `package main`.
+- **`./...`**: Go's "this folder and everything below it" pattern. Most commands accept it.
+
+</Concepts>
+
+---
+
+## `gofmt` and `go vet`
+
+Two tools ship with Go and run in seconds. Run both before every commit; most teams also run them in CI.
+
+**`gofmt` rewrites your layout into the one standard style.** It covers spaces, tabs, line breaks and spacing around operators, and takes no style options. Andrew Gerrand's post on it promises you can "never have a debate about spacing or brace position ever again", and one of the Go proverbs says "Gofmt's style is no one's favorite, yet gofmt is everyone's favorite." Run it on a deliberately messy file:
+
+<TerminalOutput command="gofmt -d ugly.go" label="Go 1.27.1" caption="gofmt -l lists files that need formatting, gofmt -d shows the change, gofmt -w rewrites the file.">
+```text
+diff ugly.go.orig ugly.go
+--- ugly.go.orig
++++ ugly.go
+@@ -2,8 +2,8 @@
+ 
+ import "fmt"
+ 
+-func helper(  a int,b int ) int {
+-  return a+b
++func helper(a int, b int) int {
++	return a + b
+ }
+ 
+-func init() { fmt.Println( helper(1,2) ) }
++func init() { fmt.Println(helper(1, 2)) }
+```
+</TerminalOutput>
+
+Set your editor to run it on save and formatting stops being a topic.
+
+**`go vet` finds code that compiles but is almost certainly wrong.** Here is a program that prints a number with the text verb `%s`:
+
+```go
+package main
+
+import "fmt"
+
+func main() {
+	orders := 3
+	fmt.Printf("orders: %s\n", orders)
+}
+```
+
+The compiler accepts it. `go vet` does not:
+
+<TerminalOutput command="go build ./... ; echo $?  &&  go vet ./... ; echo $?" label="Go 1.27.1" caption="go build exits 0 and the bug ships. go vet points at the exact line and exits 1.">
+```text
+0
+main.go:7:22: fmt.Printf format %s has arg orders of wrong type int
+1
+```
+</TerminalOutput>
+
+`go vet` ships with Go. Larger linters exist, such as `staticcheck` and `golangci-lint`; *100 Go Mistakes* recommends using one, because linters catch whole classes of mistakes before a human reviewer has to. Start with `gofmt` and `go vet`, add more when the team wants them.
+
+<Callout type="tip" title="A pre-commit routine that fits on one line">
+`gofmt -l . && go vet ./... && go build ./...` prints nothing and exits 0 when the code is formatted, clean and compiles. Paste it into CI as is.
+</Callout>
+
+<Concepts>
+
+- **`gofmt`**: Go's formatter. One style for everyone, no settings to argue about.
+- **`go vet`**: a checker for suspicious code that the compiler accepts, such as a wrong format verb.
+- **Linter**: a tool that reads code and reports likely mistakes without running it.
+
+</Concepts>
+
+---
+
+## Key takeaways
+
+- **Go builds one static file.** `go build` embeds the Go runtime, so a server needs nothing else installed. The file only runs on the OS and CPU it was built for.
+- **`go run` is for editing, `go build` is for shipping, `go install` puts a tool on your PATH.**
+- **`go.mod` names the module and pins versions; `go.sum` checks downloads.** Commit both, run `go mod tidy` after changing imports, and upgrade versions on purpose.
+- **Packages are folders. A capital first letter exports a name.** Export as little as you can; put code in `internal/` unless other modules must import it.
+- **Name packages after what they provide.** No `util`, no variable that shares a package's name.
+- **Run `gofmt` and `go vet` on every commit.** The compiler passes bugs that `go vet` catches.
+
+---
+
+## Review questions
+
+1. What does a developer need to install on a fresh Linux server to run a Go program, compared with a Java or Node program? *(See "Run, build, install")*
+2. Your teammate builds on a Mac and copies the file to a Linux server, and it will not start. What was missed? *(See "One file, nothing to install")*
+3. You ran `go get` for a new dependency and then see `// indirect` on a package you import directly. What command fixes that and what does it do? *(See "Modules and `go.mod`")*
+4. Which identifiers in a package can another package use? How does `internal/` differ from a lowercase name? *(See "Packages")*
+5. Why does `go build` succeed on a `Printf` call with the wrong verb, and which command catches it? *(See "`gofmt` and `go vet`")*
+6. When is it fine to keep a whole project as one `main.go`, and what is the signal to start adding folders? *(See "Project layout")*
+
+</En>
+
+<Vi>
+
+<Figure src={heroContainers} alt="Chồng container nhiều màu cao ngất trên một tàu container ở Hamburg" caption="Container vận chuyển là chiếc hộp chuẩn đã niêm phong: đi tàu, tàu hỏa hay xe tải mà không ai phải mở ra. File nhị phân Go muốn làm điều tương tự cho chương trình của bạn: một file tự đủ, chép sang máy đúng loại nào cũng chạy." sourceTitle="Wikimedia Commons: CSCL Saturn, Container Ships in Hamburg (Glyn Lowe, CC BY 2.0)" sourceUrl="https://commons.wikimedia.org/wiki/File:CSCL_Saturn,_Container_Ships_in_Hamburg_(10901085226).jpg" />
+
+> "Khi build chậm, ta có thừa thời gian để suy nghĩ."
+> &mdash; *Rob Pike*, *Go at Google*
+
+### Go sinh ra vì quá mệt với việc chờ build
+
+Năm 2007, build một file nhị phân C++ lớn của Google rất chậm. Rob Pike kể rằng file nhị phân năm 2007 đó "mất 45 phút dù đã dùng hệ build phân tán đời trước", và "theo giai thoại, Go được nghĩ ra ngay trong một lần chờ build 45 phút như thế". Theo ông, nguyên nhân nằm ở cách C++ xử lý phụ thuộc.
+
+Go được thiết kế để tránh chuyện đó. Pike nói cách Go quản lý phụ thuộc "là lý do lớn nhất khiến Go biên dịch nhanh hơn". Hầu hết các luật nhỏ trong bài này đều bắt nguồn từ đây: build nhanh, ra một file duy nhất, cấu trúc dự án nhàm chán để dev Go nào cũng đọc được.
+
+Trước khi viết Go thật, bạn cần biết chạy và build chương trình thế nào, `go.mod` mô tả dự án ra sao, chia code thành package thế nào, cái gì được giấu đi, và hai công cụ mọi dự án Go chạy mỗi lần lưu file và trong CI (`gofmt`, `go vet`). Mọi output bên dưới đều chụp từ Go 1.27.1.
+
+### Nếu bạn đến từ Java, Python hay JavaScript
+
+| | Java | Python | JavaScript / Node | Go |
+|---|---|---|---|---|
+| Chạy lúc đang code | `java Main.java` hoặc IDE | `python app.py` | `node app.js` | `go run .` |
+| Thứ bạn build ra | `.jar`, chạy trên JVM | không có, hoặc một wheel | không có, hoặc một bundle | một file thực thi |
+| Server cần gì | JRE cộng file jar | Python cộng các package | Node cộng `node_modules` | chỉ cần file đó |
+| File khai báo thư viện | `pom.xml` hoặc `build.gradle` | `requirements.txt` hoặc `pyproject.toml` | `package.json` | `go.mod` |
+| File kiểm tra toàn vẹn | không có chuẩn chung | `pip --require-hashes` (tùy chọn) | `package-lock.json` | `go.sum` |
+| Công khai và riêng tư | từ khóa `public` / `private` | `_name` chỉ là quy ước | từ khóa `export` | chữ cái đầu viết hoa = công khai |
+| Công cụ format | nhiều cái, chọn một | black và nhiều cái khác | prettier và nhiều cái khác | `gofmt`, có sẵn, một kiểu duy nhất |
+| Đơn vị tái sử dụng code | package cộng class | module (file) | module (file) | package (thư mục) |
+
+<Callout type="note" title="Tóm tắt nhanh">
+`go build` biến code thành một file có sẵn Go runtime bên trong, nên server không cần cài gì thêm. `go.mod` liệt kê các module bạn dùng, `go.sum` ghi checksum của chúng. Package là một thư mục, chữ cái đầu viết hoa thì được xuất ra ngoài, còn `internal/` giấu package khỏi các module khác. `gofmt` sửa cách trình bày, `go vet` bắt đoạn code đáng ngờ mà trình biên dịch vẫn cho qua.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Ngôn ngữ biên dịch (compiled language)**: code được dịch sang lệnh máy trước khi chạy, không phải dịch lúc đang chạy. Bước dịch đó là `go build`.
+- **File tĩnh (static binary)**: một file thực thi mang theo mọi thứ nó cần. Chép sang máy khác cùng hệ điều hành và loại CPU là chạy được.
+- **Module**: dự án theo cách gọi của Go: một cây thư mục có file `go.mod` ở gốc. Đây là đơn vị để đánh phiên bản và phát hành.
+- **Package**: một thư mục chứa các file `.go`. Đây là đơn vị bạn import.
+
+</Concepts>
+
+---
+
+## Chạy, build, cài đặt
+
+Go có ba lệnh để biến code thành thứ chạy được. `go run` biên dịch rồi chạy luôn và bỏ kết quả đi; dùng khi đang sửa code. `go build` để lại một file thực thi trong thư mục của bạn. `go install` build rồi chép file vào một thư mục nằm trong `PATH`, để gõ tên là chạy ở đâu cũng được.
+
+Dự án mẫu của bài là một chương trình chào hỏi bé xíu. Nó là một *module* (cách Go gọi một dự án) tên `example.com/greeter`; bạn đặt tên đó một lần bằng `go mod init example.com/greeter`, xem mục "Module và `go.mod`" bên dưới. Trong `main.go` bạn sẽ thấy đường dẫn import `example.com/greeter/internal/greet`: tên module, rồi tới thư mục chứa package. Code nằm trong hai file:
+
+```go
+// internal/greet/greet.go
+// Package greet builds greeting messages.
+package greet
+
+import "fmt"
+
+const defaultName = "world"
+
+// Hello returns a greeting for name. An empty name falls back to "world".
+func Hello(name string) string {
+	if name == "" {
+		name = defaultName
+	}
+	return fmt.Sprintf("Hello, %s!", name)
+}
+```
+
+```go
+// cmd/greeter/main.go
+package main
+
+import (
+	"fmt"
+	"os"
+
+	"example.com/greeter/internal/greet"
+)
+
+func main() {
+	name := ""
+	if len(os.Args) > 1 {
+		name = os.Args[1]
+	}
+	fmt.Println(greet.Hello(name))
+}
+```
+
+`package main` có `func main()` là điểm vào chương trình, giống `public static void main` của Java. Mọi thứ còn lại, như package `greet`, là thư viện mà chương trình import.
+
+<TerminalOutput command="go run ./cmd/greeter Khang" label="Go 1.27.1 · macOS arm64" caption="go run biên dịch vào một thư mục tạm, chạy chương trình rồi dọn sạch. Không để lại gì.">
+```text
+Hello, Khang!
+```
+</TerminalOutput>
+
+<TerminalOutput command="go build -o greeter ./cmd/greeter && ls -l greeter" label="Go 1.27.1 · macOS arm64" caption="Một file chương trình cho macOS, khoảng 2,4 MB. Go runtime (bộ quản lý bộ nhớ, bộ lập lịch) được gắn sẵn bên trong.">
+```text
+-rwxr-xr-x@ 1 nguyennhatkhang  staff  2429954 Nov 23 09:40 greeter
+```
+</TerminalOutput>
+
+Hai megabyte cho một câu chào nghe có vẻ to, nhưng chương trình một dòng chỉ gọi `println("hi")` cũng ra 1.831.794 byte trên cùng máy, nên phần lớn dung lượng là runtime chứ không phải code của bạn.
+
+### Một file, không cần cài gì
+
+File này không cần gì khác, nên bạn chép nó sang một server trống hay một image container trống là chạy được. Nhưng nó gắn với hệ điều hành và CPU lúc build: file build trên Mac sẽ không chạy trên Linux. Cách build cho nền tảng khác và đóng gói vào container nằm ở [bài về dịch vụ HTTP](/blog/go-http-service-net-http-json-middleware/).
+
+<DemoFrame title="From source to one file you can copy" titleVi="Từ mã nguồn tới một file chép đi đâu cũng được">
+<GoBuildToBinaryDemo />
+</DemoFrame>
+
+`go install` làm luôn bước build và bước chép. Mặc định nó đặt file vào `~/go/bin`, hoặc vào thư mục do `GOBIN` chỉ định, một biến môi trường cho `go install` biết nơi đặt file. Ở đây `GOBIN=$PWD/bin` trỏ nó vào thư mục `bin` cục bộ cho riêng lệnh này:
+
+<TerminalOutput command="GOBIN=$PWD/bin go install ./cmd/greeter && ls bin && ./bin/greeter install" label="Go 1.27.1" caption="Dùng go install cho công cụ dòng lệnh bạn muốn có sẵn trong PATH.">
+```text
+greeter
+Hello, install!
+```
+</TerminalOutput>
+
+<Callout type="tip" title="Trình biên dịch cố tình khắt khe">
+Go từ chối build khi có import hoặc biến cục bộ không dùng tới. Tuần đầu bạn sẽ thấy phiền, rồi code sạch được nhiều năm.
+
+<TerminalOutput command="go build ." label="Go 1.27.1" caption="Báo hai lỗi cùng lúc, cả hai đều chặn build.">
+```text
+# example.com/unused
+./main.go:5:2: "os" imported and not used
+./main.go:9:2: declared and not used: count
+```
+</TerminalOutput>
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **`go run`**: biên dịch vào chỗ tạm rồi chạy. Để có phản hồi nhanh, không phải để đem đi triển khai.
+- **`go build`**: biên dịch và để lại file thực thi. Đây là thứ bạn đem đi triển khai.
+- **`go install`**: build rồi chép file thực thi vào thư mục bin (mặc định `~/go/bin`).
+
+</Concepts>
+
+---
+
+## Module và `go.mod`
+
+Module là cả dự án, còn `go.mod` là thẻ căn cước của nó. Bạn tạo nó một lần bằng `go mod init` kèm một cái tên. Theo thông lệ, tên là nơi code sẽ nằm trên mạng, như `github.com/you/greeter`; dự án riêng tư hay làm thử thì đặt tên gì cũng được.
+
+<TerminalOutput command="go mod init example.com/greeter && cat go.mod" label="Go 1.27.1" caption="Ba dòng. Dòng go ghi phiên bản Go mà module được viết với.">
+```text
+go: creating new go.mod: module example.com/greeter
+go: to add module requirements and sums:
+	go mod tidy
+module example.com/greeter
+
+go 1.27.1
+```
+</TerminalOutput>
+
+Tên module là tiền tố của mọi import trong dự án. Vì vậy `main.go` import `example.com/greeter/internal/greet`: tên module, rồi tới đường dẫn thư mục.
+
+### Thêm một dependency
+
+Giả sử bạn muốn dùng một package bên thứ ba. Thêm import vào code, rồi tải về:
+
+<TerminalOutput command="go build ./cmd/greeter   # trước khi tải dependency" label="Go 1.27.1" caption="Thông báo lỗi còn chỉ luôn cách sửa.">
+```text
+cmd/greeter/main.go:8:2: no required module provides package rsc.io/quote; to add it:
+	go get rsc.io/quote
+```
+</TerminalOutput>
+
+<TerminalOutput command="go get rsc.io/quote@v1.5.2 && go mod tidy && cat go.mod" label="Go 1.27.1" caption="go get tải module và ghi phiên bản. go mod tidy dọn file cho gọn.">
+```text
+module example.com/greeter
+
+go 1.27.1
+
+require rsc.io/quote v1.5.2
+
+require (
+	golang.org/x/text v0.0.0-20170915032832-14c0d48ead0c // indirect
+	rsc.io/sampler v1.3.0 // indirect
+)
+```
+</TerminalOutput>
+
+`rsc.io/quote` là cái bạn yêu cầu. Hai dòng `// indirect` là các module mà chính `rsc.io/quote` cần. Ngay sau `go get`, chính `rsc.io/quote` cũng bị đánh dấu `// indirect` dù code import trực tiếp, nên cách đánh dấu chỉ đúng sau khi chạy `go mod tidy`. Mỗi khi thêm hay bỏ import, hãy chạy `go mod tidy`: nó thêm cái thiếu và xóa cái không ai dùng.
+
+Cạnh `go.mod` giờ có thêm file `go.sum` sáu dòng. Mỗi dòng chứa checksum của một phiên bản module, và Go so mọi bản tải về với file này. Nếu tôi sửa một ký tự của checksum, build dừng ngay:
+
+<TerminalOutput command="go build ./cmd/greeter 2>&1 | head -1   # sau khi sửa một ký tự checksum trong go.sum" label="Go 1.27.1" caption="Bản tải về bị đổi thì build hỏng chứ không chạy lặng lẽ.">
+```text
+verifying rsc.io/quote@v1.5.2: checksum mismatch
+```
+</TerminalOutput>
+
+Hãy commit cả `go.mod` lẫn `go.sum`. Bạn không bao giờ sửa `go.sum` bằng tay; công cụ tự giữ nó.
+
+#### Vì sao phiên bản không tự nhảy
+
+Trong `go.mod` bạn ghi một phiên bản chính xác, `v1.5.2`, chứ không phải khoảng kiểu "1.5 trở lên", nên build cùng một commit vào năm sau vẫn ra đúng các phiên bản cũ. Bạn nâng cấp có chủ đích, bằng `go get example.com/pkg@latest` cho một module hoặc `go get -u ./...` cho tất cả.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **`go.mod`**: file ở gốc module. Chứa tên module, phiên bản Go và các module cần dùng kèm phiên bản chính xác.
+- **`go.sum`**: danh sách checksum của mọi phiên bản module đang dùng. Nhờ nó, bản tải bị sửa sẽ làm build hỏng.
+- **`go mod init`**: tạo `go.mod`. Chạy một lần cho mỗi dự án.
+- **`go get`**: tải một module và ghi phiên bản của nó vào `go.mod`.
+- **`go mod tidy`**: đồng bộ `go.mod` và `go.sum` với những import code thật sự dùng.
+- **Dependency gián tiếp (indirect)**: module bạn không import trực tiếp, nhưng một dependency của bạn cần. Được đánh dấu `// indirect`.
+
+</Concepts>
+
+---
+
+## Package: thư mục kèm luật hiển thị
+
+Package là một thư mục chứa các file `.go`. Mỗi file bắt đầu bằng `package <tên>`, và mọi file trong một thư mục phải dùng cùng một tên. Bạn import package theo đường dẫn thư mục, và dùng nó theo tên package: `greet.Hello`. Go không có package con. `net` và `net/http` trong thư viện chuẩn là hai package độc lập, chỉ tình cờ nằm trong thư mục lồng nhau, và `net/http` không có đặc quyền gì với `net`.
+
+Go không có từ khóa `public` hay `private`. **Tên bắt đầu bằng chữ hoa thì được xuất ra (exported)**, package khác dùng được. Tên bắt đầu bằng chữ thường chỉ dùng trong package đó. Trong `greet.go`, `Hello` được xuất ra còn `defaultName` thì không. Với tên riêng tư, gọi từ bên ngoài sẽ lỗi ngay lúc biên dịch:
+
+<TerminalOutput command="go build ./cmd/greeter   # main.go sửa để dùng greet.defaultName" label="Go 1.27.1" caption="Nhìn từ ngoài package, cái tên riêng tư coi như không tồn tại.">
+```text
+# example.com/greeter/cmd/greeter
+cmd/greeter/main.go:15:20: undefined: greet.defaultName
+```
+</TerminalOutput>
+
+Hãy xuất ít hơn bạn nghĩ là cần. Tên không xuất ra thì sau này đổi hay xóa không làm ai hỏng; tên đã xuất ra là một lời hứa. Có một ngoại lệ: field của struct phải viết hoa thì package `encoding/json` mới đọc và ghi được. Bạn sẽ gặp chuyện này trong bài về HTTP service.
+
+### `internal/`: thư mục mà module khác không import được
+
+Chữ hoa giấu tên bên trong một package. Thư mục tên `internal` giấu cả package khỏi các *module* khác. Package nằm dưới `internal/` chỉ được import bởi code nằm trong cây thư mục cha của nó. Công cụ Go tự kiểm tra điều này. Mình tạo một module thứ hai trỏ tới greeter và thử import `internal/greet` của nó:
+
+<TerminalOutput command="go build .   # trong một module khác import example.com/greeter/internal/greet" label="Go 1.27.1" caption="Công cụ Go từ chối import. Không có cờ nào để tắt.">
+```text
+package example.com/other
+	main.go:6:2: use of internal package example.com/greeter/internal/greet not allowed
+```
+</TerminalOutput>
+
+Mặc định hãy đặt code vào `internal/`, trừ khi bạn viết thư viện cho người khác dùng. Hướng dẫn về layout module của đội Go khuyên "để package trong `internal` càng nhiều càng tốt", vì nó "ngăn module khác phụ thuộc vào package mà ta không muốn công khai".
+
+### Đặt tên package
+
+Đặt tên package theo thứ nó cung cấp, một từ ngắn viết thường. Hai cái bẫy từ *100 Go Mistakes*:
+
+- **Đừng tạo `util`, `common` hay `base`.** Package tên `util` chẳng nói gì với người đọc, và cuối cùng cái gì cũng bị nhét vào. Một tập hợp chuỗi (string set) với hàm `New` và `Sort` nên nằm trong package `stringset`, dùng là `stringset.New(...)`.
+- **Đừng đặt tên biến trùng package đang dùng.** Nếu bạn viết `greet := greet.Hello("x")`, từ đó trong phạm vi đó `greet` là biến, còn package thì không với tới được nữa. Hãy đổi tên biến (`msg`) hoặc đặt bí danh cho import.
+
+### Comment cho thứ bạn xuất ra
+
+Mọi tên được xuất ra đều cần một comment bắt đầu bằng chính tên đó và nói nó làm gì. `go doc` đọc các comment này, và editor hiện chúng thành tooltip:
+
+<TerminalOutput command="go doc ./internal/greet Hello" label="Go 1.27.1" caption="Comment phía trên Hello trở thành tài liệu của nó.">
+```text
+package greet // import "example.com/greeter/internal/greet"
+
+func Hello(name string) string
+    Hello returns a greeting for name. An empty name falls back to "world".
+```
+</TerminalOutput>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Tên được xuất ra (exported name)**: hàm, kiểu, hằng hay field bắt đầu bằng chữ hoa. Package khác dùng được.
+- **`internal/`**: tên thư mục kèm một luật. Package bên trong chỉ import được từ trong cây module chứa nó.
+- **Package main**: package duy nhất trở thành chương trình. `func main()` của nó là nơi chương trình bắt đầu chạy.
+- **Doc comment**: comment đặt ngay trên một tên được xuất ra, bắt đầu bằng chính tên đó. `go doc` in nó ra.
+
+</Concepts>
+
+---
+
+## Cấu trúc dự án
+
+Go không có layout bắt buộc. Tác giả *100 Go Mistakes* mô tả một layout phổ biến và cũng nói điều quan trọng nhất: thống nhất một layout rồi giữ nhất quán, và đừng tách thành hàng chục package tí hon khi chưa biết dự án chứa gì. Hướng dẫn của đội Go cho server cũng có hình dạng tương tự. Dự án của mình theo đúng hình dạng đó:
+
+```text
+greeter/
+  go.mod
+  cmd/
+    greeter/
+      main.go          package main: parses arguments, calls into internal/
+  internal/
+    greet/
+      greet.go         package greet: the real logic
+```
+
+- `cmd/<tên>/main.go` chứa mỗi chương trình một thư mục. Tên thư mục thành tên file thực thi, và dự án có nhiều chương trình thì có nhiều thư mục.
+- `internal/` chứa mọi thứ còn lại. Hãy đặt phần lớn code ở đây và giữ `main.go` ngắn.
+- Một script nhỏ chỉ cần `go.mod` và một `main.go` ở thư mục gốc. Cứ bắt đầu phẳng, rồi thêm thư mục khi một file bắt đầu gánh hai việc khác nhau.
+
+`go list ./...` liệt kê mọi package trong module, và `go build ./...` build tất cả:
+
+<TerminalOutput command="go list ./..." label="Go 1.27.1" caption="Hai package: một chương trình, một thư viện.">
+```text
+example.com/greeter/cmd/greeter
+example.com/greeter/internal/greet
+```
+</TerminalOutput>
+
+Bài sau, [Build a Go HTTP service](/blog/go-http-service-net-http-json-middleware/), dùng đúng layout này cho một JSON API thật.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **`cmd/`**: theo quy ước, mỗi chương trình trong module một thư mục con, mỗi cái có `package main` riêng.
+- **`./...`**: mẫu "thư mục này và mọi thứ bên dưới" của Go. Hầu hết lệnh đều nhận nó.
+
+</Concepts>
+
+---
+
+## `gofmt` và `go vet`
+
+Go có sẵn hai công cụ chạy chỉ trong vài giây. Hãy chạy cả hai trước mỗi lần commit; hầu hết các đội còn chạy chúng trong CI.
+
+**`gofmt` viết lại cách trình bày code theo đúng một kiểu chuẩn.** Nó lo dấu cách, tab, xuống dòng, khoảng trắng quanh toán tử, và không có tùy chọn nào về kiểu. Bài viết của Andrew Gerrand hứa rằng bạn sẽ "không bao giờ phải tranh cãi về khoảng trắng hay vị trí dấu ngoặc nữa", và một câu Go proverb nói "Kiểu của gofmt không phải là kiểu ai thích nhất, nhưng gofmt là thứ ai cũng quý." Thử chạy trên một file cố tình làm lộn xộn:
+
+<TerminalOutput command="gofmt -d ugly.go" label="Go 1.27.1" caption="gofmt -l liệt kê file cần format, gofmt -d hiện thay đổi, gofmt -w ghi đè file.">
+```text
+diff ugly.go.orig ugly.go
+--- ugly.go.orig
++++ ugly.go
+@@ -2,8 +2,8 @@
+ 
+ import "fmt"
+ 
+-func helper(  a int,b int ) int {
+-  return a+b
++func helper(a int, b int) int {
++	return a + b
+ }
+ 
+-func init() { fmt.Println( helper(1,2) ) }
++func init() { fmt.Println(helper(1, 2)) }
+```
+</TerminalOutput>
+
+Cài editor tự chạy khi lưu file, và chuyện format thôi là đề tài tranh luận.
+
+**`go vet` tìm đoạn code biên dịch được nhưng gần như chắc chắn sai.** Đây là chương trình in một con số bằng verb chữ `%s`:
+
+```go
+package main
+
+import "fmt"
+
+func main() {
+	orders := 3
+	fmt.Printf("orders: %s\n", orders)
+}
+```
+
+Trình biên dịch chấp nhận. `go vet` thì không:
+
+<TerminalOutput command="go build ./... ; echo $?  &&  go vet ./... ; echo $?" label="Go 1.27.1" caption="go build thoát với mã 0 và lỗi lọt đi. go vet chỉ đúng dòng và thoát với mã 1.">
+```text
+0
+main.go:7:22: fmt.Printf format %s has arg orders of wrong type int
+1
+```
+</TerminalOutput>
+
+`go vet` đi kèm Go. Cũng có các linter lớn hơn như `staticcheck` và `golangci-lint`; *100 Go Mistakes* khuyên dùng một cái, vì linter bắt cả một loạt lỗi trước khi người review phải đọc. Cứ bắt đầu với `gofmt` và `go vet`, thêm khi cả đội muốn.
+
+<Callout type="tip" title="Thói quen trước khi commit gói trong một dòng">
+`gofmt -l . && go vet ./... && go build ./...` không in gì và thoát mã 0 khi code đã được format, sạch và biên dịch được. Dán nguyên vào CI là chạy.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **`gofmt`**: công cụ format của Go. Một kiểu cho mọi người, không có cài đặt nào để cãi nhau.
+- **`go vet`**: bộ kiểm tra đoạn code đáng ngờ mà trình biên dịch vẫn chấp nhận, như dùng sai verb định dạng.
+- **Linter**: công cụ đọc code và báo các lỗi có khả năng cao mà không cần chạy code.
+
+</Concepts>
+
+---
+
+## Key takeaways
+
+- **Go build ra một file tĩnh.** `go build` nhúng sẵn Go runtime, nên server không cần cài thêm gì. File chỉ chạy trên hệ điều hành và CPU lúc build.
+- **`go run` để sửa code, `go build` để triển khai, `go install` đưa công cụ vào PATH.**
+- **`go.mod` đặt tên module và ghim phiên bản; `go.sum` kiểm tra bản tải.** Commit cả hai, chạy `go mod tidy` sau khi đổi import, và nâng phiên bản có chủ đích.
+- **Package là thư mục. Chữ cái đầu viết hoa thì được xuất ra.** Xuất càng ít càng tốt; để code trong `internal/` trừ khi module khác cần import.
+- **Đặt tên package theo thứ nó cung cấp.** Không `util`, không đặt biến trùng tên package.
+- **Chạy `gofmt` và `go vet` ở mỗi commit.** Trình biên dịch cho qua những lỗi mà `go vet` bắt được.
+
+---
+
+## Review questions
+
+1. Trên một server Linux mới, dev cần cài gì để chạy chương trình Go, so với chương trình Java hay Node? *(Xem "Chạy, build, cài đặt")*
+2. Đồng nghiệp build trên Mac rồi chép file sang server Linux, và nó không khởi động. Họ đã bỏ sót gì? *(Xem "Một file, không cần cài gì")*
+3. Bạn vừa `go get` một dependency mới và thấy `// indirect` trên package mình import trực tiếp. Lệnh nào sửa chuyện đó và nó làm gì? *(Xem "Module và `go.mod`")*
+4. Package khác dùng được những định danh nào của một package? `internal/` khác tên viết thường ở điểm nào? *(Xem "Package: thư mục kèm luật hiển thị")*
+5. Vì sao `go build` thành công với một lời gọi `Printf` sai verb, và lệnh nào bắt được? *(Xem "`gofmt` và `go vet`")*
+6. Khi nào giữ cả dự án trong một `main.go` là ổn, và dấu hiệu nào cho biết nên thêm thư mục? *(Xem "Cấu trúc dự án")*
+
+</Vi>
