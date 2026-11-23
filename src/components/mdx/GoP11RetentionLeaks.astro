@@ -1,0 +1,167 @@
+---
+// Two heap retention traps from slices & substrings:
+// 1. Substring / sub-slice pins the entire parent allocation (aibrix#3508 / msg[:5]) vs strings.Clone / bytes.Clone.
+// 2. Reslicing []Todo (or []*T) leaves trailing pointers past len alive until clear(items[2:]).
+const W = 900;
+const H = 418;
+
+function arrow(x1: number, y1: number, x2: number, y2: number) {
+  const a = Math.atan2(y2 - y1, x2 - x1);
+  const len = 8;
+  const p1 = [x2 - len * Math.cos(a - 0.45), y2 - len * Math.sin(a - 0.45)];
+  const p2 = [x2 - len * Math.cos(a + 0.45), y2 - len * Math.sin(a + 0.45)];
+  return {
+    line: `M ${x1} ${y1} L ${x2 - 6 * Math.cos(a)} ${y2 - 6 * Math.sin(a)}`,
+    head: `${x2},${y2} ${p1[0].toFixed(1)},${p1[1].toFixed(1)} ${p2[0].toFixed(1)},${p2[1].toFixed(1)}`,
+  };
+}
+
+const aPin = arrow(236, 76, 326, 76);
+const aClone = arrow(236, 152, 326, 152);
+---
+<figure class="gp11rl">
+  <div class="gp11rl-scroll">
+    <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Top: slicing a short substring or sub-slice keeps the entire 250 KB parent buffer alive for GC, while strings.Clone copies only the short value so GC frees the large buffer. Bottom: reslicing a 500-item slice to [:2] leaves 498 Payload pointers in the backing array keeping 500.2 MiB live until clear(items[2:]) drops HeapAlloc to 2.2 MiB.">
+      {/* Panel 1 */}
+      <text x="16" y="26" class="h">
+        <tspan data-lang-en>1. Interior pointer: a tiny slice or substring keeps the whole buffer pinned</tspan>
+        <tspan data-lang-vi>1. Con trỏ trỏ vào giữa: lát cắt nhỏ ghim cứng cả khối buffer lớn trên heap</tspan>
+      </text>
+
+      <rect x="16" y="48" width="220" height="56" rx="6" class="box bad" />
+      <text x="28" y="71" class="r">model := body[:5]</text>
+      <text x="28" y="92" class="m">
+        <tspan data-lang-en>same ptr (even with [:5:5])</tspan>
+        <tspan data-lang-vi>cùng ptr (kể cả dùng [:5:5])</tspan>
+      </text>
+
+      <rect x="328" y="48" width="70" height="56" rx="6" class="box gold" />
+      <text x="363" y="81" text-anchor="middle" class="b">5 B</text>
+      <rect x="398" y="48" width="484" height="56" rx="6" class="box bad" />
+      <text x="640" y="72" text-anchor="middle" class="r">
+        <tspan data-lang-en>unused 250 KB tail stays live for GC (one heap object)</tspan>
+        <tspan data-lang-vi>250 KB phần dư vẫn bị coi là còn sống (chung một khối nhớ)</tspan>
+      </text>
+      <text x="640" y="92" text-anchor="middle" class="m">
+        <tspan data-lang-en>vllm-project/aibrix#3508: ~330 MB across ~1,450 requests</tspan>
+        <tspan data-lang-vi>sự cố vllm-project/aibrix#3508: ~330 MB cho ~1.450 request</tspan>
+      </text>
+      <path d={aPin.line} class="ln red" /><polygon points={aPin.head} class="hd red" />
+
+      <rect x="16" y="124" width="220" height="56" rx="6" class="box gold" />
+      <text x="28" y="147" class="b">strings.Clone / bytes.Clone</text>
+      <text x="28" y="168" class="m">
+        <tspan data-lang-en>copies 5 bytes to new block</tspan>
+        <tspan data-lang-vi>chép 5 byte sang khối mới</tspan>
+      </text>
+
+      <rect x="328" y="124" width="76" height="56" rx="6" class="box gold" />
+      <text x="366" y="157" text-anchor="middle" class="b">5 B</text>
+      <rect x="430" y="124" width="452" height="56" rx="6" class="free" />
+      <text x="656" y="157" text-anchor="middle" class="m">
+        <tspan data-lang-en>zero live pointers into 250 KB body → reclaimed by GC</tspan>
+        <tspan data-lang-vi>không còn con trỏ trỏ vào 250 KB → GC dọn sạch</tspan>
+      </text>
+      <path d={aClone.line} class="ln gold" /><polygon points={aClone.head} class="hd gold" />
+
+      <line x1="16" x2={W - 16} y1="204" y2="204" class="rule" />
+
+      {/* Panel 2 */}
+      <text x="16" y="236" class="h">
+        <tspan data-lang-en>2. Shrinking a slice with pointers: items[:2] still hides 498 Payload pointers</tspan>
+        <tspan data-lang-vi>2. Thu ngắn slice chứa con trỏ: items[:2] vẫn giấu 498 con trỏ Payload ở đuôi</tspan>
+      </text>
+
+      {/* Row A: items[:2] */}
+      <text x="16" y="276" class="b">kept := items[:2]</text>
+      <text x="16" y="298" class="r num">500.2 MiB live</text>
+
+      {[0, 1].map((i) => {
+        const x = 190 + i * 98;
+        return (
+          <g>
+            <rect x={x} y="256" width="90" height="54" rx="5" class="box gold" />
+            <text x={x + 45} y="278" text-anchor="middle" class="b num">[{i}]</text>
+            <text x={x + 45} y="299" text-anchor="middle" class="m num">1 MiB</text>
+          </g>
+        );
+      })}
+      {[2, 3, 4].map((i) => {
+        const x = 386 + (i - 2) * 98;
+        return (
+          <g>
+            <rect x={x} y="256" width="90" height="54" rx="5" class="box bad" />
+            <text x={x + 45} y="278" text-anchor="middle" class="r num">[{i}]</text>
+            <text x={x + 45} y="299" text-anchor="middle" class="r">ptr → 1 MiB</text>
+          </g>
+        );
+      })}
+      <rect x="680" y="256" width="202" height="54" rx="5" class="box bad" />
+      <text x="781" y="280" text-anchor="middle" class="r num">... [499]</text>
+      <text x="781" y="300" text-anchor="middle" class="m">
+        <tspan data-lang-en>beyond len, scanned by GC</tspan>
+        <tspan data-lang-vi>ngoài len, GC vẫn quét tới</tspan>
+      </text>
+
+      {/* Row B: clear(items[2:]) */}
+      <text x="16" y="356" class="b">clear(items[2:])</text>
+      <text x="16" y="378" class="g num">2.2 MiB live</text>
+
+      {[0, 1].map((i) => {
+        const x = 190 + i * 98;
+        return (
+          <g>
+            <rect x={x} y="336" width="90" height="54" rx="5" class="box gold" />
+            <text x={x + 45} y="358" text-anchor="middle" class="b num">[{i}]</text>
+            <text x={x + 45} y="379" text-anchor="middle" class="m num">1 MiB</text>
+          </g>
+        );
+      })}
+      {[2, 3, 4].map((i) => {
+        const x = 386 + (i - 2) * 98;
+        return (
+          <g>
+            <rect x={x} y="336" width="90" height="54" rx="5" class="free" />
+            <text x={x + 45} y="358" text-anchor="middle" class="m num">[{i}]</text>
+            <text x={x + 45} y="379" text-anchor="middle" class="m">nil</text>
+          </g>
+        );
+      })}
+      <rect x="680" y="336" width="202" height="54" rx="5" class="free" />
+      <text x="781" y="359" text-anchor="middle" class="m num">... [499] = nil</text>
+      <text x="781" y="379" text-anchor="middle" class="m">
+        <tspan data-lang-en>498 MiB freed by GC</tspan>
+        <tspan data-lang-vi>498 MiB được GC thu hồi</tspan>
+      </text>
+    </svg>
+  </div>
+  <figcaption>
+    <span data-lang-en>Top: Go's GC tracks whole heap allocations, so keeping even 5 bytes via <code>body[:5]</code> or <code>body[:5:5]</code> pins the entire parent buffer; <code>strings.Clone</code> / <code>bytes.Clone</code> cuts that link. Bottom: in a 500-item <code>[]Todo</code> run on Go 1.27.1, <code>items[:2]</code> held <code>500.2 MiB</code> until <code>clear(items[2:])</code> zeroed the discarded tail and dropped heap usage to <code>2.2 MiB</code>.</span>
+    <span data-lang-vi>Trên: GC theo dấu theo từng khối nhớ, nên giữ 5 byte qua <code>body[:5]</code> hay <code>body[:5:5]</code> vẫn ghim cả buffer gốc; <code>strings.Clone</code> / <code>bytes.Clone</code> cắt đứt sợi dây này. Dưới: chạy thực tế 500 phần tử <code>[]Todo</code> trên Go 1.27.1, <code>items[:2]</code> giữ <code>500,2 MiB</code> cho tới khi <code>clear(items[2:])</code> xóa sạch phần đuôi và đưa heap về <code>2,2 MiB</code>.</span>
+  </figcaption>
+</figure>
+
+<style>
+  .gp11rl { margin: 2em 0; width: 100%; }
+  .gp11rl-scroll { overflow-x: auto; }
+  .gp11rl svg { display: block; width: 100%; min-width: 640px; height: auto; }
+  .gp11rl text { font-size: 14px; fill: var(--text-body); }
+  .gp11rl .h { font-size: 16px; font-weight: 700; fill: var(--text); }
+  .gp11rl .b { font-weight: 700; fill: var(--text); }
+  .gp11rl .m { fill: var(--text-muted); }
+  .gp11rl .r { fill: var(--red); font-weight: 700; }
+  .gp11rl .g { fill: var(--gold-icon); font-weight: 700; }
+  .gp11rl .num { font-variant-numeric: tabular-nums; }
+  .gp11rl .box { fill: var(--bg-alt); stroke: var(--text-muted); stroke-width: 1.2; }
+  .gp11rl .box.bad { fill: var(--red-tint-bg); stroke: var(--red); stroke-width: 1.3; }
+  .gp11rl .box.gold { fill: var(--gold-tint-bg); stroke: var(--gold); stroke-width: 1.3; }
+  .gp11rl .free { fill: none; stroke: var(--border); stroke-width: 1.2; stroke-dasharray: 4 3; }
+  .gp11rl .ln { fill: none; stroke: var(--text-muted); stroke-width: 1.5; }
+  .gp11rl .ln.red { stroke: var(--red); }
+  .gp11rl .ln.gold { stroke: var(--gold-icon); }
+  .gp11rl .hd { fill: var(--text-muted); }
+  .gp11rl .hd.red { fill: var(--red); }
+  .gp11rl .hd.gold { fill: var(--gold-icon); }
+  .gp11rl .rule { stroke: var(--border); stroke-width: 1; }
+  .gp11rl figcaption { margin-top: 10px; font-size: 14px; color: var(--text-muted); line-height: 1.55; text-align: center; }
+</style>
