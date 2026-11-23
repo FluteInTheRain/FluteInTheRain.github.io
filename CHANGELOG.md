@@ -3,11 +3,17 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-23 — Bật xuất bản bài 1–3 series Go mới
+
+- **Đã làm:** đổi `draft: false` cho `go-first-program-modules-packages`, `go-variables-types-pointers-functions`, `go-slices-maps-strings`.
+- **Ai quyết:** user — "bật luôn đi".
+- **Chưa chốt:** `series.ts` vẫn là bản 12 bài cũ tới khi cutover, nên 3 bài mới hiện như bài lẻ trên /blog; bài 1 mới trùng tiêu đề "Go basics" với bài cũ `go-fundamentals-toolchain-modules-packages-types` (sẽ redirect khi cutover); link sang bài 4, 5, 7, 10, 11 (chưa viết) tạm 404.
+
 ## 2026-11-23 — Series Go: viết bài 1–3 (draft) và chỉnh lại theo bài test người đọc
 
 - **Đã làm:** 3 agent Sonnet viết bài 1–3 trên 3 nhánh `feat/go-post-01-basics`, `feat/go-post-02-types`, `feat/go-post-03-collections` (chưa push). Mỗi bài qua review nội dung + 1 vòng sửa, rồi 1 lượt humanizer. Bài test người đọc (agent đóng vai dev Java chưa viết Go) chấm cả 3 bài "Mostly easy": ví dụ dùng thứ chưa học (`recover`, closure, struct, `context`), bài 2 ôm ~8 chủ đề, bài 3 đi sâu vào tăng capacity/benchmark.
 - **Ai quyết:** user chọn phương án A — sửa mọi ví dụ chỉ dùng thứ đã học và dời phần sâu sang bài sau. Spec cập nhật: #3/#4 (`init`, getter) 2→12, #43/#44 (named results) 2→5, #27/#38 (size hint map, Trim) 3→11, Docker `FROM scratch` 1→10; thêm luật viết "ví dụ chỉ dùng thứ bài trước đã dạy". Sách đọc qua text tách sẵn trong `books/_extract/` thay vì `/book-to-skill` (tiết kiệm token, AI quyết).
-- **Chưa chốt:** Khang duyệt kỹ bài 1 (pilot) sau khi sửa; push/PR sau khi duyệt.
+- **Chưa chốt:** (cập nhật) đã merge PR #24–#27 (main `cf5fdfa`) và bật xuất bản 3 bài.
 
 ## 2026-11-23 — Thiết kế lại series Go: 20 bài, từ cơ bản đến phỏng vấn
 
