@@ -42,3 +42,23 @@ uv run --python 3.13 --with 'fastapi==0.165.0' --with 'uvicorn[standard]' \
 | `layered_smoke.py` | `backend-layered-architecture` | The payoff: the same service rules driven by plain Python with a fake repository, then with the in-memory one — no server needed |
 | `p04_depends.py` | `backend-layered-architecture` | The same layers wired with `Depends`: cached `get_repo`, `get_service`, and endpoints that ask for the service in their signature |
 | `p04_override.py` | `backend-layered-architecture` | `app.dependency_overrides` plus `TestClient`: the endpoints' rules driven over HTTP with a fake repository, no server |
+| `p05_db.py` | `backend-database-access-layer` | SQLAlchemy 2.x engine, `sessionmaker`, tables, `SqlCaseRepository` behind post 4's `CaseRepository`, and the commit/rollback session dependency |
+| `p05_app.py` | `backend-database-access-layer` | clue.api on the real database: post 4's service unchanged, `get_service` with an early-commit session, an all-or-nothing `/cases/batch` |
+| `p05_commit_order.py` | `backend-database-access-layer` | Default vs `scope="function"` for a yield dependency, made visible by a 1 s slow COMMIT |
+| `p05_pool.py` | `backend-database-access-layer` | A 2-connection pool, three slow requests, and the real `QueuePool` timeout |
+| `p05_nplus1.py` | `backend-database-access-layer` | `/lazy` vs `/eager` (`selectinload`), each response counting its own SQL statements |
+| `p05_migrate.py` | `backend-database-access-layer` | Why `create_all` is not a migration, plus a minimal numbered-migration runner |
+| `p06_loop.py` | `backend-async-concurrency-workers` | `async def` + `await` vs `time.sleep` vs plain `def`; the requests-in-async trap and its two fixes; the thread pool limit |
+| `p06_upstream.py` | `backend-async-concurrency-workers` | A 0.5 s slow upstream API the trap endpoints call |
+| `p06_load.py` | `backend-async-concurrency-workers` | httpx burst driver: N concurrent requests, wall time, optional `/health` probe |
+| `p06_cpu.py` | `backend-async-concurrency-workers` | CPU work inline vs `run_in_threadpool` vs `ProcessPoolExecutor` |
+| `p06_workers.py` | `backend-async-concurrency-workers` | Per-process hit counter plus pid, for `--workers 3` |
+| `p06_hits.py` | `backend-async-concurrency-workers` | Driver showing counters diverging across workers |
+| `p06_background.py` | `backend-async-concurrency-workers` | `BackgroundTasks` after a 202, and its loss on `kill -9` |
+| `p07_hashing.py` | `backend-auth-oauth2-jwt` | sha256 vs Argon2id: hash format, salt, per-guess cost |
+| `p07_security.py` | `backend-auth-oauth2-jwt` | Token endpoint (`OAuth2PasswordRequestForm`, pwdlib, PyJWT), `get_current_user` guard, scoped routes |
+| `p07_attacks.py` | `backend-auth-oauth2-jwt` | No, expired, tampered and `alg=none` tokens against the guard |
+| `p07_scopes.py` | `backend-auth-oauth2-jwt` | Requested vs granted scopes; 403 on a missing scope |
+| `p07_revocation.py` | `backend-auth-oauth2-jwt` | Session logout (401) vs JWT after logout (200) |
+| `p07_bola.py` | `backend-auth-oauth2-jwt` | Vulnerable vs owner-checked case endpoint |
+| `p07_bola_check.py` | `backend-auth-oauth2-jwt` | Driver capturing the before/after BOLA results |
