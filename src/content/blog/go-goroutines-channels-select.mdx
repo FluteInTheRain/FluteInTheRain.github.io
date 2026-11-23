@@ -1,0 +1,984 @@
+---
+title: "Goroutines and channels"
+title_vi: "Goroutine và channel"
+description: "Goroutines, WaitGroup, channels, select and notification channels for a developer new to Go, plus the rule that every goroutine needs a way to stop."
+description_vi: "Goroutine, WaitGroup, channel, select và notification channel cho người mới học Go, cùng quy tắc: mỗi goroutine phải có đường để dừng."
+date: 2026-11-23
+category: "backend"
+tags: ["golang", "concurrency", "goroutines", "channels", "100-go-mistakes"]
+cover: "../../assets/series/golang/go-gopher-pencil-running.jpg"
+cover_alt: "Pencil drawing of the Go gopher running, drawn by Renee French"
+draft: true
+sources:
+  - { title: "100 Go Mistakes and How to Avoid Them", author: "Teiva Harsanyi", chapters: "Mistakes #55, #57, #62, #65, #67", url: "https://100go.co/" }
+  - { title: "Concurrency is not parallelism", author: "Andrew Gerrand (The Go Blog, 2013)", url: "https://go.dev/blog/waza-talk" }
+  - { title: "Go Concurrency Patterns: Pipelines and cancellation", author: "Sameer Ajmani (The Go Blog, 2014)", url: "https://go.dev/blog/pipelines" }
+  - { title: "LeakProf: Featherlight In-Production Goroutine Leak Detection", author: "Uber Engineering (2022)", url: "https://www.uber.com/us/en/blog/leakprof-featherlight-in-production-goroutine-leak-detection" }
+  - { title: "Go 1.27 Release Notes: goroutine leak profile", author: "The Go Authors", url: "https://go.dev/doc/go1.27" }
+  - { title: "The java command: -Xss default thread stack size (Linux/x64: 1024 KB)", author: "Oracle, Java SE 21 documentation", url: "https://docs.oracle.com/en/java/javase/21/docs/specs/man/java.html" }
+  - { title: "Go gopher pencil running (CC BY 3.0), used as the cover", author: "Renee French", url: "https://commons.wikimedia.org/wiki/File:Go_gopher_pencil_running.jpg" }
+  - { title: "Barista prepares espresso at coffee shop.jpg (CC BY 2.0)", author: "Shixart1985", url: "https://commons.wikimedia.org/wiki/File:Barista_prepares_espresso_at_coffee_shop.jpg" }
+---
+
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import En from '../../components/mdx/En.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import GoProducerConsumerDemo from '../../components/mdx/GoProducerConsumerDemo.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import heroBarista from '../../assets/blog/go-goroutines-channels-select/barista-espresso-counter.jpg';
+
+<En>
+
+<Figure src={heroBarista} alt="A barista at a coffee shop counter pressing ground coffee into a portafilter while customers wait" caption="One barista, many jobs: take an order, grind, pull a shot, steam milk. Doing several jobs in turn, with a clear hand-off between them, is concurrency." sourceTitle="Wikimedia Commons: Barista prepares espresso at coffee shop.jpg (CC BY 2.0, Shixart1985)" sourceUrl="https://commons.wikimedia.org/wiki/File:Barista_prepares_espresso_at_coffee_shop.jpg" />
+
+> "Concurrency is about dealing with lots of things at once. Parallelism is about doing lots of things at once."
+> &mdash; *Rob Pike*, quoted in The Go Blog
+
+### A service that kept growing, and goroutines that never left
+
+In 2022 Uber published how it hunts goroutine leaks in production. On one service its detector flagged 10 critical leaking goroutines, with 1 false positive. Fixing just 2 of them cut the service's peak memory by 2.5x and by 5x, and the owners lowered the container memory requirement by 25%. Nobody had written a loop that obviously ran forever. Each leak was a goroutine waiting for a channel that nobody would ever use again.
+
+That story needs two words first. A goroutine is Go's unit of concurrent work: you start one with the keyword `go`, and it runs alongside the code that started it. A channel is a pipe that goroutines use to hand values to each other. This post teaches both, plus `select` (wait on several channels at once), and ends on the rule that would have prevented Uber's bug: every goroutine needs a way to stop.
+
+<Callout type="note" title="TL;DR">
+`go f()` starts `f` as a goroutine, which costs a few kilobytes, not a thread. Use `sync.WaitGroup` to wait for a group of them. Use channels to pass values or signals between goroutines. An unbuffered channel makes sender and receiver meet. A buffered channel decouples them until it fills. `close` tells receivers no more values are coming. `select` waits on several channels. Before you write `go`, know how that goroutine will end.
+</Callout>
+
+## Coming from Java, Python or JavaScript
+
+Here is a quick map from the concurrency tools you already use to Go.
+
+| You want to | Java | Python | JavaScript | Go |
+|---|---|---|---|---|
+| Run a task alongside the current one | `new Thread(...)` or an executor | `threading.Thread` or `asyncio.create_task` | `Promise` or `async` function | `go f()` |
+| Wait for a group of tasks | `CountDownLatch`, `invokeAll` | `join()`, `asyncio.gather` | `Promise.all` | `sync.WaitGroup` |
+| Hand data to another task | `BlockingQueue` | `queue.Queue`, `asyncio.Queue` | callback, `await` | channel: `ch <- v`, `v := <-ch` |
+| Wait on several things, take the first | `CompletableFuture.anyOf` | `asyncio.wait(FIRST_COMPLETED)` | `Promise.race` | `select` |
+| Default cost of one task | an OS thread, 1 MB of stack by default on Linux x64 | an OS thread or a coroutine | a promise | about 2 KB of stack |
+
+Two differences matter most. A goroutine is not an `async` function: there is no `await` and no function colouring, so ordinary blocking code works inside one. And a goroutine has no handle. You cannot kill it from outside, so it has to end itself.
+
+<Concepts>
+
+- **Goroutine**: a function running concurrently, started with `go`. Much lighter than an OS thread.
+- **Channel**: a typed pipe between goroutines, written `chan int`. You send with `ch <- v` and receive with `<-ch`.
+- **`select`**: like a `switch` for channels. It waits until one of its cases can proceed.
+
+</Concepts>
+
+---
+
+## Concurrency and parallelism
+
+Concurrency is how a program is structured: independent steps that coordinate. Parallelism is how it runs: several steps at the same instant on different CPU cores. You can have the first without the second, and the first makes the second possible.
+
+Go's own blog says it with the quote at the top. A coffee shop shows the difference. One barista who takes orders, then grinds, then brews is sequential. Split the work into roles (order taker, grinder, machine) joined by a queue, and the shop is concurrent, even with one person switching roles. Hire a second grinder and the grinding step now runs in parallel. The structure did not change; the execution did. Goroutines and channels are Go's tools for the structure. Whether it then runs in parallel depends on how many CPU cores the machine has, and the Go runtime handles that for you.
+
+## Starting a goroutine
+
+Put `go` in front of a function call and that call runs concurrently. The caller does not wait for it. Here is the smallest program that shows the catch:
+
+```go
+package main
+
+import "fmt"
+
+func main() {
+	go fmt.Println("hello from the goroutine")
+	fmt.Println("main is done")
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="The goroutine never printed. When main returns, the whole program exits, and it does not wait for goroutines that are still running. Three runs gave this same output.">
+```text
+main is done
+```
+</TerminalOutput>
+
+So `main` needs a way to wait. The standard tool is `sync.WaitGroup`: a counter. You add one before starting each goroutine, each goroutine calls `Done` when it finishes, and `Wait` blocks until the counter is back at zero.
+
+```go
+package main
+
+import (
+	"fmt"
+	"sync"
+)
+
+func main() {
+	var wg sync.WaitGroup
+	for i := 1; i <= 3; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			fmt.Println("worker", i)
+		}()
+	}
+	wg.Wait()
+	fmt.Println("all workers finished")
+}
+```
+
+`go func() { ... }()` declares an anonymous function and calls it on the spot, which is how you start a goroutine from several lines of code ([post 5](/blog/go-errors-defer-panic/) covers this syntax under closures). `defer wg.Done()` runs when the goroutine returns, even on an early exit (`defer` is explained in [post 2](/blog/go-variables-types-pointers-functions/)). Since Go 1.22 each loop turn has its own `i`, so each worker prints its own number.
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="One real run. The order of the three workers is not fixed: two other runs printed 3, 2, 1 as well. Never write code that depends on the order goroutines run in.">
+```text
+worker 3
+worker 1
+worker 2
+all workers finished
+```
+</TerminalOutput>
+
+Put `wg.Add(1)` before the `go` statement, not inside the goroutine. If it ran inside, `Wait` could be reached before any `Add` and return too early.
+
+### Why a goroutine is cheap
+
+A Java thread reserves 1 MB of stack by default on Linux x64 (the `-Xss` default in Oracle's documentation). A goroutine starts with a stack of about 2 KB that grows when needed, so you can start many more of them. This program starts 100,000 goroutines that all wait on one channel, and measures what that costs:
+
+```go
+package main
+
+import (
+	"fmt"
+	"runtime"
+	"sync"
+	"time"
+)
+
+func main() {
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	const n = 100_000
+	block := make(chan struct{})
+	var wg sync.WaitGroup
+	start := time.Now()
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-block
+		}()
+	}
+	elapsed := time.Since(start)
+	runtime.ReadMemStats(&after)
+	fmt.Println("goroutines:", runtime.NumGoroutine())
+	fmt.Println("started in:", elapsed)
+	fmt.Println("stack bytes per goroutine:", (after.StackInuse-before.StackInuse)/n)
+	close(block)
+	wg.Wait()
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="100,000 goroutines started in under 100 ms, each with about 2 KB of stack. The timing depends on your machine and changes from run to run.">
+```text
+goroutines: 100001
+started in: 86.596ms
+stack bytes per goroutine: 2049
+```
+</TerminalOutput>
+
+The extra goroutine is `main` itself. Small does not mean free: 100,000 goroutines held 200 MB of stack here, and a goroutine can also keep heap memory, connections and files alive. How the runtime schedules them onto threads is covered much later in the series, in the [scheduler post](/blog/go-concurrency-scheduler-channels-context-mutexes/).
+
+## Channels
+
+A channel carries values of one type from one goroutine to another. You make one with `make`, send with `ch <- value`, and receive with `<-ch`. Sending and receiving also synchronise: they make goroutines wait for each other, which is the point.
+
+```go
+package main
+
+import "fmt"
+
+func main() {
+	ch := make(chan string)
+	go func() {
+		ch <- "ping"
+	}()
+	msg := <-ch
+	fmt.Println("got:", msg)
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="main blocks on the receive until the goroutine sends. No WaitGroup was needed: the receive is the wait.">
+```text
+got: ping
+```
+</TerminalOutput>
+
+### Unbuffered: sender and receiver meet
+
+`make(chan string)` has no storage. A send blocks until another goroutine is ready to receive, and a receive blocks until another goroutine sends. They meet, the value passes, both continue. Because of that meeting, an unbuffered channel is also a synchronisation point: when the send finishes, you know the receiver has the value.
+
+It also means a send with nobody on the other side waits forever. If every goroutine is stuck like that, Go notices and stops the program:
+
+```go
+package main
+
+import "fmt"
+
+func main() {
+	ch := make(chan string)
+	ch <- "ping"
+	fmt.Println(<-ch)
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Only the first lines of the crash report. The send on line 7 can never finish, because the only goroutine that could receive is the one stuck sending.">
+```text
+fatal error: all goroutines are asleep - deadlock!
+
+goroutine 1 [chan send]:
+main.main()
+```
+</TerminalOutput>
+
+This detector only fires when every goroutine is blocked. In a real server other goroutines keep running, so a stuck goroutine stays silent. That is how leaks hide.
+
+### Buffered: a queue with a limit
+
+`make(chan int, 2)` has room for two values. A send only blocks when the buffer is full, and a receive only blocks when it is empty. `len` gives how many values are waiting and `cap` gives the capacity.
+
+```go
+package main
+
+import "fmt"
+
+func main() {
+	ch := make(chan int, 2)
+	ch <- 1
+	ch <- 2
+	fmt.Println("len:", len(ch), "cap:", cap(ch))
+	fmt.Println(<-ch, <-ch)
+	ch <- 3
+	ch <- 4
+	ch <- 5
+	fmt.Println("never printed")
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Two sends fit and both values came back in order. After the buffer emptied, 3 and 4 fit again, and the send of 5 found it full with nobody receiving: deadlock. The crash report is trimmed to its first line.">
+```text
+len: 2 cap: 2
+1 2
+fatal error: all goroutines are asleep - deadlock!
+```
+</TerminalOutput>
+
+How big should the buffer be? A buffered channel does not make the two sides meet, so it gives you communication without the synchronisation an unbuffered one has. It can also hide a deadlock for a while, until the buffer fills. *100 Go Mistakes* suggests starting with an unbuffered channel, or a buffer of 1 if you need one, and choosing a larger size only for a reason you can state, such as one slot per worker in a pool, or a limit on concurrent requests. A magic number like `make(chan int, 40)` deserves a comment saying why 40.
+
+### Closing a channel and ranging over it
+
+A producer says "I am finished" by calling `close(ch)`. Receivers can then drain what is left and stop. `for v := range ch` does exactly that: it receives until the channel is closed and empty. A receive from a closed channel never blocks, and the `v, ok := <-ch` form tells you whether the value was real.
+
+```go
+package main
+
+import "fmt"
+
+func main() {
+	ch := make(chan int)
+	go func() {
+		for i := 1; i <= 5; i++ {
+			ch <- i
+		}
+		close(ch)
+	}()
+	for v := range ch {
+		fmt.Println("received", v)
+	}
+	v, ok := <-ch
+	fmt.Println("after close:", v, ok)
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="The loop ends by itself once the channel is closed. After that, a receive returns the zero value and ok is false.">
+```text
+received 1
+received 2
+received 3
+received 4
+received 5
+after close: 0 false
+```
+</TerminalOutput>
+
+Two rules keep this safe. Only the sender closes a channel, never the receiver, and sending on a closed channel panics. Also, a `range` over a channel nobody closes never ends, which is one of the leak patterns in Uber's post.
+
+### Try it: producer and consumer
+
+The demo below runs one producer and one consumer joined by a channel. Switch between `make(chan int)` and a buffered channel, and make either side slow. Watch where the producer spends its time.
+
+<GoProducerConsumerDemo />
+
+With an unbuffered channel and a slow consumer, the producer waits at every send. A buffer lets it run ahead until the buffer is full, and then it waits anyway. A buffer smooths out short bursts. It cannot fix a consumer that is slower than the producer for good.
+
+## select: wait on several channels
+
+`select` looks like a `switch`, but each `case` is a channel operation. It blocks until one case can proceed and runs that one. If several are ready it picks one at random. Its most common job is racing real work against a timer: `time.After(d)` returns a channel that receives a value after `d` has passed.
+
+```go
+package main
+
+import (
+	"fmt"
+	"time"
+)
+
+func slowSquare(n int) <-chan int {
+	out := make(chan int)
+	go func() {
+		time.Sleep(time.Duration(n) * 100 * time.Millisecond)
+		out <- n * n
+	}()
+	return out
+}
+
+func main() {
+	for _, n := range []int{1, 5} {
+		select {
+		case v := <-slowSquare(n):
+			fmt.Println("square of", n, "is", v)
+		case <-time.After(300 * time.Millisecond):
+			fmt.Println("square of", n, "timed out")
+		}
+	}
+}
+```
+
+`<-chan int` as a return type means "a channel you can only receive from". The caller cannot send on it or close it, which makes ownership clear.
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="The 100 ms job finishes before the 300 ms timer. The 500 ms job does not, so main gives up on it. The goroutine behind the 500 ms job is still alive afterwards, and a later section comes back to it.">
+```text
+square of 1 is 1
+square of 5 timed out
+```
+</TerminalOutput>
+
+A `select` with a `default` case never blocks: if no channel is ready, `default` runs at once. That is useful for checking a channel without waiting, as the next section does. For timeouts that cross many function calls, Go has a better tool than `time.After`, which [post 8](/blog/go-context-timeouts-mutexes/) covers.
+
+## Notification channels
+
+Sometimes a channel carries no data, only the fact that something happened: "stop", "connected", "ready". Go's habit for that is a channel of empty structs, `chan struct{}`. An empty struct takes zero bytes, and the type tells every reader that the content means nothing, only the arrival does. A `chan bool` leaves them guessing what `false` would mean.
+
+The usual way to send the signal is to close the channel, because closing wakes every receiver at once, however many there are:
+
+```go
+package main
+
+import (
+	"fmt"
+	"time"
+)
+
+func main() {
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+
+	go func() {
+		defer close(stopped)
+		for n := 1; ; n++ {
+			select {
+			case <-done:
+				fmt.Println("worker: told to stop")
+				return
+			default:
+				fmt.Println("worker: tick", n)
+				time.Sleep(50 * time.Millisecond)
+			}
+		}
+	}()
+
+	time.Sleep(120 * time.Millisecond)
+	close(done)
+	<-stopped
+	fmt.Println("main: worker has exited")
+}
+```
+
+The worker ticks until `done` is closed. `main` then waits on a second channel, `stopped`, which the worker closes as it exits. Asking a goroutine to stop does not tell you it has stopped, which is why `main` waits.
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Three ticks fit into 120 ms. The exact count depends on timing, so another run could show two or four.">
+```text
+worker: tick 1
+worker: tick 2
+worker: tick 3
+worker: told to stop
+main: worker has exited
+```
+</TerminalOutput>
+
+## Every goroutine needs a way to stop
+
+Starting a goroutine costs one keyword, so it is easy to forget that something must also end it. A goroutine that never ends is a leak, like an unclosed file, with a stack and whatever it holds. The Go blog is blunt about it: "Goroutines are not garbage collected; they must exit on their own."
+
+Uber's leaks followed a few patterns. The one in the `select` example above is the "timeout leak": the caller gives up after the timer, returns, and the helper goroutine later tries to send its answer to a channel nobody reads. Here is that shape in a function we call 1,000 times:
+
+```go
+package main
+
+import (
+	"fmt"
+	"runtime"
+	"time"
+)
+
+// lookup waits at most 1ms for a slow answer.
+func lookup() int {
+	ch := make(chan int)
+	go func() {
+		time.Sleep(10 * time.Millisecond) // pretend this is a slow call
+		ch <- 42                          // blocks forever if nobody receives
+	}()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(time.Millisecond):
+		return -1 // gave up; the goroutine above is now stuck
+	}
+}
+
+func main() {
+	for i := 0; i < 1000; i++ {
+		lookup()
+	}
+	time.Sleep(100 * time.Millisecond)
+	fmt.Println("goroutines:", runtime.NumGoroutine())
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Every call that timed out left one goroutine behind, stuck on its send forever. 1,000 calls, 1,001 goroutines: the extra one is main.">
+```text
+goroutines: 1001
+```
+</TerminalOutput>
+
+No error, no panic. The program runs, and memory climbs. The fix for this particular shape is one line: give the channel room for one value, so the late send completes and the goroutine can exit.
+
+```go
+ch := make(chan int, 1) // room for one value, so the send never blocks
+```
+
+With that change the same program, with `lookup` otherwise unchanged, prints:
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="The late answer goes into the buffer, nobody reads it, and the goroutine exits. Only main is left.">
+```text
+goroutines: 1
+```
+</TerminalOutput>
+
+This is the case where a buffer of 1 earns its place. Uber's post suggests the same fix for the "premature return" pattern. Other exits follow the same rule, and you have seen them already:
+
+- The goroutine reads from a channel in a `range` loop, and something closes the channel.
+- The goroutine watches a `done` channel in a `select`, and someone closes it.
+- The goroutine does finite work, and a `WaitGroup` tells the parent when it is done.
+
+Before you write `go`, finish the sentence "this goroutine ends when ...". If you cannot, stop. And if the goroutine holds resources, such as a connection or a file, make the parent wait until it has actually finished, as `main` did with `stopped`. Merely telling it to stop leaves a gap: the program can exit before the cleanup runs.
+
+Since Go 1.27 the runtime can also help you find these. The release notes describe a new `goroutineleak` profile, available through `runtime/pprof` and at the `/debug/pprof/goroutineleak` HTTP endpoint, that reports goroutines blocked forever.
+
+## Channel or mutex?
+
+Both are tools for goroutines that touch the same data, and Go does not ask you to pick one for everything. A good rule of thumb: use a channel when goroutines need to coordinate, hand work or ownership to the next step, or signal an event. Use a mutex (a lock) when several goroutines read and update the same shared value, such as a counter or a cache. A channel moves data between goroutines. A mutex protects data they all reach. Locks, and the "data race" bugs they prevent, are the subject of [post 8](/blog/go-context-timeouts-mutexes/).
+
+### Coming later in the series
+
+Cancellation and deadlines with `context`, and mutexes, come in [post 8](/blog/go-context-timeouts-mutexes/). Worker pools and pipelines built from these pieces come in [post 9](/blog/go-concurrency-patterns-worker-pools-pipelines/), and how the runtime places goroutines on threads comes in the deep dive named above.
+
+## Key takeaways
+
+- `go f()` starts a goroutine of about 2 KB of stack. When `main` returns, the program exits, whether goroutines are done or not.
+- Wait for goroutines with a `sync.WaitGroup`: `Add` before `go`, `Done` at the end of each goroutine, `Wait` in the parent.
+- An unbuffered channel makes sender and receiver meet. A buffered channel decouples them until it is full. Start unbuffered, or with a size of 1, and explain any other number.
+- The sender closes a channel. `for v := range ch` ends when it is closed and empty, and a receive from a closed channel returns the zero value with `ok` false.
+- `select` waits on several channels, and `default` makes it non-blocking. Signal without data with `chan struct{}` and `close`.
+- Every goroutine needs an exit you can name. A goroutine blocked forever on a channel is a leak, and no error will tell you.
+
+## Review questions
+
+1. Your program starts a goroutine to log a line and then `main` returns, but the line never appears. Why, and which two tools fix it? (See "Starting a goroutine".)
+2. What is the difference between `make(chan int)` and `make(chan int, 1)` for a sender with no receiver ready? (See "Channels".)
+3. A `for v := range ch` loop never finishes. What is the most likely cause? (See "Closing a channel and ranging over it".)
+4. Why is `chan struct{}` a better choice than `chan bool` for a stop signal, and why close the channel instead of sending on it? (See "Notification channels".)
+5. A function races a goroutine against `time.After` and returns on timeout. What happens to the goroutine, and how do you fix it? (See "Every goroutine needs a way to stop".)
+
+</En>
+
+<Vi>
+
+<Figure src={heroBarista} alt="Một nhân viên pha chế ở quầy cà phê đang nén cà phê xay vào tay cầm máy, khách đứng chờ" caption="Một người pha chế, nhiều việc: nhận đơn, xay, pha shot, đánh sữa. Làm nhiều việc lần lượt, có chỗ trao tay rõ ràng giữa các việc, chính là concurrency." sourceTitle="Wikimedia Commons: Barista prepares espresso at coffee shop.jpg (CC BY 2.0, Shixart1985)" sourceUrl="https://commons.wikimedia.org/wiki/File:Barista_prepares_espresso_at_coffee_shop.jpg" />
+
+> "Concurrency là xử lý nhiều việc cùng lúc về mặt cấu trúc. Parallelism là thực sự làm nhiều việc cùng một lúc."
+> &mdash; *Rob Pike*, trích trên The Go Blog
+
+### Một service ngày càng phình, và những goroutine không bao giờ thoát
+
+Năm 2022 Uber công bố cách họ săn goroutine leak trên production. Ở một service, công cụ của họ báo 10 goroutine leak nghiêm trọng, trong đó có 1 báo nhầm. Chỉ sửa 2 trong số đó, bộ nhớ đỉnh của service giảm 2,5 lần và 5 lần, và chủ service hạ yêu cầu bộ nhớ container xuống 25%. Không ai viết một vòng lặp chạy mãi một cách lộ liễu. Mỗi chỗ leak là một goroutine đang chờ một channel mà không còn ai dùng đến.
+
+Câu chuyện này cần hai từ trước đã. Goroutine là đơn vị công việc chạy đồng thời của Go: bạn bắt đầu nó bằng từ khóa `go`, và nó chạy song song với đoạn code đã khởi động nó. Channel là một đường ống để các goroutine trao giá trị cho nhau. Bài này dạy cả hai, thêm `select` (chờ nhiều channel cùng lúc), và kết bằng quy tắc lẽ ra đã ngăn được lỗi của Uber: mỗi goroutine phải có đường để dừng.
+
+<Callout type="note" title="TL;DR">
+`go f()` chạy `f` như một goroutine, tốn vài kilobyte chứ không phải một thread. Dùng `sync.WaitGroup` để chờ cả nhóm. Dùng channel để chuyển giá trị hoặc tín hiệu giữa các goroutine. Channel không buffer bắt bên gửi và bên nhận gặp nhau. Channel có buffer tách hai bên ra cho đến khi đầy. `close` báo cho bên nhận rằng không còn giá trị nào nữa. `select` chờ nhiều channel. Trước khi viết `go`, hãy biết goroutine đó sẽ kết thúc thế nào.
+</Callout>
+
+## Quen Java, Python hay JavaScript
+
+Đây là bảng đối chiếu nhanh từ các công cụ concurrency bạn đã quen sang Go.
+
+| Bạn muốn | Java | Python | JavaScript | Go |
+|---|---|---|---|---|
+| Chạy một tác vụ song song với tác vụ hiện tại | `new Thread(...)` hoặc executor | `threading.Thread` hoặc `asyncio.create_task` | `Promise` hoặc hàm `async` | `go f()` |
+| Chờ cả nhóm tác vụ | `CountDownLatch`, `invokeAll` | `join()`, `asyncio.gather` | `Promise.all` | `sync.WaitGroup` |
+| Chuyển dữ liệu cho tác vụ khác | `BlockingQueue` | `queue.Queue`, `asyncio.Queue` | callback, `await` | channel: `ch <- v`, `v := <-ch` |
+| Chờ nhiều thứ, lấy cái xong đầu tiên | `CompletableFuture.anyOf` | `asyncio.wait(FIRST_COMPLETED)` | `Promise.race` | `select` |
+| Chi phí mặc định của một tác vụ | một OS thread, mặc định 1 MB stack trên Linux x64 | một OS thread hoặc coroutine | một promise | khoảng 2 KB stack |
+
+Hai khác biệt quan trọng nhất. Goroutine không phải hàm `async`: không có `await`, không có chuyện hàm bị "nhuộm màu", nên code chặn bình thường vẫn chạy được bên trong. Và goroutine không có handle. Bạn không thể giết nó từ bên ngoài, nên nó phải tự kết thúc.
+
+<Concepts>
+
+- **Goroutine**: một hàm chạy đồng thời, bắt đầu bằng `go`. Nhẹ hơn OS thread rất nhiều.
+- **Channel**: đường ống có kiểu giữa các goroutine, viết là `chan int`. Gửi bằng `ch <- v`, nhận bằng `<-ch`.
+- **`select`**: giống `switch` nhưng cho channel. Nó chờ cho đến khi một case chạy được.
+
+</Concepts>
+
+---
+
+## Concurrency và parallelism
+
+Concurrency là cách chương trình được tổ chức: các bước độc lập phối hợp với nhau. Parallelism là cách nó chạy: nhiều bước thực sự chạy cùng một thời điểm trên các nhân CPU khác nhau. Bạn có thể có cái đầu mà không có cái sau, và cái đầu làm cho cái sau trở nên khả thi.
+
+Blog của Go nói điều này qua câu trích ở đầu bài. Quán cà phê cho thấy sự khác nhau. Một người pha chế nhận đơn, rồi xay, rồi pha là tuần tự. Chia việc thành các vai (người nhận đơn, người xay, máy pha) nối với nhau bằng một hàng đợi, và quán đã là concurrent, kể cả khi chỉ có một người đổi vai liên tục. Thuê thêm một người xay thì bước xay giờ chạy song song. Cấu trúc không đổi, chỉ cách chạy đổi. Goroutine và channel là công cụ của Go cho phần cấu trúc. Việc nó có chạy song song hay không phụ thuộc máy có bao nhiêu nhân CPU, và runtime của Go lo phần đó cho bạn.
+
+## Bắt đầu một goroutine
+
+Đặt `go` trước một lời gọi hàm và lời gọi đó chạy đồng thời. Bên gọi không chờ nó. Đây là chương trình nhỏ nhất cho thấy cái bẫy:
+
+```go
+package main
+
+import "fmt"
+
+func main() {
+	go fmt.Println("hello from the goroutine")
+	fmt.Println("main is done")
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Goroutine không in được gì. Khi main kết thúc, cả chương trình thoát, và nó không chờ các goroutine còn đang chạy. Ba lần chạy đều ra đúng kết quả này.">
+```text
+main is done
+```
+</TerminalOutput>
+
+Vậy `main` cần một cách để chờ. Công cụ chuẩn là `sync.WaitGroup`: một bộ đếm. Bạn cộng một trước khi bắt đầu mỗi goroutine, mỗi goroutine gọi `Done` khi xong, và `Wait` chặn cho đến khi bộ đếm về 0.
+
+```go
+package main
+
+import (
+	"fmt"
+	"sync"
+)
+
+func main() {
+	var wg sync.WaitGroup
+	for i := 1; i <= 3; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			fmt.Println("worker", i)
+		}()
+	}
+	wg.Wait()
+	fmt.Println("all workers finished")
+}
+```
+
+`go func() { ... }()` khai báo một hàm ẩn danh và gọi ngay tại chỗ, đó là cách khởi động goroutine từ nhiều dòng code ([bài 5](/blog/go-errors-defer-panic/) giải thích cú pháp này ở phần closure). `defer wg.Done()` chạy khi goroutine trả về, kể cả khi thoát sớm (`defer` được giải thích ở [bài 2](/blog/go-variables-types-pointers-functions/)). Từ Go 1.22, mỗi vòng lặp có `i` riêng, nên mỗi worker in đúng số của mình.
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Một lần chạy thật. Thứ tự ba worker không cố định: hai lần chạy khác cũng ra 3, 2, 1. Đừng viết code phụ thuộc vào thứ tự các goroutine chạy.">
+```text
+worker 3
+worker 1
+worker 2
+all workers finished
+```
+</TerminalOutput>
+
+Đặt `wg.Add(1)` trước câu lệnh `go`, không đặt bên trong goroutine. Nếu đặt bên trong, `Wait` có thể chạy tới trước mọi `Add` và trả về quá sớm.
+
+### Vì sao goroutine rẻ
+
+Một thread Java mặc định giữ chỗ 1 MB stack trên Linux x64 (giá trị mặc định của `-Xss` trong tài liệu Oracle). Goroutine bắt đầu với stack khoảng 2 KB và lớn thêm khi cần, nên bạn khởi động được nhiều hơn hẳn. Chương trình này khởi động 100.000 goroutine cùng chờ trên một channel, và đo chi phí:
+
+```go
+package main
+
+import (
+	"fmt"
+	"runtime"
+	"sync"
+	"time"
+)
+
+func main() {
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	const n = 100_000
+	block := make(chan struct{})
+	var wg sync.WaitGroup
+	start := time.Now()
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-block
+		}()
+	}
+	elapsed := time.Since(start)
+	runtime.ReadMemStats(&after)
+	fmt.Println("goroutines:", runtime.NumGoroutine())
+	fmt.Println("started in:", elapsed)
+	fmt.Println("stack bytes per goroutine:", (after.StackInuse-before.StackInuse)/n)
+	close(block)
+	wg.Wait()
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="100.000 goroutine khởi động trong chưa đầy 100 ms, mỗi cái khoảng 2 KB stack. Thời gian phụ thuộc máy của bạn và đổi theo từng lần chạy.">
+```text
+goroutines: 100001
+started in: 86.596ms
+stack bytes per goroutine: 2049
+```
+</TerminalOutput>
+
+Goroutine thừa ra là chính `main`. Nhỏ không có nghĩa là miễn phí: 100.000 goroutine giữ 200 MB stack ở đây, và một goroutine còn có thể giữ bộ nhớ heap, kết nối và file. Cách runtime xếp chúng lên các thread được nói ở rất sau trong series, trong [bài về scheduler](/blog/go-concurrency-scheduler-channels-context-mutexes/).
+
+## Channel
+
+Channel mang các giá trị cùng một kiểu từ goroutine này sang goroutine khác. Bạn tạo bằng `make`, gửi bằng `ch <- value`, nhận bằng `<-ch`. Gửi và nhận cũng đồng bộ hóa: chúng bắt các goroutine chờ nhau, và đó là mục đích.
+
+```go
+package main
+
+import "fmt"
+
+func main() {
+	ch := make(chan string)
+	go func() {
+		ch <- "ping"
+	}()
+	msg := <-ch
+	fmt.Println("got:", msg)
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="main bị chặn ở lệnh nhận cho đến khi goroutine gửi. Không cần WaitGroup: chính lệnh nhận là việc chờ.">
+```text
+got: ping
+```
+</TerminalOutput>
+
+### Không buffer: bên gửi và bên nhận gặp nhau
+
+`make(chan string)` không có chỗ chứa. Lệnh gửi bị chặn cho đến khi có goroutine khác sẵn sàng nhận, và lệnh nhận bị chặn cho đến khi có goroutine khác gửi. Hai bên gặp nhau, giá trị chuyển qua, cả hai chạy tiếp. Nhờ cuộc gặp đó, channel không buffer cũng là một điểm đồng bộ: khi lệnh gửi xong, bạn biết bên nhận đã có giá trị.
+
+Điều đó cũng có nghĩa là gửi mà không ai ở đầu kia thì chờ mãi. Nếu mọi goroutine đều kẹt như vậy, Go phát hiện và dừng chương trình:
+
+```go
+package main
+
+import "fmt"
+
+func main() {
+	ch := make(chan string)
+	ch <- "ping"
+	fmt.Println(<-ch)
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Chỉ là vài dòng đầu của báo cáo crash. Lệnh gửi ở dòng 7 không bao giờ xong, vì goroutine duy nhất có thể nhận lại đang kẹt ở lệnh gửi.">
+```text
+fatal error: all goroutines are asleep - deadlock!
+
+goroutine 1 [chan send]:
+main.main()
+```
+</TerminalOutput>
+
+Bộ phát hiện này chỉ kêu khi mọi goroutine đều bị chặn. Trong server thật, các goroutine khác vẫn chạy, nên một goroutine bị kẹt thì im lặng. Đó là cách leak ẩn mình.
+
+### Có buffer: hàng đợi có giới hạn
+
+`make(chan int, 2)` có chỗ cho hai giá trị. Lệnh gửi chỉ bị chặn khi buffer đầy, lệnh nhận chỉ bị chặn khi buffer rỗng. `len` cho biết có bao nhiêu giá trị đang chờ, `cap` cho biết sức chứa.
+
+```go
+package main
+
+import "fmt"
+
+func main() {
+	ch := make(chan int, 2)
+	ch <- 1
+	ch <- 2
+	fmt.Println("len:", len(ch), "cap:", cap(ch))
+	fmt.Println(<-ch, <-ch)
+	ch <- 3
+	ch <- 4
+	ch <- 5
+	fmt.Println("never printed")
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Hai lệnh gửi vừa chỗ và hai giá trị ra đúng thứ tự. Sau khi buffer cạn, 3 và 4 lại vừa, còn lệnh gửi 5 thấy buffer đầy mà không ai nhận: deadlock. Báo cáo crash được cắt còn dòng đầu.">
+```text
+len: 2 cap: 2
+1 2
+fatal error: all goroutines are asleep - deadlock!
+```
+</TerminalOutput>
+
+Buffer nên lớn cỡ nào? Channel có buffer không bắt hai bên gặp nhau, nên nó cho bạn việc truyền dữ liệu mà không có sự đồng bộ của channel không buffer. Nó còn có thể giấu deadlock một lúc, cho đến khi buffer đầy. *100 Go Mistakes* khuyên bắt đầu bằng channel không buffer, hoặc buffer 1 nếu cần, và chỉ chọn cỡ lớn hơn khi có lý do nói được, như mỗi worker trong pool một chỗ, hoặc giới hạn số request đồng thời. Một số tùy tiện như `make(chan int, 40)` đáng có một dòng comment giải thích vì sao là 40.
+
+### Đóng channel và range qua channel
+
+Bên sản xuất nói "tôi xong rồi" bằng `close(ch)`. Bên nhận khi đó lấy hết phần còn lại rồi dừng. `for v := range ch` làm đúng việc đó: nó nhận cho đến khi channel đã đóng và rỗng. Nhận từ channel đã đóng không bao giờ bị chặn, và dạng `v, ok := <-ch` cho biết giá trị có thật hay không.
+
+```go
+package main
+
+import "fmt"
+
+func main() {
+	ch := make(chan int)
+	go func() {
+		for i := 1; i <= 5; i++ {
+			ch <- i
+		}
+		close(ch)
+	}()
+	for v := range ch {
+		fmt.Println("received", v)
+	}
+	v, ok := <-ch
+	fmt.Println("after close:", v, ok)
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Vòng lặp tự kết thúc khi channel được đóng. Sau đó, lệnh nhận trả về giá trị zero và ok là false.">
+```text
+received 1
+received 2
+received 3
+received 4
+received 5
+after close: 0 false
+```
+</TerminalOutput>
+
+Hai quy tắc giữ chuyện này an toàn. Chỉ bên gửi đóng channel, không bao giờ bên nhận, và gửi vào channel đã đóng gây panic. Ngoài ra, `range` qua một channel không ai đóng sẽ không bao giờ kết thúc, đó là một trong các kiểu leak trong bài của Uber.
+
+### Thử xem: producer và consumer
+
+Demo bên dưới chạy một producer và một consumer nối với nhau bằng một channel. Chuyển giữa `make(chan int)` và channel có buffer, và làm chậm một bên. Hãy xem producer tốn thời gian ở đâu.
+
+<GoProducerConsumerDemo />
+
+Với channel không buffer và consumer chậm, producer chờ ở mỗi lần gửi. Buffer cho phép nó chạy trước cho đến khi buffer đầy, rồi nó vẫn phải chờ. Buffer làm êm các đợt dồn ngắn. Nó không cứu được consumer chậm hơn producer lâu dài.
+
+## select: chờ nhiều channel
+
+`select` trông giống `switch`, nhưng mỗi `case` là một thao tác channel. Nó chặn cho đến khi một case chạy được và chạy case đó. Nếu nhiều case cùng sẵn sàng, nó chọn ngẫu nhiên một. Việc phổ biến nhất của nó là cho công việc thật đua với một bộ đếm giờ: `time.After(d)` trả về một channel nhận giá trị sau khi `d` trôi qua.
+
+```go
+package main
+
+import (
+	"fmt"
+	"time"
+)
+
+func slowSquare(n int) <-chan int {
+	out := make(chan int)
+	go func() {
+		time.Sleep(time.Duration(n) * 100 * time.Millisecond)
+		out <- n * n
+	}()
+	return out
+}
+
+func main() {
+	for _, n := range []int{1, 5} {
+		select {
+		case v := <-slowSquare(n):
+			fmt.Println("square of", n, "is", v)
+		case <-time.After(300 * time.Millisecond):
+			fmt.Println("square of", n, "timed out")
+		}
+	}
+}
+```
+
+Kiểu trả về `<-chan int` nghĩa là "channel mà bạn chỉ được nhận". Bên gọi không gửi vào hay đóng nó được, nhờ vậy quyền sở hữu rõ ràng.
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Việc 100 ms xong trước bộ đếm 300 ms. Việc 500 ms thì không, nên main bỏ cuộc. Goroutine của việc 500 ms vẫn còn sống sau đó, và một phần sau sẽ quay lại chuyện này.">
+```text
+square of 1 is 1
+square of 5 timed out
+```
+</TerminalOutput>
+
+`select` có nhánh `default` thì không bao giờ chặn: nếu chưa channel nào sẵn sàng, `default` chạy ngay. Cách này tiện để kiểm tra một channel mà không chờ, như phần kế tiếp làm. Với timeout đi qua nhiều lời gọi hàm, Go có công cụ tốt hơn `time.After`, được trình bày ở [bài 8](/blog/go-context-timeouts-mutexes/).
+
+## Notification channel
+
+Đôi khi channel không mang dữ liệu, chỉ mang việc "có chuyện vừa xảy ra": "dừng", "đã kết nối", "sẵn sàng". Thói quen của Go cho trường hợp này là channel của struct rỗng, `chan struct{}`. Struct rỗng chiếm 0 byte, và kiểu này báo mọi người đọc rằng nội dung vô nghĩa, chỉ việc nó đến mới có nghĩa. Một `chan bool` khiến người đọc phải đoán `false` nghĩa là gì.
+
+Cách gửi tín hiệu thông thường là đóng channel, vì đóng đánh thức mọi bên nhận cùng lúc, bao nhiêu bên cũng được:
+
+```go
+package main
+
+import (
+	"fmt"
+	"time"
+)
+
+func main() {
+	done := make(chan struct{})
+	stopped := make(chan struct{})
+
+	go func() {
+		defer close(stopped)
+		for n := 1; ; n++ {
+			select {
+			case <-done:
+				fmt.Println("worker: told to stop")
+				return
+			default:
+				fmt.Println("worker: tick", n)
+				time.Sleep(50 * time.Millisecond)
+			}
+		}
+	}()
+
+	time.Sleep(120 * time.Millisecond)
+	close(done)
+	<-stopped
+	fmt.Println("main: worker has exited")
+}
+```
+
+Worker kêu tick cho đến khi `done` bị đóng. Sau đó `main` chờ trên channel thứ hai, `stopped`, mà worker đóng khi thoát. Bảo một goroutine dừng không cho bạn biết nó đã dừng, nên `main` phải chờ.
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Ba tick vừa trong 120 ms. Số chính xác phụ thuộc thời điểm, nên lần chạy khác có thể ra hai hoặc bốn.">
+```text
+worker: tick 1
+worker: tick 2
+worker: tick 3
+worker: told to stop
+main: worker has exited
+```
+</TerminalOutput>
+
+## Mỗi goroutine cần một đường để dừng
+
+Bắt đầu goroutine chỉ tốn một từ khóa, nên dễ quên rằng cũng phải có thứ kết thúc nó. Goroutine không bao giờ kết thúc là một leak, như file không đóng, với một stack và mọi thứ nó giữ. Blog Go nói thẳng: "Goroutines are not garbage collected; they must exit on their own." (Goroutine không bị dọn rác; chúng phải tự thoát.)
+
+Các leak của Uber theo vài kiểu. Kiểu trong ví dụ `select` ở trên là "timeout leak": bên gọi bỏ cuộc sau bộ đếm giờ, trả về, rồi goroutine phụ về sau cố gửi câu trả lời vào một channel không ai đọc. Đây là hình dạng đó trong một hàm được gọi 1.000 lần:
+
+```go
+package main
+
+import (
+	"fmt"
+	"runtime"
+	"time"
+)
+
+// lookup waits at most 1ms for a slow answer.
+func lookup() int {
+	ch := make(chan int)
+	go func() {
+		time.Sleep(10 * time.Millisecond) // pretend this is a slow call
+		ch <- 42                          // blocks forever if nobody receives
+	}()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(time.Millisecond):
+		return -1 // gave up; the goroutine above is now stuck
+	}
+}
+
+func main() {
+	for i := 0; i < 1000; i++ {
+		lookup()
+	}
+	time.Sleep(100 * time.Millisecond)
+	fmt.Println("goroutines:", runtime.NumGoroutine())
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Mỗi lần gọi bị timeout để lại một goroutine, kẹt mãi ở lệnh gửi. 1.000 lần gọi, 1.001 goroutine: cái thừa là main.">
+```text
+goroutines: 1001
+```
+</TerminalOutput>
+
+Không lỗi, không panic. Chương trình vẫn chạy, và bộ nhớ cứ tăng. Cách sửa cho đúng kiểu này chỉ một dòng: cho channel chỗ chứa một giá trị, để lệnh gửi muộn hoàn tất và goroutine thoát được.
+
+```go
+ch := make(chan int, 1) // room for one value, so the send never blocks
+```
+
+Với thay đổi đó, cùng chương trình, `lookup` giữ nguyên các phần khác, in ra:
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Câu trả lời muộn vào buffer, không ai đọc, và goroutine thoát. Chỉ còn main.">
+```text
+goroutines: 1
+```
+</TerminalOutput>
+
+Đây là trường hợp buffer 1 xứng đáng có mặt. Bài của Uber đề xuất cùng cách sửa cho kiểu "return sớm". Các lối thoát khác theo cùng quy tắc, và bạn đã gặp chúng:
+
+- Goroutine đọc channel trong vòng `range`, và có thứ đóng channel đó.
+- Goroutine theo dõi channel `done` trong `select`, và có ai đó đóng nó.
+- Goroutine làm việc hữu hạn, và `WaitGroup` báo cho bên cha khi nó xong.
+
+Trước khi viết `go`, hãy hoàn thành câu "goroutine này kết thúc khi ...". Nếu không điền được, dừng lại. Và nếu goroutine giữ tài nguyên, như kết nối hay file, hãy làm cho bên cha chờ đến khi nó thực sự xong, như `main` đã làm với `stopped`. Chỉ bảo nó dừng thì còn một khoảng hở: chương trình có thể thoát trước khi dọn dẹp chạy.
+
+Từ Go 1.27, runtime cũng giúp bạn tìm các lỗi này. Ghi chú phát hành mô tả một profile mới tên `goroutineleak`, dùng được qua `runtime/pprof` và ở endpoint HTTP `/debug/pprof/goroutineleak`, báo các goroutine bị chặn vĩnh viễn.
+
+## Channel hay mutex?
+
+Cả hai đều là công cụ cho các goroutine cùng đụng vào một dữ liệu, và Go không bắt bạn chọn một thứ cho mọi việc. Quy tắc ngón tay cái tốt: dùng channel khi các goroutine cần phối hợp, chuyển việc hoặc quyền sở hữu cho bước kế tiếp, hoặc báo một sự kiện. Dùng mutex (một khóa) khi nhiều goroutine cùng đọc và cập nhật một giá trị chung, như bộ đếm hay cache. Channel chuyển dữ liệu giữa các goroutine. Mutex bảo vệ dữ liệu mà tất cả cùng chạm tới. Khóa, và các lỗi "data race" mà chúng ngăn, là chủ đề của [bài 8](/blog/go-context-timeouts-mutexes/).
+
+### Sẽ học ở các bài sau
+
+Hủy việc và deadline bằng `context`, cùng mutex, ở [bài 8](/blog/go-context-timeouts-mutexes/). Worker pool và pipeline xây từ các mảnh này ở [bài 9](/blog/go-concurrency-patterns-worker-pools-pipelines/), còn cách runtime đặt goroutine lên thread ở bài chuyên sâu đã nhắc ở trên.
+
+## Điểm rút ra (Key takeaways)
+
+- `go f()` khởi động một goroutine với khoảng 2 KB stack. Khi `main` kết thúc, chương trình thoát, dù goroutine đã xong hay chưa.
+- Chờ goroutine bằng `sync.WaitGroup`: `Add` trước `go`, `Done` ở cuối mỗi goroutine, `Wait` ở bên cha.
+- Channel không buffer bắt bên gửi và bên nhận gặp nhau. Channel có buffer tách hai bên ra cho đến khi đầy. Bắt đầu bằng không buffer, hoặc cỡ 1, và giải thích mọi con số khác.
+- Bên gửi đóng channel. `for v := range ch` kết thúc khi channel đã đóng và rỗng, và nhận từ channel đã đóng trả về giá trị zero với `ok` là false.
+- `select` chờ nhiều channel, và `default` làm nó không chặn. Báo tín hiệu không kèm dữ liệu bằng `chan struct{}` và `close`.
+- Mỗi goroutine cần một lối thoát gọi được tên. Goroutine bị chặn mãi trên một channel là một leak, và không có lỗi nào báo cho bạn.
+
+## Câu hỏi ôn tập (Review questions)
+
+1. Chương trình khởi động một goroutine để in một dòng log rồi `main` kết thúc, nhưng dòng đó không bao giờ hiện. Vì sao, và hai công cụ nào sửa được? (Xem "Bắt đầu một goroutine".)
+2. `make(chan int)` và `make(chan int, 1)` khác nhau thế nào với bên gửi khi chưa có bên nhận sẵn sàng? (Xem "Channel".)
+3. Vòng `for v := range ch` không bao giờ kết thúc. Nguyên nhân khả dĩ nhất là gì? (Xem "Đóng channel và range qua channel".)
+4. Vì sao `chan struct{}` tốt hơn `chan bool` cho tín hiệu dừng, và vì sao đóng channel thay vì gửi vào nó? (Xem "Notification channel".)
+5. Một hàm cho goroutine đua với `time.After` và trả về khi hết giờ. Goroutine đó chuyện gì xảy ra, và sửa thế nào? (Xem "Mỗi goroutine cần một đường để dừng".)
+
+</Vi>
