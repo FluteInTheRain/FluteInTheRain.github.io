@@ -29,3 +29,8 @@ uv run --python 3.13 --with 'fastapi==0.165.0' --with 'uvicorn[standard]' \
 | `trace_demo.py` | `backend-http-request-lifecycle` | One `/cases/{case_id}` endpoint plus an HTTP middleware printing the ASGI `scope`, the dispatch chain, and the response round trip |
 | `station_timing.py` | `backend-http-request-lifecycle` | Raw-socket walk paying each station of one HTTPS request separately: DNS, TCP, TLS, then the first response bytes |
 | `reuse_timing.py` | `backend-http-request-lifecycle` | First vs second `GET` on one pooled `httpx.Client` connection — what keep-alive buys |
+| `fat_router.py` | `backend-layered-architecture` | The "before": parsing, rules, id generation, storage and response shaping all inside the endpoint functions |
+| `layered_data.py` | `backend-layered-architecture` | The data layer: `CaseRecord` plus `CaseRepository` (a `Protocol` seam) and today's in-memory implementation |
+| `layered_service.py` | `backend-layered-architecture` | The service layer: the case workflow (open → assign → close) and the rules each move must pass, framework-free |
+| `layered_app.py` | `backend-layered-architecture` | The web layer: thin `APIRouter` endpoints, one middleware tracing web → service → data with timings, and the two exception handlers that map domain errors to status codes |
+| `layered_smoke.py` | `backend-layered-architecture` | The payoff: the same service rules driven by plain Python with a fake repository, then with the in-memory one — no server needed |
