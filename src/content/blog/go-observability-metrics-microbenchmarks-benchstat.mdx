@@ -14,7 +14,7 @@ sources:
   - { title: "100 Go Mistakes and How to Avoid Them", author: "Teiva Harsanyi", chapters: "Mistake #89", url: "https://100go.co/" }
   - { title: "Go Issue #14813: cmd/compile: SSA compiler removes code in benchmarks", author: "The Go Authors & Community", url: "https://github.com/golang/go/issues/14813" }
   - { title: "More predictable benchmarking with testing.B.Loop", author: "Junyang Shao (The Go Blog)", url: "https://go.dev/blog/testing-b-loop" }
-  - { title: "Go standard library: src/testing/benchmark.go (go1.27.1)", author: "The Go Authors", url: "https://github.com/golang/go/blob/go1.27.1/src/testing/benchmark.go#L475-L487" }
+  - { title: "Go standard library: src/testing/benchmark.go (go1.27.1)", author: "The Go Authors", url: "https://github.com/golang/go/blob/go1.27.1/src/testing/benchmark.go#L480-L491" }
   - { title: "Package runtime/metrics", author: "The Go Authors", url: "https://pkg.go.dev/runtime/metrics" }
   - { title: "benchstat — statistical comparison of Go benchmarks", author: "The Go Authors", url: "https://pkg.go.dev/golang.org/x/perf/cmd/benchstat" }
   - { title: "Overview & Histograms and Summaries", author: "Prometheus Authors", url: "https://prometheus.io/docs/practices/histograms/" }
@@ -54,7 +54,7 @@ import chronometerImg from '../../assets/blog/go-observability-metrics-microbenc
 
 ### Why fast benchmarks still ship slow code
 
-In [Go issue #14813](https://github.com/golang/go/issues/14813), a benchmark comparing two bit-counting (`popcnt`) implementations looked blazing fast: Go's Static Single Assignment (SSA) compiler inlined the pure helper, saw that nobody used its return value, and deleted the entire calculation. The loop still ran `1,000,000,000` times and printed `PASS`, except it was timing an empty loop counter. Years later, that same class of `b.N` compiler and timer mistakes pushed the Go team to design `testing.B.Loop` for Go 1.24.
+In [Go issue #14813](https://github.com/golang/go/issues/14813), a benchmark comparing two bit-counting (`popcnt`) implementations looked blazing fast: Go's Static Single Assignment (SSA) compiler inlined the pure helper, saw that nobody used its return value, and deleted the entire calculation. The loop still ran `2,000,000,000` times at `0.41 ns/op` and printed `PASS`, except it was timing an empty loop counter. Years later, that same class of `b.N` compiler and timer mistakes pushed the Go team to design `testing.B.Loop` for Go 1.24.
 
 Functional tests give you a clear pass or fail because `2 + 2` returns `4` even if your laptop fan is spinning or Slack is syncing. Performance numbers have no such shield. Averages smear away p99 pauses, container OOM kills watch OS pages that Go's heap counters miss, CPU thermal boost swings single benchmark runs by double digits, and a microbenchmark of one isolated function sees zero TCP sockets or mutex contention.
 
@@ -67,7 +67,7 @@ Instrument services with **RED** (Rate, Errors, Duration histograms) and resourc
 This post builds directly on three earlier parts of the series:
 
 - [Go testing](/blog/go-testing-table-tests/): `go test`, `_test.go` files, table-driven subtests, and `httptest` in-memory HTTP tests.
-- [Go efficiency workflow](/blog/go-efficiency-workflow-raer-tfbo-hardware-memory/): RAER performance budgets, the TFBO (Test, Fix, Benchmark, Optimize) cycle, and stack vs. heap cost.
+- [Go efficiency workflow](/blog/go-efficiency-workflow-raer-tfbo-hardware-memory/): RAER (Resource-Aware Efficiency Requirements) performance budgets, the TFBO (Test, Fix, Benchmark, Optimize) cycle, and stack vs. heap cost.
 - [Go hardware and GC](/blog/go-hardware-cpu-caches-virtual-memory-gc-allocator/): CPU cache lines, `VSS` vs. `RSS`, `madvise(MADV_DONTNEED)`, and `GOGC` / `GOMEMLIMIT`.
 
 </Callout>
@@ -93,7 +93,7 @@ Notice why **Duration** must be a **Histogram**, never a plain average or a Prom
 
 ```go
 // Add RED middleware alongside statusRecorder from the Todo service (Post 10).
-httpDur := prometheus.NewHistogramVec(prometheus.HistogramOpts{
+var httpDur = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 	Name:    "http_request_duration_seconds",
 	Help:    "Request duration per route pattern and status class.",
 	Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.5, 2.0},
@@ -110,7 +110,7 @@ func metricsMiddleware(next http.Handler) http.Handler {
 }
 ```
 
-Watch the label trap inside `metricsMiddleware` above: never stick raw IDs, user emails, or unconstrained error strings into metric labels. Every unique label combination creates a separate time series in both your Go process memory and Prometheus TSDB—turning one route metric into millions of series if traffic hits random `/todos/991823` URLs. Use `r.Pattern` (added on Go 1.22+ `ServeMux`) and keep raw request IDs in logs or sampled traces.
+Watch the label trap inside `metricsMiddleware` above: never stick raw IDs, user emails, or unconstrained error strings into metric labels. Every unique label combination creates a separate time series in both your Go process memory and Prometheus TSDB—turning one route metric into millions of series if traffic hits random `/todos/991823` URLs. Use `r.Pattern` (a `Request` field since Go 1.23, filled in by `ServeMux`) and keep raw request IDs in logs or sampled traces.
 
 | Metric type | What it stores | Safe across pods? | Where it fits in Go |
 | :--- | :--- | :--- | :--- |
@@ -188,6 +188,8 @@ runtime/metrics allocs=20 MiB objects=20 MiB free=0 MiB released=6 MiB
 MemStats        HeapAlloc=20 MiB HeapInuse=20 MiB HeapSys=27 MiB HeapReleased=6 MiB
 ```
 </TerminalOutput>
+
+One trap in that output: `/gc/heap/allocs:bytes` counts every byte allocated since the process started and only grows, while `/memory/classes/heap/objects:bytes` (`HeapAlloc`) is what is alive right now. They match here only because this tiny program allocates once. In a long-running service, alert on the second one.
 
 Notice how checking both layers saves hours during an outage. If `container_memory_working_set_bytes` climbs past `900 MiB` while `go_memstats_heap_alloc_bytes` reads `40 MiB`, hunting through your Go structs wastes time: the RAM sits off-heap in leaked goroutine stacks, Cgo buffers, explicit `mmap` files, or OS file page cache. Conversely, if `HeapInuse` is far larger than `HeapAlloc`, objects fragmented across many 8 KiB spans are pinning memory until those spans empty and the background scavenger calls `madvise` (covered in [Go hardware and GC](/blog/go-hardware-cpu-caches-virtual-memory-gc-allocator/), alongside sizing `GOMEMLIMIT` below the container ceiling).
 
@@ -346,7 +348,7 @@ Inspecting ARM64 assembly (`go test -c -gcflags='-S'`) confirms what happened: `
 
 Go 1.24's **`for b.Loop()`** replaces both `b.ResetTimer()` and manual sink boilerplate for almost all benchmarks. Look straight into Go 1.27.1's `src/testing/benchmark.go` to see its contract:
 
-<GitHubCode repo="golang/go" path="src/testing/benchmark.go" lines="L475-L487" url="https://github.com/golang/go/blob/go1.27.1/src/testing/benchmark.go#L475-L487" caption="Inside Go 1.27.1's testing package: b.Loop() resets the timer on entry, stops it at exit, and wraps body variables in runtime.KeepAlive intrinsics.">
+<GitHubCode repo="golang/go" path="src/testing/benchmark.go" lines="L480-L491" url="https://github.com/golang/go/blob/go1.27.1/src/testing/benchmark.go#L480-L491" caption="Inside Go 1.27.1's testing package: b.Loop() resets the timer on entry, stops it at exit, and wraps body variables in runtime.KeepAlive intrinsics.">
 ```go
 // Loop resets the benchmark timer the first time it is called in a benchmark,
 // so any setup performed prior to starting the benchmark loop does not count
@@ -363,7 +365,7 @@ Go 1.24's **`for b.Loop()`** replaces both `b.ResetTimer()` and manual sink boil
 ```
 </GitHubCode>
 
-Two details in Go 1.27.1 are worth noticing in the numbers above. First, `b.Loop()` adds ~1.4 ns of stack spill and loop-check overhead compared with `GlobalSink` on sub-nanosecond functions, which vanishes once a benchmarked operation takes tens of nanoseconds or more. Second, `for b.Loop()` blocks dead-code elimination of the call's *result*, yet if you pass a local constant right above the loop (`x := 0xdeadbeef; for b.Loop() { popcnt(x) }`), Go's SSA pass can still constant-fold `popcnt(x)` to `46` before `runtime.KeepAlive` runs; vary the input (`x++`) or read it from a package variable when testing pure arithmetic.
+Two details in Go 1.27.1 are worth noticing in the numbers above. First, `b.Loop()` adds ~1.4 ns of stack spill and loop-check overhead compared with `GlobalSink` on sub-nanosecond functions, which vanishes once a benchmarked operation takes tens of nanoseconds or more. Second, `for b.Loop()` blocks dead-code elimination of the call's *result*, yet if you pass a local constant right above the loop (`x := uint64(0xdeadbeef); for b.Loop() { popcnt(x) }`), Go's SSA pass can still constant-fold `popcnt(x)` to `24` before `runtime.KeepAlive` runs; vary the input (`x++`) or read it from a package variable when testing pure arithmetic.
 
 ### 3. Observer effect and CPU cache warming
 
@@ -478,7 +480,7 @@ Look at what reading all three `benchstat` tables reveals immediately: `sec/op` 
 If you want to evaluate latency or memory optimizations reliably, stop trusting single microbenchmark runs on noisy developer laptops—automate reproducible multi-sample runs and macrobenchmarks that mirror real garbage collection, caches, and OS limits.
 </QuoteCard>
 
-Explore compiler dead-code lies, noisy variance, and an archived `Sum4` vs streaming `Sum6` `benchstat` comparison interactively below:
+Explore compiler dead-code lies, noisy variance, and a `benchstat` comparison interactively below. The comparison uses two versions of a function that sums the numbers in a file: `Sum4` reads the whole file with `os.ReadFile`, `Sum6` streams it through an 8 KB buffer:
 
 <GoEffBenchstatSimulatorDemo />
 
@@ -608,7 +610,7 @@ Once a microbenchmark or macrobenchmark proves *which* path violates your budget
 
 ### Vì sao benchmark nhìn nhanh mà lên server vẫn chậm?
 
-Trong [Go issue #14813](https://github.com/golang/go/issues/14813), một bài benchmark so sánh hai hàm đếm bit (`popcnt`) cho ra tốc độ nhanh đến mức khó tin: trình biên dịch SSA của Go đã nội tuyến (inline) hàm thuần túy đó, thấy chẳng ai dùng giá trị trả về, và cắt phăng toàn bộ phép tính. Vòng lặp vẫn chạy đủ `1.000.000.000` lượt rồi báo `PASS`, chỉ có điều nó đang đo... một vòng lặp rỗng. Chính những cái bẫy compiler và timer kiểu đó với `b.N` đã khiến đội ngũ Go thiết kế `testing.B.Loop` từ bản Go 1.24.
+Trong [Go issue #14813](https://github.com/golang/go/issues/14813), một bài benchmark so sánh hai hàm đếm bit (`popcnt`) cho ra tốc độ nhanh đến mức khó tin: trình biên dịch SSA của Go đã nội tuyến (inline) hàm thuần túy đó, thấy chẳng ai dùng giá trị trả về, và cắt phăng toàn bộ phép tính. Vòng lặp vẫn chạy đủ `2.000.000.000` lượt, `0,41 ns/op`, rồi báo `PASS`, chỉ có điều nó đang đo... một vòng lặp rỗng. Chính những cái bẫy compiler và timer kiểu đó với `b.N` đã khiến đội ngũ Go thiết kế `testing.B.Loop` từ bản Go 1.24.
 
 Unit test rất sòng phẳng vì `2 + 2` luôn ra `4` bất kể máy đang bật Slack hay quạt CPU quay ầm ầm. Số đo hiệu năng thì không dễ tính như vậy. Trung bình cộng làm mờ độ trễ đuôi `p99`, Kubernetes OOMKill đếm cả RAM ngoài Go heap, xung nhiệt làm kết quả chạy đơn lẻ dao động hàng chục phần trăm, còn microbenchmark lẻ một hàm thì hoàn toàn không thấy TCP socket hay tranh chấp khóa mutex.
 
@@ -621,7 +623,7 @@ Unit test rất sòng phẳng vì `2 + 2` luôn ra `4` bất kể máy đang b�
 Bài này nối tiếp trực tiếp ba bài nền tảng trước đó trong series:
 
 - [Test trong Go](/blog/go-testing-table-tests/): `go test`, file `_test.go`, table-driven subtest và `httptest`.
-- [Quy trình tối ưu Go](/blog/go-efficiency-workflow-raer-tfbo-hardware-memory/): ngân sách RAER, vòng lặp TFBO (Test, Fix, Benchmark, Optimize) và chi phí stack vs. heap.
+- [Quy trình tối ưu Go](/blog/go-efficiency-workflow-raer-tfbo-hardware-memory/): ngân sách RAER (Resource-Aware Efficiency Requirements), vòng lặp TFBO (Test, Fix, Benchmark, Optimize) và chi phí stack vs. heap.
 - [Phần cứng và GC trong Go](/blog/go-hardware-cpu-caches-virtual-memory-gc-allocator/): CPU cache line, `VSS` vs. `RSS`, `madvise(MADV_DONTNEED)` và tinh chỉnh `GOGC` / `GOMEMLIMIT`.
 
 </Callout>
@@ -647,7 +649,7 @@ Chỗ dễ sập bẫy nhất là cách đo **Duration**: luôn phải dùng **H
 
 ```go
 // Gắn middleware RED cùng statusRecorder từ Todo service (Bài 10).
-httpDur := prometheus.NewHistogramVec(prometheus.HistogramOpts{
+var httpDur = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 	Name:    "http_request_duration_seconds",
 	Help:    "Đo độ trễ theo pattern route và mã HTTP.",
 	Buckets: []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.5, 2.0},
@@ -664,7 +666,7 @@ func metricsMiddleware(next http.Handler) http.Handler {
 }
 ```
 
-Để ý dòng `r.Pattern` ở trên: tuyệt đối đừng nhét ID ngẫu nhiên, email hay chuỗi lỗi thô làm nhãn (label) cho metric. Mỗi giá trị label mới đẻ ra một chuỗi time-series mới nằm lì trong RAM của cả app Go lẫn Prometheus TSDB — đủ để kéo sập exporter nếu traffic gọi hàng triệu `/todos/991823` khác nhau. Hãy gom theo `r.Pattern` (có từ `ServeMux` Go 1.22+) và để ID chi tiết cho log hoặc trace đã lấy mẫu.
+Để ý dòng `r.Pattern` ở trên: tuyệt đối đừng nhét ID ngẫu nhiên, email hay chuỗi lỗi thô làm nhãn (label) cho metric. Mỗi giá trị label mới đẻ ra một chuỗi time-series mới nằm lì trong RAM của cả app Go lẫn Prometheus TSDB — đủ để kéo sập exporter nếu traffic gọi hàng triệu `/todos/991823` khác nhau. Hãy gom theo `r.Pattern` (field của `Request` từ Go 1.23, do `ServeMux` điền vào) và để ID chi tiết cho log hoặc trace đã lấy mẫu.
 
 | Kiểu metric | Bản chất lưu trữ | Cộng gộp nhiều pod? | Dùng chuẩn ở đâu |
 | :--- | :--- | :--- | :--- |
@@ -742,6 +744,8 @@ runtime/metrics allocs=20 MiB objects=20 MiB free=0 MiB released=6 MiB
 MemStats        HeapAlloc=20 MiB HeapInuse=20 MiB HeapSys=27 MiB HeapReleased=6 MiB
 ```
 </TerminalOutput>
+
+Có một cái bẫy trong output trên: `/gc/heap/allocs:bytes` đếm mọi byte đã cấp phát từ lúc tiến trình khởi động và chỉ tăng, còn `/memory/classes/heap/objects:bytes` (`HeapAlloc`) là phần đang sống lúc này. Ở đây hai số bằng nhau chỉ vì chương trình nhỏ này cấp phát đúng một lần. Với service chạy lâu, hãy đặt cảnh báo trên số thứ hai.
 
 Đối chiếu cả hai lớp giúp mình khỏi tìm sai hướng khi trực sự cố. Nếu `container_memory_working_set_bytes` vọt qua `900 MiB` trong khi `go_memstats_heap_alloc_bytes` chỉ quanh quẩn `40 MiB`, đừng mất công soi struct Go — thủ phạm đang nằm ngoài heap ở stack các goroutine bị rò, buffer Cgo, `mmap` hoặc OS page cache. Ngược lại, khi `HeapInuse` lớn hơn hẳn `HeapAlloc`, các object nằm rải rác đang ghim nhiều span 8 KiB khiến RAM chưa giải phóng được tới khi scavenger gọi `madvise` (xem cơ chế trả RAM và đặt ngưỡng `GOMEMLIMIT` ở [Phần cứng và GC trong Go](/blog/go-hardware-cpu-caches-virtual-memory-gc-allocator/)).
 
@@ -900,7 +904,7 @@ Soi mã assembly ARM64 (`go test -c -gcflags='-S'`) thấy rõ rành rành: `Ben
 
 Từ Go 1.24+, **`for b.Loop()`** giải quyết gọn cả hai chuyện `b.ResetTimer()` lẫn bẫy xóa code chết. Nhìn thẳng vào cam kết của nó trong mã nguồn chuẩn Go 1.27.1 (`src/testing/benchmark.go`):
 
-<GitHubCode repo="golang/go" path="src/testing/benchmark.go" lines="L475-L487" url="https://github.com/golang/go/blob/go1.27.1/src/testing/benchmark.go#L475-L487" caption="Bên trong gói testing của Go 1.27.1: b.Loop() tự reset đồng hồ ở đầu, dừng trước cleanup và bọc các biến trong thân vòng lặp bằng intrinsic runtime.KeepAlive.">
+<GitHubCode repo="golang/go" path="src/testing/benchmark.go" lines="L480-L491" url="https://github.com/golang/go/blob/go1.27.1/src/testing/benchmark.go#L480-L491" caption="Bên trong gói testing của Go 1.27.1: b.Loop() tự reset đồng hồ ở đầu, dừng trước cleanup và bọc các biến trong thân vòng lặp bằng intrinsic runtime.KeepAlive.">
 ```go
 // Loop resets the benchmark timer the first time it is called in a benchmark,
 // so any setup performed prior to starting the benchmark loop does not count
@@ -917,7 +921,7 @@ Từ Go 1.24+, **`for b.Loop()`** giải quyết gọn cả hai chuyện `b.Rese
 ```
 </GitHubCode>
 
-Có hai chi tiết nhỏ trên Go 1.27.1 đáng lưu ý từ bảng đo trên. Thứ nhất, `b.Loop()` thêm khoảng ~1,4 ns chi phí spill stack và kiểm tra điều kiện lặp so với `GlobalSink` trên các hàm siêu nhỏ dưới 5 ns — với hàm thực tế vài chục nano-giây trở lên thì mức này không đáng kể. Thứ hai, `for b.Loop()` bảo vệ *kết quả* không bị xóa, nhưng nếu bạn truyền hẳn một hằng số cục bộ ngay trước vòng lặp (`x := 0xdeadbeef; for b.Loop() { popcnt(x) }`), compiler vẫn có thể tính gộp trước `popcnt(x)` thành `46` (constant folding) trước khi `KeepAlive` giữ số `46` đó lại; hãy cho biến đầu vào thay đổi (`x++`) hoặc đọc từ biến package khi đo các hàm số học thuần túy.
+Có hai chi tiết nhỏ trên Go 1.27.1 đáng lưu ý từ bảng đo trên. Thứ nhất, `b.Loop()` thêm khoảng ~1,4 ns chi phí spill stack và kiểm tra điều kiện lặp so với `GlobalSink` trên các hàm siêu nhỏ dưới 5 ns — với hàm thực tế vài chục nano-giây trở lên thì mức này không đáng kể. Thứ hai, `for b.Loop()` bảo vệ *kết quả* không bị xóa, nhưng nếu bạn truyền hẳn một hằng số cục bộ ngay trước vòng lặp (`x := uint64(0xdeadbeef); for b.Loop() { popcnt(x) }`), compiler vẫn có thể tính gộp trước `popcnt(x)` thành `24` (constant folding) trước khi `KeepAlive` giữ số `24` đó lại; hãy cho biến đầu vào thay đổi (`x++`) hoặc đọc từ biến package khi đo các hàm số học thuần túy.
 
 ### 3. Hiệu ứng người quan sát (observer effect) và CPU cache ấm ảo
 
@@ -1032,7 +1036,7 @@ geomean                   4.000        1.000       -75.00%
 Muốn đánh giá trung thực hiệu năng độ trễ hay bộ nhớ, đừng tin một lần chạy microbenchmark lẻ trên laptop đang ồn — hãy tự động hóa các loạt đo nhiều mẫu kèm macrobenchmark sát điều kiện thật của GC, cache và giới hạn hệ điều hành.
 </QuoteCard>
 
-Bạn có thể thử lại các tình huống xóa code chết, nhiễu máy và bảng đối chiếu `Sum4` vs `Sum6` trong mô phỏng tương tác dưới đây:
+Bạn có thể thử lại các tình huống xóa code chết, nhiễu máy và bảng đối chiếu `benchstat` trong mô phỏng tương tác dưới đây. Bảng đối chiếu dùng hai phiên bản của một hàm cộng các số trong file: `Sum4` đọc cả file bằng `os.ReadFile`, còn `Sum6` đọc dần qua bộ đệm 8 KB:
 
 <GoEffBenchstatSimulatorDemo />
 
