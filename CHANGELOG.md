@@ -3,6 +3,14 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-23 — Trang series: Mục lục dùng nhãn của sơ đồ, bỏ dòng mô tả lộ trình "Đọc hết", đổi tên series backend
+
+- **Đã làm (branch `fix/series-page-contents-topics`):** `SeriesContents.astro` lấy tiêu đề mỗi dòng từ `part.topic` (đúng nhãn ô trong sơ đồ đọc phía trên) thay vì title bài viết — áp dụng cho mọi series vì component dùng chung. Xoá `who` của path `full` ở cả 6 series (vd. "Từ byte đầu tiên của request tới bản deploy không downtime."); `SeriesPath.who` thành optional, `SeriesMap.astro` chỉ render dòng `who` khi có.
+- **Ai quyết:** user yêu cầu (title Mục lục khớp sơ đồ; xoá dòng mô tả, áp dụng mọi series). Mở rộng việc đổi tiêu đề Mục lục sang mọi series là AI quyết, vì component dùng chung.
+- **Đổi tên series backend:** "How backend actually works" → **"Backend with Python FastAPI"** / "Backend với Python FastAPI". Tagline, pitch đoạn 2 và credit viết lại: series dạy **cả** nền tảng backend **lẫn** FastAPI (trước đây ghi FastAPI "chỉ là demo"). User quyết; câu chữ tagline/pitch do AI viết.
+- **Kiểm tra:** build 68 pages + 47 test sạch.
+- **Chưa chốt:** spec `docs/superpowers/specs/2026-11-21-backend-series-design.md` vẫn dùng tên cũ và hướng "knowledge-first"; các bài draft 2–4 chưa rà lại theo hướng mới. Title bài viết (frontmatter) giữ nguyên, vẫn hiện ở trang bài, blog index, series card, pager.
+
 ## 2026-11-23 — Wave A series backend: viết bài 2–4 (draft) theo công thức pilot
 
 - **Đã làm (branch `feat/backend-wave-a`, 3 agent song song mỗi bài 1 worktree):** viết 3 bài draft theo plan `docs/superpowers/plans/2026-11-23-backend-posts-2-12.md`. **Bài 2** `backend-rest-api-design`: 5 quyết định REST + audit 2 phút; demo `rest_api.py` (router `/v1/cases`, 201+Location, 404, 204, 405+allow); 6 sơ đồ `BeP02*`; cover Swagger /docs thật; 13 terminal block capture thật. **Bài 3** `backend-validation-schemas`: hook Heartbleed; **DDIA split rule khai báo đúng 1 lần ở intro** + link `/blog/encoding-and-schema-evolution/`, không dạy lại evolution; demo `schemas.py` (Pydantic v2 constraints, 422 có loc/type/msg, response_model filter) + minh chứng 422 sinh ra **trước** handler bằng log; 6 sơ đồ `BeP03*`; cover 422 Swagger thật; hero Ellis Island (NYPL, no known copyright). **Bài 4** `backend-layered-architecture`: fat router vs web→service→data; demo 5 file additive (`fat_router` + `layered_data/service/app/smoke`), log trace theo tầng, 409 byte-đôi giữa hai kiến trúc; 5 sơ đồ `BeP04*`; hero bếp nhà hàng 1942. Sách Lubanovic không còn trong repo → cite chapter theo map spec, nội dung bám primary docs (MDN/FastAPI/Pydantic/OWASP/12factor/Fowler). 2 icon mới theo convention flow (robot, swagger).

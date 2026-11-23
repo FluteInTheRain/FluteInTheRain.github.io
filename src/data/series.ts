@@ -43,8 +43,8 @@ export interface SeriesPart {
 export interface SeriesPath {
   id: string;
   label: L10n;
-  /** who it is for */
-  who: L10n;
+  /** who it is for; the default "read it all" path leaves it out */
+  who?: L10n;
   /** slugs in reading order */
   order: string[];
 }
@@ -237,10 +237,6 @@ const refactoringUi: Series = {
     {
       id: 'full',
       label: { en: 'Read it all', vi: 'Đọc trọn bộ' },
-      who: {
-        en: 'You have an evening or two and want the whole system, in the order it builds up.',
-        vi: 'Bạn có một hai buổi tối và muốn nắm cả hệ thống, theo đúng thứ tự xây dần.',
-      },
       order: [
         'design-before-you-prompt',
         'visual-hierarchy-rank-before-you-style',
@@ -545,10 +541,6 @@ const ddia: Series = {
     {
       id: 'full',
       label: { en: 'Read it all', vi: 'Đọc trọn bộ' },
-      who: {
-        en: 'You want the whole picture, from one disk up to systems built from logs.',
-        vi: 'Bạn muốn nắm cả bức tranh, từ một ổ đĩa tới hệ thống dựng từ log.',
-      },
       order: Object.values(D),
     },
     {
@@ -905,10 +897,6 @@ const golang: Series = {
     {
       id: 'full',
       label: { en: 'Read it all (20 parts)', vi: 'Đọc trọn bộ (20 bài)' },
-      who: {
-        en: 'Climb the whole ladder from your first Go program to concurrency, runtime traps, profiling, and interview prep.',
-        vi: 'Đi trọn lộ trình từ chương trình Go đầu tiên qua concurrency, bẫy runtime, tối ưu số đo tới ôn phỏng vấn.',
-      },
       order: [
         G.basics, G.types, G.collections, G.structs, G.errors, G.testing,
         G.goroutines, G.context, G.concurrencyPatterns, G.httpService,
@@ -1169,10 +1157,6 @@ const stocksBasics: Series = {
     {
       id: 'full',
       label: { en: 'Read it all', vi: 'Đọc trọn bộ' },
-      who: {
-        en: 'You have an evening or two and want the whole picture, in the order it builds up.',
-        vi: 'Bạn có một hai buổi tối và muốn thấy bức tranh trọn vẹn, theo đúng thứ tự xây dần.',
-      },
       order: [S.ownership, S.account, S.orders, S.settlement, S.dividends, S.statements, S.ratios, S.macro, S.risk, S.plan],
     },
     {
@@ -1214,13 +1198,13 @@ const B = {
 const backend: Series = {
   id: 'backend',
   title: {
-    en: 'How backend actually works',
-    vi: 'Hiểu đúng bản chất Backend',
+    en: 'Backend with Python FastAPI',
+    vi: 'Backend với Python FastAPI',
   },
   kicker: { en: 'A 12-part series', vi: 'Series 12 bài' },
   tagline: {
-    en: 'Backend knowledge first, with Python and FastAPI as the running demo — the judgment AI still can’t write for you.',
-    vi: 'Kiến thức backend là chính, Python và FastAPI chỉ là bài demo chạy suốt — phần phán đoán mà AI chưa viết hộ được.',
+    en: 'Backend foundations and FastAPI, learned together: each idea, then how FastAPI does it — the judgment AI still can’t write for you.',
+    vi: 'Nền tảng backend và FastAPI học cùng lúc: hiểu ý tưởng, rồi xem FastAPI làm nó thế nào — phần phán đoán mà AI chưa viết hộ được.',
   },
   pitch: [
     {
@@ -1228,13 +1212,13 @@ const backend: Series = {
       vi: 'AI dựng service FastAPI chỉ trong vài giây. Nhưng nó vẫn POST hết mọi thứ, nhét SQL ngay trong router, chặn event loop bằng lời gọi sync, và không kèm test, log hay timeout — vì backend là phán đoán, không phải cú pháp.',
     },
     {
-      en: 'Each post takes one competence — the request lifecycle, API design, layering, data access, async, auth, caching, testing, observability, performance, deploys — explains the idea, then demonstrates it on a small running Python service you can rebuild yourself.',
-      vi: 'Mỗi bài đi gọn một năng lực — vòng đời request, thiết kế API, phân tầng, truy cập dữ liệu, async, auth, caching, testing, observability, hiệu năng, triển khai — nói rõ ý, rồi demo ngay trên một service Python nhỏ mà bạn có thể tự dựng lại.',
+      en: 'Each post takes one competence — the request lifecycle, API design, layering, data access, async, auth, caching, testing, observability, performance, deploys — explains the backend idea, then builds it with FastAPI on a small running Python service you can rebuild yourself.',
+      vi: 'Mỗi bài đi gọn một năng lực — vòng đời request, thiết kế API, phân tầng, truy cập dữ liệu, async, auth, caching, testing, observability, hiệu năng, triển khai — nói rõ ý tưởng backend, rồi dựng nó bằng FastAPI trên một service Python nhỏ mà bạn có thể tự dựng lại.',
     },
   ],
   credit: {
-    en: 'Backend knowledge demonstrated in Python with FastAPI. FastAPI: Modern Python Web Development (Bill Lubanovic, O’Reilly 2023) is one of the references, alongside MDN, OWASP, the 12-factor app, and official docs.',
-    vi: 'Kiến thức backend minh họa bằng Python với FastAPI. FastAPI: Modern Python Web Development (Bill Lubanovic, O’Reilly 2023) là một trong các tài liệu tham khảo, bên cạnh MDN, OWASP, 12-factor app và tài liệu chính thức.',
+    en: 'Backend foundations and FastAPI, taught side by side. FastAPI: Modern Python Web Development (Bill Lubanovic, O’Reilly 2023) is one of the references, alongside MDN, OWASP, the 12-factor app, and official docs.',
+    vi: 'Nền tảng backend và FastAPI, dạy song song. FastAPI: Modern Python Web Development (Bill Lubanovic, O’Reilly 2023) là một trong các tài liệu tham khảo, bên cạnh MDN, OWASP, 12-factor app và tài liệu chính thức.',
   },
   // The plate is the series' own demo service: the page every FastAPI app gives you for free.
   cover: {
@@ -1415,10 +1399,6 @@ const backend: Series = {
     {
       id: 'full',
       label: { en: 'Read it all', vi: 'Đọc cả 12 bài' },
-      who: {
-        en: 'From the first byte of a request to a zero-downtime deploy.',
-        vi: 'Từ byte đầu tiên của request tới bản deploy không downtime.',
-      },
       order: [B.lifecycle, B.rest, B.validation, B.layering, B.data, B.async, B.auth, B.caching, B.testing, B.observability, B.perf, B.deploy],
     },
     {
@@ -1775,10 +1755,6 @@ const aiTrading: Series = {
     {
       id: 'full',
       label: { en: 'Read it all', vi: 'Đọc hết series' },
-      who: {
-        en: 'From zero to the agent team, in order.',
-        vi: 'Từ số 0 tới đội agent, theo đúng thứ tự.',
-      },
       order: Object.values(AT),
     },
     {
