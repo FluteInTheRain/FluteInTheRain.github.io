@@ -3,6 +3,12 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-23 — Xuất bản bài 2–4 series backend
+
+- **Đã làm (branch `content/publish-backend-2-4`):** flip `draft: true` → `false` cho `backend-rest-api-design`, `backend-validation-schemas`, `backend-layered-architecture`. Build 68 → 71 pages, 47 test pass; không bài nào link tới bài backend chưa xuất bản.
+- **Ai quyết:** user ("Public các bài còn lại").
+- **Chưa chốt:** wave B (bài 5–7) bắt đầu ngay sau entry này.
+
 ## 2026-11-23 — Series backend: lồng ví dụ FastAPI chạy thật vào bài 1–4
 
 - **Đã làm (branch `content/backend-fastapi-framing`):** spec v3 + plan recipe mục 1 ghi quy tắc mới; 4 agent Sonnet (mỗi bài 1 worktree cắt từ nhánh này) viết lại bài 1–4: FastAPI lồng trong bài, **ý nào đụng code thì có ví dụ FastAPI chạy được trong `demo/pNN_*.py` + capture thật**, phần chữ giải thích chính code đó (không có section "In FastAPI" riêng). File demo mới: `p01_raw_asgi.py`, `p02_idempotency.py`, `p02_versions.py`, `p03_boundary.py`, `p04_depends.py`, `p04_override.py` (đã thêm vào `demo/README.md`). Tiêu biểu: bài 2 dựng `Idempotency-Key` bằng `Header()` + `/v1` vs `/v2`; bài 3 handler 422 + `extra="forbid"` + trích `/openapi.json`; bài 4 `Depends` + `dependency_overrides`/`TestClient`.
