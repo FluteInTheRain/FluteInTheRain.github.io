@@ -1,0 +1,1010 @@
+---
+title: "Where the logic lives"
+title_vi: "Logic sống ở đâu"
+description: "The fat router passes every demo and fails every feature: the web → service → data split that keeps rules testable without HTTP and storage swappable — traced live."
+description_vi: "Router béo qua nổi mọi bản demo nhưng gãy ngay ở tính năng thật: tách web → service → data để luật nghiệp vụ chạy được không cần HTTP, và tầng lưu trữ thay được mà không đụng luật."
+date: 2026-11-23
+category: "backend"
+tags: ["backend", "python", "fastapi", "architecture", "layering"]
+cover: "../../assets/blog/backend-layered-architecture/layered-trace-cover.png"
+cover_alt: "Real uvicorn trace of one request through the layered clue.api: web dispatch, service rule, data store, and the 201 response back through the stack with timings"
+draft: true
+sources:
+  - { title: "FastAPI: Modern Python Web Development", author: "Bill Lubanovic", chapters: "Ch. 8, 9", url: "https://www.oreilly.com/library/view/fastapi/9781098135091/" }
+  - { title: "Bigger Applications - Multiple Files", author: "FastAPI docs", url: "https://fastapi.tiangolo.com/tutorial/bigger-applications/" }
+  - { title: "IV. Backing services", author: "The Twelve-Factor App", url: "https://12factor.net/backing-services" }
+  - { title: "Service Layer (Patterns of Enterprise Application Architecture)", author: "Randy Stafford, Martin Fowler", url: "https://martinfowler.com/eaaCatalog/serviceLayer.html" }
+  - { title: "Repository (Patterns of Enterprise Application Architecture)", author: "Edward Hieatt, Rob Mee, Martin Fowler", url: "https://martinfowler.com/eaaCatalog/repository.html" }
+  - { title: "Chef in Marconi's Restaurant on Mulberry Street (Public domain)", author: "Marjory Collins, Office of War Information, 1942", url: "https://commons.wikimedia.org/wiki/File:Chef_in_Marconi%27s_Restaurant_on_Mulberry_Street_preparing_New_Year%27s_dinner_8d23891v.jpg" }
+---
+
+import En from '../../components/mdx/En.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
+import BeP04FatVsLayered from '../../components/mdx/BeP04FatVsLayered.astro';
+import BeP04Belongs from '../../components/mdx/BeP04Belongs.astro';
+import BeP04Direction from '../../components/mdx/BeP04Direction.astro';
+import BeP04OneTrace from '../../components/mdx/BeP04OneTrace.astro';
+import BeP04WhereChangeLands from '../../components/mdx/BeP04WhereChangeLands.astro';
+import heroKitchen from '../../assets/blog/backend-layered-architecture/marconi-kitchen-1942.jpg';
+
+<En>
+
+<Figure src={heroKitchen} alt="A chef in Marconi's Restaurant on Mulberry Street in 1942, working alone at a stove with pots and pans around him, photographed from behind the counter" caption="A restaurant is three rooms with one doorway each. The dining room takes the order and translates it into a ticket — it never touches the pantry. The kitchen turns tickets into dishes; the recipes live here and nowhere else. The pantry stores ingredients; nobody plates a meal inside it. Your service has the same floor plan: web, service, data — and the waiters do not walk into the walk-in fridge." sourceTitle="Wikimedia Commons: Chef in Marconi's Restaurant, 1942" sourceUrl="https://commons.wikimedia.org/wiki/File:Chef_in_Marconi%27s_Restaurant_on_Mulberry_Street_preparing_New_Year%27s_dinner_8d23891v.jpg" />
+
+> "All problems in computer science can be solved by another level of indirection."
+> &mdash; *David Wheeler*
+
+### The hook: a pull request with nothing wrong
+
+Ask an AI to finish the series' little clue.api — open a case, close a case — and it writes this — `demo/fat_router.py`, two endpoints, ~45 lines:
+
+```python
+from fastapi import FastAPI, HTTPException
+
+app = FastAPI(title="clue.api", version="0.4.0")
+
+# Storage and id generation live here too — module-level state.
+CASES: dict[str, dict] = {}
+_next_id = 1
+
+
+@app.post("/cases", status_code=201)
+async def open_case(body: dict) -> dict:
+    # 1. parse + validate
+    title = str(body.get("title", "")).strip()
+    if not title or len(title) > 80:
+        raise HTTPException(status_code=422, detail="title must be 1-80 chars")
+    # 2. business rules and id generation
+    global _next_id
+    case_id = f"C-{_next_id}"
+    _next_id += 1
+    # 3. storage
+    case = {
+        "case_id": case_id,
+        "title": title,
+        "status": "open",
+        "detective": None,
+        "resolution": None,
+    }
+    CASES[case_id] = case
+    # 4. response shaping — same function
+    return case
+
+
+@app.post("/cases/{case_id}/close")
+async def close_case(case_id: str, body: dict) -> dict:
+    case = CASES.get(case_id)  # storage, again
+    if case is None:
+        raise HTTPException(status_code=404, detail=f"no case {case_id}")
+    if case["status"] == "closed":  # rule #1, inline
+        raise HTTPException(status_code=409, detail="case already closed")
+    if case["detective"] is None:  # rule #2, inline
+        raise HTTPException(status_code=409, detail="assign a detective first")
+    # rule #3, mixed into the storage write
+    case["status"] = "closed"
+    case["resolution"] = str(body.get("resolution", "")).strip()
+    return case
+```
+
+It works. `curl` returns 201 with a tidy JSON case; closing before assigning returns a well-mannered 409. You would approve this PR, and you would be right by every line: no line here is wrong. Every line is just in the wrong *place* — parse, rules, ids, storage and response shaping, all one function.
+
+This post is about that place. Four questions:
+
+1. **Why the fat router wins every demo** — and what it costs from the second month on.
+2. **What belongs in each layer** — web, service, data, and the test "which column is this line in?"
+3. **The direction rule** — who may call whom, and the three arrows that are always bugs.
+4. **What the split buys** — rules you can run without a server, storage you can swap without touching rules.
+
+---
+
+## 1. The router that ate the app
+
+First, watch the fat router pass its own demo:
+
+<TerminalOutput command="uvicorn fat_router:app — then: curl POST /cases and POST /cases/C-1/close" label="Python 3.13 · FastAPI 0.165 · captured Nov 2026" caption="Everything real, nothing visible. Two requests in, two statuses out — the log cannot tell you where the rule was checked, because there is no where.">
+```text
+INFO:     Started server process [59280]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:4328 (Press CTRL+C to quit)
+INFO:     127.0.0.1:64936 - "POST /cases HTTP/1.1" 201 Created
+INFO:     127.0.0.1:64937 - "POST /cases/C-1/close HTTP/1.1" 409 Conflict
+```
+</TerminalOutput>
+
+That is the trap: it passes. The rot starts at the first change that isn't an endpoint:
+
+- **A second entrance appears.** A nightly script, a message consumer, a CLI — something else needs to close cases too. The rule "assign a detective first" lives inside `close_case`, so the new caller copies it, or worse, forgets it. Same rule, two homes, drifting.
+- **Checking a rule needs the framework.** To answer "does closing refuse an unassigned case?", you boot uvicorn and curl. The rule is real, but nothing in the codebase can *call* it.
+- **Storage is welded in.** `CASES` is a module dict that the rules read and write inline. Swapping it for a database means editing the same function that holds the rules — with the rules on screen, you will break one.
+
+Fowler's Service Layer pattern page describes the disease in one line: "encoding the logic of the interactions separately in each interface causes a lot of duplication." The fat router is that duplication with one interface so far.
+
+The same six jobs, rehoused:
+
+<BeP04FatVsLayered />
+
+<Callout type="warning" title="The AI habit to break">
+You asked for an endpoint, and AI wrote an application inside it — because the endpoint is the only seam the prompt exposed. When you review generated code, the question is never "does it run?" It runs. The question is: *when the next rule, the next field or the next caller arrives, which file will it edit — and what else lives in that file?*
+</Callout>
+
+---
+
+## 2. Three boxes, one job each
+
+The fix is not a framework or a folder convention; it is an ownership rule. Three boxes, one job each — everything else follows.
+
+<BeP04Belongs />
+
+Here is clue.api, rebuilt as those three files. The data layer first — `demo/layered_data.py`, the whole file:
+
+```python
+from dataclasses import dataclass
+from typing import Protocol
+
+
+@dataclass
+class CaseRecord:
+    case_id: str
+    title: str
+    status: str
+    detective: str | None = None
+    resolution: str | None = None
+
+
+class CaseRepository(Protocol):
+    """The shape of storage, as the service layer sees it."""
+
+    def add(self, record: CaseRecord) -> None: ...
+    def get(self, case_id: str) -> CaseRecord | None: ...
+    def save(self, record: CaseRecord) -> None: ...
+
+
+class InMemoryCaseRepository:
+    """Today's implementation: the records live in one process dict."""
+
+    def __init__(self) -> None:
+        self._cases: dict[str, CaseRecord] = {}
+
+    def add(self, record: CaseRecord) -> None:
+        self._cases[record.case_id] = record
+        print(f"data    | add({record.case_id}) -> in-memory store")
+
+    def get(self, case_id: str) -> CaseRecord | None:
+        print(f"data    | get({case_id}) <- in-memory store")
+        return self._cases.get(case_id)
+
+    def save(self, record: CaseRecord) -> None:
+        self._cases[record.case_id] = record
+        print(f"data    | save({record.case_id}) -> in-memory store")
+```
+
+Two things to notice. `CaseRecord` is a plain dataclass — no ORM, no Pydantic, it is *ours*, the language the middle layer speaks. And `CaseRepository` is a `Protocol`, Python's shape-only interface: anything with `add`, `get` and `save` satisfies it, with no inheritance and no import of this file. Hold that thought for section 4.
+
+The service layer — `demo/layered_service.py`, the whole file. This is the layer you own:
+
+```python
+from layered_data import CaseRecord, CaseRepository
+
+
+class CaseNotFoundError(Exception):
+    """The workflow asked for a case that storage does not have."""
+
+
+class CaseRuleError(Exception):
+    """A rule refused the move — the web layer maps this to a 4xx."""
+
+
+def _trace(msg: str) -> None:
+    print(f"service | {msg}")
+
+
+class CaseService:
+    """The case workflow, rules enforced at every move."""
+
+    def __init__(self, repo: CaseRepository) -> None:
+        self._repo = repo
+        self._next_id = 1
+
+    def open_case(self, title: str) -> CaseRecord:
+        _trace("open_case: the id and the open status are ours to set")
+        case = CaseRecord(case_id=f"C-{self._next_id}", title=title, status="open")
+        self._next_id += 1
+        self._repo.add(case)
+        return case
+
+    def get_case(self, case_id: str) -> CaseRecord:
+        return self._require(case_id)
+
+    def assign(self, case_id: str, detective: str) -> CaseRecord:
+        case = self._require(case_id)
+        _trace(f"assign({case_id}): rule — only an open case can be taken")
+        if case.status == "closed":
+            raise CaseRuleError("a closed case cannot be assigned")
+        case.detective = detective
+        self._repo.save(case)
+        return case
+
+    def close(self, case_id: str, resolution: str) -> CaseRecord:
+        case = self._require(case_id)
+        _trace(f"close({case_id}): rule — a case closes with a detective on it")
+        if case.detective is None:
+            raise CaseRuleError("an unassigned case cannot be closed")
+        case.status = "closed"
+        case.resolution = resolution
+        self._repo.save(case)
+        return case
+
+    def _require(self, case_id: str) -> CaseRecord:
+        case = self._repo.get(case_id)
+        if case is None:
+            raise CaseNotFoundError(f"no case {case_id}")
+        return case
+```
+
+Every rule from the fat router now has one address. "Assign a detective first" is one `if` in one method, raising a domain error — not an HTTP status. The module imports no FastAPI, no HTTP anything; ask it "what does closing mean?" and it answers from its own code.
+
+And the web layer — `demo/layered_app.py`, the only file that imports FastAPI:
+
+```python
+import time
+
+from fastapi import APIRouter, FastAPI, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+
+from layered_data import CaseRecord, InMemoryCaseRepository
+from layered_service import CaseNotFoundError, CaseRuleError, CaseService
+
+
+def _trace(msg: str) -> None:
+    print(f"web     | {msg}")
+
+
+repo = InMemoryCaseRepository()
+service = CaseService(repo)
+
+app = FastAPI(title="clue.api", version="0.4.0")
+router = APIRouter(prefix="/cases", tags=["cases"])
+
+
+@app.middleware("http")
+async def trace_layers(request: Request, call_next):
+    _trace(f"{request.method} {request.url.path} -> dispatch to a handler")
+    started = time.perf_counter()
+    response = await call_next(request)
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    _trace(f"{response.status_code} back through the stack · {elapsed_ms:.2f} ms")
+    return response
+
+
+# Where domain errors become status codes: once, at the edge.
+@app.exception_handler(CaseNotFoundError)
+async def case_not_found(request: Request, exc: CaseNotFoundError) -> JSONResponse:
+    return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+
+@app.exception_handler(CaseRuleError)
+async def rule_refused(request: Request, exc: CaseRuleError) -> JSONResponse:
+    _trace(f"rule refused: {exc}; mapping CaseRuleError -> 409")
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+class OpenBody(BaseModel):
+    title: str
+
+
+class AssignBody(BaseModel):
+    detective: str
+
+
+class CloseBody(BaseModel):
+    resolution: str
+
+
+class CaseOut(BaseModel):
+    case_id: str
+    title: str
+    status: str
+    detective: str | None
+    resolution: str | None
+
+
+def _out(case: CaseRecord) -> CaseOut:
+    return CaseOut(
+        case_id=case.case_id,
+        title=case.title,
+        status=case.status,
+        detective=case.detective,
+        resolution=case.resolution,
+    )
+
+
+@router.post("", status_code=201)
+async def open_case(body: OpenBody) -> CaseOut:
+    _trace("title parsed and validated; asking the service to open the case")
+    return _out(service.open_case(title=body.title))
+
+
+@router.get("/{case_id}")
+async def get_case(case_id: str) -> CaseOut:
+    _trace(f"{case_id} asked for; the service knows what exists")
+    return _out(service.get_case(case_id))
+
+
+@router.post("/{case_id}/assign")
+async def assign(case_id: str, body: AssignBody) -> CaseOut:
+    _trace("case_id and detective parsed; asking the service to assign")
+    return _out(service.assign(case_id=case_id, detective=body.detective))
+
+
+@router.post("/{case_id}/close")
+async def close(case_id: str, body: CloseBody) -> CaseOut:
+    _trace("case_id and resolution parsed; asking the service to close")
+    return _out(service.close(case_id=case_id, resolution=body.resolution))
+
+
+app.include_router(router)
+```
+
+Read the endpoints as a checklist of the web layer's whole job: parse (Pydantic models), ask the service, shape the response (`_out` → `CaseOut`). The `409` never appears in a router — the exception handlers translate domain errors to status codes once, at the edge. (The [lifecycle post](/blog/backend-http-request-lifecycle/) left clue.api as a skeleton whose `/cases/42` answered `open` to every id — there was no storage at all. Now you can see each layer the request crosses, because each one prints its boundary.)
+
+Watch the same three requests from before, this time with the layers talking:
+
+<TerminalOutput command="uvicorn layered_app:app — then: curl POST /cases, POST /cases/C-1/assign, POST /cases/C-1/close" label="Python 3.13 · FastAPI 0.165 · captured Nov 2026" caption="The same behavior as the fat router, but now the log is a map: every request says which layer spoke, in which order, and what came back. Read one request top to bottom and you have read the architecture.">
+```text
+INFO:     Started server process [59389]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:4328 (Press CTRL+C to quit)
+web     | POST /cases -> dispatch to a handler
+web     | title parsed and validated; asking the service to open the case
+service | open_case: the id and the open status are ours to set
+data    | add(C-1) -> in-memory store
+web     | 201 back through the stack · 6.64 ms
+INFO:     127.0.0.1:64983 - "POST /cases HTTP/1.1" 201 Created
+web     | POST /cases/C-1/assign -> dispatch to a handler
+web     | case_id and detective parsed; asking the service to assign
+data    | get(C-1) <- in-memory store
+service | assign(C-1): rule — only an open case can be taken
+data    | save(C-1) -> in-memory store
+web     | 200 back through the stack · 1.20 ms
+INFO:     127.0.0.1:64984 - "POST /cases/C-1/assign HTTP/1.1" 200 OK
+web     | POST /cases/C-1/close -> dispatch to a handler
+web     | case_id and resolution parsed; asking the service to close
+data    | get(C-1) <- in-memory store
+service | close(C-1): rule — a case closes with a detective on it
+data    | save(C-1) -> in-memory store
+web     | 200 back through the stack · 0.61 ms
+INFO:     127.0.0.1:64985 - "POST /cases/C-1/close HTTP/1.1" 200 OK
+```
+</TerminalOutput>
+
+One request, read as a stack:
+
+<BeP04OneTrace />
+
+<Concepts>
+- **Fat router**: an endpoint that parses, validates, decides, stores and responds in one function. Fine in a demo; every later change edits it.
+- **Service layer**: the one home of business rules and workflow, callable from any interface — HTTP today, a queue or a CLI tomorrow.
+- **Repository**: a collection-like interface over storage (`add`, `get`, `save` here). The service asks it for records, never for dicts, SQL or files.
+- **Protocol**: Python's shape-only interface. No base class, no inheritance — any object with the right methods satisfies it, which is what makes the seam a seam.
+</Concepts>
+
+---
+
+## 3. One direction only
+
+Three layers would be decoration without the rule that keeps them honest: **a layer may call the layer below it, and nothing else.** Not sideways, not back up.
+
+<BeP04Direction />
+
+Each red X is a code smell you will actually meet:
+
+- **The router opens the database itself.** Feels efficient — one less hop! Then the next endpoint does it, and the rules that were supposed to guard the write are now a convention, not a guarantee. The hop *was* the rule.
+- **The storage layer invents rules.** An `if` creeps into the repository "just while we're here", and now every caller of the repo gets that rule whether they asked for it or not — including the script you wrote to backfill data, which needed to break it.
+- **The service answers with status codes.** The moment a rule can return 409, it is married to HTTP; your CLI now prints `409` at a detective. Rules should raise *what happened*, and only the edge should decide *how to say it*.
+
+The wiring makes the direction real. `layered_app.py` builds the repository, hands it to `CaseService`, and the routers just *use* it — the two files below never import the one above. FastAPI's own guide for bigger applications leans the same way: split routers into modules, put the shared wiring in one dependencies module, keep the main file simple enough to read in one glance.
+
+Now the payoff of that discipline — a rule refusal, watched from both sides:
+
+<TerminalOutput command="same server — open C-2, then: curl -i -X POST http://127.0.0.1:4328/cases/C-2/close" label="Python 3.13 · FastAPI 0.165 · captured Nov 2026" caption="The rule fires in the service (line 4) and becomes 409 in the web layer's exception handler (line 5) — two files, two jobs, one status code. curl sees the same 409 the fat router returned; the difference is who is allowed to change the rule, and where you would look for it.">
+```text
+web     | POST /cases -> dispatch to a handler
+web     | title parsed and validated; asking the service to open the case
+service | open_case: the id and the open status are ours to set
+data    | add(C-2) -> in-memory store
+web     | 201 back through the stack · 0.55 ms
+INFO:     127.0.0.1:64987 - "POST /cases HTTP/1.1" 201 Created
+web     | POST /cases/C-2/close -> dispatch to a handler
+web     | case_id and resolution parsed; asking the service to close
+data    | get(C-2) <- in-memory store
+service | close(C-2): rule — a case closes with a detective on it
+web     | rule refused: an unassigned case cannot be closed; mapping CaseRuleError -> 409
+web     | 409 back through the stack · 0.51 ms
+INFO:     127.0.0.1:64988 - "POST /cases/C-2/close HTTP/1.1" 409 Conflict
+```
+</TerminalOutput>
+
+The client sees `HTTP/1.1 409` and `{"detail":"an unassigned case cannot be closed"}` — byte-for-byte what the fat router produced. The behavior is identical; the *address* of the rule is not. When product asks "can cases close without a detective?", one person opens one file and answers from the code.
+
+---
+
+## 4. What the split buys
+
+**Rules without a server.** Because the service layer imports no FastAPI, you can drive the whole workflow with plain Python and a fake repository — `demo/layered_smoke.py`:
+
+```python
+from layered_data import CaseRecord, CaseRepository, InMemoryCaseRepository
+from layered_service import CaseRuleError, CaseService
+
+
+class FakeRepository:
+    """Same shape as CaseRepository, none of the storage machinery:
+    it keeps records in a list and counts the saves."""
+
+    def __init__(self) -> None:
+        self.records: list[CaseRecord] = []
+        self.saves = 0
+
+    def add(self, record: CaseRecord) -> None:
+        self.records.append(record)
+
+    def get(self, case_id: str) -> CaseRecord | None:
+        return next((r for r in self.records if r.case_id == case_id), None)
+
+    def save(self, record: CaseRecord) -> None:
+        self.saves += 1
+
+
+def run_scenario(repo: CaseRepository) -> None:
+    service = CaseService(repo)
+    case = service.open_case(title="The missing gnome")
+    print(f"    opened {case.case_id}: {case.title}")
+    try:
+        service.close(case.case_id, resolution="given up")
+    except CaseRuleError as exc:
+        print(f"    close refused -> {exc}")
+    service.assign(case.case_id, detective="wren")
+    case = service.close(case.case_id, resolution="gnome found under the hydrangeas")
+    print(f"    closed {case.case_id}: detective={case.detective}")
+```
+
+<TerminalOutput command="uv run --python 3.13 layered_smoke.py" label="Python 3.13 · no web framework · captured Nov 2026" caption="The whole rule set, exercised in a fifth of a second, with no server, no port, no HTTP. The label is the point: nothing in the top block needed FastAPI. This is what 'testable' means before any test framework shows up.">
+```text
+[1] rules with a fake repository — no FastAPI, no HTTP, no storage
+service | open_case: the id and the open status are ours to set
+    opened C-1: The missing gnome
+service | close(C-1): rule — a case closes with a detective on it
+    close refused -> an unassigned case cannot be closed
+service | assign(C-1): rule — only an open case can be taken
+service | close(C-1): rule — a case closes with a detective on it
+    closed C-1: detective=wren
+    save() calls the fake saw: 2 (nothing real stored)
+
+[2] the same rules with InMemoryCaseRepository — storage swapped, rules unchanged
+service | open_case: the id and the open status are ours to set
+data    | add(C-1) -> in-memory store
+    opened C-1: The missing gnome
+data    | get(C-1) <- in-memory store
+service | close(C-1): rule — a case closes with a detective on it
+    close refused -> an unassigned case cannot be closed
+data    | get(C-1) <- in-memory store
+service | assign(C-1): rule — only an open case can be taken
+data    | save(C-1) -> in-memory store
+data    | get(C-1) <- in-memory store
+service | close(C-1): rule — a case closes with a detective on it
+data    | save(C-1) -> in-memory store
+    closed C-1: detective=wren
+```
+</TerminalOutput>
+
+`FakeRepository` inherits nothing — the `Protocol` from section 2 is the whole reason that works. And notice what scenario [2] proves by existing: the same rules, a different repository, zero changes above the seam.
+
+**Storage becomes a thing you swap.** That is not just test convenience; it is how the service survives its own success. The twelve-factor app treats a database as an *attached resource*: a deploy "should be able to swap out a local MySQL database with one managed by a third party... without any changes to the app's code" — only the handle in config changes. My clue.api is one in-memory dict today, but the interface already has the shape a real database needs (`add` inserts, `save` updates), so the next post in this series swaps the dict for SQLAlchemy and a real engine with `layered_service.py`, both routers and the exception handlers untouched — and that promise is the whole reason `CaseRepository` exists.
+
+Where the four changes every feature brings actually land:
+
+<BeP04WhereChangeLands />
+
+<Callout type="note" title="Do not split what you do not have">
+Three files for a weekend script is ceremony, not architecture. The layer split starts paying at the second caller or the second rule — until then, one honest endpoint beats three hollow files. The test is not the count of files; it is whether you can say, for every line, which box it lives in.
+</Callout>
+
+The review habit, one line: **open the next AI-written endpoint and ask every line which layer it lives in.** A line that parses — fine, it lives in the router. A line that decides *what a case must satisfy* — it belongs in the service, no matter how short the endpoint is. A line that touches storage, decides a rule, or hardcodes a status code inside a rule — send it down a level. You are not reviewing code; you are deciding where the next six months of changes will have to live.
+
+</En>
+
+<Vi>
+
+<Figure src={heroKitchen} alt="Đầu bếp nhà hàng Marconi trên phố Mulberry năm 1942, một mình đứng bên bếp lửa với những cái nồi quanh mình, chụp từ phía quầy" caption="Nhà hàng là ba căn phòng, mỗi phòng một cửa thông nhau. Phòng ăn nhận order rồi viết thành phiếu — nó không bao giờ đặt chân vào kho. Bếp biến phiếu thành món ăn; công thức nằm ở đây và chỉ ở đây. Kho chứa nguyên liệu; không ai bày món ngay trong kho. Service của bạn có đúng sơ đồ đó: web, service, data — và nhân viên phục vụ không tự đi vào tủ lạnh." sourceTitle="Wikimedia Commons: Chef in Marconi's Restaurant, 1942" sourceUrl="https://commons.wikimedia.org/wiki/File:Chef_in_Marconi%27s_Restaurant_on_Mulberry_Street_preparing_New_Year%27s_dinner_8d23891v.jpg" />
+
+> "Mọi bài toán trong khoa học máy tính đều giải được bằng thêm một tầng gián tiếp."
+> &mdash; *David Wheeler*
+
+### Mở đầu: một pull request không sai dòng nào
+
+Bạn nhờ AI hoàn thiện clue.api của series — mở case, đóng case — và nó viết ra thế này: `demo/fat_router.py`, hai endpoint, chừng 45 dòng:
+
+```python
+from fastapi import FastAPI, HTTPException
+
+app = FastAPI(title="clue.api", version="0.4.0")
+
+# Storage and id generation live here too — module-level state.
+CASES: dict[str, dict] = {}
+_next_id = 1
+
+
+@app.post("/cases", status_code=201)
+async def open_case(body: dict) -> dict:
+    # 1. parse + validate
+    title = str(body.get("title", "")).strip()
+    if not title or len(title) > 80:
+        raise HTTPException(status_code=422, detail="title must be 1-80 chars")
+    # 2. business rules and id generation
+    global _next_id
+    case_id = f"C-{_next_id}"
+    _next_id += 1
+    # 3. storage
+    case = {
+        "case_id": case_id,
+        "title": title,
+        "status": "open",
+        "detective": None,
+        "resolution": None,
+    }
+    CASES[case_id] = case
+    # 4. response shaping — same function
+    return case
+
+
+@app.post("/cases/{case_id}/close")
+async def close_case(case_id: str, body: dict) -> dict:
+    case = CASES.get(case_id)  # storage, again
+    if case is None:
+        raise HTTPException(status_code=404, detail=f"no case {case_id}")
+    if case["status"] == "closed":  # rule #1, inline
+        raise HTTPException(status_code=409, detail="case already closed")
+    if case["detective"] is None:  # rule #2, inline
+        raise HTTPException(status_code=409, detail="assign a detective first")
+    # rule #3, mixed into the storage write
+    case["status"] = "closed"
+    case["resolution"] = str(body.get("resolution", "")).strip()
+    return case
+```
+
+Nó chạy. `curl` nhận 201 với JSON gọn gàng; đóng case khi chưa gán detective nhận 409 lịch sự. Bạn sẽ approve PR này — và theo từng dòng thì bạn đúng: chẳng có dòng nào sai. Chỉ là mỗi dòng đang đứng sai *chỗ* — parse, luật, id, lưu trữ và định hình response, tất cả nằm trong một hàm.
+
+Bài này nói về cái chỗ đó. Bốn câu:
+
+1. **Vì sao router béo thắng mọi bản demo** — và nó đắt cỡ nào từ tháng thứ hai trở đi.
+2. **Cái gì thuộc về tầng nào** — web, service, data, và phép thử "dòng này nằm cột nào?"
+3. **Quy tắc một chiều** — ai được gọi ai, và ba mũi tên luôn là bug.
+4. **Tách xong được gì** — luật chạy được không cần server, tầng lưu trữ thay được mà không đụng luật.
+
+---
+
+## 1. Cái router nuốt cả app
+
+Trước tiên, xem router béo tự pass demo của chính nó:
+
+<TerminalOutput command="uvicorn fat_router:app — rồi: curl POST /cases và POST /cases/C-1/close" label="Python 3.13 · FastAPI 0.165 · chụp tháng 11/2026" caption="Tất cả là thật, nhưng chẳng nhìn thấy gì. Hai request vào, hai status ra — log không thể cho biết luật được kiểm tra ở đâu, vì chẳng tồn tại cái 'ở đâu' đó.">
+```text
+INFO:     Started server process [59280]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:4328 (Press CTRL+C to quit)
+INFO:     127.0.0.1:64936 - "POST /cases HTTP/1.1" 201 Created
+INFO:     127.0.0.1:64937 - "POST /cases/C-1/close HTTP/1.1" 409 Conflict
+```
+</TerminalOutput>
+
+Đó chính là cái bẫy: nó chạy được. Sự mục nát bắt đầu từ thay đổi đầu tiên không phải endpoint:
+
+- **Xuất hiện lối vào thứ hai.** Một script chạy đêm, một consumer đọc message, một CLI — thứ gì đó khác cũng cần đóng case. Luật "phải gán detective trước" đang nằm trong `close_case`, nên bên gọi mới phải copy nó, hoặc tệ hơn, quên nó. Cùng một luật, hai nơi sống, lệch nhau dần.
+- **Kiểm tra một luật cần cả framework.** Muốn trả lời "đóng case chưa gán detective có bị từ chối không?", bạn phải khởi động uvicorn rồi curl. Luật là thật, nhưng chẳng có gì trong codebase *gọi* được nó.
+- **Lưu trữ bị hàn chết.** `CASES` là một dict module mà luật đọc ghi ngay bên trong. Muốn đổi thành database, bạn phải sửa đúng cái hàm đang giữ luật — luật ngay trước mắt, và bạn sẽ làm gãy một cái.
+
+Trang Service Layer của Fowler tóm gọn bệnh này trong một câu: "encode logic của các tương tác riêng ở từng interface sẽ sinh ra rất nhiều trùng lặp." Router béo chính là sự trùng lặp đó khi mới có một interface.
+
+Cùng sáu việc ấy, chuyển nhà:
+
+<BeP04FatVsLayered />
+
+<Callout type="warning" title="Thói quen AI cần bỏ">
+Bạn nhờ viết một endpoint, và AI nhét cả một application vào trong nó — vì endpoint là đường nối duy nhất mà prompt của bạn lộ ra. Khi duyệt code do AI sinh, câu hỏi không bao giờ là "nó chạy không?". Nó chạy. Câu hỏi là: *khi luật tiếp theo, field tiếp theo hay bên gọi tiếp theo xuất hiện, nó sẽ phải sửa file nào — và file đó đang chứa thêm những gì?*
+</Callout>
+
+---
+
+## 2. Ba tầng, mỗi tầng một việc
+
+Cách sửa không phải thêm framework hay bày folder cho đẹp; đó là một quy tắc sở hữu. Ba tầng, mỗi tầng một việc — mọi thứ khác tự đi theo.
+
+<BeP04Belongs />
+
+Đây là clue.api dựng lại thành đúng ba file đó. Tầng dữ liệu trước — `demo/layered_data.py`, nguyên văn:
+
+```python
+from dataclasses import dataclass
+from typing import Protocol
+
+
+@dataclass
+class CaseRecord:
+    case_id: str
+    title: str
+    status: str
+    detective: str | None = None
+    resolution: str | None = None
+
+
+class CaseRepository(Protocol):
+    """The shape of storage, as the service layer sees it."""
+
+    def add(self, record: CaseRecord) -> None: ...
+    def get(self, case_id: str) -> CaseRecord | None: ...
+    def save(self, record: CaseRecord) -> None: ...
+
+
+class InMemoryCaseRepository:
+    """Today's implementation: the records live in one process dict."""
+
+    def __init__(self) -> None:
+        self._cases: dict[str, CaseRecord] = {}
+
+    def add(self, record: CaseRecord) -> None:
+        self._cases[record.case_id] = record
+        print(f"data    | add({record.case_id}) -> in-memory store")
+
+    def get(self, case_id: str) -> CaseRecord | None:
+        print(f"data    | get({case_id}) <- in-memory store")
+        return self._cases.get(case_id)
+
+    def save(self, record: CaseRecord) -> None:
+        self._cases[record.case_id] = record
+        print(f"data    | save({record.case_id}) -> in-memory store")
+```
+
+Hai điểm cần để ý. `CaseRecord` là dataclass thuần — không ORM, không Pydantic, nó là *của mình*, ngôn ngữ mà tầng giữa nói. Còn `CaseRepository` là một `Protocol`, kiểu interface khai báo hình dạng của Python: class nào có `add`, `get`, `save` là thỏa, không cần inherit, không cần import file này. Ghi nhớ điều đó cho phần 4.
+
+Tầng service — `demo/layered_service.py`, nguyên văn. Đây là tầng bạn sở hữu:
+
+```python
+from layered_data import CaseRecord, CaseRepository
+
+
+class CaseNotFoundError(Exception):
+    """The workflow asked for a case that storage does not have."""
+
+
+class CaseRuleError(Exception):
+    """A rule refused the move — the web layer maps this to a 4xx."""
+
+
+def _trace(msg: str) -> None:
+    print(f"service | {msg}")
+
+
+class CaseService:
+    """The case workflow, rules enforced at every move."""
+
+    def __init__(self, repo: CaseRepository) -> None:
+        self._repo = repo
+        self._next_id = 1
+
+    def open_case(self, title: str) -> CaseRecord:
+        _trace("open_case: the id and the open status are ours to set")
+        case = CaseRecord(case_id=f"C-{self._next_id}", title=title, status="open")
+        self._next_id += 1
+        self._repo.add(case)
+        return case
+
+    def get_case(self, case_id: str) -> CaseRecord:
+        return self._require(case_id)
+
+    def assign(self, case_id: str, detective: str) -> CaseRecord:
+        case = self._require(case_id)
+        _trace(f"assign({case_id}): rule — only an open case can be taken")
+        if case.status == "closed":
+            raise CaseRuleError("a closed case cannot be assigned")
+        case.detective = detective
+        self._repo.save(case)
+        return case
+
+    def close(self, case_id: str, resolution: str) -> CaseRecord:
+        case = self._require(case_id)
+        _trace(f"close({case_id}): rule — a case closes with a detective on it")
+        if case.detective is None:
+            raise CaseRuleError("an unassigned case cannot be closed")
+        case.status = "closed"
+        case.resolution = resolution
+        self._repo.save(case)
+        return case
+
+    def _require(self, case_id: str) -> CaseRecord:
+        case = self._repo.get(case_id)
+        if case is None:
+            raise CaseNotFoundError(f"no case {case_id}")
+        return case
+```
+
+Mọi luật từ thời router béo giờ có đúng một địa chỉ. "Phải gán detective trước" là một `if` trong một method, raise một lỗi của miền nghiệp vụ — chứ không phải một status code HTTP. Module này không import FastAPI, không dính dáng gì tới HTTP; hỏi nó "đóng case nghĩa là gì?", nó trả lời bằng chính code của mình.
+
+Và tầng web — `demo/layered_app.py`, file duy nhất import FastAPI:
+
+```python
+import time
+
+from fastapi import APIRouter, FastAPI, Request
+from fastapi.responses import JSONResponse
+from pydantic import BaseModel
+
+from layered_data import CaseRecord, InMemoryCaseRepository
+from layered_service import CaseNotFoundError, CaseRuleError, CaseService
+
+
+def _trace(msg: str) -> None:
+    print(f"web     | {msg}")
+
+
+repo = InMemoryCaseRepository()
+service = CaseService(repo)
+
+app = FastAPI(title="clue.api", version="0.4.0")
+router = APIRouter(prefix="/cases", tags=["cases"])
+
+
+@app.middleware("http")
+async def trace_layers(request: Request, call_next):
+    _trace(f"{request.method} {request.url.path} -> dispatch to a handler")
+    started = time.perf_counter()
+    response = await call_next(request)
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    _trace(f"{response.status_code} back through the stack · {elapsed_ms:.2f} ms")
+    return response
+
+
+# Where domain errors become status codes: once, at the edge.
+@app.exception_handler(CaseNotFoundError)
+async def case_not_found(request: Request, exc: CaseNotFoundError) -> JSONResponse:
+    return JSONResponse(status_code=404, content={"detail": str(exc)})
+
+
+@app.exception_handler(CaseRuleError)
+async def rule_refused(request: Request, exc: CaseRuleError) -> JSONResponse:
+    _trace(f"rule refused: {exc}; mapping CaseRuleError -> 409")
+    return JSONResponse(status_code=409, content={"detail": str(exc)})
+
+
+class OpenBody(BaseModel):
+    title: str
+
+
+class AssignBody(BaseModel):
+    detective: str
+
+
+class CloseBody(BaseModel):
+    resolution: str
+
+
+class CaseOut(BaseModel):
+    case_id: str
+    title: str
+    status: str
+    detective: str | None
+    resolution: str | None
+
+
+def _out(case: CaseRecord) -> CaseOut:
+    return CaseOut(
+        case_id=case.case_id,
+        title=case.title,
+        status=case.status,
+        detective=case.detective,
+        resolution=case.resolution,
+    )
+
+
+@router.post("", status_code=201)
+async def open_case(body: OpenBody) -> CaseOut:
+    _trace("title parsed and validated; asking the service to open the case")
+    return _out(service.open_case(title=body.title))
+
+
+@router.get("/{case_id}")
+async def get_case(case_id: str) -> CaseOut:
+    _trace(f"{case_id} asked for; the service knows what exists")
+    return _out(service.get_case(case_id))
+
+
+@router.post("/{case_id}/assign")
+async def assign(case_id: str, body: AssignBody) -> CaseOut:
+    _trace("case_id and detective parsed; asking the service to assign")
+    return _out(service.assign(case_id=case_id, detective=body.detective))
+
+
+@router.post("/{case_id}/close")
+async def close(case_id: str, body: CloseBody) -> CaseOut:
+    _trace("case_id and resolution parsed; asking the service to close")
+    return _out(service.close(case_id=case_id, resolution=body.resolution))
+
+
+app.include_router(router)
+```
+
+Đọc các endpoint như một checklist của toàn bộ công việc tầng web: parse (Pydantic model), gọi service, định hình response (`_out` → `CaseOut`). Con số `409` không bao giờ xuất hiện trong router — hai exception handler dịch lỗi nghiệp vụ sang status code đúng một lần, ngay ở biên. ([Bài vòng đời request](/blog/backend-http-request-lifecycle/) để lại clue.api là một bộ khung mà `/cases/42` trả `open` cho mọi id — vì hồi đó chưa có lưu trữ. Giờ bạn nhìn thấy từng tầng mà request băng qua, vì từng tầng tự in ranh giới của mình.)
+
+Xem lại ba request lúc nãy, lần này các tầng lên tiếng:
+
+<TerminalOutput command="uvicorn layered_app:app — rồi: curl POST /cases, POST /cases/C-1/assign, POST /cases/C-1/close" label="Python 3.13 · FastAPI 0.165 · chụp tháng 11/2026" caption="Cùng hành xử với router béo, nhưng giờ log là một tấm bản đồ: mỗi request nói rõ tầng nào nói chuyện, theo thứ tự nào, và nhận lại gì. Đọc một request từ trên xuống là bạn vừa đọc xong kiến trúc.">
+```text
+INFO:     Started server process [59389]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:4328 (Press CTRL+C to quit)
+web     | POST /cases -> dispatch to a handler
+web     | title parsed and validated; asking the service to open the case
+service | open_case: the id and the open status are ours to set
+data    | add(C-1) -> in-memory store
+web     | 201 back through the stack · 6.64 ms
+INFO:     127.0.0.1:64983 - "POST /cases HTTP/1.1" 201 Created
+web     | POST /cases/C-1/assign -> dispatch to a handler
+web     | case_id and detective parsed; asking the service to assign
+data    | get(C-1) <- in-memory store
+service | assign(C-1): rule — only an open case can be taken
+data    | save(C-1) -> in-memory store
+web     | 200 back through the stack · 1.20 ms
+INFO:     127.0.0.1:64984 - "POST /cases/C-1/assign HTTP/1.1" 200 OK
+web     | POST /cases/C-1/close -> dispatch to a handler
+web     | case_id and resolution parsed; asking the service to close
+data    | get(C-1) <- in-memory store
+service | close(C-1): rule — a case closes with a detective on it
+data    | save(C-1) -> in-memory store
+web     | 200 back through the stack · 0.61 ms
+INFO:     127.0.0.1:64985 - "POST /cases/C-1/close HTTP/1.1" 200 OK
+```
+</TerminalOutput>
+
+Một request, đọc theo tầng:
+
+<BeP04OneTrace />
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+- **Router béo (fat router)**: endpoint tự parse, validate, quyết định, lưu trữ và trả response trong một hàm. Demo thì rất ổn; về sau mọi thay đổi đều sửa vào nó.
+- **Tầng service (service layer)**: một nơi duy nhất cho luật nghiệp vụ và luồng việc, gọi được từ bất kỳ interface nào — HTTP hôm nay, queue hay CLI ngày mai.
+- **Repository**: interface kiểu bộ sưu tập phủ lên lưu trữ (ở đây là `add`, `get`, `save`). Service chỉ xin record từ nó, không bao giờ đòi dict, SQL hay file.
+- **Protocol**: interface khai báo hình dạng của Python. Không base class, không inheritance — object nào có đúng các method là thỏa, và đó chính là thứ biến đường ranh giới thành một đường nối tháo được.
+</Concepts>
+
+---
+
+## 3. Chỉ đi một chiều
+
+Ba tầng chẳng khác nào trang trí nếu thiếu quy tắc giữ cho chúng đứng đắn: **một tầng chỉ được gọi tầng ngay dưới nó, không hơn.** Không đi ngang, không quay ngược.
+
+<BeP04Direction />
+
+Mỗi dấu X đỏ là một code smell bạn sẽ gặp thật:
+
+- **Router tự mở database.** Nghe hiệu quả — khỏi chặn thêm một chặng! Rồi endpoint kế tiếp cũng làm vậy, và những luật lẽ ra canh thao tác ghi giờ thành "lệ tên", không còn là bảo đảm. Chặng bị bỏ qua đó *chính là* luật.
+- **Tầng lưu trữ tự đặt ra luật.** Một câu `if` lẻ loi len vào repository "tiện tay thôi", và mọi bên gọi repo đều dính luật này dù có muốn hay không — kể cả script backfill dữ liệu của bạn, thứ vốn cần phá luật.
+- **Service trả về status code.** Luật mà trả được 409 là coi như đã cưới HTTP; CLI của bạn giờ in `409` ra mặt thám tử. Luật nên raise *chuyện gì đã xảy ra*, còn việc *nói nó thế nào* chỉ thuộc về biên.
+
+Cách wiring làm cho chiều phụ thuộc thành thật. `layered_app.py` dựng repository, đưa nó cho `CaseService`, rồi router chỉ việc *dùng* — hai file bên dưới không bao giờ import file phía trên. Chính guide của FastAPI cho app lớn cũng đi chiều này: tách router thành module, gom phần wiring dùng chung vào một dependencies module, giữ file chính gọn đến mức đọc một cái là hiểu.
+
+Giờ hãy xem kỷ luật đó trả tiền — một lần luật từ chối, nhìn từ hai phía:
+
+<TerminalOutput command="vẫn server đó — mở C-2, rồi: curl -i -X POST http://127.0.0.1:4328/cases/C-2/close" label="Python 3.13 · FastAPI 0.165 · chụp tháng 11/2026" caption="Luật nổ trong service (dòng 4) và trở thành 409 ở exception handler của tầng web (dòng 5) — hai file, hai việc, một status code. curl thấy cùng chữ 409 như router béo lúc trước; khác biệt là ai được phép sửa luật, và bạn sẽ tìm nó ở đâu.">
+```text
+web     | POST /cases -> dispatch to a handler
+web     | title parsed and validated; asking the service to open the case
+service | open_case: the id and the open status are ours to set
+data    | add(C-2) -> in-memory store
+web     | 201 back through the stack · 0.55 ms
+INFO:     127.0.0.1:64987 - "POST /cases HTTP/1.1" 201 Created
+web     | POST /cases/C-2/close -> dispatch to a handler
+web     | case_id and resolution parsed; asking the service to close
+data    | get(C-2) <- in-memory store
+service | close(C-2): rule — a case closes with a detective on it
+web     | rule refused: an unassigned case cannot be closed; mapping CaseRuleError -> 409
+web     | 409 back through the stack · 0.51 ms
+INFO:     127.0.0.1:64988 - "POST /cases/C-2/close HTTP/1.1" 409 Conflict
+```
+</TerminalOutput>
+
+Bên gọi nhận được `HTTP/1.1 409` và `{"detail":"an unassigned case cannot be closed"}` — y hệt những gì router béo trả. Hành xử giống hệt; *địa chỉ* của luật thì không. Khi product hỏi "case chưa gán detective có đóng được không?", một người mở một file và trả lời bằng chính code.
+
+---
+
+## 4. Tách rồi được gì?
+
+**Luật chạy không cần server.** Vì tầng service không import FastAPI, bạn có thể chạy toàn bộ luồng việc bằng Python thuần với một repository giả — `demo/layered_smoke.py`:
+
+```python
+from layered_data import CaseRecord, CaseRepository, InMemoryCaseRepository
+from layered_service import CaseRuleError, CaseService
+
+
+class FakeRepository:
+    """Same shape as CaseRepository, none of the storage machinery:
+    it keeps records in a list and counts the saves."""
+
+    def __init__(self) -> None:
+        self.records: list[CaseRecord] = []
+        self.saves = 0
+
+    def add(self, record: CaseRecord) -> None:
+        self.records.append(record)
+
+    def get(self, case_id: str) -> CaseRecord | None:
+        return next((r for r in self.records if r.case_id == case_id), None)
+
+    def save(self, record: CaseRecord) -> None:
+        self.saves += 1
+
+
+def run_scenario(repo: CaseRepository) -> None:
+    service = CaseService(repo)
+    case = service.open_case(title="The missing gnome")
+    print(f"    opened {case.case_id}: {case.title}")
+    try:
+        service.close(case.case_id, resolution="given up")
+    except CaseRuleError as exc:
+        print(f"    close refused -> {exc}")
+    service.assign(case.case_id, detective="wren")
+    case = service.close(case.case_id, resolution="gnome found under the hydrangeas")
+    print(f"    closed {case.case_id}: detective={case.detective}")
+```
+
+<TerminalOutput command="uv run --python 3.13 layered_smoke.py" label="Python 3.13 · không cần web framework · chụp tháng 11/2026" caption="Toàn bộ luật, chạy hết trong chưa tới một phần năm giây: không server, không port, không HTTP. Cái label chính là thông điệp: phần trên chẳng cần FastAPI lấy một dòng. 'Test được' nghĩa là vậy, trước khi bất kỳ framework test nào xuất hiện.">
+```text
+[1] rules with a fake repository — no FastAPI, no HTTP, no storage
+service | open_case: the id and the open status are ours to set
+    opened C-1: The missing gnome
+service | close(C-1): rule — a case closes with a detective on it
+    close refused -> an unassigned case cannot be closed
+service | assign(C-1): rule — only an open case can be taken
+service | close(C-1): rule — a case closes with a detective on it
+    closed C-1: detective=wren
+    save() calls the fake saw: 2 (nothing real stored)
+
+[2] the same rules with InMemoryCaseRepository — storage swapped, rules unchanged
+service | open_case: the id and the open status are ours to set
+data    | add(C-1) -> in-memory store
+    opened C-1: The missing gnome
+data    | get(C-1) <- in-memory store
+service | close(C-1): rule — a case closes with a detective on it
+    close refused -> an unassigned case cannot be closed
+data    | get(C-1) <- in-memory store
+service | assign(C-1): rule — only an open case can be taken
+data    | save(C-1) -> in-memory store
+data    | get(C-1) <- in-memory store
+service | close(C-1): rule — a case closes with a detective on it
+data    | save(C-1) -> in-memory store
+    closed C-1: detective=wren
+```
+</TerminalOutput>
+
+`FakeRepository` không inherit từ đâu cả — cái `Protocol` ở phần 2 chính là lý do nó chạy được. Và để ý kịch bản [2] chứng minh điều gì chỉ bằng việc tồn tại: cùng luật, repository khác, không sửa gì ở trên đường nối.
+
+**Lưu trữ thành thứ thay được.** Đó không chỉ là tiện lợi khi test; đó là cách service sống nổi qua chính thành công của nó. Twelve-factor coi database là một *attached resource*: một deploy "phải có thể thay database MySQL local bằng một dịch vụ bên thứ ba… mà không sửa gì code của app" — chỉ đổi handle trong config. clue.api của mình hôm nay là một dict trong bộ nhớ, nhưng interface đã có sẵn hình dạng một database thật cần (`add` để insert, `save` để update), nên bài tiếp theo của series sẽ thay dict bằng SQLAlchemy với engine thật mà `layered_service.py`, cả hai router lẫn exception handler, không đổi một dòng — và lời hứa đó là toàn bộ lý do `CaseRepository` tồn tại.
+
+Bốn thay đổi mà tính năng nào cũng kéo theo, chúng rơi vào đâu:
+
+<BeP04WhereChangeLands />
+
+<Callout type="note" title="Đừng tách thứ mình chưa có">
+Ba file cho một script viết cuối tuần là nghi thức, chưa phải kiến trúc. Việc tách tầng bắt đầu có lời từ bên gọi thứ hai hay luật thứ hai — trước đó, một endpoint trung thực vẫn hơn ba file rỗng. Thước đo không phải số file; mà là bạn có nói được từng dòng đang sống trong ô nào không.
+</Callout>
+
+Thói quen duyệt code, gói trong một dòng: **mở endpoint do AI viết kế tiếp ra và hỏi từng dòng đang sống ở tầng nào.** Dòng parse — ổn, nó thuộc router. Dòng quyết định *case phải thỏa điều gì* — nó thuộc service, dù endpoint ngắn cỡ nào. Dòng chạm vào lưu trữ, tự đặt luật, hay hardcode status code trong một luật — đẩy xuống một tầng. Bạn đang duyệt code đấy, nhưng bạn đang quyết định nơi sinh sống của cả sáu tháng thay đổi sắp tới.
+
+</Vi>
