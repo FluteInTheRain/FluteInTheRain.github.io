@@ -18,7 +18,7 @@ sources:
   - { title: "net/http/httptest package documentation", author: "The Go Authors", url: "https://pkg.go.dev/net/http/httptest" }
   - { title: "os/signal: NotifyContext", author: "The Go Authors", url: "https://pkg.go.dev/os/signal#NotifyContext" }
   - { title: "Go gopher biplane (CC BY 3.0), used as the cover", author: "Renee French", url: "https://commons.wikimedia.org/wiki/File:Go_gopher_biplane.jpg" }
-  - { title: "Transportation Security Administration Checkpoint at John Glenn Columbus International Airport (CC0)", author: "Michael Ball", url: "https://commons.wikimedia.org/wiki/File:Transportation_Security_Administration_Checkpoint_at_John_Glenn_Columbus_International_Airport.jpg" }
+  - { title: "BLW High Speed Sorting Machine (CC BY-SA 2.0 UK), The Postal Museum collection", author: "Mike Peel", url: "https://commons.wikimedia.org/wiki/File:BLW_High_Speed_Sorting_Machine..jpg" }
 ---
 
 import Callout from '../../components/mdx/Callout.astro';
@@ -29,11 +29,11 @@ import Figure from '../../components/mdx/Figure.astro';
 import GoHttpRequestPathDemo from '../../components/mdx/GoHttpRequestPathDemo.astro';
 import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
 import Vi from '../../components/mdx/Vi.astro';
-import heroCheckpoint from '../../assets/blog/go-http-service-net-http-json-middleware/hero-checkpoint.jpg';
+import heroSorter from '../../assets/blog/go-http-service-net-http-json-middleware/hero-sorting-machine.jpg';
 
 <En>
 
-<Figure src={heroCheckpoint} alt="A traveller waits at a marked line in front of a uniformed officer at an airport security checkpoint, with a sign reading Please Wait Here" caption="Nobody walks straight from the door to the gate. Every traveller passes the same checkpoints in the same order, and the checkpoint staff never need to know where the traveller is going. A middleware chain gives every HTTP request the same treatment before your handler sees it." sourceTitle="Wikimedia Commons: Transportation Security Administration Checkpoint at John Glenn Columbus International Airport (Michael Ball, CC0)" sourceUrl="https://commons.wikimedia.org/wiki/File:Transportation_Security_Administration_Checkpoint_at_John_Glenn_Columbus_International_Airport.jpg" />
+<Figure src={heroSorter} alt="A British Post Office high-speed letter sorting machine on display at The Postal Museum" caption="Every letter goes through the same machine in the same order, and the machine never needs to know what the letter says. A middleware chain gives every HTTP request the same treatment before your handler sees it. This is a Post Office high-speed letter sorting machine (153-box version)." sourceTitle="Wikimedia Commons: BLW High Speed Sorting Machine (Mike Peel, CC BY-SA 2.0 UK), from The Postal Museum collection" sourceUrl="https://commons.wikimedia.org/wiki/File:BLW_High_Speed_Sorting_Machine..jpg" />
 
 > "It's critical for an HTTP server exposed to the Internet to enforce timeouts on client connections."
 > &mdash; *Filippo Valsorda*, *The complete guide to Go net/http timeouts* (Cloudflare, 2016)
@@ -281,13 +281,15 @@ func chain(h http.Handler, mws ...middleware) http.Handler {
 }
 ```
 
-Two bits of syntax: `mws ...middleware` means `chain` accepts any number of middlewares, and `http.HandlerFunc(f)` turns a plain function into a `Handler`, so every middleware below can return a function literal. `chain` wraps the handler from the last middleware to the first, so the **first one listed is the outermost**. Back in `routes()`, `chain(mux, s.requestID, s.logging, s.recoverPanic)` means a request meets `requestID`, then `logging`, then `recoverPanic`, then the mux. The response goes back out the same way.
+Two bits of syntax. `mws ...middleware` means `chain` accepts any number of middlewares. And `http.HandlerFunc` is a *function type* that has a `ServeHTTP` method ([post 4](/blog/go-structs-methods-interfaces/) covers methods on types), so `http.HandlerFunc(f)` turns a plain function into a `Handler`. That is why every middleware below can return a function literal.
+
+How `chain` nests them: it walks the list from the last middleware to the first, wrapping `h` each time. Take `chain(mux, a, b, c)`. The loop does `h = c(mux)`, then `h = b(h)`, then `h = a(h)`. The result is `a(b(c(mux)))`, so the **first one listed is the outermost**. Back in `routes()`, `chain(mux, s.requestID, s.logging, s.recoverPanic)` means a request meets `requestID`, then `logging`, then `recoverPanic`, then the mux. The response goes back out the same way. The demo below shows it.
 
 <DemoFrame title="One request through the chain, and one that panics" titleVi="Một request đi qua chuỗi middleware, và một request bị panic">
 <GoHttpRequestPathDemo />
 </DemoFrame>
 
-The first layer gives each request an ID. It keeps an ID the caller sent in `X-Request-ID` (useful when a gateway already made one) and otherwise makes 8 random bytes. It stores the ID in the request's context, the same context from [post 8](/blog/go-context-timeouts-mutexes/), and echoes it in the response header.
+The first layer gives each request an ID. It keeps an ID the caller sent in `X-Request-ID` (useful when a gateway already made one) and otherwise makes 8 random bytes. It stores the ID in the request's context, the same context from [post 8](/blog/go-context-timeouts-mutexes/), and echoes it in the response header. One line to read before the code: `_, _ = rand.Read(b)` fills `b` with random bytes. `rand.Read` returns two values, a count and an error, and the `_, _ =` throws both away because in current Go it cannot fail.
 
 ```go
 type ctxKey string
@@ -309,9 +311,11 @@ func (s *server) requestID(next http.Handler) http.Handler {
 }
 ```
 
-`rand.Read` fills the slice with random bytes; the `_, _ =` throws away its two results, since in current Go it cannot fail. The key has its own type, `ctxKey`, so no other package can collide with it by accident. `r.WithContext` returns a copy of the request that carries the new context; requests are never edited in place.
+The key has its own type, `ctxKey`, so no other package can collide with it by accident. `r.WithContext` returns a copy of the request that carries the new context; requests are never edited in place.
 
 The logging layer has a puzzle: the status code is chosen inside the handler, after `logging` has already handed over control. The fix is a small wrapper. `statusRecorder` embeds the real `http.ResponseWriter` (embedding is from [post 4](/blog/go-structs-methods-interfaces/)), so it gets all of its methods for free, and overrides only `WriteHeader` to remember the code.
+
+`logging` also reads the ID back out of the context with `Value(requestIDKey).(string)`. The context stores values as `any`, so `.(string)` is a *type assertion* that asks for the string inside (see [type switches and assertions in post 4](/blog/go-structs-methods-interfaces/#type-switches-and-assertions)). The `, _` ignores the yes/no flag, so a missing ID becomes an empty string.
 
 ```go
 // statusRecorder remembers the status code a handler wrote.
@@ -338,7 +342,7 @@ func (s *server) logging(next http.Handler) http.Handler {
 }
 ```
 
-In `logging`, `Value(requestIDKey).(string)` is a *type assertion*: the context stores values as `any`, and `.(string)` asks for the string inside. The `, _` ignores the yes/no flag, so a missing ID becomes an empty string. `log/slog` writes structured logs: a message plus key-value pairs. Because this program builds a JSON handler in `main`, every line is a JSON object a log system can search by `status` or `id`. The Go blog's `slog` post covers levels, groups and custom handlers; this service needs only `Info` and `Error`.
+`log/slog` writes structured logs: a message plus key-value pairs. Because this program builds a JSON handler in `main`, every line is a JSON object a log system can search by `status` or `id`. The Go blog's `slog` post covers levels, groups and custom handlers; this service needs only `Info` and `Error`.
 
 The last layer is the safety net. If a handler panics, `net/http` already catches it, logs a stack trace and closes the connection, which the client sees as an empty reply. I checked with a handler that panics under `httptest.NewServer`: the client got `EOF`. The middleware gives a better answer: it uses `defer` and `recover` ([post 5](/blog/go-errors-defer-panic/)) to log the panic and send a clean `500` JSON error.
 
@@ -420,8 +424,8 @@ func run() error {
 Read `run` in four steps.
 
 1. **Build the server by hand.** `http.Server` is a struct, so the timeouts are plain fields. They are the guard from the opening quote.
-2. **Start it in a goroutine.** `ListenAndServe` blocks until the server stops, so it runs in a goroutine and reports its error on a channel ([post 7](/blog/go-goroutines-channels-select/)). The channel has room for one value so the goroutine can always finish.
-3. **Wait for the first of two events.** `signal.NotifyContext` gives a context that is cancelled on Ctrl+C or SIGTERM, the signal Docker and Kubernetes send to stop a container. `select` waits for that, or for the server failing to start.
+2. **Start it in a goroutine.** `ListenAndServe` blocks until the server stops, so it runs in a goroutine and reports its error on a channel ([post 7](/blog/go-goroutines-channels-select/)). `make(chan error, 1)` makes a channel with room for one value, so the goroutine can always hand over its error and finish even if nobody is listening any more.
+3. **Wait for the first of two events.** `signal.NotifyContext` gives a context that is cancelled on Ctrl+C or SIGTERM, the signal Docker and Kubernetes send to stop a container. `select` waits for whichever happens first. The first case returns the error if the server fails to start. The second case, `case <-ctx.Done():`, has no code on purpose: when a signal arrives, `select` simply ends and the function falls through to the shutdown lines below.
 4. **Shut down with a deadline.** `Server.Shutdown` closes the listener so no new connections arrive, then waits for running requests to finish. The 10-second context is the cap: if they take longer, `Shutdown` returns an error instead of hanging for ever.
 
 The four timeouts are not interchangeable.
@@ -430,14 +434,22 @@ The four timeouts are not interchangeable.
 |---|---|---|
 | `ReadHeaderTimeout` | time to read the request headers | 5 s |
 | `ReadTimeout` | time to read the whole request, body included | 10 s |
-| `WriteTimeout` | time from end of request read to end of response write | 10 s |
+| `WriteTimeout` | from the end of reading the request headers to the end of writing the response | 10 s |
 | `IdleTimeout` | how long an idle keep-alive connection may wait | 60 s |
 
 These numbers suit a small JSON API. A server that streams large downloads needs a bigger `WriteTimeout`. [Go in production](/blog/go-production-stdlib-cpu-cache-gc-kubernetes/) explains why they matter once real traffic arrives.
 
 ## Run it
 
-Build and start the server on port 8085, then call it from a second terminal. `curl -i` prints the response headers too. I removed the `Date` and `Content-Length` headers from the output to keep it short.
+In an empty folder, put `main.go` and run `go mod init example.com/todo` once, which creates `go.mod`. Then build and start the server on port 8085, and call it from a second terminal. `curl -i` prints the response headers too. I removed the `Date` and `Content-Length` headers from the output to keep it short.
+
+<TerminalOutput command="go mod init example.com/todo && go build -o todo ." label="Go 1.27.1 · macOS arm64">
+```text
+go: creating new go.mod: module example.com/todo
+go: to add module requirements and sums:
+	go mod tidy
+```
+</TerminalOutput>
 
 <TerminalOutput command="ADDR=:8085 ./todo   (in a second terminal: curl -i localhost:8085/healthz)" label="Go 1.27.1 · macOS arm64">
 ```text
@@ -653,14 +665,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o tod
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o todo-linux-arm64 .
 ```
 
-`-trimpath` removes your local folder names from the binary, and `-s -w` drops symbol and debug tables to make it smaller. Here are the results from my Mac:
-
-<TerminalOutput command="file todo-linux-amd64 todo-linux-arm64" label="Go 1.27.1 · macOS arm64 (output cut to fit)">
-```text
-todo-linux-amd64: ELF 64-bit LSB executable, x86-64, version 1 (SYSV), statically linked, Go BuildID=...
-todo-linux-arm64: ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), statically linked, Go BuildID=...
-```
-</TerminalOutput>
+`-trimpath` removes your local folder names from the binary, and `-s -w` drops symbol and debug tables to make it smaller. Here are the sizes from my Mac:
 
 | Target | `GOOS/GOARCH` | Size |
 |---|---|---|
@@ -711,7 +716,7 @@ The whole image is 8.86 MB on disk, and the binary inside is most of that. There
 - With no shell you cannot `docker exec` into it to look around. Debug with logs, or temporarily build from a base image like `gcr.io/distroless/static` that adds a minimal root filesystem.
 - If your service calls HTTPS endpoints, it needs root CA certificates, which `scratch` does not have. Copy them in from the build stage, or use the distroless base instead.
 
-Finally, `docker stop` sends SIGTERM to our process, which is PID 1 inside the container. Docker's default wait is 10 seconds before it sends SIGKILL, so the 10-second shutdown cap in `run` is the same size as Docker's. The stop on my run returned in 0.17 s: the process was idle, so `Shutdown` had nothing to wait for. On Kubernetes, set the pod's termination grace period longer than your shutdown timeout.
+Finally, `docker stop` sends SIGTERM to our process, the same signal `run` waits for. Docker's default wait is 10 seconds before it sends SIGKILL, so the 10-second shutdown cap in `run` is the same size as Docker's. The stop on my run returned in 0.17 s: the process was idle, so `Shutdown` had nothing to wait for. On Kubernetes, set the pod's termination grace period longer than your shutdown timeout.
 
 ## Key takeaways
 
@@ -745,7 +750,7 @@ Finally, `docker stop` sends SIGTERM to our process, which is PID 1 inside the c
 
 <Vi>
 
-<Figure src={heroCheckpoint} alt="Một hành khách đứng chờ ở vạch kẻ trước nhân viên mặc đồng phục tại điểm kiểm tra an ninh sân bay, có biển ghi Please Wait Here" caption="Không ai đi thẳng từ cửa vào cổng bay. Hành khách nào cũng qua cùng các chốt, theo cùng thứ tự, và nhân viên ở chốt không cần biết hành khách đi đâu. Chuỗi middleware làm điều tương tự: mọi HTTP request được xử lý giống nhau trước khi tới handler của bạn." sourceTitle="Wikimedia Commons: Transportation Security Administration Checkpoint at John Glenn Columbus International Airport (Michael Ball, CC0)" sourceUrl="https://commons.wikimedia.org/wiki/File:Transportation_Security_Administration_Checkpoint_at_John_Glenn_Columbus_International_Airport.jpg" />
+<Figure src={heroSorter} alt="Một máy phân loại thư tốc độ cao của Bưu điện Anh, trưng bày tại The Postal Museum" caption="Lá thư nào cũng qua cùng một cỗ máy, theo cùng một thứ tự, và cỗ máy không cần biết nội dung thư. Chuỗi middleware làm điều tương tự: mọi HTTP request được xử lý giống nhau trước khi tới handler của bạn. Đây là máy phân loại thư tốc độ cao của Bưu điện Anh (bản 153 ngăn)." sourceTitle="Wikimedia Commons: BLW High Speed Sorting Machine (Mike Peel, CC BY-SA 2.0 UK), from The Postal Museum collection" sourceUrl="https://commons.wikimedia.org/wiki/File:BLW_High_Speed_Sorting_Machine..jpg" />
 
 > "It's critical for an HTTP server exposed to the Internet to enforce timeouts on client connections."
 > &mdash; *Filippo Valsorda*, *The complete guide to Go net/http timeouts* (Cloudflare, 2016)
@@ -993,13 +998,15 @@ func chain(h http.Handler, mws ...middleware) http.Handler {
 }
 ```
 
-Hai chỗ cú pháp: `mws ...middleware` nghĩa là `chain` nhận số middleware tùy ý, và `http.HandlerFunc(f)` biến một hàm thường thành `Handler`, nên mọi middleware bên dưới có thể trả về một function literal. `chain` bọc handler từ middleware cuối về đầu, nên **middleware đứng đầu danh sách là lớp ngoài cùng**. Quay lại `routes()`, `chain(mux, s.requestID, s.logging, s.recoverPanic)` nghĩa là request gặp `requestID`, rồi `logging`, rồi `recoverPanic`, rồi mới tới mux. Response đi ngược ra theo đúng đường đó.
+Hai chỗ cú pháp. `mws ...middleware` nghĩa là `chain` nhận số middleware tùy ý. Còn `http.HandlerFunc` là một *kiểu hàm* có method `ServeHTTP` ([bài 4](/blog/go-structs-methods-interfaces/) nói về method trên kiểu), nên `http.HandlerFunc(f)` biến một hàm thường thành `Handler`. Vì vậy mọi middleware bên dưới có thể trả về một function literal.
+
+Cách `chain` lồng chúng: nó đi từ middleware cuối về đầu, mỗi lần bọc `h` thêm một lớp. Với `chain(mux, a, b, c)`, vòng lặp làm `h = c(mux)`, rồi `h = b(h)`, rồi `h = a(h)`. Kết quả là `a(b(c(mux)))`, nên **middleware đứng đầu danh sách là lớp ngoài cùng**. Quay lại `routes()`, `chain(mux, s.requestID, s.logging, s.recoverPanic)` nghĩa là request gặp `requestID`, rồi `logging`, rồi `recoverPanic`, rồi mới tới mux. Response đi ngược ra theo đúng đường đó. Demo bên dưới cho thấy điều này.
 
 <DemoFrame title="One request through the chain, and one that panics" titleVi="Một request đi qua chuỗi middleware, và một request bị panic">
 <GoHttpRequestPathDemo />
 </DemoFrame>
 
-Lớp đầu tiên gắn ID cho mỗi request. Nó giữ ID mà bên gọi gửi trong `X-Request-ID` (hữu ích khi gateway đã tạo sẵn) và nếu không có thì tạo 8 byte ngẫu nhiên. Nó để ID vào context của request, chính context ở [bài 8](/blog/go-context-timeouts-mutexes/), và lặp lại ID trong header response.
+Lớp đầu tiên gắn ID cho mỗi request. Nó giữ ID mà bên gọi gửi trong `X-Request-ID` (hữu ích khi gateway đã tạo sẵn) và nếu không có thì tạo 8 byte ngẫu nhiên. Nó để ID vào context của request, chính context ở [bài 8](/blog/go-context-timeouts-mutexes/), và lặp lại ID trong header response. Một dòng cần đọc trước khi xem code: `_, _ = rand.Read(b)` điền byte ngẫu nhiên vào `b`. `rand.Read` trả về hai giá trị, số byte và lỗi, và `_, _ =` bỏ cả hai vì ở Go hiện tại nó không thể lỗi.
 
 ```go
 type ctxKey string
@@ -1021,9 +1028,11 @@ func (s *server) requestID(next http.Handler) http.Handler {
 }
 ```
 
-`rand.Read` điền các byte ngẫu nhiên vào slice; `_, _ =` bỏ đi hai kết quả trả về của nó, vì ở Go hiện tại nó không thể lỗi. Key có kiểu riêng `ctxKey`, nên không package nào khác va chạm được với nó do tình cờ. `r.WithContext` trả về một bản sao của request mang context mới; request không bao giờ bị sửa tại chỗ.
+Key có kiểu riêng `ctxKey`, nên không package nào khác va chạm được với nó do tình cờ. `r.WithContext` trả về một bản sao của request mang context mới; request không bao giờ bị sửa tại chỗ.
 
 Lớp logging có một câu đố: status code được chọn bên trong handler, sau khi `logging` đã trao quyền điều khiển đi. Cách giải là một wrapper nhỏ. `statusRecorder` nhúng (embed) `http.ResponseWriter` thật (embedding có ở [bài 4](/blog/go-structs-methods-interfaces/)), nên có sẵn mọi method của nó, và chỉ ghi đè `WriteHeader` để nhớ mã status.
+
+`logging` còn đọc lại ID từ context bằng `Value(requestIDKey).(string)`. Context lưu giá trị dưới dạng `any`, nên `.(string)` là một *type assertion* (ép kiểu có kiểm tra) đòi lấy string bên trong (xem [type switch và assertion ở bài 4](/blog/go-structs-methods-interfaces/#type-switches-and-assertions)). Phần `, _` bỏ qua cờ có/không, nên thiếu ID thì ra chuỗi rỗng.
 
 ```go
 // statusRecorder remembers the status code a handler wrote.
@@ -1050,7 +1059,7 @@ func (s *server) logging(next http.Handler) http.Handler {
 }
 ```
 
-Trong `logging`, `Value(requestIDKey).(string)` là một *type assertion* (ép kiểu có kiểm tra): context lưu giá trị dưới dạng `any`, và `.(string)` đòi lấy string bên trong. Phần `, _` bỏ qua cờ có/không, nên thiếu ID thì ra chuỗi rỗng. `log/slog` ghi log có cấu trúc: một thông điệp kèm các cặp key-value. Vì chương trình này tạo JSON handler trong `main`, mỗi dòng là một object JSON mà hệ thống log tìm được theo `status` hay `id`. Bài về `slog` trên blog của Go nói về level, group và handler tùy biến; service này chỉ cần `Info` và `Error`.
+`log/slog` ghi log có cấu trúc: một thông điệp kèm các cặp key-value. Vì chương trình này tạo JSON handler trong `main`, mỗi dòng là một object JSON mà hệ thống log tìm được theo `status` hay `id`. Bài về `slog` trên blog của Go nói về level, group và handler tùy biến; service này chỉ cần `Info` và `Error`.
 
 Lớp cuối là lưới an toàn. Nếu handler panic, `net/http` vốn đã bắt được, ghi stack trace và đóng connection, và client thấy một phản hồi rỗng. Tôi đã kiểm tra bằng một handler panic chạy dưới `httptest.NewServer`: client nhận `EOF`. Middleware cho câu trả lời tốt hơn: nó dùng `defer` và `recover` ([bài 5](/blog/go-errors-defer-panic/)) để ghi log panic và gửi một lỗi `500` JSON gọn gàng.
 
@@ -1132,8 +1141,8 @@ func run() error {
 Đọc `run` theo bốn bước.
 
 1. **Tự dựng server.** `http.Server` là một struct, nên timeout chỉ là các field bình thường. Đó là lớp bảo vệ từ câu trích ở đầu bài.
-2. **Chạy nó trong goroutine.** `ListenAndServe` chặn cho tới khi server dừng, nên nó chạy trong goroutine và báo lỗi qua một channel ([bài 7](/blog/go-goroutines-channels-select/)). Channel chứa được một giá trị để goroutine luôn kết thúc được.
-3. **Chờ sự kiện nào đến trước trong hai.** `signal.NotifyContext` cho ra một context bị hủy khi nhấn Ctrl+C hoặc nhận SIGTERM, tín hiệu mà Docker và Kubernetes gửi để dừng container. `select` chờ tín hiệu đó, hoặc chờ server không khởi động được.
+2. **Chạy nó trong goroutine.** `ListenAndServe` chặn cho tới khi server dừng, nên nó chạy trong goroutine và báo lỗi qua một channel ([bài 7](/blog/go-goroutines-channels-select/)). `make(chan error, 1)` tạo channel chứa được một giá trị, nên goroutine luôn gửi được lỗi của nó rồi kết thúc, kể cả khi không còn ai lắng nghe.
+3. **Chờ sự kiện nào đến trước trong hai.** `signal.NotifyContext` cho ra một context bị hủy khi nhấn Ctrl+C hoặc nhận SIGTERM, tín hiệu mà Docker và Kubernetes gửi để dừng container. `select` chờ cái nào đến trước. Case đầu trả về lỗi nếu server không khởi động được. Case thứ hai, `case <-ctx.Done():`, cố ý để trống: khi có tín hiệu, `select` chỉ việc kết thúc và hàm chạy tiếp xuống các dòng tắt server bên dưới.
 4. **Tắt với hạn chót.** `Server.Shutdown` đóng listener để không connection mới nào vào, rồi chờ các request đang chạy làm xong. Context 10 giây là mức trần: nếu chúng lâu hơn, `Shutdown` trả về lỗi thay vì treo mãi.
 
 Bốn timeout không thay thế nhau được.
@@ -1142,14 +1151,22 @@ Bốn timeout không thay thế nhau được.
 |---|---|---|
 | `ReadHeaderTimeout` | thời gian đọc header của request | 5 s |
 | `ReadTimeout` | thời gian đọc cả request, gồm body | 10 s |
-| `WriteTimeout` | thời gian từ khi đọc xong request đến khi ghi xong response | 10 s |
+| `WriteTimeout` | từ khi đọc xong header của request đến khi ghi xong response | 10 s |
 | `IdleTimeout` | một connection keep-alive rảnh được chờ bao lâu | 60 s |
 
 Những con số này hợp với một JSON API nhỏ. Server stream file tải lớn cần `WriteTimeout` lớn hơn. [Go trên production](/blog/go-production-stdlib-cpu-cache-gc-kubernetes/) giải thích vì sao chúng quan trọng khi có traffic thật.
 
 ## Chạy thử
 
-Build và khởi động server ở cổng 8085, rồi gọi nó từ một terminal thứ hai. `curl -i` in cả header của response. Tôi đã bỏ header `Date` và `Content-Length` khỏi output cho gọn.
+Trong một thư mục trống, đặt `main.go` vào và chạy `go mod init example.com/todo` một lần để tạo `go.mod`. Rồi build và khởi động server ở cổng 8085, và gọi nó từ một terminal thứ hai. `curl -i` in cả header của response. Tôi đã bỏ header `Date` và `Content-Length` khỏi output cho gọn.
+
+<TerminalOutput command="go mod init example.com/todo && go build -o todo ." label="Go 1.27.1 · macOS arm64">
+```text
+go: creating new go.mod: module example.com/todo
+go: to add module requirements and sums:
+	go mod tidy
+```
+</TerminalOutput>
 
 <TerminalOutput command="ADDR=:8085 ./todo   (in a second terminal: curl -i localhost:8085/healthz)" label="Go 1.27.1 · macOS arm64">
 ```text
@@ -1365,14 +1382,7 @@ CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o tod
 CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o todo-linux-arm64 .
 ```
 
-`-trimpath` xóa tên thư mục trên máy bạn khỏi binary, và `-s -w` bỏ bảng symbol và bảng debug để file nhỏ hơn. Đây là kết quả trên máy Mac của tôi:
-
-<TerminalOutput command="file todo-linux-amd64 todo-linux-arm64" label="Go 1.27.1 · macOS arm64 (output cut to fit)">
-```text
-todo-linux-amd64: ELF 64-bit LSB executable, x86-64, version 1 (SYSV), statically linked, Go BuildID=...
-todo-linux-arm64: ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), statically linked, Go BuildID=...
-```
-</TerminalOutput>
+`-trimpath` xóa tên thư mục trên máy bạn khỏi binary, và `-s -w` bỏ bảng symbol và bảng debug để file nhỏ hơn. Đây là kích thước trên máy Mac của tôi:
 
 | Đích | `GOOS/GOARCH` | Kích thước |
 |---|---|---|
@@ -1423,7 +1433,7 @@ Cả image nặng 8,86 MB trên đĩa, và binary bên trong chiếm phần lớ
 - Không có shell thì không `docker exec` vào xem được. Hãy debug bằng log, hoặc tạm build từ image nền như `gcr.io/distroless/static` có thêm một root filesystem tối thiểu.
 - Nếu service gọi endpoint HTTPS, nó cần chứng chỉ root CA, thứ mà `scratch` không có. Hãy chép chúng từ giai đoạn build sang, hoặc dùng nền distroless.
 
-Cuối cùng, `docker stop` gửi SIGTERM tới tiến trình của ta, vốn là PID 1 trong container. Docker mặc định chờ 10 giây rồi mới gửi SIGKILL, nên mức trần tắt êm 10 giây trong `run` bằng đúng thời gian đó của Docker. Lệnh stop trong lần chạy của tôi trả về sau 0,17 giây: tiến trình đang rảnh nên `Shutdown` không có gì để chờ. Trên Kubernetes, hãy đặt thời gian termination grace period của pod dài hơn timeout tắt của bạn.
+Cuối cùng, `docker stop` gửi SIGTERM tới tiến trình của ta, đúng tín hiệu mà `run` đang chờ. Docker mặc định chờ 10 giây rồi mới gửi SIGKILL, nên mức trần tắt êm 10 giây trong `run` bằng đúng thời gian đó của Docker. Lệnh stop trong lần chạy của tôi trả về sau 0,17 giây: tiến trình đang rảnh nên `Shutdown` không có gì để chờ. Trên Kubernetes, hãy đặt thời gian termination grace period của pod dài hơn timeout tắt của bạn.
 
 ## Key takeaways
 
