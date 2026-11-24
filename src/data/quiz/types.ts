@@ -4,7 +4,10 @@
 export interface L10n { en: string; vi: string }
 
 export type Level = 'remember' | 'understand' | 'apply' | 'analyze' | 'evaluate';
-export type Track = 'interview' | 'ai';
+/** `ai` = review or verify AI-written code (code posts only); `case` = judge a real situation (human-skill posts) */
+export type Track = 'interview' | 'ai' | 'case';
+/** `code`: the skill is writing or reviewing code, so AI-output questions fit. `human`: judgement skills (investing, UX), so they do not. */
+export type QuizDomain = 'code' | 'human';
 export type QType = 'single' | 'scenario' | 'diagram' | 'code-output' | 'ai-review' | 'ai-advice' | 'multi';
 
 export type QuizMedia =
@@ -48,7 +51,7 @@ export interface QuizSet {
   /** "set-04" */
   id: string;
   title: L10n;
-  context: { text: L10n; illustrative?: boolean; media?: QuizMedia[] };
+  context: { text: L10n; media?: QuizMedia[] };
   /** exactly 5, difficulty never decreasing */
   questions: QuizQuestion[];
 }

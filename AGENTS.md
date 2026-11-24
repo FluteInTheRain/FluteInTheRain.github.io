@@ -17,6 +17,8 @@ Trạng thái công việc đang chạy: xem `CHANGELOG.md` (authoritative) và 
 - Progressive enhancement: trang phải dùng được không cần JavaScript (ví dụ quiz không JS vẫn hiện đủ câu hỏi + đáp án).
 - Không sửa component mdx dùng chung (`AnimatedFlow`, `DemoFrame`, `DiagramIcon`...). Icon chỉ lấy từ `src/data/diagram-icons.ts` qua `DiagramIcon`.
 - Không stage file không liên quan tới việc đang làm (hạn chế của một số branch cũ).
+- **Quiz ôn tập:** câu hỏi đánh giá kết quả AI (`track: ai`, type `ai-review` / `ai-advice`) chỉ dành cho bài về code / hệ thống. Bài về kỹ năng của con người (cổ phiếu, UX/UI...) không có câu nào về AI; thay bằng 20 câu `track: case` (tình huống thật, tự đánh giá bằng kỹ năng đó). Mỗi bài có quiz phải khai báo `code` hoặc `human` trong `src/data/quiz/domains.ts`; `node --test` kiểm tra. Chi tiết: `docs/superpowers/specs/2026-11-24-quiz-ai-track-by-domain.md`. Tình huống (`context.text`) của quiz kỹ năng con người mở đầu bằng case thật hoặc bài toán người đọc gặp ngoài đời, viết thành các dòng ngắn (mỗi ý một dòng, danh sách bằng `• `), không viết một khối chữ dài.
+- **Không dán nhãn "minh họa / illustrative"** vào đề, tình huống hay chú thích. Số bịa thì nêu giả định ngay trong câu ("Giả sử FPT giao dịch ở 60.000 đồng") để không bị đọc nhầm thành số thật. Quy tắc cũng nằm trong `.claude/skills/book-to-post/SKILL.md`.
 
 ## Flow làm việc mặc định (chuẩn Superpowers)
 

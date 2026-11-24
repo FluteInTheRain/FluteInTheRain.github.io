@@ -6,7 +6,8 @@ import {
   validateSet, orderSets, shuffleOptions, gradeAnswer, scoreByLevel,
   loadProgress, saveProgress, headingSlugPairs, englishAnchors, type Store,
 } from './quiz.ts';
-import type { QuizSet, QuizQuestion, Level, Track } from '../data/quiz/types.ts';
+import type { QuizSet, QuizQuestion, Level, Track, QuizDomain } from '../data/quiz/types.ts';
+import { QUIZ_DOMAIN } from '../data/quiz/domains.ts';
 
 const ROOT = path.resolve(import.meta.dirname, '../..');
 const QUIZ_DIR = path.join(ROOT, 'src/data/quiz');
@@ -168,10 +169,59 @@ test('position bias check looks at the order options are written in', () => {
   assert.ok(has(problems(s), /position/));
 });
 
+// ---- domain rule: AI-output questions only in code posts
+test('a human-skill quiz rejects the ai track, ai question types and AI wording', () => {
+  const s = clone(fixture());
+  s.questions[1].type = 'ai-review'; // the fixture has no ai-review question of its own
+  const ps = validateSet(s, anchors(), 'human');
+  assert.ok(has(ps, /track "ai" is for code posts/), JSON.stringify(ps));
+  assert.ok(has(ps, /judges AI output/), JSON.stringify(ps));
+});
+
+test('a human-skill quiz is clean once questions use the case track and non-AI types', () => {
+  const s = clone(fixture());
+  for (const q of s.questions) {
+    if (q.track === 'ai') q.track = 'case';
+    if (q.type === 'ai-review' || q.type === 'ai-advice') q.type = 'scenario';
+  }
+  const ps = validateSet(s, anchors(), 'human').filter((p) => /track "ai"|judges AI output|code to run/.test(p));
+  assert.deepEqual(ps, []);
+});
+
+test('a human-skill quiz rejects an option or stem that mentions AI', () => {
+  const s = clone(fixture());
+  for (const q of s.questions) { q.track = 'case'; q.type = 'scenario'; }
+  s.questions[0].stem.en = 'An AI assistant says the dividend yield is 12%. What do you check first?';
+  assert.ok(has(validateSet(s, anchors(), 'human'), /mentions AI/));
+});
+
+test('a human-skill quiz allows the Vietnamese word "ai" (who)', () => {
+  const s = clone(fixture());
+  for (const q of s.questions) { q.track = 'case'; q.type = 'scenario'; }
+  s.questions[0].stem.en = 'Who receives more cash?';
+  s.questions[0].stem.vi = 'Ai là người nhận được nhiều tiền mặt hơn?';
+  for (const o of s.questions[0].options) { o.text.en = 'Minh'; o.text.vi = 'Minh'; }
+  const id = s.questions[0].id;
+  assert.ok(!validateSet(s, anchors(), 'human').some((p) => p.startsWith(`${id}:`) && /mentions AI/.test(p)));
+});
+
+test('a code quiz keeps the ai track and rejects the case track', () => {
+  const s = clone(fixture());
+  assert.ok(!has(validateSet(s, anchors(), 'code'), /track "ai"|track "case"/));
+  s.questions[0].track = 'case';
+  assert.ok(has(validateSet(s, anchors(), 'code'), /track "case" is for human-skill posts/));
+});
+
 // ---- content on disk
 const contentDirs = fs.existsSync(QUIZ_DIR)
   ? fs.readdirSync(QUIZ_DIR, { withFileTypes: true }).filter((d) => d.isDirectory() && !d.name.startsWith('_')).map((d) => d.name)
   : [];
+
+const domainOf = (slug: string): QuizDomain => QUIZ_DOMAIN[slug];
+
+test('every quiz folder declares its domain', () => {
+  for (const slug of contentDirs) assert.ok(QUIZ_DOMAIN[slug], `${slug}: add it to src/data/quiz/domains.ts (code or human)`);
+});
 
 for (const slug of contentDirs) {
   const dir = path.join(QUIZ_DIR, slug);
@@ -182,7 +232,7 @@ for (const slug of contentDirs) {
     for (const f of files) {
       const s = read(path.join(dir, f));
       assert.equal(`${s.id}.json`, f, `${f}: id does not match the file name`);
-      assert.deepEqual(validateSet(s, a), [], f);
+      assert.deepEqual(validateSet(s, a, domainOf(slug)), [], f);
     }
   });
 
@@ -200,7 +250,8 @@ for (const slug of contentDirs) {
         for (const [k, w] of Object.entries(want)) assert.ok(Math.abs((got[k] ?? 0) - w) <= 1, `${k}: ${got[k] ?? 0} questions, target ${w}`);
       };
       near(count((q) => q.level as Level), { remember: 3, understand: 7, apply: 14, analyze: 9, evaluate: 7 });
-      near(count((q) => q.track as Track), { interview: 20, ai: 20 });
+      // code posts: 20 interview + 20 AI-output questions; human-skill posts: 20 interview + 20 real-case questions
+      near(count((q) => q.track as Track), domainOf(slug) === 'human' ? { interview: 20, case: 20 } : { interview: 20, ai: 20 });
       assert.equal(qs.filter((q) => q.type === 'multi').length, 4);
       const multiSets = files.filter((f) => read(path.join(dir, f)).questions.some((q) => q.type === 'multi')).map((f) => f.slice(4, 6));
       assert.deepEqual(multiSets, ['04', '06', '07', '08']);

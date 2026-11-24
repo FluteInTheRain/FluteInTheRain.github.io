@@ -2,18 +2,28 @@
 // No DOM and no Astro imports, so `node --test src/utils/quiz.test.ts` can run them.
 
 import Slugger from 'github-slugger';
-import type { L10n, Level, QuizMedia, QuizQuestion, QuizSet } from '../data/quiz/types';
+import type { L10n, Level, QuizDomain, QuizMedia, QuizQuestion, QuizSet } from '../data/quiz/types';
 
 const LEVELS: Level[] = ['remember', 'understand', 'apply', 'analyze', 'evaluate'];
-const TRACKS = ['interview', 'ai'];
+const TRACKS = ['interview', 'ai', 'case'];
 const QTYPES = ['single', 'scenario', 'diagram', 'code-output', 'ai-review', 'ai-advice', 'multi'];
 
 // ---- validation
 
 const blank = (s: unknown) => typeof s !== 'string' || s.trim() === '';
 
-/** every problem found in a set; [] when the set is valid. `postAnchors` = heading slugs of the post. */
-export function validateSet(set: QuizSet, postAnchors: Set<string>): string[] {
+/** question types and tracks that only make sense when the reader writes or reviews code with AI */
+const AI_TYPES = ['ai-review', 'ai-advice'];
+// "AI" is matched case-sensitively: Vietnamese "ai" means "who" and must stay usable
+const AI_ABBR = /\bAI\b|\bA\.I\./;
+const mentionsAi = (t: string) => AI_ABBR.test(t) || /\b(LLM|ChatGPT|GPT|Claude|Copilot|Gemini|Cursor|chatbot)\b|trí tuệ nhân tạo/i.test(t);
+
+/**
+ * every problem found in a set; [] when the set is valid. `postAnchors` = heading slugs of the post.
+ * `domain` says what the post teaches: in a `human` post (investing, UX, ...) a question must not ask the reader
+ * to judge AI output, and the second track is `case` instead of `ai`.
+ */
+export function validateSet(set: QuizSet, postAnchors: Set<string>, domain: QuizDomain = 'code'): string[] {
   const out: string[] = [];
   const add = (m: string) => out.push(m);
 
@@ -51,6 +61,15 @@ export function validateSet(set: QuizSet, postAnchors: Set<string>): string[] {
     if (!LEVELS.includes(q.level)) add(`${w}: unknown level "${q.level}"`);
     if (!TRACKS.includes(q.track)) add(`${w}: unknown track "${q.track}"`);
     if (!QTYPES.includes(q.type)) add(`${w}: unknown type "${q.type}"`);
+    if (domain === 'human') {
+      if (q.track === 'ai') add(`${w}: track "ai" is for code posts; use "case" (judge a real situation) in a human-skill post`);
+      if (AI_TYPES.includes(q.type)) add(`${w}: type "${q.type}" judges AI output, which does not fit a human-skill post; use single, scenario, diagram or multi`);
+      if (q.type === 'code-output') add(`${w}: a human-skill post has no code to run; use another type`);
+      const text = [q.stem?.en, q.stem?.vi, ...q.options.flatMap((o) => [o.text?.en, o.text?.vi])].join(' ');
+      if (mentionsAi(text)) add(`${w}: the stem or an option mentions AI; a human-skill quiz asks about the skill, not about AI output`);
+    } else if (q.track === 'case') {
+      add(`${w}: track "case" is for human-skill posts; a code post uses "interview" or "ai"`);
+    }
     if (![1, 2, 3, 4, 5].includes(q.difficulty)) add(`${w}: difficulty must be 1 to 5`);
     if (q.difficulty < prev) add(`${w}: difficulty ${q.difficulty} is lower than the question before (${prev})`);
     prev = Math.max(prev, q.difficulty);
