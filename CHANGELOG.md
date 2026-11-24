@@ -3,6 +3,14 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-23 — Mang fix EPS mồ côi từ phiên 22/11 lên main
+
+- **Bối cảnh:** sau khi bài 1 đã publish (entry 2026-11-22), nhánh local `feat/stocks-basics-post1` còn sót 1 commit fix `8eb3869` (23:06 ngày 22/11) chưa lên main — server restart giữa phiên nên không kịp push. Fix sửa: giải thích EPS kiểm toán (EN+VI) — thấp hơn phép chia đơn giản vì tính trên lợi nhuận sau khi trích quỹ khen thưởng/phúc lợi + weighted-average share count nhỏ hơn (bản cũ chỉ nêu weighted-average + cổ tức 15%, thiếu trích quỹ); bổ sung chú thích cùng loại cho EPS kiểm toán của Vinamilk; chỉnh framing độ lớn số trong quiz set-01/set-03.
+- **Đã làm (nhánh `fix/stocks-post1-eps-framing`, cherry-pick `8eb3869` → `5e9eccb`):** cherry-pick sạch, không conflict với các commit review đã merge.
+- **Ai quyết:** AI (AGENTS flow: công việc đã commit nhưng chưa merge → đưa lên PR, đợi user merge).
+- **Kiểm tra:** `npm run build` 60 pages sạch, `node --test` 47/47 pass, fix xuất hiện trong trang build (2 chỗ EN/VI).
+- **Chưa chốt:** viết tiếp bài 2 `vietnam-stock-market-venues-open-account`.
+
 ## 2026-11-24 — Bìa sách series v2: ảnh thật, tiêu đề lớn, màu nhấn theo series
 
 - **Quyết định (user, sau nhiều vòng dựng mẫu HTML → PNG, tham khảo bìa Kurose & Ross):** một layout cho cả 6 series — ảnh thật phủ kín bìa, tiêu đề lớn ở đầu bìa (Noto Sans 600, **từ chủ đề** như "AI", "Go", "Backend" tô màu series), một đường kẻ mảnh, phụ đề một dòng, tên "Khang Nguyen" góc dưới bên phải (cùng font/cỡ/độ đậm với phụ đề). Chữ trên mặt bìa **chỉ tiếng Anh** (user yêu cầu) — ngoại lệ so với quy tắc `{ en, vi }`, chỉ áp cho mặt bìa; credit/pitch vẫn song ngữ. Chọn kiểu nhấn bằng màu, không phải cỡ chữ.
