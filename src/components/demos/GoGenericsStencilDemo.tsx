@@ -169,7 +169,7 @@ export default function GoGenericsStencilDemo() {
         <div className="ggst-pane">
           <div className="ggst-hdr">
             <span data-lang-en>Go Source Trace</span>
-            <span data-lang-vi>Code Go Minh Họa</span>
+            <span data-lang-vi>Code Go</span>
           </div>
           <div className="ggst-code">
             {cur.code.map((line, i) => (

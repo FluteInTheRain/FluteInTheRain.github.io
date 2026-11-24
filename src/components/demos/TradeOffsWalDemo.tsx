@@ -104,8 +104,8 @@ export default function TradeOffsWalDemo() {
           <tspan data-lang-vi>ngày</tspan>
         </text>
         <text x={CW - PAD.r} y={cy(HEADROOM_GB) + 14} textAnchor="end" className="tow-limit-label">
-          <tspan data-lang-en>free disk: {HEADROOM_GB} GB (illustrative)</tspan>
-          <tspan data-lang-vi>đĩa trống: {HEADROOM_GB} GB (minh hoạ)</tspan>
+          <tspan data-lang-en>free disk: {HEADROOM_GB} GB</tspan>
+          <tspan data-lang-vi>đĩa trống: {HEADROOM_GB} GB</tspan>
         </text>
         <line x1={PAD.l} x2={CW - PAD.r} y1={cy(HEADROOM_GB)} y2={cy(HEADROOM_GB)} className="tow-limit" />
         <path d={path} className="tow-curve" />

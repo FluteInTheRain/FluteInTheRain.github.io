@@ -291,11 +291,11 @@ export default function LicenseReplayDemo() {
           </p>
           <p className="lr-note lr-sim">
             <span data-lang-en>
-              Simulated log: the days and titles are made up. The 30-day renewal and the twice-a-year download limit are the
+              Simulated log. The 30-day renewal and the twice-a-year download limit are the
               rules Netflix described.
             </span>
             <span data-lang-vi>
-              Log mô phỏng: ngày và tên phim là tự đặt. Luật gia hạn 30 ngày và giới hạn tải hai lần một năm là luật Netflix
+              Log mô phỏng. Luật gia hạn 30 ngày và giới hạn tải hai lần một năm là luật Netflix
               đã mô tả.
             </span>
           </p>

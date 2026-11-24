@@ -131,7 +131,7 @@ export default function GoContextCancelDemo() {
         <div className="gccd-pane">
           <div className="gccd-hdr">
             <span data-lang-en>Go Source Trace</span>
-            <span data-lang-vi>Code Go Minh Họa</span>
+            <span data-lang-vi>Code Go</span>
           </div>
           <div className="gccd-code">
             {SCENARIOS[mode].code.map((line, i) => (
