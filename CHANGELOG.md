@@ -3,6 +3,14 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-24 — Bìa sách series v2: ảnh thật, tiêu đề lớn, màu nhấn theo series
+
+- **Quyết định (user, sau nhiều vòng dựng mẫu HTML → PNG, tham khảo bìa Kurose & Ross):** một layout cho cả 6 series — ảnh thật phủ kín bìa, tiêu đề lớn ở đầu bìa (Noto Sans 600, **từ chủ đề** như "AI", "Go", "Backend" tô màu series), một đường kẻ mảnh, phụ đề một dòng, tên "Khang Nguyen" góc dưới bên phải (cùng font/cỡ/độ đậm với phụ đề). Chữ trên mặt bìa **chỉ tiếng Anh** (user yêu cầu) — ngoại lệ so với quy tắc `{ en, vi }`, chỉ áp cho mặt bìa; credit/pitch vẫn song ngữ. Chọn kiểu nhấn bằng màu, không phải cỡ chữ.
+- **Ảnh (đều thật, từ Wikimedia Commons, ghi đủ credit):** UI Design = cầu thang xoắn Bauhaus Weimar (CC BY-SA 3.0); Data Systems = ổ cứng mở nắp (PD); Go = quân cờ vây (CC BY-SA 4.0); Stock Basics = sàn NYSE đen trắng (PD); Backend = rack IBM cáp xanh/vàng (CC BY 3.0); AI Trading = Robonaut đối mặt phi hành gia (PD). Tên bìa Data Systems đổi thành "Data Systems Under Pressure" (chỉ trên bìa, `series.title` giữ nguyên).
+- **Đã làm (nhánh `feat/series-covers-v2`, plan `docs/superpowers/plans/2026-11-24-series-covers-v2.md`):** 6 ảnh vào `src/assets/series/cover-*.jpg` (max 1600px); `SeriesCoverArt` thêm `title {lead?, accent, rest?}`, `tagline`, `hue`, bỏ `subtitle`/`imprint`, khai báo `credit.origin?`; `BookCover.astro` viết lại (giữ gáy, mép trang, nghiêng phối cảnh; thumbnail `sm` chỉ hiện tiêu đề); xóa 6 ảnh bìa cũ không còn dùng.
+- **Kiểm tra:** `npm run build` 60 pages sạch, `node --test` 47/47 pass; xem mắt 6 trang `/blog/series/<id>/` và thumbnail ở blog index (desktop, light).
+- **Chưa chốt / chưa kiểm:** chưa kiểm 360px thật và dark mode bằng trình duyệt thật (headless không ép được viewport hẹp; bìa là vật thể giữ nguyên màu ở cả 2 theme); ảnh Backend/UI dọc 1600×2400 khá nặng (0.8–1.4MB), có thể nén thêm nếu cần; số `position` từng ảnh có thể tinh lại.
+
 ## 2026-11-23 — Series Go: bỏ mục "Coming from Java, Python or JavaScript"; sửa review đợt 4 (bài 11, 12, 13, 16, 17)
 
 - **Đã làm (branch `fix/go-drop-language-comparison`):** xoá mục so sánh với Java/Python/JS (bảng + đoạn "khác biệt lớn nhất", cả EN lẫn VI) ở 10 bài Go 1–10, tổng 20 mục. Giữ lại 3 đoạn ngắn chỉ nói về Go: hướng dẫn đọc của bài concurrency patterns, "goroutine không cần `await`, không có handle" (bài goroutines), "Go không có `assert`, `go test` có sẵn" (bài testing). Description bài 4 bỏ cụm "coming from Java, Python or JavaScript". Spec + plan series Go và 2 brief agent (`.superpowers/sdd/.../common-post-context.md`, `rewrite-common-context.md`) đổi quy ước: người đọc chỉ cần biết lập trình căn bản, không bài nào có mục/bảng so sánh ngôn ngữ.
