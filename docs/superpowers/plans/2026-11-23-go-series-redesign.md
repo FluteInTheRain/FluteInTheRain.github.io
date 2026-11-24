@@ -15,7 +15,7 @@
 - Reader: "a developer who already writes another language … and has **never written Go**." Posts do not explain what a variable or a loop is.
 - One home post per concept; other posts link to it instead of re-teaching it. Each 100 Go Mistakes item is covered only in the post the spec's Book column assigns it to.
 - Book rules from `.claude/skills/book-to-post/SKILL.md` "Never": no book text beyond short attributed quotes, no redrawn book figures, no Mermaid, no generated infographic PNGs, never commit anything under `books/`.
-- Structure per post: hero, hook, Concepts box, sections, Key takeaways, Review questions, `<En>`/`<Vi>` blocks, `sources` frontmatter (books + chapters used + web sources). Levels 1–2 (posts 1–10) open with a "Coming from Java / Python / JS" comparison table.
+- Structure per post: hero, hook, Concepts box, sections, Key takeaways, Review questions, `<En>`/`<Vi>` blocks, `sources` frontmatter (books + chapters used + web sources). No post has a "Coming from Java / Python / JS" section or comparison table (removed 2026-11-23, Khang).
 - Real sourced cases before analogies; no "chapter N" framing; no length cap, no padding.
 - At least one `<AnimatedFlow />` preset or React island in `<DemoFrame>` per post; figures drawn on the page with CSS tokens (`var(--text)` …), correct in light and dark; content readable without JS.
 - Go code and outputs are run on Go 1.27 and captured from real runs, not typed by hand.

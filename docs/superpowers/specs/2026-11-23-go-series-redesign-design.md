@@ -6,7 +6,7 @@ Date: 2026-11-23. Status: **approved** by Khang on 2026-11-23.
 
 The `golang` series (12 published posts, `src/data/series.ts`, id `golang`) is hard for newcomers. Khang (2026-11-23): *"Người mới tiếp cận sẽ không dễ hiểu được."* The series gets re-cut into one ladder that climbs from basic to advanced, and every post is rewritten against that ladder.
 
-**Reader:** a developer who already writes another language (Java, Python, JS/TS, C#…) and has **never written Go**. Posts do not explain what a variable or a loop is. They explain what is different in Go, and why, by comparing with what the reader already knows.
+**Reader:** a developer who already knows basic programming and has **never written Go**. Posts do not explain what a variable or a loop is. They explain how Go does things, and why. *(Changed 2026-11-23, Khang: no section or table comparing Go with other languages; a passing one-line mention is fine where it helps.)*
 
 **Decided by Khang (2026-11-23):**
 - Approach A: one series, 4 levels, one topic per post, no topic taught twice.
@@ -97,17 +97,17 @@ Book abbreviations: EG = *Efficient Go*, 100GM = *100 Go Mistakes*.
 
 ### Outline per post (the drafts to rewrite from)
 
-Every post follows the `book-to-post` structure: hero, hook, Concepts box, sections, Key takeaways, Review questions, bilingual `<En>`/`<Vi>`, `sources` frontmatter. Levels 1–2 add a **"Coming from Java / Python / JS"** comparison table in the first section.
+Every post follows the `book-to-post` structure: hero, hook, Concepts box, sections, Key takeaways, Review questions, bilingual `<En>`/`<Vi>`, `sources` frontmatter. No post has a "Coming from Java / Python / JS" section or comparison table (removed 2026-11-23, Khang).
 
 **1. Go basics.** What Go is built for (fast builds, one static binary, simple deploy), with Go's own design story as the real case. `go install`, `go run`, `go build`. `go mod init`, what `go.mod`/`go.sum` hold, `go get` (one paragraph on why versions are stable, no MVS algorithm). Packages = folders, capitalised names are exported, `internal/`. Project layout for a small service; the module path is explained at the first import that uses it. `gofmt`, `go vet`. Docker `FROM scratch` / cross-compiling: one sentence, details in post 10. Demo: animated flow "source → `go build` → one binary → run on a bare container".
 
 **2. Go types and functions.** `var` vs `:=`, zero values (why no "undefined"), basic types, constants and `iota`, explicit conversions, integer overflow. Functions with multiple returns. Pointers: everything passes by value; when to pass `*T`; no pointer arithmetic. `defer` basics (runs at function exit, LIFO, arguments captured now). Shadowing with `:=` as the first trap. Overflow/float/octal stay short: one overflow example, octal in two lines, no NaN/Inf detail. Demo: interactive "pass by value vs pointer" stepper.
 
-**3. Go collections.** Arrays vs slices as a reader of other languages sees them (`ArrayList`/`list`/`Array`), `make`, `append`, `len`/`cap` at usage level, nil vs empty slice, `copy`. Maps: create, comma-ok, delete, iteration order is random. Slices can share memory: one plain `b := a[1:3]; b[0] = 99` example, the why goes to post 11. Strings are bytes; `rune`; ranging over `"Phở"`. Link forward to post 11 for what happens underneath. Capacity advice stays one rule ("`make` with a capacity when you know the size"); growth tables, allocation counts, map size hints and `strings.Trim*` pitfalls live in post 11. Demo: `append` growth visualiser (usage level).
+**3. Go collections.** Arrays vs slices, `make`, `append`, `len`/`cap` at usage level, nil vs empty slice, `copy`. Maps: create, comma-ok, delete, iteration order is random. Slices can share memory: one plain `b := a[1:3]; b[0] = 99` example, the why goes to post 11. Strings are bytes; `rune`; ranging over `"Phở"`. Link forward to post 11 for what happens underneath. Capacity advice stays one rule ("`make` with a capacity when you know the size"); growth tables, allocation counts, map size hints and `strings.Trim*` pitfalls live in post 11. Demo: `append` growth visualiser (usage level).
 
 **4. Go structs and interfaces.** No classes: structs + methods. Value vs pointer receivers (one rule of thumb). Embedding as composition, not inheritance. Interfaces are satisfied implicitly; small interfaces (`io.Reader`, `fmt.Stringer`) as real stdlib cases. Type switches. Generics moved to post 12 (2026-11-23: posts 1–10 use no generics). Link forward to post 12. Demo: "which type satisfies which interface" interactive checker.
 
-**5. Go errors.** Errors are values; `if err != nil` and why Go chose it (compare with exceptions). Creating errors, wrapping with `%w`, `errors.Is`/`errors.As`, `errors.Join`. Handle an error once (log or return, not both). Named results and the `err` they silently keep (100GM #43–#44) live here, since their trap is about errors. `defer` for cleanup, `panic`/`recover` and when panic is legitimate. Real case: a sourced incident where swallowed or duplicated errors hid a failure. Demo: error-wrap chain unwinder.
+**5. Go errors.** Errors are values; `if err != nil` and why Go chose it. Creating errors, wrapping with `%w`, `errors.Is`/`errors.As`, `errors.Join`. Handle an error once (log or return, not both). Named results and the `err` they silently keep (100GM #43–#44) live here, since their trap is about errors. `defer` for cleanup, `panic`/`recover` and when panic is legitimate. Real case: a sourced incident where swallowed or duplicated errors hid a failure. Demo: error-wrap chain unwinder.
 
 **6. Go testing.** `go test`, `_test.go`, table-driven tests, subtests `t.Run`, `t.Helper`, `t.Parallel`, test fixtures, `httptest`, coverage, `-race` first look (details in post 13). Test categories (build tags / `-short`). Demo: run a table test step by step.
 

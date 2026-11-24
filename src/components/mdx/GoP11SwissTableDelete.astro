@@ -1,0 +1,167 @@
+---
+// Go 1.24+ SwissTable group lookup (h1 selects table/group; 64-bit control word probes 8 h2 fingerprints at once)
+// and why delete() marks slots empty/deleted without freeing allocated groups (Go 1.27.1 measurements: 287.8 MiB vs 2.4 MiB).
+// Icons: DiagramIcon (key, search, heap, warning, recycle). Motion: fm-dot (the h2 fingerprint travelling to the group) and fm-pulse on the pinned stage.
+import DiagramIcon from './DiagramIcon.astro';
+const W = 900;
+const H = 426;
+
+function arrow(x1: number, y1: number, x2: number, y2: number) {
+  const a = Math.atan2(y2 - y1, x2 - x1);
+  const len = 8;
+  const p1 = [x2 - len * Math.cos(a - 0.45), y2 - len * Math.sin(a - 0.45)];
+  const p2 = [x2 - len * Math.cos(a + 0.45), y2 - len * Math.sin(a + 0.45)];
+  return {
+    line: `M ${x1} ${y1} L ${x2 - 6 * Math.cos(a)} ${y2 - 6 * Math.sin(a)}`,
+    head: `${x2},${y2} ${p1[0].toFixed(1)},${p1[1].toFixed(1)} ${p2[0].toFixed(1)},${p2[1].toFixed(1)}`,
+  };
+}
+
+// 8 slots in one SwissTable group
+const ctrls = [
+  { s: 0, tag: '0x17', state: 'full' },
+  { s: 1, tag: '0x59', state: 'hit' },
+  { s: 2, tag: 'del', state: 'del' },
+  { s: 3, tag: '0x3a', state: 'full' },
+  { s: 4, tag: '0x59', state: 'hit' },
+  { s: 5, tag: 'empty', state: 'empty' },
+  { s: 6, tag: '0x42', state: 'full' },
+  { s: 7, tag: 'empty', state: 'empty' },
+];
+
+const aHash = arrow(216, 80, 292, 80);
+const aStage1 = arrow(284, 314, 312, 314);
+const aStage2 = arrow(584, 314, 612, 314);
+---
+<figure class="gp11st">
+  <div class="gp11st-scroll">
+    <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Top: Go 1.24+ SwissTable splits the 64-bit key hash into 57-bit h1 to pick a group and 7-bit h2 to probe all 8 control bytes in parallel, checking full keys only where h2 matches. Bottom: after 1 million inserts HeapAlloc reaches 287.8 MiB; deleting 990,000 keys clears slots to empty or tombstone but keeps 287.8 MiB pinned until copied into a fresh map (2.4 MiB).">
+      {/* Panel 1: SwissTable group probe */}
+      <text x="16" y="26" class="h">
+        <tspan data-lang-en>1. SwissTable lookup (Go 1.24+): one 64-bit control word probes 8 slots in parallel</tspan>
+        <tspan data-lang-vi>1. Tra cứu SwissTable (Go 1.24+): một control word 64 bit dò 8 ô cùng lúc</tspan>
+      </text>
+
+      <rect x="16" y="48" width="200" height="64" rx="6" class="box" />
+      <DiagramIcon name="key" x={194} y={64} size={24} />
+      <text x="28" y="72" class="b">hash(key) = 64 bits</text>
+      <text x="28" y="96" class="m num">h1 (57 bits) · h2 = 0x59</text>
+      <path d={aHash.line} class="ln" /><polygon points={aHash.head} class="hd" />
+      <circle class="dot fm-dot" r="4"><animateMotion dur="1.8s" repeatCount="indefinite" path="M216,80 L292,80" /></circle>
+
+      <text x="296" y="56" class="m">
+        <tspan data-lang-en>8-byte control word for group picked by h1</tspan>
+        <tspan data-lang-vi>control word 8 byte của group mà h1 trỏ tới</tspan>
+      </text>
+      {ctrls.map((c, i) => {
+        const x = 296 + i * 73;
+        const cls = c.state === 'hit' ? 'box gold' : c.state === 'empty' ? 'free' : c.state === 'del' ? 'box bad' : 'box';
+        return (
+          <g>
+            <rect x={x} y="66" width="67" height="44" rx="4" class={cls} />
+            <text x={x + 33.5} y="84" text-anchor="middle" class="m num">[{c.s}]</text>
+            <text x={x + 33.5} y="102" text-anchor="middle" class={c.state === 'hit' ? 'g num' : c.state === 'del' ? 'r' : 'b num'}>{c.tag}</text>
+          </g>
+        );
+      })}
+      <DiagramIcon name="search" x={308} y={128} size={22} />
+      <text x="330" y="134" class="g">
+        <tspan data-lang-en>match h2 = 0x59 → check full key only at slots 1 and 4; stop at empty</tspan>
+        <tspan data-lang-vi>khớp h2 = 0x59 → chỉ so sánh key đầy đủ ở ô 1 và 4; dừng khi gặp empty</tspan>
+      </text>
+
+      {/* Key-value inline vs indirect note */}
+      <text x="16" y="166" class="m">
+        <tspan data-lang-en>Note: keys or values over 128 bytes store a pointer inside the slot; tables split above 1,024 slots so resizing stays incremental.</tspan>
+        <tspan data-lang-vi>Lưu ý: key hoặc value lớn hơn 128 byte được tách ra thành con trỏ trong ô; table tách đôi khi vượt 1.024 ô để không khựng khi phình.</tspan>
+      </text>
+
+      <line x1="16" x2={W - 16} y1="190" y2="190" class="rule" />
+
+      {/* Panel 2: delete() never frees groups */}
+      <text x="16" y="222" class="h">
+        <tspan data-lang-en>2. Measured on Go 1.27.1: delete() leaves tables allocated until you rebuild</tspan>
+        <tspan data-lang-vi>2. Đo thực tế trên Go 1.27.1: delete() không trả RAM bảng cho tới khi dựng map mới</tspan>
+      </text>
+
+      {/* Stage 1 */}
+      <rect x="16" y="246" width="268" height="136" rx="8" class="box" />
+      <text x="32" y="274" class="b">
+        <tspan data-lang-en>1. Insert 1,000,000 entries</tspan>
+        <tspan data-lang-vi>1. Chèn 1.000.000 mục</tspan>
+      </text>
+      <DiagramIcon name="heap" x={256} y={316} size={28} />
+      <text x="32" y="298" class="m num">map[int][128]byte</text>
+      <text x="32" y="324" class="b num">len: 1,000,000</text>
+      <text x="32" y="348" class="b num">HeapAlloc: 287.8 MiB</text>
+      <text x="32" y="370" class="m">
+        <tspan data-lang-en>tables grow to ~87.5% max load</tspan>
+        <tspan data-lang-vi>bảng mở rộng tới tải tối đa 87,5%</tspan>
+      </text>
+      <path d={aStage1.line} class="ln" /><polygon points={aStage1.head} class="hd" />
+
+      {/* Stage 2 */}
+      <rect x="316" y="246" width="268" height="136" rx="8" class="box bad fm-pulse" />
+      <DiagramIcon name="warning" x={556} y={316} size={28} />
+      <text x="332" y="274" class="r">
+        <tspan data-lang-en>2. delete() 990,000 keys + GC</tspan>
+        <tspan data-lang-vi>2. delete() 990.000 key + GC</tspan>
+      </text>
+      <text x="332" y="298" class="m num">len: 10,000 (99% deleted)</text>
+      <text x="332" y="324" class="r num">HeapAlloc: 287.8 MiB</text>
+      <text x="332" y="348" class="m">
+        <tspan data-lang-en>slots marked empty / tombstone;</tspan>
+        <tspan data-lang-vi>ô đổi thành empty / tombstone;</tspan>
+      </text>
+      <text x="332" y="368" class="m">
+        <tspan data-lang-en>tables stay pinned (go#20135)</tspan>
+        <tspan data-lang-vi>toàn bộ bảng vẫn nằm lì trên heap</tspan>
+      </text>
+      <path d={aStage2.line} class="ln" /><polygon points={aStage2.head} class="hd" />
+
+      {/* Stage 3 */}
+      <rect x="616" y="246" width="268" height="136" rx="8" class="box gold" />
+      <text x="632" y="274" class="b">
+        <tspan data-lang-en>3. Copy 10k into fresh map</tspan>
+        <tspan data-lang-vi>3. Chép 10k mục sang map mới</tspan>
+      </text>
+      <DiagramIcon name="recycle" x={856} y={316} size={28} />
+      <text x="632" y="298" class="m num">make(map[K]V, len(m))</text>
+      <text x="632" y="324" class="g num">HeapAlloc: 2.4 MiB</text>
+      <text x="632" y="348" class="m">
+        <tspan data-lang-en>old 287.8 MiB table has zero</tspan>
+        <tspan data-lang-vi>bảng cũ 287,8 MiB hết tham chiếu</tspan>
+      </text>
+      <text x="632" y="368" class="m">
+        <tspan data-lang-en>references and is freed by GC</tspan>
+        <tspan data-lang-vi>và được GC thu hồi sạch</tspan>
+      </text>
+    </svg>
+  </div>
+  <figcaption>
+    <span data-lang-en>Go 1.24+ SwissTables probe 8 slots at once via an 8-byte control word and zero deleted slots on <code>delete(m, k)</code>, yet never shrink allocated groups or directories (<code>golang/go#20135</code>). Rebuilding a fresh map drops the live heap from <code>287.8 MiB</code> to <code>2.4 MiB</code>.</span>
+    <span data-lang-vi>SwissTable từ Go 1.24+ dò 8 ô cùng lúc qua control word 8 byte và xóa trắng con trỏ trong ô khi gọi <code>delete(m, k)</code>, nhưng không thu nhỏ bảng đã cấp (<code>golang/go#20135</code>). Chép phần còn sống sang map mới giảm heap từ <code>287,8 MiB</code> xuống <code>2,4 MiB</code>.</span>
+  </figcaption>
+</figure>
+
+<style>
+  .gp11st { margin: 2em 0; width: 100%; }
+  .gp11st-scroll { overflow-x: auto; }
+  .gp11st svg { display: block; width: 100%; min-width: 640px; height: auto; }
+  .gp11st text { font-size: 14px; fill: var(--text-body); }
+  .gp11st .h { font-size: 16px; font-weight: 700; fill: var(--text); }
+  .gp11st .b { font-weight: 700; fill: var(--text); }
+  .gp11st .m { fill: var(--text-muted); }
+  .gp11st .r { fill: var(--red); font-weight: 700; }
+  .gp11st .g { fill: var(--gold-icon); font-weight: 700; }
+  .gp11st .num { font-variant-numeric: tabular-nums; }
+  .gp11st .box { fill: var(--bg-alt); stroke: var(--text-muted); stroke-width: 1.2; }
+  .gp11st .box.bad { fill: var(--red-tint-bg); stroke: var(--red); stroke-width: 1.3; }
+  .gp11st .box.gold { fill: var(--gold-tint-bg); stroke: var(--gold); stroke-width: 1.3; }
+  .gp11st .free { fill: none; stroke: var(--border); stroke-width: 1.2; stroke-dasharray: 4 3; }
+  .gp11st .dot { fill: var(--gold); stroke: var(--text); stroke-width: 1; }
+  .gp11st .ln { fill: none; stroke: var(--text-muted); stroke-width: 1.5; }
+  .gp11st .hd { fill: var(--text-muted); }
+  .gp11st .rule { stroke: var(--border); stroke-width: 1; }
+  .gp11st figcaption { margin-top: 10px; font-size: 14px; color: var(--text-muted); line-height: 1.55; text-align: center; }
+</style>
