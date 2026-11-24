@@ -1,20 +1,24 @@
 ---
 title: "Go in production"
 title_vi: "Go trên production"
-description: "Production Go survival guide: http.DefaultClient traps, SQL pool tuning, 64-byte CPU cache lines, false sharing, escape analysis, pprof, and Kubernetes CFS throttling."
-description_vi: "Đem Go lên production đỡ vấp: chỉnh timeout cho http.DefaultClient, cấu hình pool database/sql, xếp struct theo cache line, đọc escape analysis, pprof và tránh bị Kubernetes bóp CPU."
-date: 2026-11-20
+description: "Traps that hide on localhost: calls and servers that wait for ever, bodies and rows never closed, time and JSON surprises, database/sql pools, and CPU limits in containers."
+description_vi: "Bẫy chạy ở máy mình không thấy: chờ mãi không timeout, body và rows quên đóng, bất ngờ với time và JSON, pool database/sql, và giới hạn CPU trong container."
+date: 2026-11-23
 category: "backend"
-tags: ["golang", "production", "performance", "kubernetes", "pprof", "100-go-mistakes"]
+tags: ["golang", "production", "net/http", "database-sql", "json", "kubernetes", "100-go-mistakes"]
 cover: "../../assets/series/golang/go-gopher-pencil-wrench.jpg"
 cover_alt: "Pencil drawing of the Go gopher holding a wrench, drawn by Renee French"
 draft: false
 sources:
-  - { title: "100 Go Mistakes and How to Avoid Them", author: "Teiva Harsanyi", chapters: "Ch. 10, 11, 12", url: "https://100go.co/" }
-  - { title: "net/http DefaultClient definition (src/net/http/client.go)", author: "The Go Authors", url: "https://github.com/golang/go/blob/074522c96ce70350453c164ecb17904881106b6a/src/net/http/client.go#L58-L125" }
+  - { title: "100 Go Mistakes and How to Avoid Them", author: "Teiva Harsanyi", chapters: "Ch. 10 (#75 to #81: time, JSON, database/sql, closing resources, http.Error, default HTTP client and server), Ch. 12 (#100: Docker and Kubernetes)", url: "https://100go.co/" }
+  - { title: "runtime: make GOMAXPROCS cfs-aware on GOOS=linux (golang/go issue #33803)", author: "Joshua T Corbin (opened August 2019)", url: "https://github.com/golang/go/issues/33803" }
   - { title: "Container-aware GOMAXPROCS (Go 1.25 Release Notes)", author: "The Go Authors", url: "https://go.dev/doc/go1.25" }
-  - { title: "Profiling Go Programs", author: "Russ Cox (The Go Blog)", url: "https://go.dev/blog/pprof" }
-  - { title: "More powerful Go execution traces", author: "Michael Knyszek & Carlos Amedee (The Go Blog)", url: "https://go.dev/blog/execution-traces-2024" }
+  - { title: "runtime.GOMAXPROCS documentation", author: "The Go Authors", url: "https://pkg.go.dev/runtime#GOMAXPROCS" }
+  - { title: "Timer changes (Go 1.23 Release Notes)", author: "The Go Authors", url: "https://go.dev/doc/go1.23" }
+  - { title: "CFS Bandwidth Control (Linux kernel documentation)", author: "The Linux kernel community", url: "https://docs.kernel.org/scheduler/sched-bwc.html" }
+  - { title: "net/http DefaultClient definition (src/net/http/client.go)", author: "The Go Authors", url: "https://github.com/golang/go/blob/074522c96ce70350453c164ecb17904881106b6a/src/net/http/client.go#L58-L125" }
+  - { title: "The complete guide to Go net/http timeouts", author: "Filippo Valsorda (Cloudflare Blog, 2016)", url: "https://blog.cloudflare.com/the-complete-guide-to-golang-net-http-timeouts/" }
+  - { title: "database/sql package documentation", author: "The Go Authors", url: "https://pkg.go.dev/database/sql" }
   - { title: "Boulton and Watt centrifugal governor (CC BY 3.0)", author: "Dr. Mirko Junge", url: "https://commons.wikimedia.org/wiki/File:Boulton_and_Watt_centrifugal_governor-MJ.jpg" }
   - { title: "Clocks: Mr. R. Mays detached escapement engraving (CC BY 4.0)", author: "W. Kelsall after J. Clement (Wellcome Collection)", url: "https://commons.wikimedia.org/wiki/File:Clocks;_an_escapement_mechanism._Engraving_by_W._Kelsall_aft_Wellcome_V0023849EL.jpg" }
   - { title: "Go gopher pencil wrench (CC BY 3.0)", author: "Renee French", url: "https://commons.wikimedia.org/wiki/File:Go_gopher_pencil_wrench.jpg" }
@@ -26,60 +30,65 @@ import En from '../../components/mdx/En.astro';
 import Figure from '../../components/mdx/Figure.astro';
 import GitHubCode from '../../components/mdx/GitHubCode.astro';
 import GoHttpPoolLeakDemo from '../../components/mdx/GoHttpPoolLeakDemo.astro';
-import GoProdCacheAndFalseSharing from '../../components/mdx/GoProdCacheAndFalseSharing.astro';
-import GoProdCodeTrace from '../../components/mdx/GoProdCodeTrace.astro';
-import GoProdEscapeAnalysis from '../../components/mdx/GoProdEscapeAnalysis.astro';
-import GoProdHttpTimeouts from '../../components/mdx/GoProdHttpTimeouts.astro';
-import GoProdK8sCfsThrottle from '../../components/mdx/GoProdK8sCfsThrottle.astro';
-import GoProdSqlAndTime from '../../components/mdx/GoProdSqlAndTime.astro';
-import GoProdStructCacheK8sDemo from '../../components/mdx/GoProdStructCacheK8sDemo.astro';
-import QuoteCard from '../../components/mdx/QuoteCard.astro';
+import GoP14BodyDrain from '../../components/mdx/GoP14BodyDrain.astro';
+import GoP14CfsWindow from '../../components/mdx/GoP14CfsWindow.astro';
+import GoP14ClientTimeouts from '../../components/mdx/GoP14ClientTimeouts.astro';
+import GoP14EmbeddedTime from '../../components/mdx/GoP14EmbeddedTime.astro';
+import GoP14MissingReturn from '../../components/mdx/GoP14MissingReturn.astro';
+import GoP14SqlPool from '../../components/mdx/GoP14SqlPool.astro';
 import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
 import Vi from '../../components/mdx/Vi.astro';
 import heroGovernor from '../../assets/blog/go-production-stdlib-cpu-cache-gc-kubernetes/centrifugal-governor.jpg';
 import clockEscapement from '../../assets/blog/go-production-stdlib-cpu-cache-gc-kubernetes/clock-escapement.jpg';
-import goTraceImg from '../../assets/blog/go-production-stdlib-cpu-cache-gc-kubernetes/go-execution-tracer.png';
-import goPprofImg from '../../assets/blog/go-production-stdlib-cpu-cache-gc-kubernetes/go-pprof-graph.png';
 
 <En>
 
-<Figure src={heroGovernor} alt="Watt-type brass and iron centrifugal flyball governor regulating steam flow on a Boulton and Watt engine" caption="A centrifugal governor pairs engine speed to physical throttle limits. Production services freeze when runtime parallelism ignores container limits." sourceTitle="Wikimedia Commons: Boulton and Watt centrifugal governor" sourceUrl="https://commons.wikimedia.org/wiki/File:Boulton_and_Watt_centrifugal_governor-MJ.jpg" />
+<Figure src={heroGovernor} alt="Watt-type brass and iron centrifugal flyball governor regulating steam flow on a Boulton and Watt engine" caption="A centrifugal governor keeps an engine inside the limit its steam valve allows. A Go program in a container needs the same match between how many threads it runs and how much CPU it is given." sourceTitle="Wikimedia Commons: Boulton and Watt centrifugal governor" sourceUrl="https://commons.wikimedia.org/wiki/File:Boulton_and_Watt_centrifugal_governor-MJ.jpg" />
 
-> "Premature optimization is the root of all evil—yet overlooking hardware mechanics and default timeouts is the fastest way to page on-call."
-> &mdash; *Production Go corollary after Donald Knuth*
+> "The smaller the container / larger the machine = the worse this effect becomes."
+> &mdash; *Joshua T Corbin*, [golang/go issue #33803](https://github.com/golang/go/issues/33803) (2019)
 
-### Why fast local Go services stall in Kubernetes and exhaust sockets
+### The service passed every test and still stalled
 
-Everything looks instantaneous on localhost. Your AI-scaffolded Go microservice compiles to a tiny static binary, passes unit tests in 40 ms, and handles local `curl` requests in sub-millisecond time.
+In August 2019 a Go user opened issue #33803 on the Go repository. Their setup was ordinary: each container had a CPU quota of 4, and the containers ran on machines with 32 processors. Go looked at the machine, saw 32 processors, and started its runtime as if it owned all of them. The container could only use 4 processors' worth of time, so the kernel kept pausing it. Latency suffered, and the issue says the effect was visible in the main body of the latency distribution, not only in the tail. The fix shipped in Go 1.25, in August 2025.
 
-With memory, interfaces, and concurrency pitfalls clear, we bridge into the last runtime realities before systematic performance optimization: hardening standard library defaults, avoiding false sharing across CPU cache lines, and taming Kubernetes CFS throttling across four checks:
+That story is the shape of everything in this post. Your service works on a laptop, where the network is instant, the database is next door and nothing has a CPU limit. In production the network is slow, the database is shared and the container has a ceiling. Go's standard library is friendly on a laptop, and a few of its defaults turn into outages elsewhere.
 
-1. **Standard library defaults**: hardening `net/http`, `database/sql`, `time`, and `encoding/json` before traffic arrives.
-2. **CPU cache lines, false sharing, and struct alignment**: arranging fields and slices so CPU cores stop invalidating each other's L1 caches.
-3. **Stack vs. heap, escape analysis, and GC**: reading `-gcflags="-m"` to cut heap allocations instead of guessing.
-4. **Testing accuracy, diagnostics, and Kubernetes CFS throttling**: avoiding flaky benchmarks, profiling with `pprof`/traces, and matching `GOMAXPROCS` to container quotas.
+We will use the `Todo` service from [Build a Go HTTP service](/blog/go-http-service-net-http-json-middleware/) as the running example, and go through six traps.
+
+| Trap | What goes wrong | Where |
+|---|---|---|
+| A call or a server with no timeout | A goroutine waits for ever on one stuck peer | [section 1](#1-waiting-for-ever-timeouts) |
+| A body, rows or file never closed | Connections and file handles run out | [section 2](#2-close-what-you-open) |
+| `time.After` in a loop, bare numbers as durations | Memory grows (older Go), or a sleep is a million times too short | [section 3](#3-time-bare-numbers-and-timers) |
+| JSON that quietly drops or rounds data | Missing fields, wrong comparisons, rounded IDs | [section 4](#4-json-three-surprises) |
+| `database/sql` is a pool, not a connection | Requests queue behind connections nobody returned | [section 5](#5-databasesql-is-a-pool) |
+| A container with a CPU limit | The kernel pauses the whole process | [section 6](#6-go-in-containers) |
 
 <Callout type="note" title="TL;DR">
-Never use `http.DefaultClient` or `http.ListenAndServe` without timeouts, drain and close every `resp.Body`, tune `sql.DB` pool bounds, and replace `time.After` inside loops with reusable `time.NewTimer`. Order struct fields largest-to-smallest, separate hot atomic counters onto distinct CPU cache lines, measure allocations with `pprof` and `-gcflags="-m"`, and align `GOMAXPROCS` with Kubernetes CPU limits (native in Go 1.25+, or via `uber-go/automaxprocs` on older runtimes).
+Set a timeout on every client and server: `http.DefaultClient` and `http.ListenAndServe` have none. Read the rest of a response body and close it, close `sql.Rows`, and put `return` after `http.Error`. An embedded `time.Time` takes over a struct's JSON, and numbers decoded into `any` become `float64`. `sql.Open` makes a pool and connects to nothing. In a container, check the `go` line in `go.mod`: from Go 1.25 `GOMAXPROCS` follows the CPU limit, but a CPU limit can still throttle the process.
 </Callout>
 
-<Concepts>
+<Callout type="note" title="Recap from earlier posts">
 
-- **Transient resource & HTTP Keep-Alive**: OS handles (`resp.Body`, `sql.Rows`, `os.File`) hold sockets or file descriptors until closed via `io.Closer`; draining `resp.Body` lets Go reuse the live TCP/TLS connection (**Keep-Alive**) instead of re-handshaking every call.
-- **Connection pool (`sql.DB`)**: Go's `database/sql` handle is not a single database connection—it is a thread-safe pool of reusable connections shared across concurrent goroutines.
-- **CPU Cache line (L1/L2 vs. RAM)**: the fixed 64-byte (x86) or 128-byte (Apple Silicon) chunk of contiguous RAM pulled at once into fast L1/L2 CPU caches (~1 ns vs. ~50–100 ns for main RAM).
-- **Escape analysis (Stack vs. Heap)**: compiler static analysis deciding whether a variable safely dies on a goroutine's fast **stack** when a function returns, or must "escape" onto the GC-scanned **heap**.
-- **CFS throttling & `GOMAXPROCS`**: `GOMAXPROCS` sets how many goroutines Go executes simultaneously (`P`), while Linux **CFS throttling** pauses all container threads for the rest of a 100 ms window if they burn their pod's CPU quota early.
+- [Errors, defer and panic](/blog/go-errors-defer-panic/): `defer` runs a call when the function returns, which is how `Close` is usually written.
+- [Context and locks](/blog/go-context-timeouts-mutexes/): `context.WithTimeout` stops work that takes too long.
+- [Build a Go HTTP service](/blog/go-http-service-net-http-json-middleware/): the `Todo` service, its `http.Server` with timeouts, `writeJSON` and `getTodo`.
+- [Go concurrency](/blog/go-concurrency-scheduler-channels-context-mutexes/): `GOMAXPROCS` is the number of goroutines that run at the same moment.
 
-</Concepts>
+</Callout>
 
 ---
 
-## 1. Standard library time bombs: `net/http`, `database/sql`, and `time`
+## 1. Waiting for ever: timeouts
 
-Look straight at `src/net/http/client.go` inside Go's standard library:
+A *timeout* is a limit on how long your code waits for something outside it: a connection, an answer, a client that is slow to send. Go has no hidden global timeout. If you set none, the wait has no end. That is fine on a laptop and dangerous when one upstream service hangs, because each waiting call keeps a goroutine, a socket and some memory alive.
 
-<GitHubCode repo="golang/go" path="src/net/http/client.go" lines="L58-L125" url="https://github.com/golang/go/blob/074522c96ce70350453c164ecb17904881106b6a/src/net/http/client.go#L58-L125" caption="http.DefaultClient in Go's stdlib is simply &Client{} with Timeout equal to zero (meaning infinite wait).">
+### The default client never gives up
+
+The `net/http` package ships a ready-made client, `http.DefaultClient`, and shortcuts such as `http.Get` that use it. Here is its definition in Go's own source:
+
+<GitHubCode repo="golang/go" path="src/net/http/client.go" lines="L58-L125" url="https://github.com/golang/go/blob/074522c96ce70350453c164ecb17904881106b6a/src/net/http/client.go#L58-L125" caption="http.DefaultClient is just &Client{}. Its Timeout field is zero, and the comment says what that means.">
 ```go
 	// A Timeout of zero means no timeout.
 	Timeout time.Duration
@@ -90,266 +99,838 @@ var DefaultClient = &Client{}
 ```
 </GitHubCode>
 
-Shipping `http.Get(...)`, `http.DefaultClient`, or `http.ListenAndServe(...)` leaves **every network timeout set to infinity** (`#81`). If an upstream server accepts a TCP handshake and hangs silently, your goroutine blocks forever holding sockets and RAM. Configure dedicated `Dialer`, `TLSHandshakeTimeout`, `ResponseHeaderTimeout`, `IdleConnTimeout`, and overall `Client.Timeout` on clients, and `ReadHeaderTimeout` / `ReadTimeout` / `IdleTimeout` on `&http.Server{}`.
+So `http.Get(url)` waits as long as the other side likes. The program below starts a test server that accepts a request and then sleeps for 3 seconds. `httptest.NewServer` (from [post 10](/blog/go-http-service-net-http-json-middleware/)) gives us that server without any network setup. First we call it with `http.Get` in a goroutine and give up watching after 1 second. Then we call it with our own client that has a `Timeout`.
 
 ```go
-// Never ship http.DefaultClient or http.ListenAndServe in production (#81)
-client := &http.Client{
-	Timeout: 5 * time.Second,
-	Transport: &http.Transport{
-		DialContext:           (&net.Dialer{Timeout: 1 * time.Second}).DialContext,
-		TLSHandshakeTimeout:   1 * time.Second,
-		ResponseHeaderTimeout: 2 * time.Second,
-		IdleConnTimeout:       90 * time.Second,
-	},
-}
+package main
 
-srv := &http.Server{
-	ReadHeaderTimeout: 2 * time.Second,
-	ReadTimeout:       5 * time.Second,
-	IdleTimeout:       60 * time.Second,
+import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"time"
+)
+
+func main() {
+	// A server that accepts the request and then never answers (it sleeps 3s).
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(3 * time.Second)
+	}))
+	defer slow.Close()
+
+	// 1. http.Get uses http.DefaultClient, whose Timeout is 0: wait forever.
+	done := make(chan error, 1)
+	go func() {
+		_, err := http.Get(slow.URL)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		fmt.Println("default client returned:", err)
+	case <-time.After(1 * time.Second):
+		fmt.Println("default client: no answer after 1s, still waiting")
+	}
+
+	// 2. Our own client with a deadline for the whole call.
+	client := &http.Client{Timeout: 500 * time.Millisecond}
+	start := time.Now()
+	_, err := client.Get(slow.URL)
+	fmt.Printf("own client gave up after %v\n%v\n", time.Since(start).Round(100*time.Millisecond), err)
 }
 ```
 
-<GoProdHttpTimeouts />
+<TerminalOutput command="go run ." label="Apple M2 · Go 1.27.1" caption="The port in the error message is different on every run. The test server stops sleeping after 3 seconds, so the default client would return then; a server that never answers would never let it go.">
+```text
+default client: no answer after 1s, still waiting
+own client gave up after 500ms
+Get "http://127.0.0.1:55463": context deadline exceeded (Client.Timeout exceeded while awaiting headers)
+```
+</TerminalOutput>
 
-| Standard Library Default | Unsafe Local-Dev Value | Production Failure Mode | Safe Explicit Setting |
-| :--- | :--- | :--- | :--- |
-| **`http.DefaultClient.Timeout`** | `0` (infinite wait) | Silent upstream hangs pin goroutines forever | `&http.Client{Timeout: 5 * time.Second}` + Dial/TLS timeouts |
-| **`http.Transport.MaxIdleConnsPerHost`** | `2` idle sockets | High RPS traffic churns TCP/TLS handshakes endlessly | `MaxIdleConnsPerHost: 100`, drain body before `Close()` |
-| **`http.Server.ReadHeaderTimeout`** | `0` (infinite wait) | Vulnerable to Slowloris header-trickle attacks | `ReadHeaderTimeout: 2 * time.Second`, `IdleTimeout: 60s` |
-| **`sql.DB.ConnMaxLifetime`** | `0` (never expires) | Load balancers drop idle DB sockets quietly | `SetConnMaxLifetime(5 * time.Minute)`, bounded `MaxOpenConns` |
-| **`GOMAXPROCS` (pre-Go 1.25)** | Host CPU count (`64`) | Kubernetes `limits.cpu: "4"` suffers 100 ms CFS freezes | Upgrade to Go 1.25+ or `_ "go.uber.org/automaxprocs"` |
+`Client.Timeout` is one deadline for the whole call, from connecting to reading the body. For finer control, the client's `Transport` (the part that owns connections) has its own limits. This is the client to use in production:
 
-<QuoteCard author="Dave Cheney" role="Go Production Educator" sourceTitle="The complete guide to Go net/http timeouts" sourceUrl="https://blog.cloudflare.com/the-complete-guide-to-golang-net-http-timeouts/">
-Never expose net/http servers or clients to the untrusted internet using zero default timeouts—every phase from TCP dial to TLS handshake, request headers, and response body read needs explicit bounds.
-</QuoteCard>
+```go
+client := &http.Client{
+	Timeout: 5 * time.Second, // the whole call, body included
+	Transport: &http.Transport{
+		DialContext:           (&net.Dialer{Timeout: 1 * time.Second}).DialContext, // opening the connection
+		TLSHandshakeTimeout:   1 * time.Second,
+		ResponseHeaderTimeout: 2 * time.Second, // from sending the request to the first response header
+		IdleConnTimeout:       90 * time.Second, // how long an unused connection may stay in the pool
+	},
+}
+```
 
-Step interactively through what breaks HTTP Keep-Alive pooling when `resp.Body.Close()` runs without draining, plus proper timeout wiring below:
+<GoP14ClientTimeouts />
+
+A `Dialer` is the part that opens a network connection, so `Dialer.Timeout` limits how long that takes. Make one client like this at start-up and share it: clients are safe for many goroutines, and sharing one is also what lets connections be reused (next section). If the `Todo` service called a webhook after every `createTodo`, this is the client that call would use. You can also stop a single request early with a `context`, as [post 8](/blog/go-context-timeouts-mutexes/) shows.
+
+### The server side: the same trap on the other end
+
+A server has the mirror problem. A client can connect and then send its headers one byte at a time, or never finish them, and a server with no limit keeps that connection open. [Post 10](/blog/go-http-service-net-http-json-middleware/) builds the `Todo` server with `ReadHeaderTimeout`, `ReadTimeout`, `WriteTimeout` and `IdleTimeout` and explains each one. Here is the difference they make. The program connects with a raw TCP socket, sends half a request header and waits to see whether the server hangs up.
+
+```go
+package main
+
+import (
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"time"
+)
+
+// trickle opens a connection, sends half a request header, then waits to see
+// whether the server hangs up.
+func trickle(addr string) string {
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		return err.Error()
+	}
+	defer conn.Close()
+	fmt.Fprint(conn, "GET / HTTP/1.1\r\nHost: example\r\n") // no blank line: the header never ends
+	start := time.Now()
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	buf := make([]byte, 512)
+	n, err := conn.Read(buf)
+	waited := time.Since(start).Round(100 * time.Millisecond)
+	if err != nil {
+		return fmt.Sprintf("after %v: %v", waited, err)
+	}
+	return fmt.Sprintf("after %v the server answered: %q", waited, string(buf[:n]))
+}
+
+func main() {
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+
+	bare := httptest.NewServer(h) // no timeouts, like http.ListenAndServe
+	defer bare.Close()
+	fmt.Println("no timeouts:        ", trickle(bare.Listener.Addr().String()))
+
+	guarded := httptest.NewUnstartedServer(h)
+	guarded.Config.ReadHeaderTimeout = 1 * time.Second
+	guarded.Start()
+	defer guarded.Close()
+	fmt.Println("ReadHeaderTimeout 1s:", trickle(guarded.Listener.Addr().String()))
+}
+```
+
+<TerminalOutput command="go run ." label="Apple M2 · Go 1.27.1" caption="The first line is our own 3-second read deadline firing: the server without timeouts was still holding the half-finished request when we gave up. The second line is the server hanging up after 1 second (EOF).">
+```text
+no timeouts:         after 3s: read tcp 127.0.0.1:55471->127.0.0.1:55470: i/o timeout
+ReadHeaderTimeout 1s: after 1s: EOF
+```
+</TerminalOutput>
+
+One slow client costs a goroutine and a socket. A few thousand of them can use up your file descriptors. That is why `http.ListenAndServe(addr, h)` is fine for a demo and wrong for a service: it builds a server with every timeout at zero and gives you no way to change that. Build the `http.Server` yourself, as post 10 does.
+
+| Setting | Default | What it risks | A starting point |
+|---|---|---|---|
+| `http.Client.Timeout` | `0`, no limit | a stuck upstream pins a goroutine for ever | `5 * time.Second`, plus the `Transport` limits above |
+| `http.Server.ReadHeaderTimeout` | `0`, no limit | clients that never finish their headers | a few seconds |
+| `http.Transport.MaxIdleConnsPerHost` | `2` (`http.DefaultMaxIdleConnsPerHost`) | at high request rates most connections are closed and opened again | raise it to the number of calls you make in parallel to one host |
+| `sql.DB` `SetMaxOpenConns` | `0`, no limit | a burst opens as many database connections as it asks for | a number your database can serve ([section 5](#5-databasesql-is-a-pool)) |
+
+<Concepts>
+
+- **Timeout**: a limit on how long to wait. Go sets none by default for clients and servers built from the defaults.
+- **`Transport` and `Dialer`**: the `Transport` is the part of an `http.Client` that owns connections and the pool of idle ones. The `Dialer` is the part that opens a network connection.
+- **Slow-client attack**: a client that opens connections and sends data very slowly, or not at all, so the server's resources stay tied up.
+
+</Concepts>
+
+---
+
+## 2. Close what you open
+
+Some values hold an operating-system resource until you close them: an HTTP response body, the rows of a database query, an open file. Forgetting to close them is the quiet kind of leak, because nothing crashes. The resource count just creeps up until a call fails. Go gives you `defer` for this ([post 5](/blog/go-errors-defer-panic/)). Two details are easy to miss.
+
+### Response bodies: close, and read to the end
+
+Every `http.Get` that succeeds returns a `resp` whose `Body` you must close. Closing is also not quite enough. An HTTP connection can serve many requests one after another (this is called *keep-alive*), and the client keeps finished connections in an idle pool to reuse them. A connection goes back to that pool only if the whole body was read. If you close early, the client throws the connection away, and the next request pays for a new TCP connection and TLS handshake.
+
+```go
+func fetch(client *http.Client, url string) error {
+	resp, err := client.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close() // runs when fetch returns
+	// ... decode the body here ...
+	_, err = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20)) // read what is left, at most 1 MiB
+	return err
+}
+```
+
+`io.Discard` is a writer that throws everything away, so `io.Copy` into it reads and ignores the rest. `io.LimitReader` stops after 1 MiB (`1<<20` bytes), so a huge answer cannot make this call run for ever. The `defer` goes right after the error check: when `err` is not `nil`, `resp` is `nil` and there is nothing to close.
+
+How much does it matter? The program below makes 5 requests to a local server, with and without reading the rest, for three body sizes. It counts the connections the server accepted.
+
+```go
+package main
+
+import (
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
+)
+
+func main() {
+	for _, size := range []int{1_000, 100_000, 5_000_000} {
+		for _, drain := range []bool{false, true} {
+			var conns atomic.Int32
+			srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				io.WriteString(w, strings.Repeat("x", size))
+			}))
+			srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+				if s == http.StateNew {
+					conns.Add(1)
+				}
+			}
+			srv.Start()
+			client := &http.Client{Transport: &http.Transport{}}
+			for i := 0; i < 5; i++ {
+				resp, err := client.Get(srv.URL)
+				if err != nil {
+					panic(err)
+				}
+				if drain {
+					io.Copy(io.Discard, resp.Body)
+				}
+				resp.Body.Close()
+			}
+			fmt.Printf("body %7d bytes, drain=%-5v: 5 requests used %d connection(s)\n", size, drain, conns.Load())
+			srv.Close()
+		}
+	}
+}
+```
+
+<TerminalOutput command="go run ." label="Apple M2 · Go 1.27.1" caption="Real run. Reading the rest of the body lets the client reuse one connection. Not reading it costs a new connection per request once the body is large.">
+```text
+body    1000 bytes, drain=false: 5 requests used 2 connection(s)
+body    1000 bytes, drain=true : 5 requests used 1 connection(s)
+body  100000 bytes, drain=false: 5 requests used 2 connection(s)
+body  100000 bytes, drain=true : 5 requests used 1 connection(s)
+body 5000000 bytes, drain=false: 5 requests used 5 connection(s)
+body 5000000 bytes, drain=true : 5 requests used 1 connection(s)
+```
+</TerminalOutput>
+
+<GoP14BodyDrain />
+
+Small bodies are cheap to throw away, so Go often manages anyway, but even a 1,000-byte answer usually cost a second connection here (5 of 6 runs; one run reused a single connection). The step-through below shows the same difference with the pool settings next to it.
 
 <GoHttpPoolLeakDemo />
 
-<GoProdCodeTrace />
+### `http.Error` does not stop the handler
 
-Pair those timeouts with three everyday stdlib hygiene rules:
-- **Drain and close every `io.Closer` (`#79`, `#80`)**: HTTP Keep-Alive reuses an open TCP/TLS socket across sequential API calls instead of paying a fresh TCP + TLS handshake every time—yet if you close `resp.Body` with unread bytes left inside, Go tears down the socket completely. Always run `_, _ = io.Copy(io.Discard, resp.Body)` before `resp.Body.Close()`. Also remember `http.Error(w, msg, code)` writes headers and body **without stopping your handler**—always write `return` right after it.
-- **Tune `database/sql` as a pool, not one connection (`#78`)**: newcomers often assume `sql.Open()` dials a single database connection; in reality it constructs a lazy thread-safe **connection pool** (`*sql.DB`) without connecting at all. Call `db.PingContext(ctx)` on startup, configure `SetMaxOpenConns`, `SetMaxIdleConns`, `SetConnMaxLifetime`, and `SetConnMaxIdleTime`, use `sql.NullString` or pointers for nullable columns, and always check `rows.Err()` after iterating `rows.Next()`.
-- **Watch `time.Duration`, `time.After`, and `time.Time` equality (`#75`, `#76`, `#77`)**: pass `5 * time.Second` (never bare integer `5`), replace `time.After` inside `for`/`select` loops with a single `time.NewTimer` + `Reset` so heap timers do not accumulate until expiry, and compare timestamps with `t1.Equal(t2)` rather than `==` because `time.Now()` carries an internal **monotonic clock** (a forward-only nanosecond stopwatch unaffected by OS clock adjustments) that `json.Unmarshal` strips away.
-
-<Figure src={clockEscapement} alt="Historic engraving of Mr. R. Mays detached clock escapement mechanism showing paired timing wheels" caption="Two clocks in one struct: Go's time.Time carries both wall-clock calendar time and a monotonic tick counter. JSON round-tripping drops the monotonic half, breaking == equality." sourceTitle="Wikimedia Commons: Mays detached escapement (Wellcome Collection)" sourceUrl="https://commons.wikimedia.org/wiki/File:Clocks;_an_escapement_mechanism._Engraving_by_W._Kelsall_aft_Wellcome_V0023849EL.jpg" />
+`http.Error(w, message, code)` writes a status line and a text body. It does not return from your handler. The function you wrote keeps running, and anything it writes afterwards is appended to the same response. The program below is a trimmed `getTodo` from post 10, with the `return` missing after the first `http.Error`. The handler gets `abc` as the id, which is not a number.
 
 ```go
-// Monotonic clock is stripped during JSON round-trip (#76)
-t1 := time.Now()
-raw, _ := json.Marshal(t1)
-var t2 time.Time
-_ = json.Unmarshal(raw, &t2)
-fmt.Println(t1 == t2, t1.Equal(t2)) // false, true!
+package main
 
-// SQL hygiene (#78, #79): bound pools and always inspect rows.Err()
-db.SetMaxOpenConns(25)
-db.SetConnMaxLifetime(5 * time.Minute)
-defer rows.Close()
-for rows.Next() { /* ... */ }
-return rows.Err()
-```
+import (
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strconv"
+)
 
-<GoProdSqlAndTime />
+var titles = []string{"write post"} // todo 1 is titles[0]
 
-<Concepts>
-
-- **Wall clock vs. monotonic clock**: wall clock tracks calendar date/time (subject to NTP jumps), whereas monotonic clock strictly counts elapsed nanoseconds forward since process start for safe duration math.
-- **Connection pool churn**: repeatedly opening and tearing down TLS/TCP connections because `resp.Body` was left unread or `MaxIdleConns` remained at its tiny default of `2`.
-
-</Concepts>
-
----
-
-## 2. Mechanical sympathy: CPU cache lines, false sharing, and struct alignment
-
-Modern CPUs do not read single bytes directly from main RAM—they fetch blocks through tiny, ultra-fast **L1/L2 caches** right next to the CPU cores (L1 reads in ~1 ns, 50–100x faster than main RAM). Every fetch pulls an entire **cache line** (64 bytes on x86_64, 128 bytes on Apple Silicon) of neighboring memory, so how you lay out structs and slices directly governs throughput (`#91`, `#93`).
-
-Think of pulling books from a library basement: even if you only want page 1 of a book, the librarian carries up an entire shelf box of 8 adjacent books. Grouping fields that are read together (**Struct of Slices** over Slice of Structs for tight loops) lets one cache fetch serve eight values at once.
-
-```go
-// SoA (#91): tight loop reading foo.a loads 8 useful int64 values per 64B cache line
-type Bar struct {
-	a []int64
-	b []int64
+func getTodo(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(r.PathValue("id"))
+	if err != nil {
+		http.Error(w, "id must be a number", http.StatusBadRequest)
+		// no return here
+	}
+	if id < 1 || id > len(titles) {
+		http.Error(w, "todo not found", http.StatusNotFound)
+		return
+	}
+	fmt.Fprintln(w, titles[id-1])
 }
 
-// Prevent False Sharing across cores (#92) by separating hot counters by 64 bytes
-type Result struct {
-	sumA int64
-	_    [56]byte // cache-line padding so sumB sits on the next 64B line
-	sumB int64
+func main() {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /todos/{id}", getTodo)
+	srv := httptest.NewUnstartedServer(mux)
+	srv.Config.ErrorLog = log.New(os.Stdout, "server log: ", 0) // show the server's own log here
+	srv.Start()
+	defer srv.Close()
+
+	resp, _ := http.Get(srv.URL + "/todos/abc")
+	body, _ := io.ReadAll(resp.Body)
+	fmt.Printf("status %d\nbody %q\n", resp.StatusCode, body)
 }
 ```
 
-<GoProdCacheAndFalseSharing />
-
-Two hardware optimizations deliver immediate wins in hot paths:
-
-1. **Prevent False Sharing (`#92`)**: if Goroutine 1 on Core 0 increments `s.a` while Goroutine 2 on Core 1 increments `s.b`, and both `int64` fields sit side by side in the same cache line, both cores continuously invalidate each other's L1 cache. Adding cache-line padding between independent hot counters cuts runtime more than 2x in our local Apple M2 Go 1.27 test:
-
-<TerminalOutput command="go test -bench=Benchmark -benchmem" label="Apple M2 · Go 1.27" caption="Separating two concurrent atomic.Int64 counters across Apple Silicon's 128-byte cache line doubles throughput with zero algorithmic change.">
+<TerminalOutput command="go run ." label="Apple M2 · Go 1.27.1" caption="Real run. The server's own log points at line 22 of the file above, the second http.Error call.">
 ```text
-BenchmarkFalseSharing-8      	      52	  22237397 ns/op	     100 B/op	       3 allocs/op
-BenchmarkCacheLinePadded-8   	     100	  10251683 ns/op	      80 B/op	       3 allocs/op
+server log: http: superfluous response.WriteHeader call from main.getTodo (main.go:22)
+status 400
+body "id must be a number\ntodo not found\n"
 ```
 </TerminalOutput>
 
-2. **Sort struct fields largest-to-smallest (`#94`)**: for hardware efficiency, CPUs expect fields aligned at memory offsets divisible by their byte size (`int64` wants an 8-byte boundary), so the Go compiler automatically inserts hidden empty **padding** bytes between fields when smaller types sit before larger ones. Ordering fields `{ bool, int64, bool }` wastes 14 bytes of padding (24 bytes total), whereas `{ int64, bool, bool }` packs cleanly into 16 bytes—saving 33% RAM across millions of elements!
+<GoP14MissingReturn />
 
-Test struct byte packing and Kubernetes throttling right in the interactive lab below:
+When `Atoi` fails, `id` is `0`, so the next check also fails and writes a second error. The status was already sent, so the second one is ignored (and logged as "superfluous"), but its text is still appended to the body. In a bigger handler the code after the missing `return` might write to a database. The fix is one word, `return`, right after every `http.Error` and every `writeError` call.
 
-<GoProdStructCacheK8sDemo />
+### Rows and files
+
+`sql.Rows` from a query holds a database connection until you call `rows.Close()`, and a file holds a file descriptor until `f.Close()`. Both follow the same `defer` pattern. The rows version appears in [section 5](#5-databasesql-is-a-pool). For files you write to, check the error from `Close` too, as [post 5](/blog/go-errors-defer-panic/) explains.
 
 <Concepts>
 
-- **Spatial locality**: storing sequentially accessed fields contiguously in RAM so each fetched CPU cache line delivers maximum useful data.
-- **False sharing**: performance degradation when multiple CPU cores update logically independent variables that happen to reside on the same physical cache line.
+- **Keep-alive and the idle pool**: an HTTP connection that can carry several requests. The client keeps finished connections ready in a pool and reuses them, but only if the response body was read to the end.
+- **`io.Discard`**: a writer that drops everything written to it. Copying into it is the standard way to read and ignore data.
 
 </Concepts>
 
 ---
 
-## 3. Stack vs. heap, escape analysis, and Garbage Collection
+## 3. Time: bare numbers and timers
 
-Go splits memory between each goroutine's private **stack** and the process-wide **heap** (`#95`). Think of the stack as a goroutine's disposable scratchpad: allocating variables costs a single pointer bump and vanishes automatically with zero garbage-collection work when a function returns. Values that outlive the function (for instance returned as a pointer) or exceed static stack sizing **escape to the heap**—the shared pool tracked and swept periodically by Go's Garbage Collector (`#99`)—a compiler decision known as **escape analysis**.
+### A bare number is nanoseconds
+
+`time.Duration` counts nanoseconds. Constants like `time.Second` are just big numbers of them, so a literal without a unit means something very small.
 
 ```go
-// Sharing DOWN -> stays on stack (0 GC overhead)
-func sumPtr(x, y *int) int {
-	return *x + *y
-}
+package main
 
-// Sharing UP -> pointer outlives sum(), so z escapes to heap!
-func sumEscape(x, y int) *int {
-	z := x + y
-	return &z // compiler: "moved to heap: z"
+import (
+	"fmt"
+	"time"
+)
+
+func main() {
+	fmt.Println(time.Duration(1000))
+	fmt.Println(1000 * time.Millisecond)
+	start := time.Now()
+	time.Sleep(1000) // meant: one second
+	fmt.Println("slept for", time.Since(start).Round(time.Microsecond) < 100*time.Microsecond)
 }
 ```
 
-<GoProdEscapeAnalysis />
-
-Run `go build -gcflags="-m"` to see exact compiler decisions rather than guessing:
-
-<TerminalOutput command="go build -gcflags='-m' ./prod.go" label="Apple M2 · Go 1.27" caption="Compiler escape analysis: passing a pointer down to shareDown stays on the stack; returning &x in shareUp moves x to the heap.">
+<TerminalOutput command="go run ." label="Apple M2 · Go 1.27.1" caption="Real run. 1000 is 1µs, and the Sleep(1000) returned in well under 100µs.">
 ```text
-./prod.go:9:16: v does not escape
-./prod.go:13:2: moved to heap: x
+1µs
+1s
+slept for true
 ```
 </TerminalOutput>
 
-Four levers cut heap pressure (`#96`, `#97`, `#99`):
-- **Share down, avoid sharing up**: write APIs like `io.Reader.Read(buf []byte)` where callers pass reusable buffers downward instead of returning freshly allocated structs upward.
-- **Leverage compiler fast-path inlining**: keep tiny hot helpers below Go's inline cost budget so calls compile away without forcing pointer arguments onto the heap.
-- **Recycle temporary buffers with `sync.Pool`**: ideal for high-churn request scratch buffers (`bytes.Buffer`), resetting them before `Put`.
-- **Understand GC pacing (`GOGC` and `GOMEMLIMIT`)**: `GOGC=100` (default) triggers a GC cycle whenever live heap doubles; setting `GOMEMLIMIT` (Go 1.19+) caps memory softly before container OOM kills while preventing thrashing on spiky traffic.
+Always write the unit: `5 * time.Second`, `time.Duration(n) * time.Millisecond`.
+
+### `time.After` in a loop
+
+`time.After(d)` returns a channel and starts a timer that sends on it after `d`. It is the usual way to write "wait for an event, but give up after a minute" inside a `select`. Put it in a `for` loop and every iteration starts a new timer. For years the advice was that those timers stay in memory until they fire, so a busy loop with a long timeout could use gigabytes.
+
+I measured it. The program reads from a channel that always has a value ready, with a one-minute `time.After` as the other `select` case, a million times, and prints the live heap before and after.
+
+```go
+package main
+
+import (
+	"fmt"
+	"runtime"
+	"time"
+)
+
+// heapMB forces a collection and returns the live heap in megabytes.
+func heapMB() float64 {
+	var m runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&m)
+	return float64(m.HeapAlloc) / (1 << 20)
+}
+
+func main() {
+	events := make(chan int)
+	go func() {
+		for i := 0; ; i++ {
+			events <- i
+		}
+	}()
+
+	before := heapMB()
+	for i := 0; i < 1_000_000; i++ {
+		select {
+		case <-events:
+		case <-time.After(time.Minute): // a new timer every iteration
+		}
+	}
+	fmt.Printf("live heap: %.1f MB before, %.1f MB after 1,000,000 loops\n", before, heapMB())
+}
+```
+
+<TerminalOutput command="GOTOOLCHAIN=go1.22.12 go run ." label="Apple M2 · Go 1.22.12" caption="The same file with go.mod saying go 1.22, built by Go 1.22.12.">
+```text
+live heap: 0.1 MB before, 199.2 MB after 1,000,000 loops
+```
+</TerminalOutput>
+
+<TerminalOutput command="go run ." label="Apple M2 · Go 1.27.1" caption="The same file with go.mod saying go 1.27.1.">
+```text
+live heap: 0.2 MB before, 0.2 MB after 1,000,000 loops
+```
+</TerminalOutput>
+
+On Go 1.22 the million unfired timers hold about 199 MB. On Go 1.27 they hold nothing. The [Go 1.23 release notes](https://go.dev/doc/go1.23) explain: timers that the program no longer refers to can now be garbage-collected immediately, even if they were not stopped. So the leak the advice warns about is gone on current Go. It is still alive if you build with an older toolchain, so if you meet this pattern in old code, or have to support an old Go, create one timer outside the loop and reuse it:
+
+```go
+timer := time.NewTimer(time.Minute) // one timer for the whole loop
+defer timer.Stop()
+for i := 0; i < 1_000_000; i++ {
+	timer.Reset(time.Minute) // restart the countdown each time
+	select {
+	case <-events:
+	case <-timer.C:
+	}
+}
+```
+
+Dropped into the same program, this loop kept the heap at 0.1 MB after a million iterations on Go 1.22.12 and 0.2 MB on Go 1.27.1. On Go 1.23 and newer, `time.After` in a loop is fine for memory.
+
+---
+
+## 4. JSON: three surprises
+
+`encoding/json` turns Go values into JSON and back. The `Todo` service uses it in every handler, through `json.NewEncoder` and `json.NewDecoder`. Three behaviours catch people out, and the program below shows all three. It needs two small types: `Event`, which embeds a `time.Time` (embedding is from [post 4](/blog/go-structs-methods-interfaces/): the embedded type's fields and methods are promoted to the outer struct), and `Fixed`, which holds the same time in a named field.
+
+```go
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+	"time"
+)
+
+type Todo struct {
+	ID    int    `json:"id"`
+	Title string `json:"title"`
+}
+
+// Event is a todo change. time.Time is embedded, so its methods are promoted.
+type Event struct {
+	Todo
+	time.Time
+}
+
+// Fixed is the same data with the time under a name.
+type Fixed struct {
+	Todo
+	At time.Time `json:"at"`
+}
+
+func main() {
+	at := time.Date(2026, 11, 23, 9, 30, 0, 0, time.UTC)
+	todo := Todo{ID: 7, Title: "write post"}
+
+	b, _ := json.Marshal(Event{todo, at})
+	fmt.Println("embedded: ", string(b))
+	b, _ = json.Marshal(Fixed{todo, at})
+	fmt.Println("named:    ", string(b))
+
+	// The monotonic clock does not survive JSON.
+	t1 := time.Now()
+	raw, _ := json.Marshal(t1)
+	var t2 time.Time
+	json.Unmarshal(raw, &t2)
+	fmt.Println("t1 == t2:", t1 == t2, " t1.Equal(t2):", t1.Equal(t2))
+
+	// Numbers decoded into any are float64.
+	var m map[string]any
+	json.Unmarshal([]byte(`{"id": 9007199254740993}`), &m)
+	fmt.Printf("map[string]any: %v (%T)\n", m["id"], m["id"])
+	fmt.Printf("as %%.0f:        %.0f\n", m["id"])
+
+	dec := json.NewDecoder(strings.NewReader(`{"id": 9007199254740993}`))
+	dec.UseNumber()
+	var m2 map[string]any
+	dec.Decode(&m2)
+	fmt.Printf("with UseNumber: %v (%T)\n", m2["id"], m2["id"])
+}
+```
+
+<TerminalOutput command="go run ." label="Apple M2 · Go 1.27.1" caption="Real run. The t1 == t2 line uses time.Now(), but the false and true do not change between runs.">
+```text
+embedded:  "2026-11-23T09:30:00Z"
+named:     {"id":7,"title":"write post","at":"2026-11-23T09:30:00Z"}
+t1 == t2: false  t1.Equal(t2): true
+map[string]any: 9.007199254740992e+15 (float64)
+as %.0f:        9007199254740992
+with UseNumber: 9007199254740993 (json.Number)
+```
+</TerminalOutput>
+
+### An embedded `time.Time` takes over the JSON (#77)
+
+`Event{todo, at}` should print an object with `id` and `title`, and it prints only the time. `time.Time` has a method `MarshalJSON`, the hook `encoding/json` calls for a type that wants to encode itself (the interface is `json.Marshaler`). Because `time.Time` is embedded, that method is promoted to `Event`, so `Event` now encodes itself as a time and `json.Marshal` never looks at the other fields. Decoding has the same problem the other way round.
+
+<GoP14EmbeddedTime />
+
+The fix in `Fixed` is to give the time a name. Embedding is a convenient way to reuse methods, and this is its cost: it can make your struct satisfy an interface you never meant to implement.
+
+### The monotonic clock does not survive JSON
+
+<Figure src={clockEscapement} alt="Historic engraving of Mr. R. Mays detached clock escapement mechanism showing paired timing wheels" caption="Two clocks in one struct: a time.Time returned by time.Now carries a wall-clock reading and a monotonic tick count. JSON keeps only the wall-clock half." sourceTitle="Wikimedia Commons: Mays detached escapement (Wellcome Collection)" sourceUrl="https://commons.wikimedia.org/wiki/File:Clocks;_an_escapement_mechanism._Engraving_by_W._Kelsall_aft_Wellcome_V0023849EL.jpg" />
+
+A computer keeps two kinds of time. The *wall clock* is the date and time of day; it can jump when the machine syncs with a time server. The *monotonic clock* only counts forward, so it is the right thing to measure how long something took. `time.Now()` returns both in one `time.Time`. When you encode a time to JSON, only the wall-clock reading is written, so after decoding `t1` and `t2` show the same instant but are different values. `==` compares every part of the struct, including the monotonic reading, and says `false`. `t1.Equal(t2)` compares the instant and says `true`. Compare times with `Equal` (or `Before` and `After`), not with `==`.
+
+### Numbers decoded into `any` are `float64`
+
+If you decode into `map[string]any`, the compiler does not know your structure, so every JSON number becomes a `float64`. A `float64` holds whole numbers exactly only up to 2^53, which is 9007199254740992. The program decodes 9007199254740993, one more than that, and gets back ...992. An ID that big would be silently changed, and this is how a big database ID gets rounded on its way through a generic handler. Two fixes: decode into a struct with an `int64` field, or call `UseNumber()` on the decoder, which keeps the digits as a `json.Number` you can turn into an `int64` yourself.
 
 <Concepts>
 
-- **Escape analysis**: compile-time static pass in the Go compiler determining whether a variable can live safely on a goroutine stack or must be heap-allocated.
-- **`sync.Pool`**: thread-safe per-P temporary object cache that reduces heap allocation churn while allowing the GC to reclaim pooled items under memory pressure.
+- **Method promotion**: when a struct embeds a type, the embedded type's methods can be called on the outer struct, and the outer struct satisfies the same interfaces.
+- **Wall clock and monotonic clock**: the wall clock tells the date and can jump; the monotonic clock only moves forward and is meant for measuring durations. A `time.Time` from `time.Now()` holds both.
+- **`float64` precision**: a 64-bit float stores integers exactly only up to 2^53. Larger whole numbers are rounded.
 
 </Concepts>
 
 ---
 
-## 4. Testing accuracy, `pprof`/traces, and Kubernetes CFS throttling
+## 5. `database/sql` is a pool
 
-Optimizing blind wastes time; optimizing with brittle tests or misconfigured container limits masks real outages.
+The standard `database/sql` package gives you one type for talking to a database, `*sql.DB`. Despite the name, it is not one connection. It is a *pool*: a set of connections that the package opens when needed, hands to one caller at a time and takes back for the next caller. The `Todo` service keeps its data in memory, but a real one would hold a `*sql.DB` the same way it holds its `store`. The real driver you import (for PostgreSQL, MySQL and so on) matters little here, so the program below uses a fake driver that only counts how many connections were opened. That lets us see the pool without a database.
 
-First, inspect real bottlenecks instead of guessing using Go's two built-in profilers (`#98`): **`pprof`** periodically samples running programs to build CPU and Heap call graphs pinning down hotspots like `runtime.growslice` or map lookups, whereas **`go tool trace`** records an exact millisecond-by-millisecond timeline showing when individual goroutines run, block on locks, or stall in syscalls across each logical processor `P`.
+```go
+package main
 
-<Figure src={goPprofImg} alt="Go pprof call graph highlighting time spent inside main.FindLoops, runtime.mapaccess1_fast64, and runtime.growslice" caption="A pprof call graph immediately exposes hidden allocation culprits like growslice or un-presized maps before you guess at micro-optimizations." sourceTitle="The Go Blog: Profiling Go Programs" sourceUrl="https://go.dev/blog/pprof" />
+import (
+	"context"
+	"database/sql"
+	"database/sql/driver"
+	"errors"
+	"fmt"
+	"sync/atomic"
+	"time"
+)
 
-<Figure src={goTraceImg} alt="Go execution tracer timeline showing goroutines G1, G84, and syscall blocks distributed across Proc 0 to Proc 7" caption="While pprof aggregates cumulative CPU or RAM totals, go tool trace reveals exact timeline stalls, lock contention, and idle P windows." sourceTitle="The Go Blog: More powerful Go execution traces" sourceUrl="https://go.dev/blog/execution-traces-2024" />
+// fakeDriver stands in for a real database driver (such as pgx). It only
+// counts how many connections were opened.
+type fakeDriver struct{ opened atomic.Int32 }
 
-Keep tests and benchmarks honest (`#82`–`#90`):
-- **Categorize integration tests** with build tags (`//go:build integration`) or `testing.Short()`, use table-driven subtests, run `go test -race -shuffle=on`, and never call `time.Sleep` in tests when a channel or retry loop works deterministically (`#86`, `#87`).
-- **Use `httptest` and `iotest`** (`#88`) for HTTP boundaries and broken-reader fault injection, plus `t.Cleanup` / `TestMain` for deterministic teardown (`#90`).
-- **Prevent benchmark lies (`#89`)**: call `b.ResetTimer()` after setup, assign outputs to package-level sinks (or use `b.Loop()` in Go 1.24+) so the compiler cannot optimize away dead code, and compare runs statistically with `benchstat`.
+func (d *fakeDriver) Open(name string) (driver.Conn, error) {
+	d.opened.Add(1)
+	return fakeConn{}, nil
+}
+
+type fakeConn struct{}
+
+func (fakeConn) Prepare(string) (driver.Stmt, error) { return nil, errors.New("not needed") }
+func (fakeConn) Close() error                         { return nil }
+func (fakeConn) Begin() (driver.Tx, error)            { return nil, errors.New("not needed") }
+
+func main() {
+	d := &fakeDriver{}
+	sql.Register("fake", d)
+
+	db, err := sql.Open("fake", "host=db")
+	fmt.Println("sql.Open error:", err, "| connections opened:", d.opened.Load())
+
+	ctx := context.Background()
+	fmt.Println("Ping error:", db.PingContext(ctx), "| connections opened:", d.opened.Load())
+
+	db.SetMaxOpenConns(2)
+	c1, _ := db.Conn(ctx) // takes connection 1 and keeps it
+	c2, _ := db.Conn(ctx) // takes connection 2 and keeps it
+	fmt.Println("holding 2 of 2 connections")
+
+	waitCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer cancel()
+	_, err = db.Conn(waitCtx) // a third caller has to queue
+	fmt.Println("third caller:", err)
+	fmt.Printf("stats: open=%d inUse=%d waitCount=%d\n",
+		db.Stats().OpenConnections, db.Stats().InUse, db.Stats().WaitCount)
+
+	c1.Close() // hand one back
+	c3, err := db.Conn(ctx)
+	fmt.Println("after releasing one:", err, "| connections opened:", d.opened.Load())
+	c2.Close()
+	c3.Close()
+}
+```
+
+<TerminalOutput command="go run ." label="Apple M2 · Go 1.27.1" caption="Real run with a fake driver. db.Conn is used here because it holds a connection the way an unclosed sql.Rows does.">
+```text
+sql.Open error: <nil> | connections opened: 0
+Ping error: <nil> | connections opened: 1
+holding 2 of 2 connections
+third caller: context deadline exceeded
+stats: open=2 inUse=2 waitCount=1
+after releasing one: <nil> | connections opened: 2
+```
+</TerminalOutput>
+
+<GoP14SqlPool />
+
+Read the output top to bottom.
+
+1. `sql.Open` returned no error and **opened 0 connections** (#78). It checks its arguments and builds the pool. With a real driver it would also succeed if the database were down. Call `db.PingContext(ctx)` at start-up to find out early; the ping is what opened the first connection.
+2. With `SetMaxOpenConns(2)`, two callers hold both connections. A third caller does not fail. It waits in line, and only the `context` timeout got it out after 200 ms. This is the same shape as the missing timeout in section 1: without a context deadline, that caller would wait until someone returns a connection.
+3. When `c1` was handed back, the next caller reused it instead of opening a third connection.
+
+What holds a connection in a real service is usually a query result you forgot to close. This is the shape of a function that reads rows. It needs a real driver, so it is only a sketch:
+
+```go
+func names(ctx context.Context, db *sql.DB) ([]string, error) {
+	rows, err := db.QueryContext(ctx, "SELECT title FROM todos")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() // gives the connection back to the pool
+	var out []string
+	for rows.Next() {
+		var title string
+		if err := rows.Scan(&title); err != nil {
+			return nil, err
+		}
+		out = append(out, title)
+	}
+	return out, rows.Err() // Next() also returns false when something went wrong
+}
+```
+
+`rows.Next()` returns `false` both when the rows have run out and when an error stopped the read, so after the loop you must check `rows.Err()`. The `defer rows.Close()` is what puts the connection back; if one code path forgets it, the pool shrinks by one every time it runs.
+
+The pool has four settings. The defaults come from `go doc`:
+
+| Setting | Default | What it controls |
+|---|---|---|
+| `SetMaxOpenConns(n)` | `0`, unlimited | most connections open at once; the rest queue |
+| `SetMaxIdleConns(n)` | `2` | connections kept ready when idle |
+| `SetConnMaxLifetime(d)` | no limit | how long a connection may be reused before it is replaced |
+| `SetConnMaxIdleTime(d)` | no limit | how long a connection may sit idle before it is closed |
+
+Unlimited open connections means a burst of traffic can open more connections than your database allows. Set `SetMaxOpenConns` to a number the database can serve, and give connections a lifetime so a firewall or load balancer that quietly drops old ones cannot leave you with dead ones.
+
+<Concepts>
+
+- **Connection pool**: a set of ready connections shared by many callers. A caller takes one, uses it and gives it back.
+- **`sql.Open` vs `Ping`**: `sql.Open` builds the pool without necessarily connecting; `PingContext` forces a connection and proves the database is reachable.
+
+</Concepts>
+
+---
+
+## 6. Go in containers
+
+A container runs your program with limits the program cannot see directly. The one that matters here is CPU. In Kubernetes, `limits.cpu: "2"` on a pod becomes a kernel setting for the container, and the Linux scheduler that enforces it is called CFS (the Completely Fair Scheduler). To understand what goes wrong, you first need `GOMAXPROCS`.
+
+`GOMAXPROCS` is how many goroutines the Go runtime lets run at the same moment, one per logical processor (`P`), as [post 13](/blog/go-concurrency-scheduler-channels-context-mutexes/) explains. It is also the number of threads that can burn CPU at once.
 
 ### The Kubernetes CFS throttling trap (`#100`)
 
-Finally, watch what happens when you deploy Go into Kubernetes with CPU limits (for example `limits.cpu: "4"` on an 8-core or 64-core host node). Recall from GMP scheduling that **`GOMAXPROCS`** controls how many logical processors `P` (concurrent CPU-executing OS threads) Go spins up at once. Meanwhile, Linux's **Completely Fair Scheduler (CFS)** enforces container limits over 100 ms windows—4 CPUs gives your pod a 400 ms CPU budget per 100 ms wall time.
+CFS gives a container a *quota* of CPU time per *period* of 100 ms. A limit of 2 CPUs is a quota of 200 ms of CPU time in every 100 ms. When the container's threads together use up the quota, the kernel pauses all of them until the next period starts. This is *throttling*. It is not a crash and not an error. The process just stops for a while, which shows up as latency.
 
-<GoProdK8sCfsThrottle />
+Before Go 1.25, `GOMAXPROCS` defaulted to the number of CPUs on the machine, whatever the container's limit was. On a 6-CPU machine with a limit of 2, Go runs 6 threads at once, and 6 busy threads use 200 ms of CPU in about 33 ms. Then everything waits for the rest of the window.
 
-Historically, Go set `GOMAXPROCS` from the host machine's core count (`8` or `64`), not the container cgroup limit (`4`). With 8 runnable threads burning CPU concurrently, your pod consumes its entire 400 ms budget in just 50 ms—then Linux CFS freezes every thread for the remaining 50 ms of the window, adding up to a 300% latency spike while average CPU utilization still reads low.
+<GoP14CfsWindow />
 
-*(Runtime update: Go 1.25 introduced native container-aware `GOMAXPROCS` defaults that respect cgroup CPU limits out of the box. If your services still build on Go 1.24 or earlier, keep importing `_ "go.uber.org/automaxprocs"` in `main.go`!)*
+I ran this, not only calculated it. The program below prints the container's quota (the file `cpu.max`), the CPU count and `GOMAXPROCS`. It then burns CPU on every `P` for 3 seconds. In the meantime it asks to sleep 1 ms again and again and records how late it wakes up at worst, and at the end it reads how many 100 ms periods were throttled from the container's `cpu.stat`.
+
+```go
+package main
+
+import (
+	"fmt"
+	"os"
+	"runtime"
+	"strings"
+	"time"
+)
+
+func cgroupFile(name string) string {
+	b, err := os.ReadFile("/sys/fs/cgroup/" + name)
+	if err != nil {
+		return err.Error()
+	}
+	return strings.TrimSpace(string(b))
+}
+
+// throttled pulls two counters out of the cgroup's cpu.stat file.
+func throttled() (periods, count string) {
+	for _, line := range strings.Split(cgroupFile("cpu.stat"), "\n") {
+		f := strings.Fields(line)
+		switch f[0] {
+		case "nr_periods":
+			periods = f[1]
+		case "nr_throttled":
+			count = f[1]
+		}
+	}
+	return
+}
+
+func main() {
+	fmt.Println("cpu.max (quota period):", cgroupFile("cpu.max"))
+	fmt.Println("NumCPU:", runtime.NumCPU(), " GOMAXPROCS:", runtime.GOMAXPROCS(0))
+
+	// Burn CPU on every P for 3 seconds, and watch how late a 1 ms sleeper wakes up.
+	stop := time.Now().Add(3 * time.Second)
+	for i := 0; i < runtime.GOMAXPROCS(0); i++ {
+		go func() {
+			for time.Now().Before(stop) {
+			}
+		}()
+	}
+	var worst time.Duration
+	for time.Now().Before(stop) {
+		t := time.Now()
+		time.Sleep(time.Millisecond)
+		if late := time.Since(t) - time.Millisecond; late > worst {
+			worst = late
+		}
+	}
+	p, n := throttled()
+	fmt.Printf("periods: %s, throttled periods: %s, worst wake-up delay: %v\n", p, n, worst.Round(time.Millisecond))
+}
+```
+
+I built it for Linux with Go 1.27.1 and ran it in a container limited to 2 CPUs on a 6-CPU machine, twice, once with the default and once with `GOMAXPROCS=6` in the environment, which is what the old default would have chosen. The container runtime was OrbStack. It sets the same `cpu.max` file that Kubernetes writes for a CPU limit, but this was not a Kubernetes cluster.
+
+<TerminalOutput command="GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o gmp-linux . && docker run --rm --platform linux/arm64 --cpus=2 -v &quot;$PWD&quot;:/app ubuntu:24.04 /app/gmp-linux" label="Go 1.27.1 · linux/arm64 container, 2 CPUs" caption="Default environment, first run.">
+```text
+cpu.max (quota period): 200000 100000
+NumCPU: 6  GOMAXPROCS: 2
+periods: 31, throttled periods: 11, worst wake-up delay: 46ms
+```
+</TerminalOutput>
+
+<TerminalOutput command="docker run --rm --platform linux/arm64 --cpus=2 -e GOMAXPROCS=6 -v &quot;$PWD&quot;:/app ubuntu:24.04 /app/gmp-linux" label="Go 1.27.1 · linux/arm64 container, 2 CPUs" caption="GOMAXPROCS forced to the machine's 6 CPUs, first run.">
+```text
+cpu.max (quota period): 200000 100000
+NumCPU: 6  GOMAXPROCS: 6
+periods: 31, throttled periods: 30, worst wake-up delay: 103ms
+```
+</TerminalOutput>
+
+| Run (2 CPUs, 6-CPU machine) | `GOMAXPROCS` | Throttled periods | Worst wake-up delay |
+|---|---|---|---|
+| default, run 1 | 2 | 11 of 31 | 46 ms |
+| default, run 2 | 2 | 4 of 31 | 45 ms |
+| `GOMAXPROCS=6`, run 1 | 6 | 30 of 31 | 103 ms |
+| `GOMAXPROCS=6`, run 2 | 6 | 30 of 31 | 93 ms |
+
+With 6 threads, almost every period was throttled and a 1 ms sleep woke up as much as 103 ms late. With 2 it was far better, but not clean. The worst delay was still about 45 ms, and some periods were throttled anyway. That is because Go has threads other than the 2 running goroutines (the garbage collector and the runtime's own helpers), and they also spend quota. A CPU limit can still throttle a well-behaved Go program. Go 1.25 shrank the problem; it did not remove it.
+
+What Go 1.25 changed is the default. [The release notes](https://go.dev/doc/go1.25) say that on Linux the runtime now reads the cgroup's CPU limit, and if it is lower than the number of logical CPUs it becomes the default `GOMAXPROCS`. It uses the *limit* and ignores the *request* in Kubernetes terms. `go doc runtime.GOMAXPROCS` adds that the runtime keeps updating the value if the limit changes. I also tried fractional limits on the same machine: `--cpus=1.5` gave `GOMAXPROCS` 2, `--cpus=2.5` gave 3 and `--cpus=0.5` gave 2, so it rounds up and never goes below 2.
+
+There is one more catch, and it is in `go.mod`. The new default is tied to the language version in the module's `go` line. `go doc` says `containermaxprocs=0` is the default for language version 1.24 and below. I took the same program, set `go 1.24` in `go.mod` and built it with Go 1.27.1:
+
+<TerminalOutput command="go build -o gmp-old . (go.mod says go 1.24), then docker run --cpus=2" label="Go 1.27.1 toolchain · go 1.24 in go.mod · 2 CPUs" caption="A new toolchain does not help while the go line is old.">
+```text
+cpu.max (quota period): 200000 100000
+NumCPU: 6  GOMAXPROCS: 6
+periods: 31, throttled periods: 30, worst wake-up delay: 90ms
+```
+</TerminalOutput>
+
+So upgrading the compiler is not enough: raise the `go` line too, or set `GOMAXPROCS` yourself (an environment variable or a call to `runtime.GOMAXPROCS`; either one turns off the automatic behaviour). On a Go older than 1.25, the usual fix is the `go.uber.org/automaxprocs` package.
+
+How do you know it is happening? Throttling does not show up as high CPU. A pod can look idle on average and still be paused in bursts. Kubernetes exposes `container_cpu_cfs_throttled_seconds_total`, and [Go observability](/blog/go-observability-metrics-microbenchmarks-benchstat/) shows how to read it next to CPU usage.
 
 <Concepts>
 
-- **Compiler dead-code elimination**: compiler optimization that deletes computations whose return values are never observed—a classic trap that makes naive benchmarks report 0.2 ns/op falsely.
-- **Container-aware `GOMAXPROCS`**: adjusting Go's active logical processor count to match container cgroup CPU quotas (`uber-go/automaxprocs` or built-in Go 1.25+ defaults) instead of host hardware cores.
+- **CFS quota and throttling**: the Linux scheduler gives a container a CPU-time budget per 100 ms period. When the container's threads spend it all, the kernel pauses them until the next period.
+- **`GOMAXPROCS`**: how many goroutines run at the same moment. From Go 1.25, with a `go` line of 1.25 or newer, its default follows the container's CPU limit, rounded up, with a minimum of 2.
+- **CPU limit and CPU request**: in Kubernetes the limit is the ceiling that causes throttling. The request is a scheduling hint, and Go does not read it.
 
 </Concepts>
+
+---
+
+## Where the other production topics live
+
+This post used to carry more, and each topic now has a home post where it gets the room it needs. CPU cache lines, false sharing, escape analysis and the garbage collector are in [Go hardware, memory and GC](/blog/go-hardware-cpu-caches-virtual-memory-gc-allocator/). Finding hot spots with `pprof` is in [Go profiling](/blog/go-profiling-pprof-flamegraphs-off-cpu-continuous/). Writing benchmarks you can trust, and testing accuracy in general, is in [Go benchmarking and observability](/blog/go-observability-metrics-microbenchmarks-benchstat/).
 
 ---
 
 ## Key takeaways
 
-- **Treat stdlib defaults as local-dev shortcuts**: set explicit HTTP client/server timeouts, drain `resp.Body` before closing, configure `sql.DB` pool bounds, and use `time.NewTimer` instead of `time.After` inside loops.
-- **Align data to CPU cache lines**: sort struct fields from largest to smallest to remove padding waste, pack hot loops into Struct of Slices, and pad independent concurrent counters across cache lines.
-- **Verify escape analysis instead of guessing**: pass buffers downward (`io.Reader`), inspect `-gcflags="-m"`, and reuse temporary scratch buffers with `sync.Pool`.
-- **Measure before tuning and trust `pprof` / traces**: eliminate `time.Sleep` from tests, run `-race -shuffle=on`, guard benchmarks against dead-code elimination, and profile real allocations first.
-- **Match `GOMAXPROCS` to Kubernetes CPU quotas**: run Go 1.25+ (or import `uber-go/automaxprocs` on older versions) to prevent 100 ms CFS throttling stalls.
+- **Set a timeout on everything that waits.** `http.DefaultClient`, `http.Get` and `http.ListenAndServe` have none. Build your own `http.Client` with `Timeout` and Transport limits, and your own `http.Server` with its timeouts.
+- **Read the rest of a response body, then close it.** An unread body makes the client drop the connection; five requests with a 5,000,000-byte body used five connections instead of one.
+- **Put `return` after `http.Error`.** The handler keeps running otherwise, and what it writes next is appended to the response.
+- **A bare number is nanoseconds.** `time.Sleep(1000)` is 1 microsecond. `time.After` in a loop leaked about 199 MB per million iterations on Go 1.22.12 and nothing on Go 1.27.1.
+- **Do not trust JSON round trips blindly.** An embedded `time.Time` replaces the struct's JSON, `==` on times can be `false` for the same instant, and numbers decoded into `any` are `float64`.
+- **`sql.Open` makes a pool and does not connect.** Ping at start-up, close every `sql.Rows`, check `rows.Err()`, and bound the pool.
+- **In a container, check the `go` line and watch throttling.** Go 1.25 and a `go` line of 1.25 or newer make `GOMAXPROCS` follow the CPU limit, yet a limit can still throttle you: 4 to 11 of 31 periods in my runs, against 30 of 31 with `GOMAXPROCS=6`.
 
 ---
 
 ## Review questions
 
-1. Why does closing `resp.Body` without calling `io.Copy(io.Discard, resp.Body)` hurt throughput even when no file descriptors leak? *(See Section 1)*
-2. Why can `t1 == t2` evaluate to `false` on two `time.Time` values representing the exact same instant after one passes through `json.Marshal` and `json.Unmarshal`? *(See Section 1)*
-3. Reordering struct fields from `{ bool, int64, bool }` to `{ int64, bool, bool }` shrinks `unsafe.Sizeof` from 24 bytes to 16 bytes. Where did the 8 saved bytes go? *(See Section 2)*
-4. Why does `shareDown(&a)` stay on the goroutine stack while `func shareUp() *int { x := 42; return &x }` moves `x` to the heap? *(See Section 3)*
-5. How can a Go service inside Kubernetes show only 35% average CPU utilization yet suffer 50–100 ms p99 latency freezes when `GOMAXPROCS` reads host cores instead of pod CPU limits? *(See Section 4)*
+1. Why does `http.Get` on a server that accepts the connection and never answers keep a goroutine alive for ever, and which two settings stop it? *(See section 1)*
+2. Why does reading a response body to the end before `Close` let five requests share one connection? *(See section 2)*
+3. A handler calls `http.Error(w, "bad id", 400)` and then falls into the next `if`, which calls `http.Error(w, "not found", 404)`. What status and body does the client get? *(See section 2)*
+4. `json.Marshal` of a struct that embeds `time.Time` prints only a timestamp. What promoted method causes this, and what are two fixes? *(See section 4)*
+5. `sql.Open("postgres", dsn)` returns `nil` for the error although the database is down. Why, and what should the start-up code call? *(See section 5)*
+6. A pod with `limits.cpu: "2"` on a 6-CPU node shows 35% average CPU and still has latency spikes. How can throttling explain that, and what two things would you check about `GOMAXPROCS`? *(See section 6)*
 
 </En>
 
 <Vi>
 
-<Figure src={heroGovernor} alt="Bộ điều tốc ly tâm bằng đồng và gang trên động cơ hơi nước Boulton và Watt" caption="Bộ điều tốc ly tâm giữ vòng quay máy khớp với van hơi. Service chạy thật cũng bị khựng giống vậy nếu số thread của Go vượt quá giới hạn CPU cấp cho container." sourceTitle="Wikimedia Commons: Boulton and Watt centrifugal governor" sourceUrl="https://commons.wikimedia.org/wiki/File:Boulton_and_Watt_centrifugal_governor-MJ.jpg" />
+<Figure src={heroGovernor} alt="Bộ điều tốc ly tâm bằng đồng và gang trên động cơ hơi nước Boulton và Watt" caption="Bộ điều tốc ly tâm giữ cho động cơ chạy trong mức mà van hơi cho phép. Chương trình Go trong container cũng cần khớp như vậy giữa số thread nó chạy và lượng CPU được cấp." sourceTitle="Wikimedia Commons: Boulton and Watt centrifugal governor" sourceUrl="https://commons.wikimedia.org/wiki/File:Boulton_and_Watt_centrifugal_governor-MJ.jpg" />
 
-> "Tối ưu quá sớm dễ làm rối code — nhưng bỏ mặc mấy thứ mặc định không timeout hay cách phần cứng chạy thì lúc trực prod mệt lắm."
-> &mdash; *Đúc kết vận hành Go theo tinh thần Donald Knuth*
+> "The smaller the container / larger the machine = the worse this effect becomes."
+> &mdash; *Joshua T Corbin*, [golang/go issue #33803](https://github.com/golang/go/issues/33803) (2019)
 
-### Vì sao service Go chạy mượt ở máy mình mà lên Kubernetes lại treo socket và nhảy vọt p99?
+### Service qua hết test mà vẫn đứng hình
 
-Ở máy dev lúc nào cũng êm. File binary Go do AI viết chạy unit test mất 40 ms, gọi `curl` trả về chưa tới 1 mili giây.
+Tháng 8 năm 2019, một người dùng Go mở issue #33803 trên repo của Go. Hệ thống của họ rất bình thường: mỗi container có quota CPU là 4, chạy trên máy 32 processor. Go nhìn máy, thấy 32 processor, và khởi động runtime như thể nó được dùng hết. Container chỉ được xài lượng thời gian của 4 processor, nên kernel liên tục dừng nó lại. Độ trễ tăng, và issue nói hiệu ứng này thấy rõ ngay ở phần thân của phân phối độ trễ, không chỉ ở đuôi. Bản sửa ra mắt trong Go 1.25, tháng 8 năm 2025.
 
-Sau khi nắm chắc bẫy bộ nhớ, interface và goroutine, bài chốt lại phần vận hành thực tế này — ngay trước khi bước sang chuỗi bài tối ưu hiệu năng có đo đạc — tổng hợp bốn hạng mục sống còn cần rà kỹ trước lúc chạy prod:
+Câu chuyện này là hình mẫu của cả bài. Service chạy ổn trên laptop: mạng tức thì, database ở ngay bên cạnh, không có giới hạn CPU nào. Lên production thì mạng chậm, database dùng chung, và container có trần. Thư viện chuẩn của Go thân thiện trên laptop, nhưng vài giá trị mặc định của nó thành sự cố ở chỗ khác.
 
-1. **Mấy cái mặc định dễ sập trong Standard Library**: bọc timeout và đóng tài nguyên đúng cách với `net/http`, `database/sql`, `time` và `encoding/json`.
-2. **CPU Cache Line, False Sharing & Struct Alignment**: xếp bộ nhớ cho thuận cách CPU đọc dữ liệu để mấy nhân khỏi giẫm cache của nhau.
-3. **Stack vs. Heap, Escape Analysis & GC**: chạy `-gcflags="-m"` xem trình biên dịch cấp phát ở đâu thay vì đoán mò.
-4. **Viết test/benchmark cho đúng, dùng `pprof`/Trace và bẫy CFS Throttling trên Kubernetes**: đừng để benchmark ảo đánh lừa, đo đúng chỗ nghẽn thật và giữ `GOMAXPROCS` khớp giới hạn CPU của container.
+Mình dùng service `Todo` trong [Xây dựng HTTP service bằng Go](/blog/go-http-service-net-http-json-middleware/) làm ví dụ xuyên suốt, và đi qua sáu cái bẫy.
+
+| Bẫy | Chuyện gì xảy ra | Ở đâu |
+|---|---|---|
+| Lời gọi hay server không có timeout | Một goroutine chờ mãi một đầu bên kia bị kẹt | [mục 1](#1-chờ-mãi-timeout) |
+| Body, rows hay file không bao giờ đóng | Cạn connection và file handle | [mục 2](#2-đã-mở-thì-phải-đóng) |
+| `time.After` trong vòng lặp, số trần làm duration | Bộ nhớ phình (Go cũ), hoặc một lệnh sleep ngắn hơn cả triệu lần | [mục 3](#3-time-số-trần-và-timer) |
+| JSON âm thầm làm mất hay làm tròn dữ liệu | Thiếu field, so sánh sai, ID bị làm tròn | [mục 4](#4-json-ba-điều-bất-ngờ) |
+| `database/sql` là pool, không phải một connection | Request xếp hàng sau những connection không ai trả | [mục 5](#5-databasesql-là-một-pool) |
+| Container có giới hạn CPU | Kernel dừng cả process | [mục 6](#6-go-trong-container) |
 
 <Callout type="note" title="Tóm tắt nhanh (TL;DR)">
-Đừng bao giờ dùng thẳng `http.DefaultClient` hay `http.ListenAndServe` mà không gắn timeout, nhớ đọc cạn `resp.Body` trước khi đóng, cấu hình đủ thông số pool cho `sql.DB`, và thay `time.After` trong vòng lặp bằng `time.NewTimer`. Xếp field trong struct từ lớn xuống nhỏ, tách các biến atomic hay ghi sang hai cache line riêng, soi allocation bằng `pprof` và `-gcflags="-m"`, rồi kiểm tra `GOMAXPROCS` cho khớp giới hạn CPU của Kubernetes (có sẵn từ Go 1.25+, bản cũ hơn thì gắn `uber-go/automaxprocs`).
+Đặt timeout cho mọi client và server: `http.DefaultClient` và `http.ListenAndServe` không có cái nào. Đọc nốt phần còn lại của response body rồi đóng nó, đóng `sql.Rows`, và đặt `return` sau `http.Error`. `time.Time` nhúng sẵn sẽ chiếm luôn JSON của struct, và số decode vào `any` thành `float64`. `sql.Open` tạo pool và chưa kết nối gì cả. Trong container, xem dòng `go` trong `go.mod`: từ Go 1.25 `GOMAXPROCS` theo giới hạn CPU, nhưng giới hạn CPU vẫn có thể làm process bị bóp.
 </Callout>
 
-<Concepts title="Mấy khái niệm nhắc tới ở trên">
+<Callout type="note" title="Ôn lại từ các bài trước">
 
-- **Transient resource & HTTP Keep-Alive**: tài nguyên mượn từ hệ điều hành (`resp.Body`, `sql.Rows`, `os.File`) còn giữ socket hoặc file descriptor tới khi đóng bằng `io.Closer`; đọc cạn `resp.Body` giúp Go giữ lại kết nối TCP/TLS cũ (**Keep-Alive**) dùng tiếp thay vì bắt tay lại từ đầu.
-- **Connection pool (`sql.DB`)**: biến `*sql.DB` không phải một kết nối đơn lẻ — nó là một bể (pool) chứa sẵn nhiều kết nối DB dùng chung và tái sử dụng an toàn giữa các goroutine.
-- **CPU Cache line (L1/L2 vs. RAM)**: từng khối nhớ 64 byte (x86) hoặc 128 byte (Apple Silicon) mà CPU bốc nguyên tảng từ RAM chính (~50–100 ns) lên bộ nhớ đệm L1/L2 (~1 ns) ngay cạnh nhân.
-- **Escape analysis (Stack vs. Heap)**: bước kiểm tra của trình biên dịch xem biến có sống gọn được trên **stack** riêng của goroutine để tự xóa khi hàm thoát không, hay bị "thoát" (**escape**) lên **heap** cho GC đi dọn.
-- **CFS throttling & `GOMAXPROCS`**: `GOMAXPROCS` chỉnh số goroutine Go chạy song song cùng lúc, còn **CFS throttling** là việc Linux kernel cho dừng hết thread trong container tới hết chu kỳ 100 ms khi container xài lố hạn mức CPU.
+- [Lỗi, defer và panic](/blog/go-errors-defer-panic/): `defer` chạy một lời gọi khi hàm kết thúc, đó là cách thường viết `Close`.
+- [Context và khoá](/blog/go-context-timeouts-mutexes/): `context.WithTimeout` dừng việc chạy quá lâu.
+- [Xây dựng HTTP service bằng Go](/blog/go-http-service-net-http-json-middleware/): service `Todo`, `http.Server` có timeout, `writeJSON` và `getTodo`.
+- [Concurrency trong Go](/blog/go-concurrency-scheduler-channels-context-mutexes/): `GOMAXPROCS` là số goroutine chạy cùng một lúc.
 
-</Concepts>
+</Callout>
 
 ---
 
-## 1. Mấy bẫy mặc định trong Standard Library: `net/http`, `database/sql` và `time`
+## 1. Chờ mãi: timeout
 
-Bạn nhìn thử thẳng vào `src/net/http/client.go` trong thư viện chuẩn Go:
+*Timeout* là giới hạn thời gian code chờ một thứ nằm ngoài nó: một connection, một câu trả lời, một client gửi chậm. Go không có timeout toàn cục ngầm. Nếu mình không đặt, việc chờ không có điểm dừng. Trên laptop thì không sao, nhưng khi một service phía sau treo thì nguy hiểm, vì mỗi lời gọi đang chờ giữ lại một goroutine, một socket và ít bộ nhớ.
 
-<GitHubCode repo="golang/go" path="src/net/http/client.go" lines="L58-L125" url="https://github.com/golang/go/blob/074522c96ce70350453c164ecb17904881106b6a/src/net/http/client.go#L58-L125" caption="http.DefaultClient thực chất chỉ là &Client{} với Timeout bằng 0 (chờ vô thời hạn).">
+### Client mặc định không bao giờ bỏ cuộc
+
+Package `net/http` có sẵn một client, `http.DefaultClient`, và các hàm tắt như `http.Get` dùng nó. Định nghĩa của nó trong mã nguồn Go:
+
+<GitHubCode repo="golang/go" path="src/net/http/client.go" lines="L58-L125" url="https://github.com/golang/go/blob/074522c96ce70350453c164ecb17904881106b6a/src/net/http/client.go#L58-L125" caption="http.DefaultClient chỉ là &Client{}. Field Timeout của nó bằng 0, và comment nói rõ ý nghĩa của số 0 đó.">
 ```go
 	// A Timeout of zero means no timeout.
 	Timeout time.Duration
@@ -360,223 +941,786 @@ var DefaultClient = &Client{}
 ```
 </GitHubCode>
 
-Dùng thẳng `http.Get(...)`, `http.DefaultClient` hay `http.ListenAndServe(...)` đồng nghĩa với việc để **mọi mốc timeout bằng 0 — tức là chờ vô thời hạn** (`#81`). Chỉ cần một dịch vụ bên kia nhận kết nối TCP xong rồi im re không trả lời, goroutine bên mình sẽ treo ở đó mãi. Lúc tạo client nhớ gắn riêng `Dialer`, `TLSHandshakeTimeout`, `ResponseHeaderTimeout`, `IdleConnTimeout` và `Client.Timeout`; bên server thì tự dựng `&http.Server{}` có `ReadHeaderTimeout`, `ReadTimeout` và `IdleTimeout`.
+Vậy `http.Get(url)` chờ bao lâu tuỳ đầu bên kia. Chương trình dưới dựng một server thử nhận request rồi ngủ 3 giây. `httptest.NewServer` (từ [bài 10](/blog/go-http-service-net-http-json-middleware/)) cho mình server đó mà không cần cấu hình mạng. Đầu tiên gọi bằng `http.Get` trong một goroutine và ngừng xem sau 1 giây. Sau đó gọi bằng client của mình có `Timeout`.
 
 ```go
-// Không dùng http.DefaultClient hay http.ListenAndServe trên production (#81)
-client := &http.Client{
-	Timeout: 5 * time.Second,
-	Transport: &http.Transport{
-		DialContext:           (&net.Dialer{Timeout: 1 * time.Second}).DialContext,
-		TLSHandshakeTimeout:   1 * time.Second,
-		ResponseHeaderTimeout: 2 * time.Second,
-		IdleConnTimeout:       90 * time.Second,
-	},
-}
+package main
 
-srv := &http.Server{
-	ReadHeaderTimeout: 2 * time.Second,
-	ReadTimeout:       5 * time.Second,
-	IdleTimeout:       60 * time.Second,
+import (
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"time"
+)
+
+func main() {
+	// A server that accepts the request and then never answers (it sleeps 3s).
+	slow := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(3 * time.Second)
+	}))
+	defer slow.Close()
+
+	// 1. http.Get uses http.DefaultClient, whose Timeout is 0: wait forever.
+	done := make(chan error, 1)
+	go func() {
+		_, err := http.Get(slow.URL)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		fmt.Println("default client returned:", err)
+	case <-time.After(1 * time.Second):
+		fmt.Println("default client: no answer after 1s, still waiting")
+	}
+
+	// 2. Our own client with a deadline for the whole call.
+	client := &http.Client{Timeout: 500 * time.Millisecond}
+	start := time.Now()
+	_, err := client.Get(slow.URL)
+	fmt.Printf("own client gave up after %v\n%v\n", time.Since(start).Round(100*time.Millisecond), err)
 }
 ```
 
-<GoProdHttpTimeouts />
+<TerminalOutput command="go run ." label="Apple M2 · Go 1.27.1" caption="Số cổng trong thông báo lỗi mỗi lần chạy một khác. Server thử ngừng ngủ sau 3 giây nên client mặc định sẽ trả về lúc đó; còn server không bao giờ trả lời thì client không bao giờ được thả.">
+```text
+default client: no answer after 1s, still waiting
+own client gave up after 500ms
+Get "http://127.0.0.1:55463": context deadline exceeded (Client.Timeout exceeded while awaiting headers)
+```
+</TerminalOutput>
 
-| Cấu hình Thư viện chuẩn | Giá trị mặc định nguy hiểm | Tai họa lúc chạy Production | Giá trị chuẩn nên đặt |
-| :--- | :--- | :--- | :--- |
-| **`http.DefaultClient.Timeout`** | `0` (chờ vô tận) | Đối tác im lặng làm treo vĩnh viễn goroutine | `&http.Client{Timeout: 5 * time.Second}` + Dial/TLS timeout |
-| **`http.Transport.MaxIdleConnsPerHost`** | Chỉ `2` kết nối rảnh | Tải cao đóng/mở bắt tay TLS liên tục gây nghẽn | Nâng `MaxIdleConnsPerHost: 100`, đọc cạn body trước `Close()` |
-| **`http.Server.ReadHeaderTimeout`** | `0` (chờ vô tận) | Dễ dính tấn công Slowloris ngâm header | `ReadHeaderTimeout: 2 * time.Second`, `IdleTimeout: 60s` |
-| **`sql.DB.ConnMaxLifetime`** | `0` (không hết hạn) | Firewall/LB âm thầm ngắt kết nối DB nhàn rỗi | `SetConnMaxLifetime(5 * time.Minute)` + trần `MaxOpenConns` |
-| **`GOMAXPROCS` (trước Go 1.25)** | Số core máy chủ (`64`) | Pod có `limits.cpu: "4"` bị CFS bóp khựng mỗi 100 ms | Lên Go 1.25+ hoặc nhúng `_ "go.uber.org/automaxprocs"` |
+`Client.Timeout` là một hạn chót cho cả lời gọi, từ lúc kết nối đến lúc đọc xong body. Muốn chia nhỏ hơn thì `Transport` của client (phần giữ các connection) có giới hạn riêng. Đây là client nên dùng trên production:
 
-<QuoteCard author="Dave Cheney" role="Tác giả Bài hướng dẫn net/http" sourceTitle="The complete guide to Go net/http timeouts" sourceUrl="https://blog.cloudflare.com/the-complete-guide-to-golang-net-http-timeouts/">
-Đừng bao giờ mở server hay client net/http ra internet bằng bộ timeout bằng 0 mặc định — từng khâu từ mở TCP dial, bắt tay TLS, đọc header tới đọc body đều phải được đặt trần thời gian tường minh.
-</QuoteCard>
+```go
+client := &http.Client{
+	Timeout: 5 * time.Second, // the whole call, body included
+	Transport: &http.Transport{
+		DialContext:           (&net.Dialer{Timeout: 1 * time.Second}).DialContext, // opening the connection
+		TLSHandshakeTimeout:   1 * time.Second,
+		ResponseHeaderTimeout: 2 * time.Second, // from sending the request to the first response header
+		IdleConnTimeout:       90 * time.Second, // how long an unused connection may stay in the pool
+	},
+}
+```
 
-Bấm tương tác bên dưới xem việc đóng sớm `resp.Body.Close()` phá hỏng Keep-Alive pool ra sao và cách bọc đọc cạn `io.Discard` + cấu hình Transport chuẩn:
+<GoP14ClientTimeouts />
+
+`Dialer` là phần mở một connection mạng, nên `Dialer.Timeout` giới hạn việc đó mất bao lâu. Hãy tạo một client như vậy lúc khởi động và dùng chung: client an toàn với nhiều goroutine, và dùng chung cũng là điều cho phép tái sử dụng connection (mục sau). Nếu service `Todo` gọi một webhook sau mỗi `createTodo`, đây là client lời gọi đó sẽ dùng. Mình cũng có thể dừng một request riêng lẻ bằng `context`, như [bài 8](/blog/go-context-timeouts-mutexes/) đã chỉ.
+
+### Phía server: cùng một cái bẫy ở đầu kia
+
+Server gặp đúng vấn đề đối xứng. Một client có thể kết nối rồi gửi header từng byte một, hoặc không bao giờ gửi xong, và server không có giới hạn sẽ giữ connection đó mở mãi. [Bài 10](/blog/go-http-service-net-http-json-middleware/) dựng server `Todo` với `ReadHeaderTimeout`, `ReadTimeout`, `WriteTimeout` và `IdleTimeout` và giải thích từng cái. Đây là khác biệt chúng tạo ra. Chương trình kết nối bằng một socket TCP thô, gửi nửa header của request rồi chờ xem server có tự ngắt không.
+
+```go
+package main
+
+import (
+	"fmt"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"time"
+)
+
+// trickle opens a connection, sends half a request header, then waits to see
+// whether the server hangs up.
+func trickle(addr string) string {
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		return err.Error()
+	}
+	defer conn.Close()
+	fmt.Fprint(conn, "GET / HTTP/1.1\r\nHost: example\r\n") // no blank line: the header never ends
+	start := time.Now()
+	conn.SetReadDeadline(time.Now().Add(3 * time.Second))
+	buf := make([]byte, 512)
+	n, err := conn.Read(buf)
+	waited := time.Since(start).Round(100 * time.Millisecond)
+	if err != nil {
+		return fmt.Sprintf("after %v: %v", waited, err)
+	}
+	return fmt.Sprintf("after %v the server answered: %q", waited, string(buf[:n]))
+}
+
+func main() {
+	h := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {})
+
+	bare := httptest.NewServer(h) // no timeouts, like http.ListenAndServe
+	defer bare.Close()
+	fmt.Println("no timeouts:        ", trickle(bare.Listener.Addr().String()))
+
+	guarded := httptest.NewUnstartedServer(h)
+	guarded.Config.ReadHeaderTimeout = 1 * time.Second
+	guarded.Start()
+	defer guarded.Close()
+	fmt.Println("ReadHeaderTimeout 1s:", trickle(guarded.Listener.Addr().String()))
+}
+```
+
+<TerminalOutput command="go run ." label="Apple M2 · Go 1.27.1" caption="Dòng đầu là hạn đọc 3 giây của chính mình hết hiệu lực: server không có timeout vẫn giữ request viết dở khi mình bỏ cuộc. Dòng hai là server tự ngắt sau 1 giây (EOF).">
+```text
+no timeouts:         after 3s: read tcp 127.0.0.1:55471->127.0.0.1:55470: i/o timeout
+ReadHeaderTimeout 1s: after 1s: EOF
+```
+</TerminalOutput>
+
+Một client chậm tốn một goroutine và một socket. Vài nghìn client như vậy có thể làm cạn file descriptor. Đó là lý do `http.ListenAndServe(addr, h)` ổn cho bản demo mà sai cho service: nó dựng server với mọi timeout bằng 0 và không cho mình đổi. Hãy tự dựng `http.Server`, như bài 10.
+
+| Cài đặt | Mặc định | Rủi ro | Điểm khởi đầu |
+|---|---|---|---|
+| `http.Client.Timeout` | `0`, không giới hạn | upstream bị kẹt giữ chặt một goroutine mãi mãi | `5 * time.Second`, kèm các giới hạn `Transport` ở trên |
+| `http.Server.ReadHeaderTimeout` | `0`, không giới hạn | client không bao giờ gửi xong header | vài giây |
+| `http.Transport.MaxIdleConnsPerHost` | `2` (`http.DefaultMaxIdleConnsPerHost`) | khi tải cao, phần lớn connection bị đóng rồi mở lại | nâng lên bằng số lời gọi song song tới một host |
+| `sql.DB` `SetMaxOpenConns` | `0`, không giới hạn | một đợt tải mở bao nhiêu connection database cũng được | con số database của bạn phục vụ nổi ([mục 5](#5-databasesql-là-một-pool)) |
+
+<Concepts title="Mấy khái niệm ở mục này">
+
+- **Timeout**: giới hạn thời gian chờ. Go mặc định không đặt cái nào cho client và server dựng từ giá trị mặc định.
+- **`Transport` và `Dialer`**: `Transport` là phần của `http.Client` giữ các connection và pool connection đang rảnh. `Dialer` là phần mở một connection mạng.
+- **Tấn công client chậm**: client mở connection rồi gửi dữ liệu rất chậm, hoặc không gửi gì, để tài nguyên server bị giữ chặt.
+
+</Concepts>
+
+---
+
+## 2. Đã mở thì phải đóng
+
+Có những giá trị giữ tài nguyên của hệ điều hành cho đến khi mình đóng chúng: body của HTTP response, các dòng kết quả của một câu query, một file đang mở. Quên đóng là kiểu rò rỉ âm thầm, vì không có gì crash. Chỉ là số tài nguyên cứ nhích lên cho đến khi một lời gọi hỏng. Go có `defer` cho việc này ([bài 5](/blog/go-errors-defer-panic/)). Có hai chi tiết dễ sót.
+
+### Response body: đóng, và đọc đến hết
+
+Mỗi `http.Get` thành công trả về `resp` mà mình phải đóng `Body` của nó. Chỉ đóng cũng chưa đủ. Một connection HTTP có thể phục vụ nhiều request nối tiếp nhau (gọi là *keep-alive*), và client giữ các connection đã xong trong một pool rảnh để dùng lại. Connection chỉ quay về pool nếu body đã được đọc hết. Đóng sớm thì client vứt connection đi, và request sau phải trả giá cho một connection TCP mới cộng một lần bắt tay TLS.
+
+```go
+func fetch(client *http.Client, url string) error {
+	resp, err := client.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close() // runs when fetch returns
+	// ... decode the body here ...
+	_, err = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20)) // read what is left, at most 1 MiB
+	return err
+}
+```
+
+`io.Discard` là một writer vứt hết mọi thứ ghi vào, nên `io.Copy` vào đó là đọc và bỏ phần còn lại. `io.LimitReader` dừng sau 1 MiB (`1<<20` byte), nên một câu trả lời khổng lồ không thể làm lời gọi này chạy mãi. `defer` đặt ngay sau chỗ kiểm tra lỗi: khi `err` khác `nil` thì `resp` là `nil` và không có gì để đóng.
+
+Chuyện này quan trọng cỡ nào? Chương trình dưới gửi 5 request tới một server local, có và không đọc phần còn lại, với ba cỡ body. Nó đếm số connection mà server đã nhận.
+
+```go
+package main
+
+import (
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
+)
+
+func main() {
+	for _, size := range []int{1_000, 100_000, 5_000_000} {
+		for _, drain := range []bool{false, true} {
+			var conns atomic.Int32
+			srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				io.WriteString(w, strings.Repeat("x", size))
+			}))
+			srv.Config.ConnState = func(_ net.Conn, s http.ConnState) {
+				if s == http.StateNew {
+					conns.Add(1)
+				}
+			}
+			srv.Start()
+			client := &http.Client{Transport: &http.Transport{}}
+			for i := 0; i < 5; i++ {
+				resp, err := client.Get(srv.URL)
+				if err != nil {
+					panic(err)
+				}
+				if drain {
+					io.Copy(io.Discard, resp.Body)
+				}
+				resp.Body.Close()
+			}
+			fmt.Printf("body %7d bytes, drain=%-5v: 5 requests used %d connection(s)\n", size, drain, conns.Load())
+			srv.Close()
+		}
+	}
+}
+```
+
+<TerminalOutput command="go run ." label="Apple M2 · Go 1.27.1" caption="Chạy thật. Đọc nốt phần còn lại của body cho phép client dùng lại một connection. Không đọc thì mỗi request tốn một connection mới khi body đủ lớn.">
+```text
+body    1000 bytes, drain=false: 5 requests used 2 connection(s)
+body    1000 bytes, drain=true : 5 requests used 1 connection(s)
+body  100000 bytes, drain=false: 5 requests used 2 connection(s)
+body  100000 bytes, drain=true : 5 requests used 1 connection(s)
+body 5000000 bytes, drain=false: 5 requests used 5 connection(s)
+body 5000000 bytes, drain=true : 5 requests used 1 connection(s)
+```
+</TerminalOutput>
+
+<GoP14BodyDrain />
+
+Body nhỏ thì vứt đi rẻ, nên Go thường xoay xở được, nhưng ngay cả một câu trả lời 1.000 byte thường vẫn tốn thêm một connection thứ hai ở đây (5 trên 6 lần chạy; có một lần chỉ dùng một connection). Bản chạy từng bước dưới đây cho thấy cùng khác biệt đó, kèm các thông số pool bên cạnh.
 
 <GoHttpPoolLeakDemo />
 
-<GoProdCodeTrace />
+### `http.Error` không dừng handler
 
-Cộng thêm ba lưu ý quen tay khi dùng thư viện chuẩn:
-- **Đọc cạn rồi mới đóng mọi `io.Closer` (`#79`, `#80`)**: cơ chế HTTP Keep-Alive cho phép client dùng lại đường ống TCP/TLS đang mở cho các request sau thay vì bắt tay mạng lại từ đầu — nhưng nếu gọi `resp.Body.Close()` khi trong body vẫn còn byte chưa đọc, Go phải đập bỏ luôn kết nối TCP đó. Nhớ gọi `_, _ = io.Copy(io.Discard, resp.Body)` trước khi `Close()`. Ngoài ra, gọi `http.Error(w, msg, code)` xong hàm không tự dừng đâu — phải viết `return` ngay sau đó.
-- **Chỉnh `database/sql` đúng kiểu connection pool (`#78`)**: nhiều bạn mới cứ tưởng `sql.Open()` là mở sẵn một kết nối tới DB; thực ra `*sql.DB` là một **bể kết nối (connection pool)** mở lười biếng và chưa hề nối mạng ngay lúc gọi. Nhớ gọi `db.PingContext(ctx)` lúc khởi động để kiểm tra sớm, đặt `SetMaxOpenConns`, `SetMaxIdleConns`, `SetConnMaxLifetime`, `SetConnMaxIdleTime`, map cột NULL qua `sql.NullString` hoặc con trỏ, và luôn kiểm tra `rows.Err()` sau vòng lặp `rows.Next()`.
-- **Cẩn thận với `time.Duration`, `time.After` và phép so sánh `time.Time` (`#75`, `#76`, `#77`)**: luôn nhân rõ với đơn vị như `5 * time.Second`, thay `time.After` trong vòng `for`/`select` bằng một biến `time.NewTimer` dùng `Reset` để khỏi tạo hàng loạt timer rác trên heap, và so sánh thời gian bằng `t1.Equal(t2)` thay vì `==` vì `time.Now()` gắn thêm **monotonic clock** (đồng hồ bấm giờ chỉ tiến lên, không bị đồng hồ hệ thống làm nhảy ngược) nhưng lại rớt mất khi đi qua `json.Unmarshal`.
-
-<Figure src={clockEscapement} alt="Bản khắc cơ cấu hồi thoát đồng hồ cơ cổ điển với hai bánh răng đồng bộ" caption="Giống như có hai đồng hồ chạy chung một vỏ: time.Time của Go giữ cả giờ lịch wall-clock lẫn bộ đếm monotonic. Qua JSON, phần monotonic mất đi khiến == ra sai." sourceTitle="Wikimedia Commons: Mays detached escapement (Wellcome Collection)" sourceUrl="https://commons.wikimedia.org/wiki/File:Clocks;_an_escapement_mechanism._Engraving_by_W._Kelsall_aft_Wellcome_V0023849EL.jpg" />
+`http.Error(w, message, code)` ghi một dòng status và một body chữ. Nó không thoát khỏi handler của mình. Hàm bạn viết vẫn chạy tiếp, và mọi thứ nó ghi sau đó được nối vào cùng một response. Chương trình dưới là một `getTodo` rút gọn từ bài 10, thiếu `return` sau lần `http.Error` đầu tiên. Handler nhận `abc` làm id, không phải số.
 
 ```go
-// Qua JSON là rụng phần đồng hồ monotonic -> so == bị false (#76)
-t1 := time.Now()
-raw, _ := json.Marshal(t1)
-var t2 time.Time
-_ = json.Unmarshal(raw, &t2)
-fmt.Println(t1 == t2, t1.Equal(t2)) // false, true!
+package main
 
-// Kỷ luật sql.DB (#78, #79): giới hạn pool và luôn kiểm tra rows.Err()
-db.SetMaxOpenConns(25)
-db.SetConnMaxLifetime(5 * time.Minute)
-defer rows.Close()
-for rows.Next() { /* ... */ }
-return rows.Err()
-```
+import (
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"strconv"
+)
 
-<GoProdSqlAndTime />
+var titles = []string{"write post"} // todo 1 is titles[0]
 
-<Concepts title="Mấy khái niệm ở mục này">
-
-- **Wall clock vs. monotonic clock**: wall clock theo dõi giờ lịch (có thể nhảy ngược lúc máy đồng bộ NTP), còn monotonic clock chỉ đếm nano giây tiến lên từ lúc bật app để đo khoảng thời gian cho chuẩn.
-- **Connection pool churn**: tình trạng đóng mở lại kết nối TCP/TLS liên tục do quên đọc cạn `resp.Body` hoặc để `MaxIdleConns` ở mặc định quá bé là `2`.
-
-</Concepts>
-
----
-
-## 2. Xếp bộ nhớ hợp phần cứng: CPU Cache Line, False Sharing và Struct Alignment
-
-CPU không bốc từng byte lẻ trực tiếp từ RAM chính mà kéo qua bộ nhớ đệm siêu nhanh **L1/L2 cache** nằm sát ngay nhân xử lý (đọc L1 mất ~1 ns, nhanh hơn RAM chính 50–100 lần). Mỗi lần đọc như vậy CPU kéo nguyên một khúc bộ nhớ gọi là **cache line** (64 byte trên x86_64, 128 byte trên Apple Silicon), nên cách bạn sắp thứ tự field trong struct và slice ảnh hưởng thẳng tới tốc độ chạy (`#91`, `#93`).
-
-Cứ hình dung bạn xuống kho lấy sách: dù chỉ cần đọc trang đầu của một cuốn, thủ thư vẫn bưng lên cả một chồng 8 cuốn nằm chung kệ. Gom mấy field hay đọc cùng nhau về dạng **Struct of Slices** thay vì Slice of Structs giúp mỗi lần nạp cache mang theo toàn bộ phần dữ liệu cần dùng.
-
-```go
-// Struct of Slices (#91): đọc Bar.a nạp gọn 8 số int64 trên một dòng cache 64B
-type Bar struct {
-	a []int64
-	b []int64
+func getTodo(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(r.PathValue("id"))
+	if err != nil {
+		http.Error(w, "id must be a number", http.StatusBadRequest)
+		// no return here
+	}
+	if id < 1 || id > len(titles) {
+		http.Error(w, "todo not found", http.StatusNotFound)
+		return
+	}
+	fmt.Fprintln(w, titles[id-1])
 }
 
-// Chống False Sharing (#92): đệm 56 byte để sumA và sumB nằm khác cache line
-type Result struct {
-	sumA int64
-	_    [56]byte
-	sumB int64
+func main() {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /todos/{id}", getTodo)
+	srv := httptest.NewUnstartedServer(mux)
+	srv.Config.ErrorLog = log.New(os.Stdout, "server log: ", 0) // show the server's own log here
+	srv.Start()
+	defer srv.Close()
+
+	resp, _ := http.Get(srv.URL + "/todos/abc")
+	body, _ := io.ReadAll(resp.Body)
+	fmt.Printf("status %d\nbody %q\n", resp.StatusCode, body)
 }
 ```
 
-<GoProdCacheAndFalseSharing />
-
-Có hai mẹo nhỏ ở tầng bố cục bộ nhớ cho kết quả thấy ngay:
-
-1. **Né False Sharing (`#92`)**: nếu Goroutine 1 trên Core 0 liên tục tăng `s.a` còn Goroutine 2 trên Core 1 liên tục tăng `s.b`, mà cả hai biến `int64` lại nằm chung một cache line, hai nhân CPU sẽ liên tục làm mất cache L1 của nhau. Chèn thêm phần padding ngăn hai biến ra hai cache line riêng giúp benchmark trên Apple M2 Go 1.27 chạy nhanh hơn gấp đôi ngay:
-
-<TerminalOutput command="go test -bench=Benchmark -benchmem" label="Apple M2 · Go 1.27" caption="Đưa hai biến atomic.Int64 sang hai cache line 128 byte riêng trên Apple Silicon tăng gấp đôi tốc độ dù thuật toán y hệt.">
+<TerminalOutput command="go run ." label="Apple M2 · Go 1.27.1" caption="Chạy thật. Log của chính server trỏ vào dòng 22 của file trên, lần gọi http.Error thứ hai.">
 ```text
-BenchmarkFalseSharing-8      	      52	  22237397 ns/op	     100 B/op	       3 allocs/op
-BenchmarkCacheLinePadded-8   	     100	  10251683 ns/op	      80 B/op	       3 allocs/op
+server log: http: superfluous response.WriteHeader call from main.getTodo (main.go:22)
+status 400
+body "id must be a number\ntodo not found\n"
 ```
 </TerminalOutput>
 
-2. **Xếp field trong struct từ lớn xuống nhỏ (`#94`)**: để CPU đọc một phát ăn ngay, Go căn địa chỉ từng field tại bội số kích thước kiểu của nó (`int64` cần địa chỉ chia hết cho 8) nên tự động chèn các byte **padding** trống nếu kiểu nhỏ đứng trước kiểu lớn. Để `{ bool, int64, bool }` khiến compiler độn thêm 14 byte trống (tổng 24 byte), trong khi xếp `{ int64, bool, bool }` chỉ tốn 16 byte — tiết kiệm ngay 33% RAM cho slice mấy triệu phần tử.
+<GoP14MissingReturn />
 
-Bạn có thể thử đổi thứ tự field trong struct và bấm xem hiệu ứng bóp CPU trên Kubernetes trong phần mô phỏng bên dưới:
+Khi `Atoi` lỗi, `id` bằng `0`, nên lần kiểm tra kế cũng lỗi và ghi thêm một thông báo lỗi nữa. Status đã gửi đi rồi, nên lần thứ hai bị bỏ qua (và bị ghi log là "superfluous"), nhưng chữ của nó vẫn bị nối vào body. Trong một handler lớn hơn, đoạn code sau chỗ thiếu `return` có thể ghi vào database. Cách sửa chỉ một từ, `return`, ngay sau mỗi lời gọi `http.Error` và `writeError`.
 
-<GoProdStructCacheK8sDemo />
+### Rows và file
+
+`sql.Rows` từ một câu query giữ một connection database cho đến khi gọi `rows.Close()`, và một file giữ một file descriptor cho đến khi `f.Close()`. Cả hai theo cùng khuôn `defer`. Bản của rows nằm ở [mục 5](#5-databasesql-là-một-pool). Với file mình ghi vào, nhớ kiểm tra lỗi từ `Close` nữa, như [bài 5](/blog/go-errors-defer-panic/) giải thích.
 
 <Concepts title="Mấy khái niệm ở mục này">
 
-- **Spatial locality**: xếp dữ liệu hay đọc liền nhau nằm cạnh nhau trong RAM để một lần đọc cache line kéo lên được nhiều phần tử hữu ích nhất.
-- **False sharing**: hiện tượng chậm đi rõ rệt khi nhiều nhân CPU ghi vào các biến độc lập nhưng tụi nó lại vô tình nằm chung một cache line vật lý.
+- **Keep-alive và pool rảnh**: một connection HTTP chở được nhiều request. Client giữ sẵn các connection đã xong trong pool và dùng lại, nhưng chỉ khi response body đã được đọc đến hết.
+- **`io.Discard`**: một writer bỏ hết mọi thứ ghi vào. Copy vào nó là cách chuẩn để đọc và bỏ dữ liệu.
 
 </Concepts>
 
 ---
 
-## 3. Stack vs. Heap, Escape Analysis và Garbage Collector
+## 3. Time: số trần và timer
 
-Bộ nhớ lúc chạy của Go chia làm hai vùng: **stack** và **heap** (`#95`). Mỗi goroutine giữ riêng một **stack** siêu nhanh như quyển giấy nháp cá nhân — cấp phát biến chỉ là nhích con trỏ rồi tự giải phóng sạch lúc hàm `return` mà GC không phải đụng tay. Nhưng biến nào sống lâu hơn phạm vi hàm (ví dụ trả con trỏ ra ngoài) hoặc quá khổ sẽ bị đẩy ra vùng nhớ chung **heap** (*escape to heap*) để Garbage Collector dọn dẹp (`#99`); bước trình biên dịch quyết định đặt biến ở đâu chính là **escape analysis**.
+### Số trần là nano giây
+
+`time.Duration` đếm bằng nano giây. Các hằng như `time.Second` chỉ là những con số lớn của đơn vị đó, nên một số viết không kèm đơn vị có nghĩa là một khoảng rất nhỏ.
 
 ```go
-// Truyền XUỐNG -> nằm gọn trên stack (0 áp lực lên GC)
-func sumPtr(x, y *int) int {
-	return *x + *y
-}
+package main
 
-// Trả LÊN -> con trỏ sống lâu hơn hàm, buộc phải đẩy z lên heap!
-func sumEscape(x, y int) *int {
-	z := x + y
-	return &z // compiler báo: "moved to heap: z"
+import (
+	"fmt"
+	"time"
+)
+
+func main() {
+	fmt.Println(time.Duration(1000))
+	fmt.Println(1000 * time.Millisecond)
+	start := time.Now()
+	time.Sleep(1000) // meant: one second
+	fmt.Println("slept for", time.Since(start).Round(time.Microsecond) < 100*time.Microsecond)
 }
 ```
 
-<GoProdEscapeAnalysis />
-
-Bạn chạy `go build -gcflags="-m"` để coi thẳng quyết định của trình biên dịch thay vì đoán mò:
-
-<TerminalOutput command="go build -gcflags='-m' ./prod.go" label="Apple M2 · Go 1.27" caption="Output thật từ escape analysis: truyền con trỏ xuống shareDown thì biến nằm lại stack; trả &x lên trong shareUp thì x bị đẩy lên heap.">
+<TerminalOutput command="go run ." label="Apple M2 · Go 1.27.1" caption="Chạy thật. 1000 là 1µs, và Sleep(1000) trả về trong chưa đầy 100µs.">
 ```text
-./prod.go:9:16: v does not escape
-./prod.go:13:2: moved to heap: x
+1µs
+1s
+slept for true
 ```
 </TerminalOutput>
 
-Bốn cách giúp giảm gánh nặng cho GC (`#96`, `#97`, `#99`):
-- **Truyền buffer xuống (share down), hạn chế cấp mới trả lên (share up)**: thiết kế API kiểu `io.Reader.Read(buf []byte)` nhận buffer từ bên gọi truyền xuống thay vì lần nào gọi cũng tạo slice mới trả về.
-- **Giữ hàm hot-path gọn để được inline**: hàm nhỏ chạy nhiều được compiler chèn thẳng vào chỗ gọi, vừa bớt overhead gọi hàm vừa tránh làm biến bị escape qua tham số.
-- **Dùng lại buffer qua `sync.Pool`**: rất hiệu quả cho buffer tạm (`bytes.Buffer`) tạo mới theo từng request, nhớ `.Reset()` sạch trước khi `Put` lại vào pool.
-- **Nắm nhịp chạy GC (`GOGC` và `GOMEMLIMIT`)**: mặc định `GOGC=100` bật GC mỗi khi heap sống tăng gấp đôi; từ Go 1.19+ bạn gắn thêm `GOMEMLIMIT` để giữ trần RAM sát mức OOM của container mà không ép GC chạy liên tục.
+Luôn viết kèm đơn vị: `5 * time.Second`, `time.Duration(n) * time.Millisecond`.
+
+### `time.After` trong vòng lặp
+
+`time.After(d)` trả về một channel và bật một timer gửi vào đó sau `d`. Đây là cách quen thuộc để viết "chờ một sự kiện, nhưng bỏ cuộc sau một phút" trong `select`. Đặt nó trong vòng `for` thì mỗi vòng bật một timer mới. Nhiều năm lời khuyên là các timer đó nằm trong bộ nhớ cho đến khi chúng nổ, nên một vòng lặp bận với timeout dài có thể ngốn hàng gigabyte.
+
+Mình đã đo. Chương trình đọc từ một channel lúc nào cũng có sẵn giá trị, với `time.After` một phút là nhánh `select` còn lại, một triệu lần, rồi in heap đang sống trước và sau.
+
+```go
+package main
+
+import (
+	"fmt"
+	"runtime"
+	"time"
+)
+
+// heapMB forces a collection and returns the live heap in megabytes.
+func heapMB() float64 {
+	var m runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&m)
+	return float64(m.HeapAlloc) / (1 << 20)
+}
+
+func main() {
+	events := make(chan int)
+	go func() {
+		for i := 0; ; i++ {
+			events <- i
+		}
+	}()
+
+	before := heapMB()
+	for i := 0; i < 1_000_000; i++ {
+		select {
+		case <-events:
+		case <-time.After(time.Minute): // a new timer every iteration
+		}
+	}
+	fmt.Printf("live heap: %.1f MB before, %.1f MB after 1,000,000 loops\n", before, heapMB())
+}
+```
+
+<TerminalOutput command="GOTOOLCHAIN=go1.22.12 go run ." label="Apple M2 · Go 1.22.12" caption="Cùng file đó, go.mod ghi go 1.22, build bằng Go 1.22.12.">
+```text
+live heap: 0.1 MB before, 199.2 MB after 1,000,000 loops
+```
+</TerminalOutput>
+
+<TerminalOutput command="go run ." label="Apple M2 · Go 1.27.1" caption="Cùng file đó, go.mod ghi go 1.27.1.">
+```text
+live heap: 0.2 MB before, 0.2 MB after 1,000,000 loops
+```
+</TerminalOutput>
+
+Trên Go 1.22, một triệu timer chưa nổ giữ khoảng 199 MB. Trên Go 1.27 thì chẳng giữ gì. [Ghi chú phát hành Go 1.23](https://go.dev/doc/go1.23) giải thích: timer mà chương trình không còn tham chiếu tới có thể bị garbage collector thu ngay, dù chưa được dừng. Vậy cái rò rỉ mà lời khuyên cảnh báo đã hết trên Go hiện tại. Nó vẫn còn nếu bạn build bằng toolchain cũ, nên nếu gặp mẫu này trong code cũ, hoặc phải hỗ trợ Go cũ, hãy tạo một timer bên ngoài vòng lặp và dùng lại:
+
+```go
+timer := time.NewTimer(time.Minute) // one timer for the whole loop
+defer timer.Stop()
+for i := 0; i < 1_000_000; i++ {
+	timer.Reset(time.Minute) // restart the countdown each time
+	select {
+	case <-events:
+	case <-timer.C:
+	}
+}
+```
+
+Đặt vào cùng chương trình, vòng lặp này giữ heap ở 0,1 MB sau một triệu vòng trên Go 1.22.12 và 0,2 MB trên Go 1.27.1. Từ Go 1.23 trở đi, `time.After` trong vòng lặp không gây vấn đề về bộ nhớ.
+
+---
+
+## 4. JSON: ba điều bất ngờ
+
+`encoding/json` biến giá trị Go thành JSON và ngược lại. Service `Todo` dùng nó trong mọi handler, qua `json.NewEncoder` và `json.NewDecoder`. Ba hành vi hay làm người ta vấp, và chương trình dưới cho thấy cả ba. Nó cần hai kiểu nhỏ: `Event`, nhúng một `time.Time` (nhúng là chuyện của [bài 4](/blog/go-structs-methods-interfaces/): field và method của kiểu được nhúng được đưa lên struct ngoài), và `Fixed`, giữ cùng thời điểm đó trong một field có tên.
+
+```go
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+	"time"
+)
+
+type Todo struct {
+	ID    int    `json:"id"`
+	Title string `json:"title"`
+}
+
+// Event is a todo change. time.Time is embedded, so its methods are promoted.
+type Event struct {
+	Todo
+	time.Time
+}
+
+// Fixed is the same data with the time under a name.
+type Fixed struct {
+	Todo
+	At time.Time `json:"at"`
+}
+
+func main() {
+	at := time.Date(2026, 11, 23, 9, 30, 0, 0, time.UTC)
+	todo := Todo{ID: 7, Title: "write post"}
+
+	b, _ := json.Marshal(Event{todo, at})
+	fmt.Println("embedded: ", string(b))
+	b, _ = json.Marshal(Fixed{todo, at})
+	fmt.Println("named:    ", string(b))
+
+	// The monotonic clock does not survive JSON.
+	t1 := time.Now()
+	raw, _ := json.Marshal(t1)
+	var t2 time.Time
+	json.Unmarshal(raw, &t2)
+	fmt.Println("t1 == t2:", t1 == t2, " t1.Equal(t2):", t1.Equal(t2))
+
+	// Numbers decoded into any are float64.
+	var m map[string]any
+	json.Unmarshal([]byte(`{"id": 9007199254740993}`), &m)
+	fmt.Printf("map[string]any: %v (%T)\n", m["id"], m["id"])
+	fmt.Printf("as %%.0f:        %.0f\n", m["id"])
+
+	dec := json.NewDecoder(strings.NewReader(`{"id": 9007199254740993}`))
+	dec.UseNumber()
+	var m2 map[string]any
+	dec.Decode(&m2)
+	fmt.Printf("with UseNumber: %v (%T)\n", m2["id"], m2["id"])
+}
+```
+
+<TerminalOutput command="go run ." label="Apple M2 · Go 1.27.1" caption="Chạy thật. Dòng t1 == t2 dùng time.Now(), nhưng false và true không đổi giữa các lần chạy.">
+```text
+embedded:  "2026-11-23T09:30:00Z"
+named:     {"id":7,"title":"write post","at":"2026-11-23T09:30:00Z"}
+t1 == t2: false  t1.Equal(t2): true
+map[string]any: 9.007199254740992e+15 (float64)
+as %.0f:        9007199254740992
+with UseNumber: 9007199254740993 (json.Number)
+```
+</TerminalOutput>
+
+### `time.Time` nhúng sẵn chiếm luôn phần JSON (#77)
+
+`Event{todo, at}` lẽ ra in một object có `id` và `title`, nhưng nó chỉ in mỗi thời điểm. `time.Time` có method `MarshalJSON`, cái móc mà `encoding/json` gọi cho kiểu muốn tự encode (interface đó là `json.Marshaler`). Vì `time.Time` được nhúng, method đó được đưa lên `Event`, nên `Event` giờ tự encode mình như một thời điểm và `json.Marshal` không bao giờ nhìn tới các field còn lại. Decode cũng bị y như vậy theo chiều ngược lại.
+
+<GoP14EmbeddedTime />
+
+Cách sửa trong `Fixed` là đặt tên cho field thời gian. Nhúng là cách tiện để dùng lại method, và đây là cái giá: nó có thể khiến struct của bạn thoả một interface mà bạn chưa hề định cài đặt.
+
+### Đồng hồ đơn điệu không sống sót qua JSON
+
+<Figure src={clockEscapement} alt="Bản khắc cổ về cơ cấu thoát của đồng hồ Mays với hai bánh răng định giờ ghép đôi" caption="Hai đồng hồ trong một struct: time.Time từ time.Now mang một số đọc đồng hồ treo tường và một bộ đếm tick đơn điệu. JSON chỉ giữ nửa đồng hồ treo tường." sourceTitle="Wikimedia Commons: Mays detached escapement (Wellcome Collection)" sourceUrl="https://commons.wikimedia.org/wiki/File:Clocks;_an_escapement_mechanism._Engraving_by_W._Kelsall_aft_Wellcome_V0023849EL.jpg" />
+
+Máy tính giữ hai loại thời gian. *Đồng hồ treo tường* (wall clock) cho ngày giờ; nó có thể nhảy khi máy đồng bộ với máy chủ thời gian. *Đồng hồ đơn điệu* (monotonic clock) chỉ đếm tiến, nên là thứ đúng để đo một việc mất bao lâu. `time.Now()` trả về cả hai trong một `time.Time`. Khi encode một thời điểm ra JSON, chỉ số đọc của đồng hồ treo tường được ghi ra, nên sau khi decode, `t1` và `t2` cùng một thời điểm nhưng là hai giá trị khác nhau. `==` so sánh mọi phần của struct, kể cả số đọc đơn điệu, và cho `false`. `t1.Equal(t2)` so sánh thời điểm và cho `true`. Hãy so sánh thời gian bằng `Equal` (hoặc `Before` và `After`), đừng dùng `==`.
+
+### Số decode vào `any` là `float64`
+
+Nếu decode vào `map[string]any`, compiler không biết cấu trúc của mình, nên mọi số JSON đều thành `float64`. Một `float64` chỉ giữ chính xác số nguyên tới 2^53, tức 9007199254740992. Chương trình decode 9007199254740993, lớn hơn đúng một đơn vị, và nhận lại ...992. Một ID lớn như vậy bị đổi âm thầm, và đó là cách một ID database lớn bị làm tròn khi đi qua một handler tổng quát. Hai cách sửa: decode vào struct có field `int64`, hoặc gọi `UseNumber()` trên decoder, giữ nguyên các chữ số dưới dạng `json.Number` để mình tự đổi sang `int64`.
 
 <Concepts title="Mấy khái niệm ở mục này">
 
-- **Escape analysis**: bước phân tích tĩnh lúc biên dịch giúp Go quyết định biến đó nằm gọn trên stack của goroutine hay phải đưa lên heap.
-- **`sync.Pool`**: bộ nhớ đệm đối tượng tạm có phân vùng theo từng `P`, giúp tái sử dụng vùng nhớ cho đỡ tốn GC nhưng vẫn cho phép GC thu hồi bớt nếu thiếu RAM.
+- **Method promotion (đưa method lên)**: khi một struct nhúng một kiểu, method của kiểu được nhúng gọi được trên struct ngoài, và struct ngoài thoả cùng các interface.
+- **Wall clock và monotonic clock**: wall clock cho biết ngày giờ và có thể nhảy; monotonic clock chỉ chạy tiến và dùng để đo khoảng thời gian. `time.Time` từ `time.Now()` giữ cả hai.
+- **Độ chính xác của `float64`**: số thực 64-bit chỉ lưu chính xác số nguyên tới 2^53. Số nguyên lớn hơn bị làm tròn.
 
 </Concepts>
 
 ---
 
-## 4. Viết test/benchmark cho chuẩn, dùng `pprof`/Trace và bẫy CPU Throttling trên Kubernetes
+## 5. `database/sql` là một pool
 
-Tối ưu mò rất mất thời gian, còn test sơ sài hay cấu hình container lệch sẽ giấu bệnh tới tận lúc chạy thật.
+Package chuẩn `database/sql` cho mình một kiểu duy nhất để nói chuyện với database, `*sql.DB`. Dù tên vậy, nó không phải một connection. Nó là một *pool*: một tập các connection mà package mở khi cần, giao cho từng người gọi một lúc và nhận lại cho người kế tiếp. Service `Todo` giữ dữ liệu trong bộ nhớ, nhưng một service thật sẽ giữ một `*sql.DB` giống cách nó giữ `store`. Driver thật mà bạn import (cho PostgreSQL, MySQL...) ở đây không quan trọng lắm, nên chương trình dưới dùng một driver giả chỉ đếm số connection đã mở. Nhờ vậy mình thấy được pool mà không cần database.
 
-Trước khi đụng tay sửa code tối ưu, hãy đo bằng hai đồ nghề sẵn có trong Go (`#98`): **`pprof`** lấy mẫu để vẽ biểu đồ hàm nào đang đốt nhiều CPU hoặc xin nhiều RAM nhất (kiểu `runtime.growslice` hay tra map), còn **`go tool trace`** ghi lại dòng thời gian từng mili giây cho thấy tận mắt goroutine nào bị khựng, đợi khóa mutex hay kẹt syscall trên từng bộ xử lý `P`.
+```go
+package main
 
-<Figure src={goPprofImg} alt="Biểu đồ lời gọi hàm từ go tool pprof chỉ ra điểm nghẽn trong runtime.mapaccess1_fast64 và runtime.growslice" caption="Đồ thị pprof chỉ rõ chỗ nào đang cấp phát tốn RAM như growslice trước khi bạn tốn công sửa mò." sourceTitle="The Go Blog: Profiling Go Programs" sourceUrl="https://go.dev/blog/pprof" />
+import (
+	"context"
+	"database/sql"
+	"database/sql/driver"
+	"errors"
+	"fmt"
+	"sync/atomic"
+	"time"
+)
 
-<Figure src={goTraceImg} alt="Dòng thời gian của Go execution tracer hiển thị các goroutine G1, G84 và syscall chạy trên Proc 0 đến Proc 7" caption="Trong khi pprof cộng dồn tổng CPU/RAM, go tool trace cho thấy tận mắt lúc nào goroutine bị khựng, đợi lock hay Proc bị bỏ trống." sourceTitle="The Go Blog: More powerful Go execution traces" sourceUrl="https://go.dev/blog/execution-traces-2024" />
+// fakeDriver stands in for a real database driver (such as pgx). It only
+// counts how many connections were opened.
+type fakeDriver struct{ opened atomic.Int32 }
 
-Để bộ test với benchmark đo không bị sai số (`#82`–`#90`):
-- **Tách loại test bằng build tag** (`//go:build integration`) hoặc `testing.Short()`, viết subtest theo bảng (table-driven), luôn bật `go test -race -shuffle=on`, và tránh dùng `time.Sleep` trong test khi có thể đồng bộ bằng channel hoặc retry (`#86`, `#87`).
-- **Tận dụng `httptest` và `iotest`** (`#88`) để giả server HTTP với giả lập `io.Reader` bị lỗi giữa chừng, kết hợp `t.Cleanup` / `TestMain` để dọn dữ liệu (`#90`).
-- **Tránh benchmark ra số ảo (`#89`)**: gọi `b.ResetTimer()` sau đoạn chuẩn bị dữ liệu, gán kết quả tính ra biến package (hoặc dùng `b.Loop()` trên Go 1.24+) để compiler không xóa mất đoạn code đang đo, rồi so sánh hai lần chạy bằng `benchstat`.
+func (d *fakeDriver) Open(name string) (driver.Conn, error) {
+	d.opened.Add(1)
+	return fakeConn{}, nil
+}
+
+type fakeConn struct{}
+
+func (fakeConn) Prepare(string) (driver.Stmt, error) { return nil, errors.New("not needed") }
+func (fakeConn) Close() error                         { return nil }
+func (fakeConn) Begin() (driver.Tx, error)            { return nil, errors.New("not needed") }
+
+func main() {
+	d := &fakeDriver{}
+	sql.Register("fake", d)
+
+	db, err := sql.Open("fake", "host=db")
+	fmt.Println("sql.Open error:", err, "| connections opened:", d.opened.Load())
+
+	ctx := context.Background()
+	fmt.Println("Ping error:", db.PingContext(ctx), "| connections opened:", d.opened.Load())
+
+	db.SetMaxOpenConns(2)
+	c1, _ := db.Conn(ctx) // takes connection 1 and keeps it
+	c2, _ := db.Conn(ctx) // takes connection 2 and keeps it
+	fmt.Println("holding 2 of 2 connections")
+
+	waitCtx, cancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	defer cancel()
+	_, err = db.Conn(waitCtx) // a third caller has to queue
+	fmt.Println("third caller:", err)
+	fmt.Printf("stats: open=%d inUse=%d waitCount=%d\n",
+		db.Stats().OpenConnections, db.Stats().InUse, db.Stats().WaitCount)
+
+	c1.Close() // hand one back
+	c3, err := db.Conn(ctx)
+	fmt.Println("after releasing one:", err, "| connections opened:", d.opened.Load())
+	c2.Close()
+	c3.Close()
+}
+```
+
+<TerminalOutput command="go run ." label="Apple M2 · Go 1.27.1" caption="Chạy thật với driver giả. Ở đây dùng db.Conn vì nó giữ một connection giống cách một sql.Rows chưa đóng giữ.">
+```text
+sql.Open error: <nil> | connections opened: 0
+Ping error: <nil> | connections opened: 1
+holding 2 of 2 connections
+third caller: context deadline exceeded
+stats: open=2 inUse=2 waitCount=1
+after releasing one: <nil> | connections opened: 2
+```
+</TerminalOutput>
+
+<GoP14SqlPool />
+
+Đọc output từ trên xuống.
+
+1. `sql.Open` không trả lỗi và **mở 0 connection** (#78). Nó chỉ kiểm tra tham số và dựng pool. Với driver thật nó cũng thành công dù database đang sập. Hãy gọi `db.PingContext(ctx)` lúc khởi động để biết sớm; chính lần ping đã mở connection đầu tiên.
+2. Với `SetMaxOpenConns(2)`, hai người gọi giữ hết cả hai connection. Người gọi thứ ba không bị lỗi. Nó xếp hàng chờ, và chỉ timeout của `context` mới đưa nó ra sau 200 ms. Hình dạng này giống chuyện thiếu timeout ở mục 1: không có hạn chót của context thì người gọi đó chờ cho tới khi có ai trả connection.
+3. Khi `c1` được trả lại, người gọi kế tiếp dùng lại nó chứ không mở connection thứ ba.
+
+Thứ giữ connection trong một service thật thường là kết quả query mà bạn quên đóng. Đây là dạng của một hàm đọc rows. Nó cần driver thật, nên chỉ là bản phác:
+
+```go
+func names(ctx context.Context, db *sql.DB) ([]string, error) {
+	rows, err := db.QueryContext(ctx, "SELECT title FROM todos")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close() // gives the connection back to the pool
+	var out []string
+	for rows.Next() {
+		var title string
+		if err := rows.Scan(&title); err != nil {
+			return nil, err
+		}
+		out = append(out, title)
+	}
+	return out, rows.Err() // Next() also returns false when something went wrong
+}
+```
+
+`rows.Next()` trả `false` cả khi hết dòng lẫn khi có lỗi làm dừng việc đọc, nên sau vòng lặp bạn phải kiểm tra `rows.Err()`. Chính `defer rows.Close()` trả connection về pool; nếu một nhánh code quên nó, pool nhỏ đi một connection mỗi lần nhánh đó chạy.
+
+Pool có bốn thông số. Mặc định lấy từ `go doc`:
+
+| Thông số | Mặc định | Điều khiển gì |
+|---|---|---|
+| `SetMaxOpenConns(n)` | `0`, không giới hạn | số connection mở tối đa cùng lúc; phần còn lại xếp hàng |
+| `SetMaxIdleConns(n)` | `2` | số connection giữ sẵn khi rảnh |
+| `SetConnMaxLifetime(d)` | không giới hạn | một connection được dùng lại bao lâu trước khi bị thay |
+| `SetConnMaxIdleTime(d)` | không giới hạn | một connection được rảnh bao lâu trước khi bị đóng |
+
+Không giới hạn số connection mở nghĩa là một đợt tải có thể mở nhiều connection hơn database cho phép. Hãy đặt `SetMaxOpenConns` bằng con số database phục vụ nổi, và cho connection một tuổi thọ để firewall hay load balancer âm thầm cắt connection cũ không để lại cho bạn những connection chết.
+
+<Concepts title="Mấy khái niệm ở mục này">
+
+- **Connection pool**: một tập connection sẵn sàng dùng chung cho nhiều người gọi. Người gọi lấy một cái, dùng và trả lại.
+- **`sql.Open` và `Ping`**: `sql.Open` dựng pool mà không nhất thiết kết nối; `PingContext` ép kết nối và chứng minh database với tới được.
+
+</Concepts>
+
+---
+
+## 6. Go trong container
+
+Container chạy chương trình của mình với những giới hạn mà chương trình không thấy trực tiếp. Giới hạn quan trọng ở đây là CPU. Trong Kubernetes, `limits.cpu: "2"` trên một pod trở thành một thiết lập kernel cho container, và bộ lập lịch Linux thực thi nó gọi là CFS (Completely Fair Scheduler). Để hiểu cái gì hỏng, trước hết cần hiểu `GOMAXPROCS`.
+
+`GOMAXPROCS` là số goroutine mà runtime của Go cho chạy cùng một lúc, mỗi cái trên một logical processor (`P`), như [bài 13](/blog/go-concurrency-scheduler-channels-context-mutexes/) giải thích. Nó cũng là số thread có thể đốt CPU cùng lúc.
 
 ### Cái bẫy CFS Throttling trên Kubernetes (`#100`)
 
-Cuối cùng, nhớ để ý chuyện này khi deploy Go lên Kubernetes có đặt CPU limit (chẳng hạn `limits.cpu: "4"` trên node vật lý 8 hoặc 64 nhân). Trong mô hình GMP, biến **`GOMAXPROCS`** quy định Go được mở tối đa bao nhiêu thread CPU chạy song song cùng lúc (`P`). Trong khi đó, bộ lập lịch **Completely Fair Scheduler (CFS)** của Linux cấp CPU theo từng cửa sổ 100 ms — giới hạn 4 CPU tức là pod có tối đa 400 ms thời gian chạy CPU trong mỗi chu kỳ 100 ms thực tế.
+CFS cấp cho container một *quota* thời gian CPU trên mỗi *chu kỳ* 100 ms. Giới hạn 2 CPU là quota 200 ms thời gian CPU trong mỗi 100 ms. Khi các thread của container cộng lại dùng hết quota, kernel dừng tất cả chúng cho đến khi chu kỳ mới bắt đầu. Đó là *throttling* (bị bóp). Nó không phải crash, cũng không phải lỗi. Process chỉ đứng lại một lúc, và biểu hiện ra ngoài là độ trễ.
 
-<GoProdK8sCfsThrottle />
+Trước Go 1.25, `GOMAXPROCS` mặc định bằng số CPU của máy, bất kể giới hạn của container. Trên máy 6 CPU với giới hạn 2, Go chạy 6 thread cùng lúc, và 6 thread bận dùng hết 200 ms CPU chỉ trong khoảng 33 ms. Sau đó mọi thứ chờ hết phần còn lại của chu kỳ.
 
-Ở các bản Go cũ, `GOMAXPROCS` mặc định lấy theo số nhân của cả máy chủ vật lý (`8` hay `64`) chứ không nhìn theo cgroup limit của container (`4`). Khi 8 thread cùng bung chạy, pod xài cạn sạch 400 ms hạn mức chỉ trong 50 ms đầu — thế là Linux CFS cho đứng hình cả process suốt 50 ms còn lại của chu kỳ, làm p99 latency vọt gấp 3 dù biểu đồ CPU trung bình nhìn vẫn rất nhàn.
+<GoP14CfsWindow />
 
-*(Lưu ý phiên bản Go: Từ Go 1.25 trở đi, Go runtime đã tự đọc giới hạn CPU từ cgroup để chỉnh `GOMAXPROCS` mặc định. Nếu service bạn vẫn đang chạy Go 1.24 trở về trước thì nhớ import thêm `_ "go.uber.org/automaxprocs"` trong `main.go` nhé!)*
+Mình đã chạy thật chứ không chỉ tính. Chương trình dưới in quota của container (file `cpu.max`), số CPU và `GOMAXPROCS`. Rồi nó đốt CPU trên mọi `P` trong 3 giây. Trong lúc đó nó liên tục xin ngủ 1 ms và ghi lại lần thức dậy trễ nhất, và cuối cùng đọc từ `cpu.stat` của container xem bao nhiêu chu kỳ 100 ms đã bị bóp.
+
+```go
+package main
+
+import (
+	"fmt"
+	"os"
+	"runtime"
+	"strings"
+	"time"
+)
+
+func cgroupFile(name string) string {
+	b, err := os.ReadFile("/sys/fs/cgroup/" + name)
+	if err != nil {
+		return err.Error()
+	}
+	return strings.TrimSpace(string(b))
+}
+
+// throttled pulls two counters out of the cgroup's cpu.stat file.
+func throttled() (periods, count string) {
+	for _, line := range strings.Split(cgroupFile("cpu.stat"), "\n") {
+		f := strings.Fields(line)
+		switch f[0] {
+		case "nr_periods":
+			periods = f[1]
+		case "nr_throttled":
+			count = f[1]
+		}
+	}
+	return
+}
+
+func main() {
+	fmt.Println("cpu.max (quota period):", cgroupFile("cpu.max"))
+	fmt.Println("NumCPU:", runtime.NumCPU(), " GOMAXPROCS:", runtime.GOMAXPROCS(0))
+
+	// Burn CPU on every P for 3 seconds, and watch how late a 1 ms sleeper wakes up.
+	stop := time.Now().Add(3 * time.Second)
+	for i := 0; i < runtime.GOMAXPROCS(0); i++ {
+		go func() {
+			for time.Now().Before(stop) {
+			}
+		}()
+	}
+	var worst time.Duration
+	for time.Now().Before(stop) {
+		t := time.Now()
+		time.Sleep(time.Millisecond)
+		if late := time.Since(t) - time.Millisecond; late > worst {
+			worst = late
+		}
+	}
+	p, n := throttled()
+	fmt.Printf("periods: %s, throttled periods: %s, worst wake-up delay: %v\n", p, n, worst.Round(time.Millisecond))
+}
+```
+
+Mình build cho Linux bằng Go 1.27.1 và chạy trong container giới hạn 2 CPU trên máy 6 CPU, hai lần, một lần với mặc định và một lần với `GOMAXPROCS=6` trong môi trường, là giá trị mà mặc định cũ sẽ chọn. Runtime container là OrbStack. Nó đặt cùng file `cpu.max` mà Kubernetes ghi cho một giới hạn CPU, nhưng đây không phải một cluster Kubernetes.
+
+<TerminalOutput command="GOOS=linux GOARCH=arm64 CGO_ENABLED=0 go build -o gmp-linux . && docker run --rm --platform linux/arm64 --cpus=2 -v &quot;$PWD&quot;:/app ubuntu:24.04 /app/gmp-linux" label="Go 1.27.1 · container linux/arm64, 2 CPU" caption="Môi trường mặc định, lần chạy đầu.">
+```text
+cpu.max (quota period): 200000 100000
+NumCPU: 6  GOMAXPROCS: 2
+periods: 31, throttled periods: 11, worst wake-up delay: 46ms
+```
+</TerminalOutput>
+
+<TerminalOutput command="docker run --rm --platform linux/arm64 --cpus=2 -e GOMAXPROCS=6 -v &quot;$PWD&quot;:/app ubuntu:24.04 /app/gmp-linux" label="Go 1.27.1 · container linux/arm64, 2 CPU" caption="GOMAXPROCS ép bằng 6 CPU của máy, lần chạy đầu.">
+```text
+cpu.max (quota period): 200000 100000
+NumCPU: 6  GOMAXPROCS: 6
+periods: 31, throttled periods: 30, worst wake-up delay: 103ms
+```
+</TerminalOutput>
+
+| Lần chạy (2 CPU, máy 6 CPU) | `GOMAXPROCS` | Chu kỳ bị bóp | Độ trễ thức dậy tệ nhất |
+|---|---|---|---|
+| mặc định, lần 1 | 2 | 11 trên 31 | 46 ms |
+| mặc định, lần 2 | 2 | 4 trên 31 | 45 ms |
+| `GOMAXPROCS=6`, lần 1 | 6 | 30 trên 31 | 103 ms |
+| `GOMAXPROCS=6`, lần 2 | 6 | 30 trên 31 | 93 ms |
+
+Với 6 thread, gần như chu kỳ nào cũng bị bóp và một lệnh ngủ 1 ms thức dậy trễ tới 103 ms. Với 2 thì tốt hơn nhiều, nhưng chưa sạch. Độ trễ tệ nhất vẫn khoảng 45 ms, và vài chu kỳ vẫn bị bóp. Đó là vì Go còn có các thread khác ngoài 2 goroutine đang chạy (garbage collector và các helper của runtime), và chúng cũng tiêu quota. Giới hạn CPU vẫn có thể bóp một chương trình Go cư xử tử tế. Go 1.25 làm vấn đề nhỏ lại; nó không xoá hẳn.
+
+Cái Go 1.25 đổi là giá trị mặc định. [Ghi chú phát hành](https://go.dev/doc/go1.25) nói rằng trên Linux runtime giờ đọc giới hạn CPU của cgroup, và nếu nó thấp hơn số logical CPU thì nó thành `GOMAXPROCS` mặc định. Nó dùng *limit* và bỏ qua *request* theo cách gọi của Kubernetes. `go doc runtime.GOMAXPROCS` nói thêm rằng runtime tiếp tục cập nhật giá trị nếu giới hạn đổi. Mình cũng thử giới hạn lẻ trên cùng máy: `--cpus=1.5` cho `GOMAXPROCS` 2, `--cpus=2.5` cho 3 và `--cpus=0.5` cho 2, nghĩa là nó làm tròn lên và không bao giờ xuống dưới 2.
+
+Còn một cái bẫy nữa, và nó nằm trong `go.mod`. Mặc định mới gắn với phiên bản ngôn ngữ ở dòng `go` của module. `go doc` nói `containermaxprocs=0` là mặc định cho phiên bản ngôn ngữ 1.24 trở xuống. Mình lấy cùng chương trình, đặt `go 1.24` trong `go.mod` và build bằng Go 1.27.1:
+
+<TerminalOutput command="go build -o gmp-old . (go.mod ghi go 1.24), rồi docker run --cpus=2" label="Toolchain Go 1.27.1 · go 1.24 trong go.mod · 2 CPU" caption="Toolchain mới cũng không giúp được khi dòng go còn cũ.">
+```text
+cpu.max (quota period): 200000 100000
+NumCPU: 6  GOMAXPROCS: 6
+periods: 31, throttled periods: 30, worst wake-up delay: 90ms
+```
+</TerminalOutput>
+
+Vậy nâng compiler chưa đủ: hãy nâng cả dòng `go`, hoặc tự đặt `GOMAXPROCS` (biến môi trường hoặc gọi `runtime.GOMAXPROCS`; cái nào cũng tắt hành vi tự động). Với Go cũ hơn 1.25, cách sửa thường dùng là package `go.uber.org/automaxprocs`.
+
+Làm sao biết nó đang xảy ra? Throttling không hiện ra là CPU cao. Một pod có thể trông rảnh theo trung bình mà vẫn bị dừng từng đợt. Kubernetes cung cấp `container_cpu_cfs_throttled_seconds_total`, và [Go observability](/blog/go-observability-metrics-microbenchmarks-benchstat/) chỉ cách đọc nó bên cạnh mức dùng CPU.
 
 <Concepts title="Mấy khái niệm ở mục này">
 
-- **Compiler dead-code elimination**: tối ưu của compiler tự bỏ các phép tính không ai dùng kết quả — lý do hay làm benchmark hiện 0,2 ns/op ảo.
-- **Container-aware `GOMAXPROCS`**: chỉnh số `P` của Go khớp với hạn mức CPU cgroup trong container (`uber-go/automaxprocs` hoặc mặc định từ Go 1.25+) thay vì số nhân của máy chủ vật lý.
+- **CFS quota và throttling**: bộ lập lịch Linux cấp cho container một ngân sách thời gian CPU trên mỗi chu kỳ 100 ms. Khi các thread của container tiêu hết, kernel dừng chúng cho tới chu kỳ sau.
+- **`GOMAXPROCS`**: số goroutine chạy cùng một lúc. Từ Go 1.25, với dòng `go` là 1.25 trở lên, giá trị mặc định theo giới hạn CPU của container, làm tròn lên, tối thiểu là 2.
+- **CPU limit và CPU request**: trong Kubernetes, limit là cái trần gây ra throttling. Request là gợi ý để xếp lịch, và Go không đọc nó.
 
 </Concepts>
+
+---
+
+## Các chủ đề production khác nằm ở đâu
+
+Bài này từng ôm nhiều hơn, và mỗi chủ đề giờ có một bài riêng đủ chỗ để nói. CPU cache line, false sharing, escape analysis và garbage collector nằm ở [Go hardware, memory và GC](/blog/go-hardware-cpu-caches-virtual-memory-gc-allocator/). Tìm điểm nóng bằng `pprof` nằm ở [Go profiling](/blog/go-profiling-pprof-flamegraphs-off-cpu-continuous/). Viết benchmark đáng tin, và độ chính xác của test nói chung, nằm ở [Go benchmarking và observability](/blog/go-observability-metrics-microbenchmarks-benchstat/).
 
 ---
 
 ## Điểm rút ra (Key takeaways)
 
-- **Đừng tin mặc định của Standard Library khi lên production**: luôn gắn timeout cho HTTP client/server, đọc cạn `resp.Body` trước khi `Close()`, chỉnh giới hạn cho pool `sql.DB` và dùng `time.NewTimer` thay `time.After` trong vòng lặp.
-- **Xếp bộ nhớ thuận theo CPU cache line**: đặt field struct từ lớn tới nhỏ cho đỡ tốn padding, gom dữ liệu lặp dày sang Struct of Slices và chèn đệm cách ly các biến atomic hay ghi cùng lúc.
-- **Đọc kết quả escape analysis thay vì đoán**: truyền buffer từ trên xuống (`io.Reader`), soi bằng `-gcflags="-m"`, và dùng lại buffer tạm qua `sync.Pool`.
-- **Đo bằng `pprof` và `go tool trace` trước khi tối ưu**: dẹp `time.Sleep` khỏi test, chạy `-race -shuffle=on`, và chặn compiler xóa code lúc đo benchmark.
-- **Giữ `GOMAXPROCS` khớp CPU limit trên Kubernetes**: dùng Go 1.25+ hoặc gắn `uber-go/automaxprocs` trên bản cũ để tránh bị CFS cho đứng hình theo nhịp 100 ms.
+- **Đặt timeout cho mọi thứ phải chờ.** `http.DefaultClient`, `http.Get` và `http.ListenAndServe` không có cái nào. Tự dựng `http.Client` với `Timeout` và các giới hạn Transport, và tự dựng `http.Server` với timeout của nó.
+- **Đọc nốt response body rồi mới đóng.** Body chưa đọc làm client bỏ connection; năm request với body 5.000.000 byte dùng năm connection thay vì một.
+- **Đặt `return` sau `http.Error`.** Không thì handler chạy tiếp, và thứ nó ghi sau đó bị nối vào response.
+- **Số trần là nano giây.** `time.Sleep(1000)` là 1 micro giây. `time.After` trong vòng lặp rò khoảng 199 MB cho mỗi triệu vòng trên Go 1.22.12 và không rò gì trên Go 1.27.1.
+- **Đừng tin mù quáng vào việc đi qua JSON rồi quay về.** `time.Time` nhúng sẵn thay JSON của struct, `==` trên thời gian có thể `false` cho cùng một thời điểm, và số decode vào `any` là `float64`.
+- **`sql.Open` tạo pool và không kết nối.** Ping lúc khởi động, đóng mọi `sql.Rows`, kiểm tra `rows.Err()` và giới hạn pool.
+- **Trong container, xem dòng `go` và theo dõi throttling.** Go 1.25 cùng dòng `go` từ 1.25 trở lên làm `GOMAXPROCS` theo giới hạn CPU, nhưng một giới hạn vẫn có thể bóp bạn: 4 đến 11 trên 31 chu kỳ trong các lần chạy của mình, so với 30 trên 31 khi `GOMAXPROCS=6`.
 
 ---
 
 ## Câu hỏi tự kiểm tra
 
-1. Vì sao chỉ gọi `resp.Body.Close()` mà không chạy `io.Copy(io.Discard, resp.Body)` trước lại làm giảm thông lượng mạng dù không hề rò file descriptor? *(Xem Mục 1)*
-2. Tại sao `t1 == t2` có thể trả về `false` trên hai biến `time.Time` chỉ cùng một thời điểm nếu một biến vừa đi qua `json.Marshal` rồi `json.Unmarshal`? *(Xem Mục 1)*
-3. Đổi thứ tự field từ `{ bool, int64, bool }` thành `{ int64, bool, bool }` giúp `unsafe.Sizeof` giảm từ 24 byte xuống 16 byte. 8 byte dư ra trước đó nằm ở đâu? *(Xem Mục 2)*
-4. Vì sao truyền con trỏ xuống `shareDown(&a)` vẫn giữ biến ở lại stack của goroutine, còn `func shareUp() *int { x := 42; return &x }` lại bắt `x` phải lên heap? *(Xem Mục 3)*
-5. Vì sao một service Go trên Kubernetes báo mức CPU trung bình chỉ 35% mà p99 latency vẫn thỉnh thoảng khựng 50–100 ms khi `GOMAXPROCS` lấy theo số nhân máy chủ vật lý? *(Xem Mục 4)*
+1. Vì sao `http.Get` tới một server nhận connection rồi không bao giờ trả lời lại giữ một goroutine sống mãi, và hai thiết lập nào chặn được chuyện đó? *(Xem mục 1)*
+2. Vì sao đọc response body đến hết trước khi `Close` lại cho phép năm request dùng chung một connection? *(Xem mục 2)*
+3. Một handler gọi `http.Error(w, "bad id", 400)` rồi rơi vào `if` kế tiếp, nơi gọi `http.Error(w, "not found", 404)`. Client nhận status và body gì? *(Xem mục 2)*
+4. `json.Marshal` một struct nhúng `time.Time` chỉ in ra một timestamp. Method nào được đưa lên gây ra chuyện này, và có hai cách sửa nào? *(Xem mục 4)*
+5. `sql.Open("postgres", dsn)` trả `nil` cho lỗi dù database đang sập. Vì sao, và code khởi động nên gọi gì? *(Xem mục 5)*
+6. Một pod có `limits.cpu: "2"` trên node 6 CPU cho thấy CPU trung bình 35% mà vẫn có đợt trễ vọt. Throttling giải thích chuyện đó thế nào, và bạn kiểm tra hai điều gì về `GOMAXPROCS`? *(Xem mục 6)*
 
 </Vi>

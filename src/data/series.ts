@@ -4,25 +4,29 @@
 // are skipped by the prev/next links in production.
 
 import type { ImageMetadata } from 'astro';
-import draftingSet from '../assets/series/drafting-set.jpg';
-import ramac305 from '../assets/series/ibm-305-ramac.jpg';
-import goGophers from '../assets/series/go-gopher-five-years.jpg';
-import stockCert from '../assets/series/stock-certificate-1892.jpg';
-import hoseBuilding from '../assets/series/ai-trading/hose-building.jpg';
-import backendPlate from '../assets/series/backend-plate.png';
+import coverUi from '../assets/series/cover-ui-bauhaus-stair.jpg';
+import coverData from '../assets/series/cover-data-hard-drive.jpg';
+import coverGo from '../assets/series/cover-go-stones.jpg';
+import coverStocks from '../assets/series/cover-stocks-nyse-floor.jpg';
+import coverBackend from '../assets/series/cover-backend-rack.jpg';
+import coverAi from '../assets/series/cover-ai-robonaut.jpg';
 
 export interface L10n { en: string; vi: string }
 
 /** what the book cover shows (BookCover.astro) and how its photo is credited */
 export interface SeriesCoverArt {
-  subtitle: L10n;
+  /** cover title in parts: `accent` is the topic word, drawn in the series colour. English only. */
+  title: { lead?: string; accent: string; rest?: string };
+  /** one-line cover subtitle, English only */
+  tagline: string;
+  /** hue (OKLCH degrees) of the series colour on its cover */
+  hue: number;
   image: ImageMetadata;
   alt: string;
-  /** CSS object-position for the photo plate */
+  /** CSS object-position for the cover photo */
   position: string;
-  /** small label at the cover's foot */
-  imprint: string;
-  credit: { title: string; author: string; url: string; license: string };
+  /** `origin` names the host when it is not Wikimedia Commons (read by SeriesCover.astro) */
+  credit: { title: string; author: string; url: string; license: string; origin?: string };
 }
 
 /** one column of the reading map; `id` is what `SeriesPart.act` refers to */
@@ -43,8 +47,8 @@ export interface SeriesPart {
 export interface SeriesPath {
   id: string;
   label: L10n;
-  /** who it is for */
-  who: L10n;
+  /** who it is for; the default "read it all" path leaves it out */
+  who?: L10n;
   /** slugs in reading order */
   order: string[];
 }
@@ -89,17 +93,19 @@ const refactoringUi: Series = {
     en: 'Built on Refactoring UI by Adam Wathan and Steve Schoger, then extended with live demos, real-product screenshots and audits of this very site.',
     vi: 'Dựa trên Refactoring UI của Adam Wathan và Steve Schoger, bổ sung demo tương tác, ảnh chụp sản phẩm thật và các lần soát lỗi ngay trên chính blog này.',
   },
-  // A drafting set keeps every instrument in its own slot on a grid: the series' idea of fixed scales over eyeballing.
   cover: {
-    subtitle: {
-      en: 'Hierarchy · Spacing · Type · Colour · Depth',
-      vi: 'Phân cấp · Khoảng cách · Chữ · Màu · Chiều sâu',
+    title: { accent: 'UI Design', rest: ' for Developers' },
+    tagline: 'Ship interfaces that don’t look generated',
+    hue: 265,
+    image: coverUi,
+    alt: 'A spiral staircase with a wrought-iron balustrade in the Bauhaus University main building in Weimar, lit by tall windows.',
+    position: '50% 55%',
+    credit: {
+      title: 'Weimar Bauhaus-Universität Hauptgebäude 406',
+      author: 'GFreihalter',
+      url: 'https://commons.wikimedia.org/wiki/File:Weimar_Bauhaus-Universit%C3%A4t_Hauptgeb%C3%A4ude_406.jpg',
+      license: 'CC BY-SA 3.0',
     },
-    image: draftingSet,
-    alt: 'A vintage drafting set open on graph paper: compasses, dividers and ruling pens, each resting in its own slot of a blue velvet case.',
-    position: '55% 60%',
-    imprint: 'UI / UX',
-    credit: { title: 'Anker compass set in case', author: 'Slashme', url: 'https://commons.wikimedia.org/wiki/File:Anker_compass_set_in_case.jpg', license: 'CC0' },
   },
   outcomes: [
     {
@@ -237,10 +243,6 @@ const refactoringUi: Series = {
     {
       id: 'full',
       label: { en: 'Read it all', vi: 'Đọc trọn bộ' },
-      who: {
-        en: 'You have an evening or two and want the whole system, in the order it builds up.',
-        vi: 'Bạn có một hai buổi tối và muốn nắm cả hệ thống, theo đúng thứ tự xây dần.',
-      },
       order: [
         'design-before-you-prompt',
         'visual-hierarchy-rank-before-you-style',
@@ -352,17 +354,19 @@ const ddia: Series = {
     en: 'Built on Designing Data-Intensive Applications (2nd edition) by Martin Kleppmann and Chris Riccomini, extended with postmortems, architecture diagrams and live demos.',
     vi: 'Dựa trên Designing Data-Intensive Applications (bản 2) của Martin Kleppmann và Chris Riccomini, bổ sung postmortem thật, sơ đồ kiến trúc và demo tương tác.',
   },
-  // An IBM 305 RAMAC, the first computer sold with a hard disk (1956): the series starts at one disk and ends at many machines.
   cover: {
-    subtitle: {
-      en: 'Storage · Replication · Consensus · Streams',
-      vi: 'Lưu trữ · Replication · Đồng thuận · Luồng',
+    title: { accent: 'Data', rest: ' Systems Under Pressure' },
+    tagline: 'Explained by the outages that shaped them',
+    hue: 35,
+    image: coverData,
+    alt: 'An IDE hard drive with its cover removed, showing the silver platter, the actuator arm and the read/write head.',
+    position: '55% 50%',
+    credit: {
+      title: 'Open hard-drive',
+      author: 'Zzubnik',
+      url: 'https://commons.wikimedia.org/wiki/File:Open_hard-drive.jpg',
+      license: 'Public domain',
     },
-    image: ramac305,
-    alt: 'An IBM 305 RAMAC installation at the U.S. Army Red River Arsenal: tall cabinets, the 350 disk unit visible behind glass, and an operator at the console.',
-    position: '50% 45%',
-    imprint: 'SYSTEM DESIGN',
-    credit: { title: 'IBM 305 RAMAC', author: 'U.S. Army Red River Arsenal', url: 'https://commons.wikimedia.org/wiki/File:BRL61-IBM_305_RAMAC.jpeg', license: 'Public domain' },
   },
   outcomes: [
     {
@@ -545,10 +549,6 @@ const ddia: Series = {
     {
       id: 'full',
       label: { en: 'Read it all', vi: 'Đọc trọn bộ' },
-      who: {
-        en: 'You want the whole picture, from one disk up to systems built from logs.',
-        vi: 'Bạn muốn nắm cả bức tranh, từ một ổ đĩa tới hệ thống dựng từ log.',
-      },
       order: Object.values(D),
     },
     {
@@ -591,9 +591,16 @@ const ddia: Series = {
 };
 
 const G = {
-  fundBasics: 'go-fundamentals-toolchain-modules-packages-types',
-  fundComposite: 'go-fundamentals-composite-types-structs-methods-interfaces',
-  fundConcurrency: 'go-fundamentals-errors-concurrency-goroutines-channels-testing',
+  basics: 'go-first-program-modules-packages',
+  types: 'go-variables-types-pointers-functions',
+  collections: 'go-slices-maps-strings',
+  structs: 'go-structs-methods-interfaces',
+  errors: 'go-errors-defer-panic',
+  testing: 'go-testing-table-tests',
+  goroutines: 'go-goroutines-channels-select',
+  context: 'go-context-timeouts-mutexes',
+  concurrencyPatterns: 'go-concurrency-patterns-worker-pools-pipelines',
+  httpService: 'go-http-service-net-http-json-middleware',
   memory: 'go-memory-data-types-slices-maps-strings',
   abstractions: 'go-abstractions-interfaces-generics-errors',
   concurrency: 'go-concurrency-scheduler-channels-context-mutexes',
@@ -603,6 +610,7 @@ const G = {
   benchmarking: 'go-observability-metrics-microbenchmarks-benchstat',
   profiling: 'go-profiling-pprof-flamegraphs-off-cpu-continuous',
   patterns: 'go-three-rs-optimization-patterns-streaming-pooling',
+  interview: 'go-interview-questions-output-live-coding',
 };
 
 const golang: Series = {
@@ -611,243 +619,345 @@ const golang: Series = {
     en: 'How Go actually works',
     vi: 'Hiểu đúng bản chất Golang',
   },
-  kicker: { en: 'A 12-part series', vi: 'Series 12 bài' },
+  kicker: { en: 'A 20-part series', vi: 'Series 20 bài' },
   tagline: {
-    en: 'A step-by-step path from Go basics to runtime traps and data-driven performance optimization.',
-    vi: 'Đi trọn lộ trình từ Go cơ bản qua các bẫy ngầm runtime tới đo đạc và tối ưu hiệu năng có cơ sở.',
+    en: 'One ladder from your first Go program to concurrent services, runtime traps, profiling, and interview prep.',
+    vi: 'Một lộ trình liền mạch từ chương trình Go đầu tiên tới HTTP service, bẫy ngầm runtime, tối ưu hiệu năng và phỏng vấn.',
   },
   pitch: [
     {
-      en: 'Learning Go is fast, yet jumping straight from syntax to production leaves dangerous blind spots: sub-slices overwriting shared arrays, typed nil errors passing != nil checks, dropped goroutines on HTTP timeouts, and megabytes of hidden heap garbage.',
-      vi: 'Học cú pháp Go chỉ mất vài ngày, nhưng nhảy thẳng ra làm dự án hay viết cùng AI rất dễ vướng bẫy: slice con ghi đè mảng gốc, lỗi typed nil vượt qua check err != nil, rò goroutine khi request tắt và đống rác heap làm GC khựng lại.',
+      en: 'If you already write Java, Python, or JavaScript, learning Go syntax takes an afternoon — yet tutorials either stop at Hello World or jump straight into scheduler internals. This 20-part ladder climbs step by step: Levels 1–2 take you from your first module to writing, testing, and shipping a small concurrent HTTP service.',
+      vi: 'Nếu bạn đã code Java, Python hay JavaScript, nắm cú pháp Go chỉ mất một buổi — nhưng tài liệu thường dừng ở Hello World hoặc nhảy thẳng vào ruột scheduler. Series 20 bài này đi từng bậc: Cấp 1–2 dẫn từ module đầu tiên tới viết, test và dựng một HTTP service chạy đồng thời hoàn chỉnh.',
     },
     {
-      en: 'Parts 1–3 build Go fundamentals from zero (modules, types, pointers, interfaces, goroutines, tests); Parts 4–7 uncover subtle runtime mistakes; Parts 8–12 master data-driven optimization (RAER, TFBO, CPU caches/GC, benchstat, pprof/fgprof, and Three Rs streaming).',
-      vi: 'Phần 1–3 đi từ nền tảng Go cơ bản (module, con trỏ, slice, interface, goroutine, test); Phần 4–7 mổ xẻ các bẫy ngầm theo sách 100 Go Mistakes; Phần 8–12 khép trọn quy trình tối ưu theo Efficient Go (RAER, TFBO, phần cứng/GC, benchstat, pprof/fgprof và Three Rs).',
+      en: 'Levels 3–5 build on that service to explain the runtime traps behind classic Go bugs (slice headers, typed nil, GMP scheduling, production timeouts), teach data-driven optimization (RAER, TFBO, CPU caches/GC, benchstat, pprof/fgprof, Three Rs), and finish with interview questions and live-coding drills.',
+      vi: 'Cấp 3–5 bám trên chính service đó để giải mã các bẫy runtime kinh điển (slice header, typed nil, bộ lập lịch GMP, timeout production), rèn quy trình tối ưu theo số đo (RAER, TFBO, CPU/GC, benchstat, pprof/fgprof, Three Rs), rồi khép lại bằng bài ôn phỏng vấn.',
     },
   ],
   credit: {
-    en: 'Parts 1–3 draw on official Go docs (Effective Go, The Go Blog, Tour of Go); Parts 4–7 distill 100 Go Mistakes (Teiva Harsanyi); Parts 8–12 synthesize Efficient Go (Bartłomiej Płotka), verified with Apple M2 Go 1.27 benchmarks and interactive tools.',
-    vi: 'Phần 1–3 tổng hợp từ tài liệu chuẩn Go (Effective Go, The Go Blog); Phần 4–7 đúc kết từ 100 Go Mistakes (Teiva Harsanyi); Phần 8–12 dựa trên Efficient Go (Bartłomiej Płotka), chạy kiểm chứng trực tiếp trên Go 1.27 kèm mô phỏng tương tác.',
+    en: 'Levels 1–2 draw on official Go docs and real production incidents; Levels 3–4 distill 100 Go Mistakes (Teiva Harsanyi) and Efficient Go (Bartłomiej Płotka), with every code sample and benchmark verified on Go 1.27.',
+    vi: 'Cấp 1–2 tổng hợp từ tài liệu chuẩn Go và các sự cố thực tế; Cấp 3–4 đúc kết từ 100 Go Mistakes (Teiva Harsanyi) và Efficient Go (Bartłomiej Płotka), mọi ví dụ và benchmark đều chạy kiểm chứng trực tiếp trên Go 1.27.',
   },
   cover: {
-    subtitle: {
-      en: 'Fundamentals · Internals · Benchmarking · Optimization',
-      vi: 'Cơ bản · Bản chất Runtime · Đo đạc · Tối ưu Go',
-    },
-    image: goGophers,
-    alt: 'Three Go gophers gathered around an old reel-to-reel computer by Renee French.',
-    position: '50% 45%',
-    imprint: 'GOLANG',
+    title: { lead: 'How ', accent: 'Go', rest: ' Actually Works' },
+    tagline: 'From the scheduler to the cache line',
+    hue: 205,
+    image: coverGo,
+    alt: 'Black and white stones on a wooden board during a game of Go.',
+    position: '50% 60%',
     credit: {
-      title: 'Go gopher five years',
-      author: 'Renee French',
-      url: 'https://commons.wikimedia.org/wiki/File:Go_gopher_five_years.jpg',
-      license: 'CC BY 3.0',
+      title: 'Go -- 2021 -- 6732',
+      author: 'Dietmar Rabich',
+      url: 'https://commons.wikimedia.org/wiki/File:Go_--_2021_--_6732.jpg',
+      license: 'CC BY-SA 4.0',
     },
   },
   outcomes: [
     {
-      en: 'Write idiomatic Go modules, slices, maps, interfaces, error wrapping, goroutines, and race-free table tests.',
-      vi: 'Viết chuẩn Go ngay từ đầu: module, slice, map, interface ngầm định, bọc lỗi %w, goroutine và unit test -race.',
+      en: 'Write, structure, test, and ship a small concurrent HTTP service in Go using only the standard library.',
+      vi: 'Viết, tổ chức, kiểm thử và đóng gói một HTTP service chạy đồng thời bằng thư viện chuẩn Go.',
     },
     {
-      en: 'Catch shared slice mutations, typed nil errors, goroutine leaks, and missing HTTP/SQL timeouts cleanly.',
-      vi: 'Bắt ngay các lỗi slice đè chéo, typed nil, map không tự co, rò goroutine và thiếu timeout trên production.',
+      en: 'Explain and catch the runtime mechanics behind classic Go bugs: shared slices, typed nil errors, goroutine leaks, and missing timeouts.',
+      vi: 'Giải thích và bắt gọn nguyên nhân runtime sau các bug Go kinh điển: slice ghi đè chéo, typed nil, rò goroutine và thiếu timeout.',
     },
     {
-      en: 'Reason about CPU L1 cache lines, compiler inlining/BCE, VSS vs RSS memory, and GOMEMLIMIT pacing.',
-      vi: 'Hiểu cơ chế phần cứng (L1 cache, trình biên dịch BCE/escape), bộ nhớ ảo VSS/RSS và nhịp dọn rác GC.',
+      en: 'Prove speed-ups with numbers using RAER budgets, CPU/GC reasoning, benchstat, pprof/fgprof, and Three Rs streaming.',
+      vi: 'Chứng minh tối ưu bằng số đo thật qua ngân sách RAER, tư duy CPU/GC, benchstat, pprof/fgprof và mẫu Three Rs.',
     },
     {
-      en: 'Prove speedups with benchstat, find bottlenecks via pprof/fgprof, and stream multi-GB files in 8 KB Heap.',
-      vi: 'Chứng minh hiệu năng bằng benchstat, soi đúng hàm nghẽn với pprof/fgprof và tối ưu streaming O(1) RAM.',
+      en: 'Check yourself under interview pressure with concept Q&A, predict-the-output puzzles, and race-tested live coding.',
+      vi: 'Tự kiểm tra dưới áp lực phỏng vấn qua hỏi-đáp bản chất, đoán output và bài live-code chạy sạch với -race.',
     },
   ],
   acts: [
     {
       id: 'basics',
-      label: { en: 'Core Syntax', vi: 'Go cơ bản' },
-      blurb: { en: 'Types, slices, errors & tests', vi: 'Cú pháp, kiểu, lỗi & test' },
+      label: { en: 'Write Go', vi: 'Viết Go' },
+      blurb: { en: 'Write, structure & test Go', vi: 'Viết, tổ chức và test code Go' },
+    },
+    {
+      id: 'concurrency',
+      label: { en: 'Run things at once', vi: 'Chạy song song' },
+      blurb: { en: 'Run work concurrently & ship HTTP', vi: 'Chạy đồng thời & dựng service' },
     },
     {
       id: 'internals',
-      label: { en: 'Internals & Bugs', vi: 'Lõi & Bẫy' },
-      blurb: { en: 'Slices, ifaces, GMP & K8s', vi: 'Slice, iface, GMP & K8s' },
+      label: { en: 'Under the hood & traps', vi: 'Bên trong & bẫy' },
+      blurb: { en: 'Why classic Go bugs happen', vi: 'Vì sao các bug Go xảy ra' },
     },
     {
-      id: 'measurement',
-      label: { en: 'Measure First', vi: 'Đo & Phần cứng' },
-      blurb: { en: 'RAER, CPU/GC & benchstat', vi: 'RAER, CPU/GC & benchstat' },
+      id: 'performance',
+      label: { en: 'Measure, then optimize', vi: 'Đo rồi mới tối ưu' },
+      blurb: { en: 'Prove speed-ups with numbers', vi: 'Chứng minh tối ưu bằng con số' },
     },
     {
-      id: 'optimization',
-      label: { en: 'Profile & Tune', vi: 'Soi & Tối ưu' },
-      blurb: { en: 'pprof, fgprof & Three Rs', vi: 'pprof, fgprof & Three Rs' },
+      id: 'interview',
+      label: { en: 'Check yourself', vi: 'Tự kiểm tra' },
+      blurb: { en: 'Answer & code under pressure', vi: 'Trả lời & code khi phỏng vấn' },
     },
   ],
   parts: [
     {
-      slug: G.fundBasics,
-      topic: { en: 'Syntax & Types', vi: 'Cú pháp & Kiểu' },
+      slug: G.basics,
+      topic: { en: 'Go basics', vi: 'Go cơ bản' },
       hook: {
-        en: 'Design philosophy, modules & internal/, zero values, pass-by-value pointers, and LIFO defer.',
-        vi: 'Triết lý thiết kế, module/internal/, zero value sạch, con trỏ truyền tham trị và ngăn xếp defer.',
+        en: 'Go toolchain, modules and go.mod, packages, internal/ visibility, project layout, and gofmt/go vet.',
+        vi: 'Toolchain Go, module và go.mod, package, phạm vi internal/, bố cục thư mục và gofmt/go vet.',
       },
       act: 'basics',
       builds: [],
     },
     {
-      slug: G.fundComposite,
-      topic: { en: 'Structs & Map', vi: 'Struct & Slice' },
+      slug: G.types,
+      topic: { en: 'Types & funcs', vi: 'Kiểu & hàm' },
       hook: {
-        en: 'Fixed arrays vs dynamic slices, preallocation, comma-ok maps, struct embedding, and implicit interfaces.',
-        vi: 'Phân biệt array với slice, cấp phát trước make(), tra map comma-ok, embedding và interface ngầm định.',
+        en: 'Zero values, numeric conversions, multiple returns, pass-by-value pointers, LIFO defer, and := shadowing.',
+        vi: 'Zero value sạch, ép kiểu tường minh, nhiều giá trị trả về, con trỏ truyền tham trị, defer LIFO và bẫy := che biến.',
       },
       act: 'basics',
-      builds: [G.fundBasics],
+      builds: [G.basics],
     },
     {
-      slug: G.fundConcurrency,
-      topic: { en: 'Errors & Tests', vi: 'Lỗi & Goroutine' },
+      slug: G.collections,
+      topic: { en: 'Collections', vi: 'Slice & map' },
       hook: {
-        en: 'Wrapping errors with %w, goroutines & WaitGroup, channels, select, context timeouts, and go test -race.',
-        vi: 'Bọc lỗi %w với errors.Is, goroutine, WaitGroup, channel/select, context timeout và test -race.',
+        en: 'Arrays vs slices, len/cap and append, nil vs empty, random map iteration, and UTF-8 bytes vs runes.',
+        vi: 'Array khác slice thế nào, len/cap và append, nil vs rỗng, thứ tự map ngẫu nhiên và byte UTF-8 với rune.',
       },
       act: 'basics',
-      builds: [G.fundBasics, G.fundComposite],
+      builds: [G.types],
+    },
+    {
+      slug: G.structs,
+      topic: { en: 'Struct & method', vi: 'Struct & method' },
+      hook: {
+        en: 'No classes: structs, value vs pointer receivers, composition by embedding, implicit interfaces, and type switches.',
+        vi: 'Không có class: struct, value/pointer receiver, embedding thay kế thừa, interface ngầm định và type switch.',
+      },
+      act: 'basics',
+      builds: [G.collections],
+    },
+    {
+      slug: G.errors,
+      topic: { en: 'Go errors', vi: 'Lỗi & defer' },
+      hook: {
+        en: 'Errors as values, %w wrapping, errors.Is/As/Join, handle once, named result err traps, and panic/recover.',
+        vi: 'Lỗi là giá trị, bọc %w, errors.Is/As/Join, xử lý lỗi một lần, bẫy err với named result và panic/recover.',
+      },
+      act: 'basics',
+      builds: [G.structs],
+    },
+    {
+      slug: G.testing,
+      topic: { en: 'Go testing', vi: 'Test trong Go' },
+      hook: {
+        en: 'Table-driven subtests, t.Helper, coverage, -short and build tags, httptest, and a first look at -race.',
+        vi: 'Table-driven test, t.Helper, coverage, -short và build tag, httptest và làm quen với cờ -race.',
+      },
+      act: 'basics',
+      builds: [G.errors],
+    },
+    {
+      slug: G.goroutines,
+      topic: { en: 'Goroutines', vi: 'Goroutine' },
+      hook: {
+        en: 'Concurrency vs parallelism, go f(), WaitGroup, buffered vs unbuffered channels, select, and stopping every goroutine.',
+        vi: 'Concurrency vs parallelism, go f(), WaitGroup, channel có/không buffer, select và đường dừng cho mọi goroutine.',
+      },
+      act: 'concurrency',
+      builds: [G.testing],
+    },
+    {
+      slug: G.context,
+      topic: { en: 'Context & locks', vi: 'Context & khóa' },
+      hook: {
+        en: 'Propagating deadlines and cancel with context.Context, Mutex/RWMutex, never copying sync types, and channel vs mutex.',
+        vi: 'Lan truyền timeout/cancel qua context.Context, Mutex/RWMutex, tránh copy kiểu sync và chọn channel hay mutex.',
+      },
+      act: 'concurrency',
+      builds: [G.goroutines],
+    },
+    {
+      slug: G.concurrencyPatterns,
+      topic: { en: 'Patterns', vi: 'Mẫu concurrency' },
+      hook: {
+        en: 'Worker pools, pipelines with cancellation, fan-out/fan-in, semaphores, rate limiting, and errgroup shutdown.',
+        vi: 'Worker pool, pipeline kèm hủy ngang, fan-out/fan-in, semaphore, rate limit và tắt gọn với errgroup.',
+      },
+      act: 'concurrency',
+      builds: [G.context],
+    },
+    {
+      slug: G.httpService,
+      topic: { en: 'HTTP service', vi: 'HTTP service' },
+      hook: {
+        en: 'Assembling levels 1–2 into a stdlib JSON API: routing, middleware, slog, server timeouts, graceful shutdown, and FROM scratch.',
+        vi: 'Gom cấp 1–2 thành JSON API chuẩn thư viện Go: routing, middleware, slog, timeout, tắt êm và đóng gói FROM scratch.',
+      },
+      act: 'concurrency',
+      builds: [G.concurrencyPatterns],
     },
     {
       slug: G.memory,
-      topic: { en: 'Slice & Map', vi: 'Bộ nhớ & Map' },
+      topic: { en: 'Go memory', vi: 'Bộ nhớ Go' },
       hook: {
-        en: 'Slice headers, append overwrites, maps that never shrink, range value copies, and UTF-8 runes.',
-        vi: 'Slice header, append ghi đè ngầm, map không tự co, range copy giá trị và chuỗi UTF-8.',
+        en: 'Slice headers, append overwrites, slice/map memory leaks, SwissTable maps, range copies, and Trim pitfalls.',
+        vi: 'Slice header, append ghi đè ngầm, rò RAM ở slice/map, map SwissTable, range copy và bẫy strings.Trim.',
       },
       act: 'internals',
-      builds: [G.fundComposite],
+      builds: [G.httpService],
     },
     {
       slug: G.abstractions,
-      topic: { en: 'Design & Error', vi: 'Thiết kế & Lỗi' },
+      topic: { en: 'Interfaces', vi: 'Sâu về interface' },
       hook: {
-        en: 'Consumer interfaces, typed nil traps, type embedding, defer timing, and wrapping errors with %w.',
-        vi: 'Interface phía người gọi, bẫy typed nil, type embedding, thời điểm chạy defer và bọc lỗi %w.',
+        en: 'Interface (type, data) layout, typed-nil traps, consumer interfaces, generics usage, functional options, and embedding.',
+        vi: 'Cặp (type, data) của interface, bẫy typed nil, interface phía người gọi, generics, functional options và embedding.',
       },
       act: 'internals',
-      builds: [G.fundComposite, G.fundConcurrency],
+      builds: [G.memory],
     },
     {
       slug: G.concurrency,
       topic: { en: 'GMP & Locks', vi: 'GMP & Locks' },
       hook: {
-        en: 'The GMP scheduler, channels vs. mutexes, context cancellation, nil channels, and reentrant locks.',
-        vi: 'Bộ lập lịch GMP, channel vs. mutex, hủy context, nil channel và lỗi tự khóa chính mình.',
+        en: 'GMP scheduler, data races vs race conditions, Go 1.22 loop vars, random select, nil channels, and the etcd deadlock.',
+        vi: 'Bộ lập lịch GMP, data race vs race condition, biến vòng lặp Go 1.22, select ngẫu nhiên, nil channel và deadlock ở etcd.',
       },
       act: 'internals',
-      builds: [G.fundConcurrency],
+      builds: [G.abstractions],
     },
     {
       slug: G.production,
-      topic: { en: 'Prod & K8s', vi: 'Prod & K8s' },
+      topic: { en: 'Production', vi: 'Go production' },
       hook: {
-        en: 'HTTP/SQL timeouts, CPU cache lines, escape analysis, GC, and Kubernetes CFS throttling.',
-        vi: 'Timeout HTTP/SQL, CPU cache line, escape analysis, GC và bóp CPU trên Kubernetes.',
+        en: 'http.DefaultClient traps, time.After leaks, JSON and sql.DB pools, closing resources, and K8s CFS throttling.',
+        vi: 'Bẫy http.DefaultClient, rò time.After, JSON và pool database/sql, quên return sau http.Error và bóp CPU trên K8s.',
       },
       act: 'internals',
-      builds: [G.memory, G.concurrency],
+      builds: [G.concurrency],
     },
     {
       slug: G.workflow,
-      topic: { en: 'RAER & TFBO', vi: 'RAER & TFBO' },
+      topic: { en: 'When to tune', vi: 'Khi nào tối ưu' },
       hook: {
-        en: 'Why scaling pods fails tail latency, written RAER budgets, 5 Optimization Design Levels, and TFBO.',
-        vi: 'Mở thêm pod không cứu được p99, đặt hợp đồng RAER, 5 Tầng thiết kế và quy trình TFBO 9 bước.',
+        en: 'Why scaling pods does not fix tail latency, efficiency vs speed, RAER budgets, 5 design levels, and TFBO.',
+        vi: 'Mở thêm pod không cứu được p99, hiệu suất vs tốc độ, đặt hợp đồng RAER, 5 tầng thiết kế và quy trình TFBO.',
       },
-      act: 'measurement',
+      act: 'performance',
       builds: [G.production],
     },
     {
       slug: G.hardware,
-      topic: { en: 'CPU & GC RAM', vi: 'CPU & GC RAM' },
+      topic: { en: 'Hardware & GC', vi: 'Phần cứng & GC' },
       hook: {
-        en: 'L1 cache lines, Inlining & BCE flags, napkin math, Linux VSS vs RSS page faults, and GOMEMLIMIT.',
-        vi: 'Cache CPU 64B, cờ compiler Inlining/BCE, bộ nhớ ảo VSS/RSS, mcache và nhịp chạy GOGC/GOMEMLIMIT.',
+        en: 'CPU caches and false sharing, struct alignment, escape analysis, VSS vs RSS, tri-color GC, and GOMEMLIMIT.',
+        vi: 'Cache CPU và false sharing, căn lề struct, escape analysis, bộ nhớ ảo VSS/RSS, GC ba màu và GOMEMLIMIT.',
       },
-      act: 'measurement',
-      builds: [G.memory, G.workflow],
+      act: 'performance',
+      builds: [G.workflow],
     },
     {
       slug: G.benchmarking,
-      topic: { en: 'Benchstat', vi: 'Đo & Benchstat' },
+      topic: { en: 'Benchmarking', vi: 'Đo & benchstat' },
       hook: {
-        en: 'Prometheus RED/USE histograms, HeapInuse vs RSS, dead-code elimination lies, and benchstat p-values.',
-        vi: 'Prometheus RED/USE Histogram, HeapInuse vs RSS, bẫy compiler xóa code và đọc benchstat.',
+        en: 'RED/USE metrics, container vs runtime memory, benchmarks that do not lie (b.Loop), benchstat, and macrobenchmarks.',
+        vi: 'Chỉ số RED/USE, RAM container vs runtime, viết microbenchmark không tự lừa (b.Loop), benchstat và macrobenchmark.',
       },
-      act: 'measurement',
-      builds: [G.workflow, G.hardware],
+      act: 'performance',
+      builds: [G.hardware],
     },
     {
       slug: G.profiling,
-      topic: { en: 'pprof & fgprof', vi: 'pprof & fgprof' },
+      topic: { en: 'Profiling', vi: 'pprof & fgprof' },
       hook: {
-        en: 'Safe /debug/pprof ports, Flat vs Cum in Flame Graphs, alloc_space vs inuse_space, fgprof & Parca diffs.',
-        vi: 'Cổng /debug/pprof an toàn, đọc Flat/Cum trên Flame Graph, fgprof Off-CPU và Parca -diff_base.',
+        en: 'Safe /debug/pprof endpoints, Flat vs Cum in flame graphs, alloc_space vs inuse_space, fgprof, and -diff_base.',
+        vi: 'Mở /debug/pprof an toàn, đọc Flat/Cum trên flame graph, alloc_space vs inuse_space, fgprof và so sánh -diff_base.',
       },
-      act: 'optimization',
+      act: 'performance',
       builds: [G.benchmarking],
     },
     {
       slug: G.patterns,
       topic: { en: 'Three Rs & I/O', vi: 'Three Rs & I/O' },
       hook: {
-        en: 'Cutting bytes.Split and strconv waste, 8 KB streaming, sharded SectionReaders, and sync.Pool cautions.',
-        vi: 'Bỏ bytes.Split & strconv chậm, streaming 8 KB cố định, chia khúc SectionReader và bẫy sync.Pool.',
+        en: 'Do less work, the Three Rs, Sum1 to Sum6Reader streaming in fixed memory, sharding, and sync.Pool trade-offs.',
+        vi: 'Làm ít việc hơn, Three Rs, tối ưu Sum1 tới Sum6Reader chạy streaming RAM cố định, sharding và đánh đổi của sync.Pool.',
       },
-      act: 'optimization',
-      builds: [G.hardware, G.profiling],
+      act: 'performance',
+      builds: [G.profiling],
+    },
+    {
+      slug: G.interview,
+      topic: { en: 'Interview prep', vi: 'Ôn phỏng vấn' },
+      hook: {
+        en: 'Concept Q&A across levels 1–4, predict-the-output traps verified on Go 1.27, and three race-tested live-coding tasks.',
+        vi: 'Hỏi-đáp bản chất cấp 1–4, bài tập đoán output kiểm chứng trên Go 1.27 và 3 bài live-coding kèm test -race.',
+      },
+      act: 'interview',
+      builds: [G.patterns],
     },
   ],
   paths: [
     {
       id: 'full',
-      label: { en: 'Read it all (12 parts)', vi: 'Đọc trọn bộ 12 bài' },
-      who: {
-        en: 'Go from scratch all the way through internals, benchmarks, profiling, and Three Rs optimization.',
-        vi: 'Đi trọn lộ trình từ Go căn bản qua các bẫy ngầm tới đo đạc và tối ưu hiệu năng thực chiến.',
-      },
+      label: { en: 'Read it all (20 parts)', vi: 'Đọc trọn bộ (20 bài)' },
       order: [
-        G.fundBasics, G.fundComposite, G.fundConcurrency,
+        G.basics, G.types, G.collections, G.structs, G.errors, G.testing,
+        G.goroutines, G.context, G.concurrencyPatterns, G.httpService,
         G.memory, G.abstractions, G.concurrency, G.production,
         G.workflow, G.hardware, G.benchmarking, G.profiling, G.patterns,
+        G.interview,
       ],
     },
     {
-      id: 'beginners',
-      label: { en: 'New to Go & Code Review (1–7)', vi: 'Người mới & Review AI (Bài 1–7)' },
+      id: 'new-to-go',
+      label: { en: 'New to Go (1–10)', vi: 'Mới học Go (Bài 1–10)' },
       who: {
-        en: 'Master Go syntax, types, concurrency, and catch the bugs AI coding tools routinely slip in.',
-        vi: 'Nắm vững cú pháp, thiết kế kiểu, concurrency và bắt đúng lỗi mà AI rất hay viết lọt qua test.',
+        en: 'Know another language and want to write, test, and ship a concurrent HTTP service in Go from scratch.',
+        vi: 'Đã viết ngôn ngữ khác và muốn nắm Go từ đầu tới lúc viết, test và dựng xong một HTTP service chạy đồng thời.',
       },
-      order: [G.fundBasics, G.fundComposite, G.fundConcurrency, G.memory, G.abstractions, G.concurrency, G.production],
+      order: [
+        G.basics, G.types, G.collections, G.structs, G.errors, G.testing,
+        G.goroutines, G.context, G.concurrencyPatterns, G.httpService,
+      ],
     },
     {
-      id: 'efficient-go',
-      label: { en: 'Make slow Go fast (8–12)', vi: 'Tối ưu Go theo số đo (Bài 8–12)' },
+      id: 'review',
+      label: { en: 'Catch the classic bugs (11–14)', vi: 'Bắt các bug kinh điển (Bài 11–14)' },
       who: {
-        en: 'Focus purely on Efficient Go: RAER, TFBO, CPU/GC hardware, benchstat, pprof/fgprof, and Three Rs.',
-        vi: 'Đi thẳng vào 5 bài Efficient Go: RAER, phần cứng/GC, benchstat, soi pprof và mẫu Three Rs.',
+        en: 'Understand the runtime internals behind slice overwrites, typed nil, GMP races, and production K8s traps.',
+        vi: 'Hiểu cơ chế runtime sau các lỗi slice đè chéo, typed nil, race trong GMP và bẫy production trên Kubernetes.',
+      },
+      order: [G.memory, G.abstractions, G.concurrency, G.production],
+    },
+    {
+      id: 'performance',
+      label: { en: 'Make slow Go fast (15–19)', vi: 'Tối ưu Go có số đo (Bài 15–19)' },
+      who: {
+        en: 'Measure before tuning: RAER budgets, CPU caches and GC, benchstat, pprof/fgprof, and Three Rs streaming.',
+        vi: 'Đo trước khi sửa: ngân sách RAER, CPU cache và GC, benchstat, soi pprof/fgprof và mẫu Three Rs.',
       },
       order: [G.workflow, G.hardware, G.benchmarking, G.profiling, G.patterns],
     },
     {
       id: 'oncall',
-      label: { en: 'Leaks & latency spikes', vi: 'Săn lỗi ăn RAM & chậm p99' },
+      label: { en: 'Leaks and latency spikes', vi: 'Rò RAM & vọt độ trễ' },
       who: {
-        en: 'Service holding RAM or stalling under load? Inspect memory traps, K8s ops, profiles, and streaming.',
-        vi: 'Service tụt hiệu năng hoặc ăn RAM không nhả? Đọc thẳng bẫy RAM, K8s, phần cứng GC, pprof và streaming.',
+        en: 'Service holding memory or stalling under load? Jump straight to memory traps, production timeouts, GC, profiles, and streaming.',
+        vi: 'Service ăn RAM không nhả hay p99 vọt cao? Đi thẳng tới bẫy bộ nhớ, timeout production, GC, pprof và streaming.',
       },
       order: [G.memory, G.production, G.hardware, G.profiling, G.patterns],
+    },
+    {
+      id: 'interview',
+      label: { en: 'Preparing for a Go interview', vi: 'Ôn phỏng vấn Go' },
+      who: {
+        en: 'Drill concept questions, output puzzles, and live-coding tasks, with links back to the runtime posts behind each answer.',
+        vi: 'Luyện hỏi-đáp, đoán output và live-coding, kèm đường dẫn về đúng bài giải thích cơ chế phía sau.',
+      },
+      order: [G.interview, G.memory, G.abstractions, G.concurrency, G.production],
     },
   ],
 };
@@ -890,21 +1000,18 @@ const stocksBasics: Series = {
     en: 'Assembled from Vietnamese market mechanics (HOSE, HNX and VSDC rules, fee schedules, issuer filings) plus investing classics: The Intelligent Investor (Graham), One Up on Wall Street (Lynch) and The Psychology of Money (Housel).',
     vi: 'Tổng hợp từ cơ chế thị trường Việt (quy định HOSE, HNX, VSDC, bảng phí, báo cáo doanh nghiệp) cùng các kinh điển về đầu tư: The Intelligent Investor (Graham), One Up on Wall Street (Lynch) và The Psychology of Money (Housel).',
   },
-  // A lithographed 1892 stock certificate: the "basic" unit of the market, before it was a number on a screen.
   cover: {
-    subtitle: {
-      en: 'Ownership · Orders · Numbers · Discipline',
-      vi: 'Sở hữu · Lệnh · Con số · Kỷ luật',
-    },
-    image: stockCert,
-    alt: 'A lithographed stock certificate from 1892 with ornate borders and a central vignette.',
-    position: '50% 55%',
-    imprint: 'STOCKS',
+    title: { accent: 'Stock Market', rest: ' Basics' },
+    tagline: 'Own a slice of a company, safely',
+    hue: 75,
+    image: coverStocks,
+    alt: 'Brokers on the New York Stock Exchange trading floor in black and white, one holding up a slip of paper.',
+    position: '62% 55%',
     credit: {
-      title: 'Original company stock certificate',
-      author: 'Downingsf',
-      url: 'https://commons.wikimedia.org/wiki/File:Original_company_stock_certificate.jpg',
-      license: 'CC BY-SA 3.0',
+      title: 'NY stock exchange traders floor',
+      author: 'Thomas J. O\'Halloran (Library of Congress)',
+      url: 'https://commons.wikimedia.org/wiki/File:NY_stock_exchange_traders_floor_LC-U9-10548-6.jpg',
+      license: 'Public domain',
     },
   },
   outcomes: [
@@ -1053,10 +1160,6 @@ const stocksBasics: Series = {
     {
       id: 'full',
       label: { en: 'Read it all', vi: 'Đọc trọn bộ' },
-      who: {
-        en: 'You have an evening or two and want the whole picture, in the order it builds up.',
-        vi: 'Bạn có một hai buổi tối và muốn thấy bức tranh trọn vẹn, theo đúng thứ tự xây dần.',
-      },
       order: [S.ownership, S.account, S.orders, S.settlement, S.dividends, S.statements, S.ratios, S.macro, S.risk, S.plan],
     },
     {
@@ -1098,13 +1201,13 @@ const B = {
 const backend: Series = {
   id: 'backend',
   title: {
-    en: 'How backend actually works',
-    vi: 'Hiểu đúng bản chất Backend',
+    en: 'Backend with Python FastAPI',
+    vi: 'Backend với Python FastAPI',
   },
   kicker: { en: 'A 12-part series', vi: 'Series 12 bài' },
   tagline: {
-    en: 'Backend knowledge first, with Python and FastAPI as the running demo — the judgment AI still can’t write for you.',
-    vi: 'Kiến thức backend là chính, Python và FastAPI chỉ là bài demo chạy suốt — phần phán đoán mà AI chưa viết hộ được.',
+    en: 'Backend foundations and FastAPI, learned together: each idea, then how FastAPI does it — the judgment AI still can’t write for you.',
+    vi: 'Nền tảng backend và FastAPI học cùng lúc: hiểu ý tưởng, rồi xem FastAPI làm nó thế nào — phần phán đoán mà AI chưa viết hộ được.',
   },
   pitch: [
     {
@@ -1112,30 +1215,26 @@ const backend: Series = {
       vi: 'AI dựng service FastAPI chỉ trong vài giây. Nhưng nó vẫn POST hết mọi thứ, nhét SQL ngay trong router, chặn event loop bằng lời gọi sync, và không kèm test, log hay timeout — vì backend là phán đoán, không phải cú pháp.',
     },
     {
-      en: 'Each post takes one competence — the request lifecycle, API design, layering, data access, async, auth, caching, testing, observability, performance, deploys — explains the idea, then demonstrates it on a small running Python service you can rebuild yourself.',
-      vi: 'Mỗi bài đi gọn một năng lực — vòng đời request, thiết kế API, phân tầng, truy cập dữ liệu, async, auth, caching, testing, observability, hiệu năng, triển khai — nói rõ ý, rồi demo ngay trên một service Python nhỏ mà bạn có thể tự dựng lại.',
+      en: 'Each post takes one competence — the request lifecycle, API design, layering, data access, async, auth, caching, testing, observability, performance, deploys — explains the backend idea, then builds it with FastAPI on a small running Python service you can rebuild yourself.',
+      vi: 'Mỗi bài đi gọn một năng lực — vòng đời request, thiết kế API, phân tầng, truy cập dữ liệu, async, auth, caching, testing, observability, hiệu năng, triển khai — nói rõ ý tưởng backend, rồi dựng nó bằng FastAPI trên một service Python nhỏ mà bạn có thể tự dựng lại.',
     },
   ],
   credit: {
-    en: 'Backend knowledge demonstrated in Python with FastAPI. FastAPI: Modern Python Web Development (Bill Lubanovic, O’Reilly 2023) is one of the references, alongside MDN, OWASP, the 12-factor app, and official docs.',
-    vi: 'Kiến thức backend minh họa bằng Python với FastAPI. FastAPI: Modern Python Web Development (Bill Lubanovic, O’Reilly 2023) là một trong các tài liệu tham khảo, bên cạnh MDN, OWASP, 12-factor app và tài liệu chính thức.',
+    en: 'Backend foundations and FastAPI, taught side by side. FastAPI: Modern Python Web Development (Bill Lubanovic, O’Reilly 2023) is one of the references, alongside MDN, OWASP, the 12-factor app, and official docs.',
+    vi: 'Nền tảng backend và FastAPI, dạy song song. FastAPI: Modern Python Web Development (Bill Lubanovic, O’Reilly 2023) là một trong các tài liệu tham khảo, bên cạnh MDN, OWASP, 12-factor app và tài liệu chính thức.',
   },
-  // The plate is the series' own demo service: the page every FastAPI app gives you for free.
   cover: {
-    subtitle: {
-      en: 'Requests · APIs · Layers · Ops',
-      vi: 'Request · API · Tầng · Vận hành',
-    },
-    image: backendPlate,
-    alt: 'Swagger UI page of the series’ small FastAPI demo service, listing its /health, /cases and /reports endpoints with Try it out buttons.',
-    position: '50% 42%',
-    imprint: 'BACKEND',
+    title: { lead: 'How ', accent: 'Backend', rest: ' Actually Works' },
+    tagline: 'What happens after the request lands',
+    hue: 150,
+    image: coverBackend,
+    alt: 'Blue and yellow network cables running into a rack of servers in a data center.',
+    position: '50% 50%',
     credit: {
-      title: 'Swagger UI of the series demo service',
-      author: 'captured locally',
-      url: 'https://fastapi.tiangolo.com/',
-      license: 'screenshot',
-      origin: 'FastAPI docs',
+      title: 'IBM Portable Modular Data Center',
+      author: 'Raysonho @ Open Grid Scheduler / Grid Engine',
+      url: 'https://commons.wikimedia.org/wiki/File:IBMPortableModularDataCenter3.jpg',
+      license: 'CC BY 3.0',
     },
   },
   outcomes: [
@@ -1299,10 +1398,6 @@ const backend: Series = {
     {
       id: 'full',
       label: { en: 'Read it all', vi: 'Đọc cả 12 bài' },
-      who: {
-        en: 'From the first byte of a request to a zero-downtime deploy.',
-        vi: 'Từ byte đầu tiên của request tới bản deploy không downtime.',
-      },
       order: [B.lifecycle, B.rest, B.validation, B.layering, B.data, B.async, B.auth, B.caching, B.testing, B.observability, B.perf, B.deploy],
     },
     {
@@ -1376,21 +1471,18 @@ const aiTrading: Series = {
     en: 'Built on the public curriculum and research of 51labs (Machine Learning for Financial Market), extended with public papers and Vietnamese market cases.',
     vi: 'Dựa trên chương trình và nghiên cứu công khai của 51labs (Machine Learning for Financial Market), bổ sung paper công khai và case thị trường Việt Nam.',
   },
-  // The Ho Chi Minh Stock Exchange building (District 1, HCMC): where Vietnamese orders are matched.
   cover: {
-    subtitle: {
-      en: 'Market · Machine Learning · Deep Learning · RL & Agents',
-      vi: 'Thị trường · Machine Learning · Học sâu · RL & Agent',
-    },
-    image: hoseBuilding,
-    alt: 'The Ho Chi Minh Stock Exchange building on Nguyen Thai Binh street, District 1: a restored French-colonial facade under a clear sky.',
-    position: '50% 40%',
-    imprint: 'AI × MARKETS',
+    title: { accent: 'AI', rest: ' for Market Systems' },
+    tagline: 'From the first order to the agent that decides',
+    hue: 285,
+    image: coverAi,
+    alt: 'Robonaut 2, a humanoid robot, facing an astronaut in a white spacesuit against a deep blue background.',
+    position: '30% 50%',
     credit: {
-      title: 'So Giao Dich chung khoan tphcm, Nguyen Thai Binh, Quan 1, TPHCM',
-      author: 'trungydang',
-      url: 'https://commons.wikimedia.org/wiki/File:So_Giao_Dich_chung_khoan_tphcm-Nguy%E1%BB%85n_Th%C3%A1i_B%C3%ACnh,_Qu%E1%BA%ADn_1,_TPHCM,_Vi%E1%BB%87t_Nam_-_panoramio.jpg',
-      license: 'CC BY 3.0',
+      title: 'Face-Off Robonaut',
+      author: 'Robert Markowitz (NASA)',
+      url: 'https://commons.wikimedia.org/wiki/File:Face-Off_Robonaut.jpg',
+      license: 'Public domain',
     },
   },
   outcomes: [
@@ -1659,10 +1751,6 @@ const aiTrading: Series = {
     {
       id: 'full',
       label: { en: 'Read it all', vi: 'Đọc hết series' },
-      who: {
-        en: 'From zero to the agent team, in order.',
-        vi: 'Từ số 0 tới đội agent, theo đúng thứ tự.',
-      },
       order: Object.values(AT),
     },
     {

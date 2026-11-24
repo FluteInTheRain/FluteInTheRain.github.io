@@ -1,22 +1,20 @@
 ---
-title: "Go efficiency workflow"
-title_vi: "Quy trình tối ưu Go"
-description: "Why scaling pods multiplies cloud bills without fixing latency, how RAER budgets & TFBO guide high-leverage wins, and how Go escape analysis chooses stack vs heap."
-description_vi: "Vì sao tăng pod không sửa được p99, cách viết hợp đồng RAER & quy trình TFBO 5 tầng, chi phí Stack vs Heap trên CPU và đọc luồng phân tích escape -gcflags=-m=2."
-date: 2026-11-20
+title: "When to optimize"
+title_vi: "Khi nào nên tối ưu"
+description: "Adding pods does not fix tail latency. Learn when tuning Go is worth it: written RAER budgets, five levels to change, and the TFBO loop, with the Todo service as the example."
+description_vi: "Thêm pod không chữa được độ trễ đuôi. Khi nào nên tối ưu Go: ngân sách RAER viết ra giấy, năm tầng để can thiệp và vòng TFBO, lấy Todo service làm ví dụ."
+date: 2026-11-23
 category: "backend"
-tags: ["golang", "efficient-go", "raer", "tfbo", "escape-analysis", "performance"]
+tags: ["golang", "efficient-go", "raer", "tfbo", "performance"]
 cover: "../../assets/series/golang/go-gopher-biplane.jpg"
 cover_alt: "Go gopher flying a biplane, pencil artwork by Renee French"
 draft: false
 sources:
-  - { title: "Efficient Go: Data-Driven Performance Optimization", author: "Bartłomiej Płotka", chapters: "Ch. 1, 2 & 3", url: "https://www.efficientgo.dev/" }
-  - { title: "Efficient Go Examples Repository", author: "Bartłomiej Płotka", url: "https://github.com/efficientgo/examples" }
-  - { title: "Go compiler escape invariants (cmd/compile/internal/escape/escape.go)", author: "The Go Authors", url: "https://github.com/golang/go/blob/master/src/cmd/compile/internal/escape/escape.go" }
-  - { title: "Structured Programming with go to Statements (Critical 3% quote)", author: "Donald E. Knuth", url: "https://pic.plover.com/knuth-GOTO.pdf" }
+  - { title: "Efficient Go: Data-Driven Performance Optimization", author: "Bartłomiej Płotka", chapters: "Ch. 1 (Behind Performance, misconceptions, Thanos compaction) and Ch. 3 (RAER, Optimization Design Levels, TFBO flow)", url: "https://www.efficientgo.dev/" }
+  - { title: "The Tail at Scale (Communications of the ACM, vol. 56, 2013)", author: "Jeffrey Dean, Luiz André Barroso", url: "https://research.google/pubs/the-tail-at-scale/" }
+  - { title: "Structured Programming with go to Statements (the 97% / critical 3% quote)", author: "Donald E. Knuth", url: "https://pic.plover.com/knuth-GOTO.pdf" }
+  - { title: "Package net/http/httptest", author: "The Go Authors", url: "https://pkg.go.dev/net/http/httptest" }
   - { title: "Slide rule (Jacek Halicki, CC BY-SA 4.0)", author: "Jacek Halicki", url: "https://commons.wikimedia.org/wiki/File:2023_Suwak_logarytmiczny_(1).jpg" }
-  - { title: "Metronome Maelzel mechanism (CC BY-SA 3.0)", author: "Myself", url: "https://commons.wikimedia.org/wiki/File:Metronome_Ma%C3%ABlzel_mechanism.jpg" }
-  - { title: "Hydro steam turbine rotor Galiza (CC BY-SA 4.0)", author: "Luis Miguel Bugallo Sánchez", url: "https://commons.wikimedia.org/wiki/File:2018._Sotavento._Steam_turbine_rotor._Galiza-2.jpg" }
   - { title: "Go gopher biplane (CC BY 3.0)", author: "Renee French", url: "https://commons.wikimedia.org/wiki/File:Go_gopher_biplane.jpg" }
 ---
 
@@ -24,545 +22,679 @@ import Callout from '../../components/mdx/Callout.astro';
 import Concepts from '../../components/mdx/Concepts.astro';
 import En from '../../components/mdx/En.astro';
 import Figure from '../../components/mdx/Figure.astro';
-import GitHubCode from '../../components/mdx/GitHubCode.astro';
-import GoEffComplexityTradeoff from '../../components/mdx/GoEffComplexityTradeoff.astro';
-import GoEffComplexityTrap from '../../components/mdx/GoEffComplexityTrap.astro';
-import GoEffCostVsLatencyCascade from '../../components/mdx/GoEffCostVsLatencyCascade.astro';
-import GoEffRaerAndLevels from '../../components/mdx/GoEffRaerAndLevels.astro';
-import GoEffStackFrameTrace from '../../components/mdx/GoEffStackFrameTrace.astro';
-import GoEffTfboDecisionDemo from '../../components/mdx/GoEffTfboDecisionDemo.astro';
-import GoEffTfboWorkflow from '../../components/mdx/GoEffTfboWorkflow.astro';
-import GoEscapeAnalysisDemo from '../../components/mdx/GoEscapeAnalysisDemo.astro';
-import QuoteCard from '../../components/mdx/QuoteCard.astro';
+import GoP15Levels from '../../components/mdx/GoP15Levels.astro';
+import GoP15RaerCard from '../../components/mdx/GoP15RaerCard.astro';
+import GoP15RaerCheckDemo from '../../components/mdx/GoP15RaerCheckDemo.astro';
+import GoP15TailFanout from '../../components/mdx/GoP15TailFanout.astro';
+import GoP15TfboLoop from '../../components/mdx/GoP15TfboLoop.astro';
 import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
 import Vi from '../../components/mdx/Vi.astro';
 import heroSlideRule from '../../assets/blog/go-efficiency-workflow-raer-tfbo-hardware-memory/slide-rule-cursor.jpg';
-import metronomeImg from '../../assets/blog/go-efficiency-workflow-raer-tfbo-hardware-memory/metronome-mechanism.jpg';
-import turbineImg from '../../assets/blog/go-efficiency-workflow-raer-tfbo-hardware-memory/steam-turbine-rotor.jpg';
 
 <En>
 
-<Figure src={heroSlideRule} alt="Precision mechanical slide rule cursor aligned over logarithmic scales" caption="Engineers read slide rule tolerances before cutting steel—just like a written RAER contract sets explicit latency and memory budgets before changing one line of Go." sourceTitle="Wikimedia Commons: Slide rule" sourceUrl="https://commons.wikimedia.org/wiki/File:2023_Suwak_logarytmiczny_(1).jpg" />
+<Figure src={heroSlideRule} alt="Precision mechanical slide rule cursor aligned over logarithmic scales" caption="A slide rule is read against a written tolerance. A RAER does the same job for a service: it says in numbers what fast enough means before anyone changes code." sourceTitle="Wikimedia Commons: Slide rule" sourceUrl="https://commons.wikimedia.org/wiki/File:2023_Suwak_logarytmiczny_(1).jpg" />
 
-> "Programmers waste enormous amounts of time thinking about, or worrying about, the speed of noncritical parts of their programs... We should forget about small efficiencies, say about 97% of the time: premature optimization is the root of all evil. **Yet we should not pass up our opportunities in that critical 3%.**"
+> "We should forget about small efficiencies, say about 97% of the time: premature optimization is the root of all evil. Yet we should not pass up our opportunities in that critical 3%."
 > &mdash; *Donald Knuth*, *Structured Programming with go to Statements* (1974)
 
-### Why guessing performance ruins Go codebases—and three real failure modes
+Google engineers Jeffrey Dean and Luiz André Barroso describe an idealized service where each server answers slowly, in more than one second, on only 1 request in 100. That sounds fine. Then a page needs answers from 100 of those servers at once, and [63% of pages take more than a second](https://research.google/pubs/the-tail-at-scale/). Nobody's code got worse. The page just waits for its slowest part, and with 100 parts the slowest one is usually slow.
 
-Every performance war story starts similarly: production latency spikes, Kubernetes autoscalers spin up dozens of expensive replicas, and engineers jump straight to tearing apart readable Go code—adding hand-rolled `sync.Pool` caches or cryptic `unsafe` byte casts—without ever measuring whether the bottleneck sits inside their CPU code, downstream SQL calls, or heap allocation churn. Notice what happens when teams optimize blindly:
+The usual reaction to a slow service is to run more copies of it. Here that does nothing for those 63%. This post is about what to do instead: decide **whether** a piece of code needs tuning, **where** to change things, and **when to stop**. Writing a faster loop is the easy part. Knowing whether it was worth writing is the skill.
 
-- **Kubernetes pods multiplied, p99 latency untouched.** Scaling from 2 pods to 20 pods increases monthly cloud spend 10x, yet a slow per-request JSON parse (`180 ms`) stays just as slow for every customer hitting a single pod—and cascading microservices fanning out across 10 replicas amplify tail spikes toward `10%` error budgets.
-- **Prometheus & Thanos high-cardinality OOM loops.** In multi-tenant observability clusters, dynamic request labels like `user_id` or raw HTTP paths create millions of distinct metric series per scrape cycle, allocating gigabytes of tiny string keys and map buckets; simply increasing container memory limits merely pushes the OOM crash back by twenty minutes until compaction hits GC spikes.
-- **Cloudflare's 30% logging CPU win via one escape fix.** In high-packet-rate proxies, logging a counter through a generic helper taking `...any` boxed primitive values onto the heap tens of millions of times per second—solved cleanly once `-gcflags="-m=2"` exposed the interface escape!
-- **Three weeks tuning JSON when 94% of latency sat inside N+1 SQL.** An engineering team shaved `0.4 ms` off Go marshaling while their endpoint quietly fired 180 sequential SQL queries taking `92 ms`! Attacking the wrong **Optimization Design Level** wastes weeks for invisible gains.
+<Callout type="note" title="Recap from earlier posts">
 
-This guide installs systematic, data-driven Go performance engineering from the top down:
+This post uses three things you already know:
 
-1. **Beyond Big-O & horizontal scaling myths**: why asymptotic math ignores cache constants and why adding pods hides real inefficiency.
-2. **Written RAER budgets and 5 Optimization Design Levels**: anchoring clear latency & memory goals before touching an editor.
-3. **The 9-step TFBO cycle**: separating correctness proof from measurement so optimization never ships subtle regressions.
-4. **Stack frames vs. heap allocations**: why stack pops cost 1 CPU instruction while every heap allocation pays twice.
-5. **Reading the compiler's mind (`-gcflags="-m=2"`)**: inspecting Go's escape analyzer interactively to keep hot paths allocation-free.
+- [Go testing](/blog/go-testing-table-tests/): a `_test.go` file and `go test`. The loop below starts with tests.
+- [Build a Go HTTP service](/blog/go-http-service-net-http-json-middleware/): the `Todo` service (`store`, `server`, `listTodos`, `writeJSON`). It is the example here.
+- [Go memory](/blog/go-memory-data-types-slices-maps-strings/): `for range n`, a loop over an integer, and how slices are copied.
+
+</Callout>
 
 <Callout type="note" title="TL;DR">
-Define concrete **RAER budgets** (operation volume, p99 latency cap, and peak memory budget) *before* editing code. Fix bottlenecks top-down across the **5 Optimization Design Levels** (`System -> Algorithm -> Code -> OS -> Hardware`), enforce strict **TFBO** correctness verification every cycle, stop tuning once RAER passes, and verify compiler stack placement with `go build -gcflags="-m=2"`.
+More pods add capacity but leave tail latency alone. Before tuning anything, write a **RAER** (Resource-Aware Efficiency Requirements): the operation, the data size, a p99 latency budget and a memory budget. Measure against it. If you are within budget, stop. If not, find the bottleneck, change **one** of the five levels, and run the **TFBO** loop (Test, Fix, Benchmark, Optimize) again, starting with tests.
 </Callout>
 
 <Concepts>
 
-- **Premature optimization**: tuning rare or fast-enough code paths before measuring against explicit RAER efficiency budgets, sacrificing clarity for invisible returns.
-- **Post-Dennard scaling plateau**: since ~2005, single-core CPU clock speeds stopped doubling rapidly due to heat limits; extra throughput now comes from core locality, memory layout, and avoiding wasted work rather than waiting for faster GHz chips.
-- **Pareto 80/20 (Critical 3%)**: in real backend programs, ~80–97% of latency and heap allocations routinely stem from fewer than 3–20% of hot functions.
-- **Escape analysis**: a static compile-time Go pass verifying whether variables can safely perish with their enclosing stack frame or must relocate onto the garbage-collected Heap.
+- **Pod**: one running copy of a service in Kubernetes. Adding pods means running more copies.
+- **Latency and p99**: latency is how long one request takes. The p99 is the time that 99% of requests beat, so 1 request in 100 is slower than it.
+- **Fan-out**: one incoming request that triggers many calls to other servers and waits for all of them.
+- **Tail latency**: the slow end of the latency distribution, the p99 and beyond.
 
 </Concepts>
 
 ---
 
-## 1. Beyond Big-O: why hardware constants and tail cascades dominate real systems
+## Why more pods do not fix tail latency
 
-Software performance splits sharply into two different goals: **throughput** (how many events/sec a service processes across machines) and **latency** (how fast *one* request finishes). Throwing more Kubernetes pods only rescues saturated throughput. Since single-core frequencies plateaued around ~3–4 GHz after the end of Dennard scaling in ~2005, throwing hardware cannot shrink single-thread GC pauses, lock contention, or wasted serialization allocations!
+A pod is one running copy of your service. A load balancer spreads requests across pods, so adding pods means each pod gets fewer requests. That shortens queues and raises the total traffic you can serve. It is called **capacity**.
 
-Worse still is **tail-latency amplification**. Imagine an API gateway assembling a storefront page by querying 10 downstream Go microservices in parallel. Even if each individual service hits its SLO `99%` of the time (`1%` slow GC/network tail), the probability that *at least one* of the 10 sub-requests triggers that tail wait jumps cleanly to $1 - 0.99^{10} \approx 9.56\%$! Suddenly nearly 1 in 10 storefront page loads stalls waiting on the slowest straggler.
-
-<QuoteCard author="Jeffrey Dean & Luiz André Barroso" role="Google Engineering" sourceTitle="The Tail at Scale (CACM 2013)" sourceUrl="https://research.google/pubs/the-tail-at-scale/">
-A response time SLA of 1 second may sound modest, yet as fan-out grows, small fractions of slow backend replies dominate end-user p99 latency—making efficiency and latency predictability critical even when average load looks idle.
-</QuoteCard>
-
-Notice also the hidden economics behind **efficiency ratio (`Value / Resource Cost`)**. Most teams confuse *performance* (raw ops/sec at peak throttle) with *efficiency* (useful business requests delivered per CPU-second, gigabyte of RAM, and watt burned). Spinning up 40 oversized containers running at 8% CPU masks sluggish algorithms behind wasted money—whereas optimizing a leaky serialization pipeline drops cluster cost by 60% *and* cuts GC tail jitter across every user simultaneously.
-
-<GoEffCostVsLatencyCascade />
-
-### Why Big-O deceives Go engineers on small and medium datasets
-
-Algorithm classes teach asymptotic **Big-O notation** (`O(1)` vs `O(N)` vs `O(N log N)`). Asymptotic complexity holds true as `N -> infinity`, *ignoring leading hardware constants `c1` and memory allocation costs!* Think of sorting 16 books sitting right on your desk versus looking them up in a warehouse card catalog down the hall: technically the catalog is `O(1)` while scanning your desk is `O(N)`, yet grabbing directly off the desk wins easily for small `N`.
-
-Compare actual Apple M2 Go 1.27 latency across contiguous slice linear scan vs. hash map lookup—plus see what happens when small datasets grow or trigger allocations inside hot loops:
-
-<TerminalOutput command="go test -bench='Benchmark(ScanSlice16|LookupMap16)' -benchmem -count=3 ." label="Apple M2 · Go 1.27" caption="Measured on Apple M2 Go 1.27: contiguous L1-resident slice scanning (~5.4 ns) competes head-to-head with O(1) SwissTable lookup (~4.5 ns) with ZERO allocations, while avoiding allocating maps on small N saves orders of magnitude.">
-```text
-goos: darwin   goarch: arm64   cpu: Apple M2
-BenchmarkScanSlice16-8    217078412     5.434 ns/op     0 B/op     0 allocs/op
-BenchmarkScanSlice16-8    222393444     5.542 ns/op     0 B/op     0 allocs/op
-BenchmarkLookupMap16-8    268162940     4.483 ns/op     0 B/op     0 allocs/op
-BenchmarkLookupMap16-8    265658908     4.592 ns/op     0 B/op     0 allocs/op
-```
-</TerminalOutput>
-
-<GoEffComplexityTrap />
-
-Notice the nuance in that M2 benchmark: when a 16-element map *already exists statically*, SwissTable's 8-slot control word wins narrowly (`4.5 ns` vs `5.4 ns`). But if each HTTP request constructs a 16-item `make(map[int]int, 16)` dynamically on the heap versus packing a tiny slice onto the stack, building the map costs **~10x–30x more CPU and heap churn** than scanning the slice linearly inside one 64-byte cache line!
-
-<GoEffComplexityTradeoff />
-
-<Concepts>
-
-- **Tail-latency amplification**: the compounding probability $1 - (1 - p)^k$ that a parallel fan-out request hits at least one slow outlier across `k` downstream services.
-- **Throughput vs. Latency**: jobs/sec system capacity vs. wall-clock time spent waiting on a single request; replicas scale throughput, never per-request latency bloat.
-- **Hardware constant**: the true nanosecond multiplier (`1 ns` L1 cache vs `100 ns` RAM miss) hidden inside simplified Big-O formulas.
-
-</Concepts>
-
----
-
-## 2. Written RAER budgets and Pareto's 80/20 across 5 Design Levels
-
-Instead of vague sprint tickets saying *"optimize the CSV importer"*, senior Go teams write an explicit **RAER (Resource-Aware Efficiency Requirements)** contract up front—combining a workload size, an observable speed target, and a firm memory cap—and stop immediately once satisfied:
+It does not change how long one request takes on one pod. If a request is slow because it parses a large body, allocates too much, or waits on a lock, a new pod runs the same code and is slow in the same way. The numbers in the Google paper make this visible. Here is the arithmetic as a short Go program. A page is slow if at least one of its servers is slow, which is 1 minus the chance that all of them are fast.
 
 ```go
-// Explicit RAER contract before opening profilers or touching algorithms:
-// Workload:     Sum() scanning 2,000,000 lines of 9-digit newline-delimited ints
-// Latency goal: <= 10 ns/line on 1 CPU core (~20 ms total) OR <= 2.5 ns/line across 4 cores
-// Memory goal:  <= 10 KB live Heap regardless of file size (even 100M lines!)
-// Stop rule:    Freeze implementation cleanly the moment benchmarks clear RAER.
-```
+package main
 
-Once RAER exposes a real gap (say, current importer runs at `45 ms` and consumes `140 MB` RAM), **where do you cut first?** Think of Bartłomiej Płotka's **5 Optimization Design Levels** like plumbing repairs in an apartment building: shutting off the broken main valve (Level 1/2) stops flooding in 30 seconds; wiping floorboards with paper towels while the pipe stays open (Level 4/5) achieves zero durability.
+import (
+	"fmt"
+	"math"
+)
 
-Look at how dramatically a **Level 1 (`singleflight`)** or **Level 2 (SQL batching)** design choice dominates micro-optimizing code lines:
-
-```go
-var sg singleflight.Group
-
-// Level 1 win: 500 concurrent requests asking for the exact same product SKU
-// trigger ONLY ONE database round-trip instead of stampeding upstream!
-func GetCatalogItem(ctx context.Context, sku string) (*Item, error) {
-	v, err, _ := sg.Do(sku, func() (any, error) {
-		return db.QueryItem(ctx, sku) // runs once; all 500 waiters share the result
-	})
-	if err != nil {
-		return nil, err
+func main() {
+	slow := 0.01 // each server is slow on 1 request in 100
+	for _, servers := range []int{1, 10, 100} {
+		// A page is slow if at least one of its servers is slow:
+		// 1 minus the chance that every server is fast.
+		pageSlow := 1 - math.Pow(1-slow, float64(servers))
+		fmt.Printf("%3d servers per page: %5.1f%% of pages are slow\n", servers, pageSlow*100)
 	}
-	return v.(*Item), nil
 }
 ```
 
-Why does climbing up to System or Algorithm design beat spending three days tweaking string concatenation in Level 3? Because removing an extra network RPC or shrinking an quadratic $O(N^2)$ slice scan down to an $O(N)$ pass trims **90–99%** of total wall-clock work cleanly in 15 lines of idiomatic, readable Go! Only *after* Level 1 and Level 2 look sound do compiler escapes (Level 3) or runtime knobs (Level 4) deserve attention.
+`math.Pow(x, y)` raises `x` to the power `y`. `%5.1f%%` prints a float with one decimal, and `%%` prints a literal percent sign.
 
-<GoEffRaerAndLevels />
-
-| Design Level | What You Change | Typical Impact | Risk & Code Effort | Classic Real-World Go Win |
-| :--- | :--- | :--- | :--- | :--- |
-| **1. System / Architecture** | Caching, batching RPCs, async queues, shedding duplicate work | **10x–100x** | Low code trickery; high schema impact | Single-flight deduplicating 500 identical upstream fetches |
-| **2. Algorithm & Data Struct** | Streaming instead of `io.ReadAll`, SwissTable vs nested loops, AoS->SoA | **5x–50x** | Clean idiomatic Go | Replacing O(N^2) dedup + 200 sequential SQL queries with 1 `WHERE IN` |
-| **3. Code & Go Compiler** | Preallocating `make([]T, 0, n)`, eliminating escapes, `sync.Pool` | **1.5x–5x** | Moderate; requires `-bench` proof | Reusing scratch buffers (`bytes.Buffer.Reset`) cleanly in hot loops |
-| **4. OS / Runtime / Container** | Tuning `GOGC`/`GOMEMLIMIT`, `GOMAXPROCS` (`automaxprocs`), page flags | **1.1x–2x** | Low risk when monitored | Setting `GOMEMLIMIT=900MiB` in a 1 GiB pod cuts GC churn 40% |
-| **5. Hardware / Assembly** | SIMD vectorization, cache-line struct alignment, branchless loops | **1.2x–4x** | Highest complexity; non-portable | Struct padding compression (`24B -> 16B`) or crypto ASM intrinsics |
-
-<Figure src={turbineImg} alt="Large industrial hydro-steam turbine rotor mounted on test cradles" caption="High-leverage engineering removes drag in the primary flow path first (Design Levels 1–2) before polishing surface bolts—maximizing efficiency cleanly without turning Go into unreadable cleverness." sourceTitle="Wikimedia Commons: Steam turbine rotor Galiza" sourceUrl="https://commons.wikimedia.org/wiki/File:2018._Sotavento._Steam_turbine_rotor._Galiza-2.jpg" />
-
-<Concepts>
-
-- **RAER (Resource-Aware Efficiency Requirements)**: a concrete contract pairing operation scale (`N`), latency budget (`<= X ms`), and peak RAM cap (`<= Y KB`) so teams know *when to start* and *when to stop*.
-- **Optimization Design Level**: the hierarchical engineering ladder prioritizing System -> Algorithm -> Code -> OS -> Hardware changes from highest leverage/readability downward.
-- **Single-flight (`golang.org/x/sync/singleflight`)**: a Level-1 concurrency primitive collapsing concurrent identical upstream lookups into one shared RPC execution.
-
-</Concepts>
-
----
-
-## 3. Discipline in action: the TFBO 9-step cycle
-
-> "Make it work, make it right, make it fast."
-> &mdash; *Kent Beck*
-
-Performance tuning without a safety harness regularly replaces a working 30 ms endpoint with a broken 3 ms bug. Every loop follows **TFBO (Test → Fix → Benchmark → Optimize)**: strictly separate the **Functionality Phase** (red/green unit & integration tests verifying edge cases, empty inputs, and malformed UTF-8) from the **Efficiency Phase** (measuring baselines against RAER, finding the #1 bottleneck with `pprof`, changing *one* Design Level cleanly, and returning immediately back to unit tests!).
-
-<GoEffTfboWorkflow />
-
-Watch two subtle failures teams commit when skipping TFBO steps:
-
-1. **Combining two optimizations in one commit.** A developer switches `bufio.Scanner` to a hand-rolled byte slice *and* enables worker goroutines in the same PR. Throughput drops 15% and tests flake under `-race`, leaving nobody sure which half regressed! Change **one level per TFBO iteration** and record before/after benchmark medians.
-2. **Neglecting maintainability documentation on unavoidable hot-path tricks.** Whenever a genuine hot loop drops from idiomatic readability (for example, slicing `unsafe.String` or reusing a pooled struct slice), freeze two artifacts right beside it: **the exact `benchstat` delta justification** and **clear invariant comments** warning teammates not to mutate shared bytes!
-
-| TFBO Habit | What Goes Wrong Without It | Disciplined TFBO Practice |
-| :--- | :--- | :--- |
-| **Test First (`Functionality`)** | Fast broken code returns corrupted zero sums silently | Comprehensive edge-case & fuzz suite stays 100% green before optimizing |
-| **Assess RAER Up Front** | Endless "just one more micro-tweak" bikeshedding | Freeze code & ship the instant RAER passes on target data scale |
-| **Single-Change Iterations** | Conflicting optimizations hide regressions & races | Change **one** design level per commit; measure `benchstat` delta |
-| **Document Fast-Path Invariants** | Well-meaning teammates clean up tricky zero-alloc code later | Leave inline benchmark deltas + invariant notes beside non-obvious code |
-
-<Figure src={metronomeImg} alt="Precision brass clockwork metronome escapement and weighted pendulum rod" caption="Like a mechanical metronome keeping steady engineering cadence, TFBO checks stop work the moment RAER tempo is met—never trading simple, readable code for unmeasured cleverness." sourceTitle="Wikimedia Commons: Metronome Maelzel mechanism" sourceUrl="https://commons.wikimedia.org/wiki/File:Metronome_Ma%C3%ABlzel_mechanism.jpg" />
-
-Step interactively through three everyday TFBO decision gates below—knowing when to stop shipping, when to climb up a Design Level, and why every optimization loops back to unit verification:
-
-<GoEffTfboDecisionDemo />
-
-<Concepts>
-
-- **TFBO cycle**: **Test** (functionality) -> **Fix** (correctness) -> **Benchmark** (RAER check & single-bottleneck profile) -> **Optimize** (single design level) -> **Loop back to Test**.
-- **Baseline anchor**: recorded initial benchmark & memory numbers taken *before* writing optimization code so net wins vs regressions remain indisputable.
-
-</Concepts>
-
----
-
-## 4. Stack frames vs. heap allocations: what the CPU actually executes
-
-Every performance newcomer eventually asks: *"Go has automatic garbage collection—why does calling `return &u` instead of `return u` matter inside a tight loop?"*
-
-Think of memory like two ways workers handle tools during a kitchen shift:
-- The **Stack** is each chef's apron pocket: reaching down takes sub-nanosecond pointer arithmetic (`SUB SP, #32`), tools stay warm right inside L1 CPU cache, and the split second the dish finishes (`return`), shifting `SP` back up clears every temporary pocket at once with **zero cleanup work**. Even better: because each goroutine owns its own private stack exclusively, stack allocation requires **zero locks, zero inter-core atomic contention, and zero write barriers**.
-- The **Heap** is a locked central warehouse (`runtime.mallocgc`): borrowing a bin requires size-class lookups, zeroing freed bytes (`memclrHeapBytes`), recording heap bitmap pointer flags, and forcing background **Garbage Collector** workers to mark pointers and sweep garbage milliseconds later—stalling user goroutines (`Mark Assist`) whenever traffic outpaces background marking! Moreover, heap objects live scattered across disparate virtual pages, inviting costly CPU cache misses whenever structs chase nested pointers.
-
-Here is why this distinction matters immediately for everyday Go style: passing small domain values (`Order`, `Money`, `Point`) **by value** (`func Total(o Order) int64`) instead of scattering `*Order` pointers across constructor helpers keeps transient records hot on the caller's stack frame, eliminates millions of per-second allocations under API load, and prevents background GC sweeps from burning 25% of cluster CPU.
-
-<GoEffStackFrameTrace />
-
-| Property | Goroutine Stack Frame (`SUB SP`) | Managed Go Heap (`runtime.newobject`) |
-| :--- | :--- | :--- |
-| **Allocation cost** | **1 CPU instruction** (~0.3 ns pointer move) | ~20–60 ns size-class alloc + zeroing |
-| **Reclamation cost** | **0 ns** on function return (`ADD SP`) | Tri-color concurrent mark + sweep later |
-| **Cache locality** | **Hot in L1 cache** (same thread frame reused) | Scattered across mspans; higher cache miss odds |
-| **GC pressure trigger** | Invisible to `GOGC` & `GOMEMLIMIT` | Counts straight toward `heap_live`, driving GC frequency |
-
-<Concepts>
-
-- **Stack pointer (`SP`)**: hardware CPU register marking the active bottom of the current function frame; allocating/freeing local variables simply adds/subtracts a constant offset from `SP`.
-- **`runtime.mallocgc`**: Go runtime entry point allocating managed Heap memory, selecting small per-`P` `mcache` size slots or large spans.
-- **Mark Assist**: runtime throttle forcing an allocating goroutine to scan heap objects directly whenever allocation rate outpaces background GC marker goroutines.
-
-</Concepts>
-
----
-
-## 5. Reading the compiler's mind with escape analysis (`-gcflags="-m=2"`)
-
-In C or C++, you manually write `malloc` vs local variables; in Go, **you write clean pointers and values, and the compiler's escape analyzer decides Stack vs. Heap statically during compilation!** Look directly at the compiler's two ironclad invariants inside `src/cmd/compile/internal/escape/escape.go`:
-
-<GitHubCode repo="golang/go" path="src/cmd/compile/internal/escape/escape.go" lines="L25-L34" url="https://github.com/golang/go/blob/master/src/cmd/compile/internal/escape/escape.go#L25-L34" caption="Exact escape analysis contract documented by Go compiler engineers: stack safety reduces strictly to ensuring pointers neither enter heap storage nor outlive their declaring stack frame.">
-```go
-// The two key invariants we have to ensure are:
-// (1) pointers to stack objects cannot be stored in the heap, and
-// (2) pointers to a stack object cannot outlive that object
-// (e.g., because the declaring function returned and destroyed the
-// object's stack frame, or its space is reused across loop iterations
-// for logically distinct variables).
-```
-</GitHubCode>
-
-<QuoteCard author="Bartłomiej Płotka" role="Author of Efficient Go & Thanos Co-Creator" sourceTitle="Efficient Go: How Does Go Manage Memory?" sourceUrl="https://www.efficientgo.dev/">
-Never guess whether a variable allocates on the stack or escapes to the heap—ask the compiler directly with -gcflags="-m=2". Four lines of compiler output regularly expose interface boxing and slice escapes invisible in plain code review.
-</QuoteCard>
-
-Run `go build -gcflags="-m=2"` right on small functions and look at real output from Go 1.27 below—notice how returning `&onHeap` triggers `flow: ~r0 <- &onHeap` and `moved to heap: onHeap`, while `InlineAdd` inlines completely cleanly (`0 escapes`):
-
-<TerminalOutput command="go build -gcflags='-m=2' bce_escape.go" label="Apple M2 · Go 1.27" caption="Real Go 1.27 compiler escape decision trace: InlineAdd stays stack-bound and inlines, whereas returning &onHeap forces heap allocation.">
+<TerminalOutput command="go run ." label="Go 1.27.1" caption="Run as shown. The 1% slow rate is the paper's assumption, not a measurement of your service.">
 ```text
-bce_escape.go:24:6: can inline InlineAdd with cost 4 as: func(int, int) int { return a + b }
-bce_escape.go:28:22: inlining call to InlineAdd
-bce_escape.go:3:21: s does not escape
-bce_escape.go:27:2: onHeap escapes to heap in EscapeDemo:
-bce_escape.go:27:2:   flow: ~r0 <- &onHeap:
-bce_escape.go:27:2:     from &onHeap (address-of) at bce_escape.go:29:9
-bce_escape.go:27:2:     from return &onHeap, onStack (return) at bce_escape.go:29:2
-bce_escape.go:27:2: moved to heap: onHeap
+  1 servers per page:   1.0% of pages are slow
+ 10 servers per page:   9.6% of pages are slow
+100 servers per page:  63.4% of pages are slow
 ```
 </TerminalOutput>
 
-Step through all four everyday escape patterns interactively below (`Return *User Pointer`, `Boxing into any / fmt`, `Dynamic make([]byte, n)`, and `Closure Reference Capture`) alongside each zero-allocation rewrite:
+<GoP15TailFanout />
 
-Also watch Go's **function inlining cost budget (`cost <= 80` compiler nodes)**. Small functions (`InlineAdd`, struct getters, option setters) paste directly into callers during SSA lowering. Because pointer arguments no longer cross function boundaries once inlined, inlining routinely transforms a heap-escaping local variable cleanly back onto the caller's zero-allocation stack frame—which is why inspecting `-gcflags="-m=2"` highlights both `can inline` and `escapes to heap` in a single trace!
+Doubling the pods does not move the `0.01` in that program. Only making each server slow less often does, which means changing the code or what it waits for. That is why "just scale it" has a ceiling for latency, even when it works for load.
 
-<GoEscapeAnalysisDemo />
+Scaling can also be a trap on the cost side. The Thanos project (a long-term store for Prometheus metrics) once hit this. Its first compaction code was deliberately naive and assumed one CPU and a small amount of memory. Users hit compaction that was too slow to keep up with incoming data, or that used hundreds of GB of memory per operation. Bartłomiej Płotka, who worked on the project, writes in *Efficient Go* that the team discussed a scheduler that would hand compaction jobs to many machines, and that this would probably have doubled or tripled the complexity of the system. Instead, a few days of work on the algorithm and code made compaction twice as fast and let it stream data from disk with little peak memory. A few years on, the project still had no distributed compaction beyond simple sharding.
 
-### Self-check questions before opening CPU caches & Go memory runtime
-
-1. Why does fanning out across 10 microservices running at `99%` reliability push the gateway's user-facing failure/tail rate close to `9.56%`? *(See Section 1)*
-2. Using the **RAER** template, write an explicit latency and memory budget before optimizing an API endpoint—and explain why Level 1/2 edits beat Level 3 string tricks. *(See Section 2)*
-3. Inside the **TFBO** workflow, why is modifying two design levels in one PR dangerous even if aggregate throughput seems faster? *(See Section 3)*
-4. Compare CPU execution steps to clean up a local stack variable vs. a heap-escaped `User` pointer. *(See Section 4)*
-5. Looking at Go's `escape.go` invariants, why does passing `x` into `fmt.Println("items:", x)` or `make([]byte, n)` force `x`/buffer onto the Heap? *(See Section 5)*
+Scaling out is fine when you need it. It also brings network calls, partial failures and extra moving parts, and a few days in the code can sometimes avoid all of that. You can only tell which case you are in by measuring.
 
 <Concepts>
 
-- **`-gcflags="-m=2"`**: Go compiler flag printing exact inlining decisions and data-flow graphs showing *which assignment path* forced variables to escape onto the Heap.
-- **Interface boxing escape**: storing a concrete value into `any` (`eface`) when the callee cannot prove non-retention (such as `fmt` reflection), forcing heap copy allocation.
-- **Function inlining**: copying a tiny callee function body (`cost <= 80` AST nodes) directly inside callers so arguments avoid crossing stack frames—often eliminating pointer escapes altogether!
+- **Capacity**: how much total traffic a service can handle. More pods raise it.
+- **Tail amplification**: when a request waits on `k` parts, the chance that at least one is slow is `1 - (1 - p)^k`. It grows quickly with `k`.
 
 </Concepts>
+
+---
+
+## Efficiency is not the same as speed
+
+People say "performance" for many things. *Efficient Go* splits it into three: **accuracy** (how many wrong results you produce), **speed** (how fast the work finishes, as latency or throughput) and **efficiency** (how much extra work and resources you spent). Płotka's example of efficiency: fetching 64 bytes of useful data from disk but allocating 420 bytes of memory to do it. That is about 15% memory efficiency (64 of 420 bytes), whatever the speed was.
+
+Speed and efficiency often move together, because a program that does less work usually finishes sooner. They can also split apart. *Efficient Go* gives a search that reads data from disk a million times. A faster disk might cut latency to a tenth, but making the code read the data a few times instead would beat that, and it costs nothing in hardware. Doing less work is usually the better first move.
+
+There is a second reason to aim at efficiency first. Speed is fragile: it depends on the machine, other processes, thermal limits and the network. The amount of work your code does, such as how many database calls it makes, is something you control and it travels with the code to any machine.
+
+Knuth's 97/3 quote fits here. Most code does not need tuning, and a small part does. The risk is not tuning too much or too little by itself. The risk is tuning without knowing which part is which. *Efficient Go* names this directly: programmers are bad at guessing which part of a program uses the most resources, and in most programs a small share of operations (the Pareto rule, often 20%) accounts for most of the cost.
+
+A small note on Big-O. It says how the work grows as the input grows, not how long one step takes. Two approaches with the same growth can differ a lot in real time, and on small inputs a "worse" one can win. So a Big-O argument does not replace a measurement. [Go benchmarking](/blog/go-observability-metrics-microbenchmarks-benchstat/) shows how to measure across input sizes.
+
+One cost is left for the hardware and runtime post: why a value lives on the stack or the heap, and what that costs. It has its own home in [Go hardware and GC](/blog/go-hardware-cpu-caches-virtual-memory-gc-allocator/).
+
+<Concepts>
+
+- **Accuracy, speed, efficiency**: wrong results, time taken, and wasted resources. They are three different things you can improve or give up.
+- **Efficiency ratio**: useful work divided by total work or resources used, for one named resource such as memory.
+
+</Concepts>
+
+---
+
+## RAER: write the budget first
+
+"Make it faster" is not a goal you can finish. A **RAER** (Resource-Aware Efficiency Requirements) is a short written budget for one operation. *Efficient Go* suggests an entry with the operation, the size and shape of the data, the maximum latency, and limits for the resources that matter, usually CPU and memory. You do not need an entry for every function. Start with the operations that are used the most or cost the most, and add more only when they matter.
+
+The point of the numbers is a stop rule. With a budget, step one of any tuning job is to measure, and if you are inside the budget, you are done.
+
+### A RAER for GET /todos
+
+The `Todo` service from the HTTP post has `GET /todos`, which returns every todo as JSON. Here is a RAER for it. I picked these numbers as an example for this post. In a real project they would come from your users or from your own capacity plan.
+
+```text
+Operation:    GET /todos (list all todos as JSON)
+Dataset:      1,000 todos
+p99 latency:  5 ms or less (handler only, measured in-process)
+Memory:       200 KB or less allocated per request
+CPU:          1 core
+```
+
+Note that the dataset is part of the budget. "5 ms" means nothing until you say for how much data.
+
+### Measure it
+
+To check the budget we need numbers. The program below runs `GET /todos` 2,000 times against an in-memory server with `n` todos, then prints the p50 (the median), the p99 and the memory allocated per request. It is a rough measurement tool, not a proper benchmark. [Go benchmarking](/blog/go-observability-metrics-microbenchmarks-benchstat/) covers the right way to measure.
+
+First the service pieces, copied unchanged from the HTTP post (`Todo`, a mutex-guarded `store` with `add` and `list`, `server`, `listTodos` and `writeJSON`). There is no middleware here, only the router.
+
+```go
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"runtime"
+	"slices"
+	"strconv"
+	"sync"
+	"time"
+)
+
+type Todo struct {
+	ID    int    `json:"id"`
+	Title string `json:"title"`
+	Done  bool   `json:"done"`
+}
+
+type store struct {
+	mu    sync.Mutex
+	todos []Todo
+}
+
+func (s *store) add(title string) Todo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t := Todo{ID: len(s.todos) + 1, Title: title}
+	s.todos = append(s.todos, t)
+	return t
+}
+
+func (s *store) list() []Todo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]Todo, len(s.todos))
+	copy(out, s.todos)
+	return out
+}
+
+type server struct{ store *store }
+
+func (s *server) listTodos(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.store.list())
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		slog.Error("write response", "err", err)
+	}
+}
+```
+
+Then the measuring `main`. It reads `n` from the command line (`os.Args[1]`, turned into an int by `strconv.Atoi`) and builds the store. `httptest.NewRequest` and `httptest.NewRecorder` are from the standard library: they let the router handle a request without a network, as in the [HTTP post](/blog/go-http-service-net-http-json-middleware/). `runtime.ReadMemStats` fills in counters about the heap, and `TotalAlloc` is the total bytes allocated so far, so its difference divided by the number of requests is the allocation per request. `slices.Sort` puts the times in order so we can pick the middle one and the 99th percentile. `for range requests` loops that many times ([Go memory](/blog/go-memory-data-types-slices-maps-strings/) shows this integer range).
+
+```go
+func main() {
+	n, _ := strconv.Atoi(os.Args[1])
+	s := &server{store: &store{}}
+	for i := 1; i <= n; i++ {
+		s.store.add("todo " + strconv.Itoa(i))
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /todos", s.listTodos)
+
+	const requests = 2000
+	times := make([]time.Duration, 0, requests)
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for range requests {
+		req := httptest.NewRequest("GET", "/todos", nil)
+		rec := httptest.NewRecorder()
+		start := time.Now()
+		mux.ServeHTTP(rec, req)
+		times = append(times, time.Since(start))
+	}
+	runtime.ReadMemStats(&after)
+
+	slices.Sort(times)
+	fmt.Printf("todos=%d requests=%d\n", n, requests)
+	fmt.Printf("p50=%v p99=%v\n", times[requests/2], times[requests*99/100])
+	fmt.Printf("allocated per request: %d KB\n", (after.TotalAlloc-before.TotalAlloc)/requests/1024)
+}
+```
+
+The recorder keeps the response body in memory, so the allocation figure includes that copy of the response. That is fine for a comparison between sizes, which is what we want.
+
+<TerminalOutput command="for n in 1000 10000 100000; do go run . $n; done" label="Apple M2 · Go 1.27.1" caption="One real run. The p99 moves a lot between runs (an earlier run gave 251 µs at 1,000 todos and 19.9 ms at 100,000), so treat these as orders of magnitude, not exact values.">
+```text
+todos=1000 requests=2000
+p50=113.583µs p99=352.458µs
+allocated per request: 86 KB
+todos=10000 requests=2000
+p50=1.180333ms p99=3.060083ms
+allocated per request: 1027 KB
+todos=100000 requests=2000
+p50=12.468792ms p99=32.296792ms
+allocated per request: 15438 KB
+```
+</TerminalOutput>
+
+<GoP15RaerCard />
+
+At 1,000 todos, which is the dataset the RAER names, the handler is far inside the budget: 352 µs against 5 ms, 86 KB against 200 KB. By the stop rule there is nothing to do. At 10,000 todos the p99 still passes (3.06 ms) but memory is five times over (1,027 KB). At 100,000 both fail. Memory and latency both grow roughly with the number of todos, and the budget told us which of the two broke first.
+
+Try it with your own budget below. Change the limits and watch the verdict change.
+
+<GoP15RaerCheckDemo />
+
+<Concepts>
+
+- **RAER (Resource-Aware Efficiency Requirements)**: a written budget for one operation: the operation, the data size, a p99 latency limit, and CPU and memory limits.
+- **Stop rule**: if the measurement is inside the RAER, you stop. No more tuning.
+- **p50 and p99**: the median request time, and the time that 99 of 100 requests beat.
+
+</Concepts>
+
+---
+
+## Five levels to optimize at
+
+Say `GET /todos` misses its budget at 10,000 todos. Where do you start? *Efficient Go* lists five **optimization design levels**, from the top down: the system, the algorithm and data structure, the code, the operating system, and the hardware. Each one is a place where you can make the work cheaper.
+
+<GoP15Levels />
+
+Here is the reasoning for starting at the top. It points to older studies that find speedups of about 10 to 20 times are often possible at any one level. Changes at a higher level can also make lower ones less valuable. If you serve 50 todos per request instead of 10,000, then the effort you spent shaving allocations from the 10,000-item path was wasted. The opposite does not hold. A code-level fix does not remove the need for a page limit.
+
+Some levels are not yours to change. As a Go developer you usually cannot choose the operating system's scheduler or the CPU, though you can set container limits and understand what they do. And Płotka notes that a level where you already got a 10 to 20 times gain gets expensive to push further, which is the point where looking at another level pays.
+
+For the rest of this series the levels line up like this: [Go production](/blog/go-production-stdlib-cpu-cache-gc-kubernetes/) and [Go hardware and GC](/blog/go-hardware-cpu-caches-virtual-memory-gc-allocator/) are about levels 4 and 5, [Go optimization patterns](/blog/go-three-rs-optimization-patterns-streaming-pooling/) about levels 2 and 3.
+
+<Concepts>
+
+- **Optimization design level**: one of five places to make work cheaper: system, algorithm and data structure, code, operating system, hardware.
+- **One level at a time**: change a single level in each round, so you know what helped.
+
+</Concepts>
+
+---
+
+## TFBO: the loop that keeps you honest
+
+Tuning a program can break it. A change that saves a copy can also share a slice that two goroutines now write to. *Efficient Go* handles this with a nine-step flow it calls **TFBO**: Test, Fix, Benchmark, Optimize. It splits the work into two phases that never mix.
+
+<GoP15TfboLoop />
+
+**The functionality phase (steps 1 to 3).** Write tests for what the code must do and run them. If they pass, move on. If they do not, fix the code, with no tuning yet, and test again. Tests first, because, as *Efficient Go* quotes, it is far easier to make a correct program fast than to make a fast program correct.
+
+**The efficiency phase (steps 4 to 8).** Measure a baseline, which is what we did above with the program that printed p99 and KB. Then compare it to the RAER (step 5). Inside budget? Release (step 9). Not? Find the bottleneck (step 6), pick one level (step 7) and optimize (step 8). Then go back to step 1: run the tests on the optimized code, then run the same measurement and compare it to the baseline.
+
+Two habits in that loop save the most pain:
+
+1. **Find the bottleneck before you change anything.** We are bad at guessing. For `GET /todos` at 10,000 todos, the budget says memory per request is the problem, but it does not say which line allocates. A profile does, and [Go profiling](/blog/go-profiling-pprof-flamegraphs-off-cpu-continuous/) shows how to read one.
+2. **Change one level per round, and test after every change.** Płotka admits to skipping the tests after a small change and then not being able to tell which of several changes broke things, which meant reverting all of them. A scoped test run after each attempt is cheap.
+
+For our service the walk goes like this. Step 4 was the measurement above. Step 5 says memory is over budget at 10,000 todos. Step 6 needs a profile, which we leave for the profiling post. Step 7 is a choice between levels: serving a page of todos is a system-level change, while encoding the JSON more cheaply is a code-level one. Which one is right depends on what the users need, and that is why the RAER names the dataset in the first place.
+
+Each round ends with the same question: are we within the budget now? When the answer is yes, stop. Rewriting readable code to save a few more microseconds that nobody asked for is the kind of premature work Knuth warned about.
+
+Next in the series: [Go hardware and GC](/blog/go-hardware-cpu-caches-virtual-memory-gc-allocator/) for what happens under the budget, [Go benchmarking](/blog/go-observability-metrics-microbenchmarks-benchstat/) for measuring properly, [Go profiling](/blog/go-profiling-pprof-flamegraphs-off-cpu-continuous/) for step 6, and [Go optimization patterns](/blog/go-three-rs-optimization-patterns-streaming-pooling/) for step 8.
+
+<Concepts>
+
+- **TFBO (Test, Fix, Benchmark, Optimize)**: a nine-step loop: test and fix until correct, measure against the RAER, then optimize one level and go back to the tests.
+- **Baseline**: the measurement taken before you change anything. Every later number is compared to it.
+- **Bottleneck**: the place where most of a resource is spent. Programs usually have only a few.
+
+</Concepts>
+
+---
+
+## Key takeaways
+
+- **More pods add capacity, not speed for one request.** If a request waits on many parts, the chance of at least one slow part is `1 - (1 - p)^k`, and new pods do not change `p`.
+- **Efficiency is doing less work.** Fixing the algorithm or the code first can avoid the cost and complexity of scaling out, as the Thanos compaction story shows.
+- **Write a RAER before tuning.** Operation, data size, p99 latency, memory and CPU. The data size is part of the budget.
+- **Inside the budget means stop.** Outside it, find the bottleneck, change one of the five levels and run the TFBO loop again, starting with the tests.
+- **Start at the top.** Changes to the system or the algorithm can make code-level work unnecessary.
+
+---
+
+## Review questions
+
+1. A page waits on 10 servers. Each one is slow on 1 request in 100. Why is the page slow about 9.6% of the time, and why do 10 more pods not change that? *(See "Why more pods do not fix tail latency")*
+2. A fetch returns 64 useful bytes but allocates 420. What is the memory efficiency, and why can a faster disk still be the wrong fix? *(See "Efficiency is not the same as speed")*
+3. Why does the RAER for `GET /todos` name 1,000 todos? What happened to the same handler at 10,000? *(See "RAER: write the budget first")*
+4. You can serve a page of 50 todos, or encode JSON more cheaply. Which levels are those, and which would you try first? *(See "Five levels to optimize at")*
+5. Why does step 8 of TFBO send you back to step 1 and not on to step 9? *(See "TFBO: the loop that keeps you honest")*
 
 </En>
 
 <Vi>
 
-<Figure src={heroSlideRule} alt="Thước loga cơ khí căn vạch tỉ lệ chính xác" caption="Kỹ sư xây dựng luôn đo ngưỡng sai số trên thước trước khi đổ bê tông — hệt như viết bản cam kết RAER chốt trần độ trễ và RAM trước khi đụng tay sửa dòng code Go nào." sourceTitle="Wikimedia Commons: Slide rule" sourceUrl="https://commons.wikimedia.org/wiki/File:2023_Suwak_logarytmiczny_(1).jpg" />
+<Figure src={heroSlideRule} alt="Con trượt của thước loga cơ khí chính xác đặt trên các thang logarit" caption="Thước loga được đọc theo dung sai viết sẵn. RAER làm việc tương tự cho một service: nó nói bằng con số thế nào là đủ nhanh, trước khi ai đó sửa code." sourceTitle="Wikimedia Commons: Slide rule" sourceUrl="https://commons.wikimedia.org/wiki/File:2023_Suwak_logarytmiczny_(1).jpg" />
 
-> "Lập trình viên tốn vô khối thời gian ngồi lo lắng về tốc độ ở những đoạn code không hề quan trọng... Hãy quên đi chuyện tối ưu vặt ở 97% thời gian: tối ưu non chính là cội nguồn của mọi rắc rối. **Nhưng chớ bao giờ bỏ lỡ cơ hội ở đúng 3% điểm nút then chốt kia.**"
+> "Ta nên quên đi những tối ưu vụn vặt, khoảng 97% thời gian: tối ưu sớm là gốc rễ của mọi tội lỗi. Nhưng cũng đừng bỏ lỡ cơ hội trong 3% quan trọng đó."
 > &mdash; *Donald Knuth*, *Structured Programming with go to Statements* (1974)
 
-### Vì sao tối ưu mò mẫm làm hỏng code Go — và ba tai nạn thực tế trên production
+Hai kỹ sư Google, Jeffrey Dean và Luiz André Barroso, mô tả một service lý tưởng hóa trong đó mỗi server chỉ chậm (hơn một giây) ở 1 request trên 100. Nghe thì ổn. Rồi một trang cần câu trả lời từ 100 server như vậy cùng lúc, và [63% số trang mất hơn một giây](https://research.google/pubs/the-tail-at-scale/). Không ai viết code tệ đi. Trang chỉ đơn giản phải chờ phần chậm nhất của nó, và với 100 phần thì phần chậm nhất thường là phần chậm thật.
 
-Câu chuyện đau đầu quen thuộc ở nhiều đội backend bắt đầu y hệt nhau: p99 đột ngột dựng đứng, bộ autoscaler bật thêm hàng chục pod đắt đỏ, rồi anh em lao vào đập bỏ code Go sạch đẹp để nhét đủ thứ `sync.Pool` hay ép kiểu `unsafe` — mà không hề kiểm chứng xem nút thắt thật sự đang kẹt ở code CPU, câu SQL tuần tự hay áp lực Garbage Collector. Tối ưu mù thường dẫn thẳng vào ba cái bẫy sau:
+Phản xạ quen thuộc khi service chậm là chạy thêm bản sao. Với 63% kia thì cách đó chẳng giúp gì. Bài này nói về việc nên làm gì thay thế: quyết định **có** nên tối ưu một đoạn code không, nên sửa ở **đâu**, và **khi nào dừng**. Viết một vòng lặp nhanh hơn là phần dễ. Biết nó có đáng viết hay không mới là kỹ năng.
 
-- **Nhân gấp 10 pod Kubernetes, p99 vẫn chậm y nguyên.** Kéo từ 2 lên 20 pod khiến hóa đơn cloud đội gấp 10, nhưng một pha parse JSON chậm `180 ms` vẫn chậm đúng `180 ms` cho từng request chạm vào từng pod — chưa kể hệ thống gọi chéo 10 microservice song song sẽ khuếch đại tỷ lệ khách hàng dính cú giật đuôi lên tới gần `10%`!
-- **Prometheus & Thanos dính vòng lặp OOM khi bùng nổ cardinality.** Trong cụm metrics nhiều tenant, các nhãn động như `user_id` hay URL thô đẻ ra hàng triệu chuỗi ngắn và map bucket mỗi chu kỳ scrape; tăng giới hạn RAM container chỉ kéo dài thêm hai chục phút trước khi compaction đụng độ với đợt quét GC.
-- **Cloudflare tiết kiệm ~30% CPU chỉ nhờ sửa một lỗi escape.** Trên các proxy tốc độ cao, việc gọi helper log nhận `...any` vô tình đóng hộp hàng chục triệu giá trị nguyên thủy lên Heap mỗi giây — biến mất hoàn toàn ngay khi soi `-gcflags="-m=2"`.
-- **Ba tuần đánh bóng JSON trong khi 94% thời gian kẹt ở N+1 SQL.** Đội ngũ gọt được `0,4 ms` chỗ serialize JSON nhưng lại bỏ sót endpoint đang bắn `180` câu SQL nối đuôi mất `92 ms`! Ra tay nhầm **Tầng thiết kế** tốn công sức vô ích.
+<Callout type="note" title="Nhắc lại từ các bài trước">
 
-Bài viết này dựng lại toàn bộ bộ khung tư duy tối ưu hiệu năng Go từ tầng cao nhất xuống sát trình biên dịch:
+Bài này dùng ba thứ bạn đã biết:
 
-1. **Vượt ra ngoài Big-O & ảo tưởng scale ngang**: vì sao công thức Big-O giấu hằng số CPU cache và lý do tăng pod không giảm độ trễ đuôi.
-2. **Hợp đồng RAER & nguyên lý Pareto 80/20 qua 5 Tầng thiết kế**: luôn chốt số đo trước và đánh từ tầng cao đòn bẩy 10x trở xuống.
-3. **Kỷ luật TFBO 9 bước**: giữ tường thành bảo vệ giữa Test đúng chức năng với Benchmark tối ưu.
-4. **Stack Frame vs. Heap trên CPU**: lý do dọn Stack chỉ tốn 1 lệnh CPU còn dọn Heap phải trả giá tận 2 lần.
-5. **Đọc suy nghĩ của compiler bằng Escape Analysis (`-gcflags="-m=2"`)**: mô phỏng từng bước cách compiler quyết định đặt biến trên Stack hay đẩy lên Heap.
+- [Go testing](/blog/go-testing-table-tests/): file `_test.go` và `go test`. Vòng lặp bên dưới bắt đầu bằng test.
+- [Xây HTTP service bằng Go](/blog/go-http-service-net-http-json-middleware/): `Todo` service (`store`, `server`, `listTodos`, `writeJSON`). Đây là ví dụ xuyên suốt.
+- [Bộ nhớ trong Go](/blog/go-memory-data-types-slices-maps-strings/): `for range n` (vòng lặp trên một số nguyên) và cách slice được sao chép.
 
-<Callout type="note" title="Tóm tắt nhanh (TL;DR)">
-Luôn ghi ra **hợp đồng RAER** (cỡ dữ liệu thật, trần độ trễ và trần RAM) trước khi sửa dòng code nào. Tấn công nghẽn từ **Tầng thiết kế cao nhất** trở xuống (**Hệ thống → Thuật toán → Code → OS → Phần cứng**), giữ chặt chu trình **TFBO** để không phá hỏng logic đúng, dừng tay ngay khi đạt RAER và kiểm chứng cấp phát Heap bằng `go build -gcflags="-m=2"`.
 </Callout>
 
-<Concepts title="Giải thích nhanh mấy thuật ngữ nền tảng">
+<Callout type="note" title="TL;DR">
+Thêm pod làm tăng công suất nhưng không đụng tới độ trễ đuôi. Trước khi tối ưu bất cứ thứ gì, hãy viết một **RAER** (Resource-Aware Efficiency Requirements, yêu cầu hiệu năng có tính tới tài nguyên): thao tác, cỡ dữ liệu, ngân sách độ trễ p99 và ngân sách bộ nhớ. Đo theo nó. Nếu đã trong ngân sách thì dừng. Nếu chưa, tìm điểm nghẽn, đổi **một** trong năm tầng, rồi chạy lại vòng **TFBO** (Test, Fix, Benchmark, Optimize), bắt đầu bằng test.
+</Callout>
 
-- **Tối ưu non (Premature Optimization)**: viết code phức tạp hóa ở những đường chạy hiếm hoặc đã đủ nhanh trước khi có mục tiêu RAER đo đạc cụ thể.
-- **Bão hòa hậu-Dennard (Post-Dennard plateau)**: từ ~2005, xung nhịp đơn nhân CPU không tự nhân đôi được nữa vì giới hạn nhiệt; tăng tốc giờ đến từ tận dụng cache CPU, giảm rác bộ nhớ và bỏ việc thừa.
-- **Quy luật Pareto 80/20 (3% điểm nóng)**: trong hệ thống backend thật, 80–97% thời gian CPU hoặc rác bộ nhớ thường dồn vào chưa tới 3–20% số hàm trọng yếu.
-- **Escape analysis (Phân tích thoát Stack)**: pha phân tích tĩnh lúc biên dịch xem một biến có thể nằm gọn trên Stack frame rồi biến mất không dấu vết hay bắt buộc phải đưa lên Heap cho GC quản lý.
+<Concepts>
 
-</Concepts>
-
----
-
-## 1. Vượt ra ngoài Big-O: hằng số phần cứng và hiệu ứng khuếch đại độ trễ đuôi
-
-Hiệu năng phần mềm chia làm hai mục tiêu rất khác nhau: **thông lượng (throughput)** — hệ thống gánh nổi bao nhiêu request/giây; và **độ trễ (latency)** — *một* request chờ bao lâu. Mở thêm pod Kubernetes chỉ cứu được thông lượng đang quá tải. Còn từ khi chip chạm ngưỡng ~3–4 GHz, việc thêm máy hoàn toàn bất lực trước một vòng lặp cấp phát rác tốn 180 ms hay một khóa Mutex bị tranh chấp!
-
-Nguy hiểm hơn nữa là **khuếch đại độ trễ đuôi (Tail-Latency Amplification)**. Giả sử trang chủ của bạn gọi song song tới 10 microservice Go phía sau. Dù từng service riêng lẻ đạt SLO `99%` (chỉ `1%` bị vấp GC hay nghẽn mạng), xác suất để *ít nhất 1 trong 10* nhánh con vấp đuôi chậm nhảy vọt lên $1 - 0.99^{10} \approx 9,56\%$! Nghĩa là cứ 10 lượt mở trang thì gần 1 khách hàng phải chờ thằng chậm nhất.
-
-<QuoteCard author="Jeffrey Dean & Luiz André Barroso" role="Kỹ sư Google" sourceTitle="The Tail at Scale (CACM 2013)" sourceUrl="https://research.google/pubs/the-tail-at-scale/">
-Một SLA 1 giây nghe có vẻ dư dả, nhưng khi một request phải gọi tỏa qua nhiều backend, chỉ một tỷ lệ rất nhỏ các nhánh phản hồi chậm cũng sẽ chi phối hoàn toàn độ trễ p99 mà người dùng cuối cảm nhận.
-</QuoteCard>
-
-Đừng nhầm lẫn giữa *tốc độ đỉnh (performance)* với *hiệu quả vận hành (efficiency = Giá trị / Chi phí tài nguyên)*. Bật 40 container chạy 8% CPU chỉ để gánh một thuật toán đọc file cồng kềnh là đốt tiền vô ích — trong khi cắt gọn đường cấp phát rác giúp vừa giảm 60% tiền server vừa hết hẳn hiện tượng giật p99.
-
-<GoEffCostVsLatencyCascade />
-
-### Vì sao lý thuyết Big-O dễ đánh lừa kỹ sư Go ở dữ liệu nhỏ và vừa
-
-Giáo trình thuật toán dạy **Big-O** (`O(1)` vs `O(N)`) theo giả định `N -> vô cùng`, nhưng bỏ quên **hằng số phần cứng `c1`** và **chi phí cấp phát bộ nhớ**! Hãy tưởng tượng tìm 16 quyển vở đang xếp ngay trước mặt bàn (`O(N)` duyệt bằng mắt cực lẹ) so với đi bộ xuống kho tra mục lục thẻ thư viện (`O(1)` băm khóa nhưng mất công đi lại).
-
-Xem số đo thật trên Apple M2 Go 1.27 so sánh quét tuyến tính một slice 16 phần tử với tra cứu `map[int]int`:
-
-<TerminalOutput command="go test -bench='Benchmark(ScanSlice16|LookupMap16)' -benchmem -count=3 ." label="Apple M2 · Go 1.27" caption="Đo thật trên Apple M2 Go 1.27: quét slice 16 phần tử trên L1 cache (~5.4 ns) bám sát tra SwissTable có sẵn (~4.5 ns) với 0 cấp phát; còn nếu dựng Map động trong vòng lặp thì chậm hơn nhiều lần.">
-```text
-goos: darwin   goarch: arm64   cpu: Apple M2
-BenchmarkScanSlice16-8    217078412     5.434 ns/op     0 B/op     0 allocs/op
-BenchmarkScanSlice16-8    222393444     5.542 ns/op     0 B/op     0 allocs/op
-BenchmarkLookupMap16-8    268162940     4.483 ns/op     0 B/op     0 allocs/op
-BenchmarkLookupMap16-8    265658908     4.592 ns/op     0 B/op     0 allocs/op
-```
-</TerminalOutput>
-
-<GoEffComplexityTrap />
-
-Điểm tinh tế nằm ngay ở số đo trên: khi 1 `map` 16 phần tử đã dựng sẵn đứng yên, nhóm 8-slot SwissTable thắng sít sao (`4,5 ns` vs `5,4 ns`). Nhưng nếu mỗi HTTP request tự khởi tạo động một `make(map[int]int, 16)` trên Heap thay vì dùng slice nhỏ trên Stack, chi phí dựng map + dọn GC vọt lên gấp **10–30 lần** việc quét slice nằm trọn trên một đường L1 cache!
-
-<GoEffComplexityTradeoff />
-
-<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
-
-- **Khuếch đại độ trễ đuôi (Tail-latency amplification)**: xác suất $1 - (1 - p)^k$ khiến một trang web gọi tỏa qua `k` dịch vụ con dễ dính ít nhất một nhánh chạy chậm gấp bội từng dịch vụ lẻ.
-- **Throughput vs. Latency**: sức tải request/giây của cả cụm máy vs. thời gian phản hồi của một request đơn; mở rộng pod chỉ tăng throughput chứ không chữa được latency cao.
-- **Hằng số phần cứng**: độ trễ thực sự (`1 ns` L1 cache vs `100 ns` RAM) bị ẩn đi trong phép ước lượng Big-O lý thuyết.
+- **Pod**: một bản sao đang chạy của service trong Kubernetes. Thêm pod nghĩa là chạy thêm bản sao.
+- **Độ trễ (latency) và p99**: độ trễ là thời gian một request mất. p99 là mốc thời gian mà 99% request nhanh hơn, tức cứ 100 request có 1 cái chậm hơn mốc này.
+- **Fan-out**: một request đến kéo theo nhiều lệnh gọi sang server khác và chờ tất cả.
+- **Độ trễ đuôi (tail latency)**: phần chậm của phân phối độ trễ, từ p99 trở lên.
 
 </Concepts>
 
 ---
 
-## 2. Hợp đồng RAER & nguyên lý Pareto 80/20 qua 5 Tầng thiết kế
+## Vì sao thêm pod không chữa được độ trễ đuôi
 
-Thay vì đặt tiêu đề task mơ hồ như *"tối ưu importer cho nhanh lên"*, hãy chốt rõ một bản **RAER (Resource-Aware Efficiency Requirements)** gắn liền kích thước input, trần tốc độ và trần RAM ngay từ đầu — và dừng ngay khi đạt:
+Pod là một bản sao đang chạy của service. Bộ cân bằng tải (load balancer) chia request cho các pod, nên thêm pod nghĩa là mỗi pod nhận ít request hơn. Hàng đợi ngắn đi và tổng lưu lượng phục vụ được tăng lên. Cái này gọi là **công suất (capacity)**.
 
-```go
-// Ghi sẵn hợp đồng RAER trước khi mở profiler hay sửa thuật toán:
-// Tác vụ:       Sum() đọc 2.000.000 dòng số nguyên 9 chữ số ngăn cách bởi xuống dòng
-// Trần Latency: <= 10 ns/dòng trên 1 CPU (~20 ms tổng) HOẶC <= 2,5 ns/dòng trên 4 CPU
-// Trần RAM:     <= 10 KB Heap bất kể file nặng 1 triệu hay 100 triệu dòng!
-// Điểm dừng:    Chạy benchmark vượt hai ngưỡng trên là DỪNG TỐI ƯU NGAY.
-```
-
-Khi benchmark cho thấy code hiện tại đang chạy mất `45 ms` và ngốn `140 MB` RAM, ta sửa từ đâu? Hãy xem **5 Tầng thiết kế tối ưu** như đi sửa rò nước trong chung cư: khóa van tổng bị gãy (Tầng 1–2) cầm nước trong 30 giây; còn ngồi lấy khăn giấy lau sàn trong khi ống vẫn vỡ (Tầng 4–5) làm kiệt sức mà chẳng giải quyết vấn đề.
-
-Xem mức tác động thực tế của **Tầng 1 (`singleflight`)** trước khi đụng vào những thủ thuật code lắt léo:
+Nó không đổi thời gian một request mất trên một pod. Nếu request chậm vì phải parse body lớn, cấp phát quá nhiều hoặc chờ một lock, thì pod mới chạy cùng đoạn code đó và chậm y như vậy. Con số trong bài báo của Google cho thấy rõ điều này. Phép tính dưới đây viết thành chương trình Go ngắn. Một trang chậm khi ít nhất một server của nó chậm, tức là 1 trừ đi xác suất tất cả đều nhanh.
 
 ```go
-var sg singleflight.Group
+package main
 
-// Đòn bẩy Tầng 1: 500 request đồng thời hỏi cùng một SKU sản phẩm
-// chỉ bắn ĐÚNG 1 CÂU SQL xuống DB thay vì làm sập database upstream!
-func GetCatalogItem(ctx context.Context, sku string) (*Item, error) {
-	v, err, _ := sg.Do(sku, func() (any, error) {
-		return db.QueryItem(ctx, sku) // chạy 1 lần; 500 goroutine chia nhau kết quả
-	})
-	if err != nil {
-		return nil, err
+import (
+	"fmt"
+	"math"
+)
+
+func main() {
+	slow := 0.01 // each server is slow on 1 request in 100
+	for _, servers := range []int{1, 10, 100} {
+		// A page is slow if at least one of its servers is slow:
+		// 1 minus the chance that every server is fast.
+		pageSlow := 1 - math.Pow(1-slow, float64(servers))
+		fmt.Printf("%3d servers per page: %5.1f%% of pages are slow\n", servers, pageSlow*100)
 	}
-	return v.(*Item), nil
 }
 ```
 
-Xử lý từ tầng Kiến trúc hoặc Thuật toán luôn cắt được 90–99% lãng phí chỉ bằng vài chục dòng code Go sạch sẽ — sau khi hai tầng trên đã chuẩn rồi mới cần nhìn xuống trình biên dịch (Tầng 3) hoặc runtime (Tầng 4).
+`math.Pow(x, y)` lấy `x` mũ `y`. `%5.1f%%` in số thực với một chữ số thập phân, còn `%%` in ra dấu phần trăm.
 
-<GoEffRaerAndLevels />
-
-| Tầng thiết kế | Bạn chỉnh gì ở tầng này? | Đòn bẩy điển hình | Độ rủi ro / Công sức | Ví dụ thực chiến trong Go |
-| :--- | :--- | :--- | :--- | :--- |
-| **1. Hệ thống / Kiến trúc** | Cache biên, gộp batch RPC, queue bất đồng bộ, bỏ việc trùng | **10x–100x** | Code sạch, đụng thiết kế luồng | Dùng `singleflight` gộp 500 request trùng gọi 1 lần DB |
-| **2. Thuật toán & Cấu trúc** | Streaming thay `io.ReadAll`, đổi vòng lặp $O(N^2)$ | **5x–50x** | Code Go thuần sáng sủa | Gom 200 câu `SELECT` nối đuôi thành 1 query `WHERE IN` |
-| **3. Code & Trình biên dịch** | `make([]T, 0, n)`, bỏ escape Heap, `sync.Pool`, inline | **1,5x–5x** | Vừa; cần số đo `-bench` rõ | Dùng lại buffer tạm (`bytes.Buffer.Reset`) trong vòng nóng |
-| **4. OS / Runtime / Container** | Tinh chỉnh `GOGC`/`GOMEMLIMIT`, `automaxprocs` | **1,1x–2x** | Rủi ro thấp nếu có metrics | Đặt `GOMEMLIMIT=900MiB` trên pod 1 GiB cắt giảm 40% vòng GC |
-| **5. Phần cứng / Assembly** | SIMD vector, nén padding field struct, ASM nội tại | **1,2x–4x** | Phức tạp nhất, kén nền tảng | Đảo thứ tự trường struct (`24B -> 16B`) tránh đệm trống |
-
-<Figure src={turbineImg} alt="Cánh tua-bin thủy nhiệt điện cỡ lớn trên giá kiểm định" caption="Kỹ thuật tối ưu hiệu quả nhất luôn gỡ lực cản ở dòng chảy chính (Tầng Hệ thống & Thuật toán) trước khi đi đánh bóng từng chi tiết nhỏ bên dưới." sourceTitle="Wikimedia Commons: Steam turbine rotor Galiza" sourceUrl="https://commons.wikimedia.org/wiki/File:2018._Sotavento._Steam_turbine_rotor._Galiza-2.jpg" />
-
-<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
-
-- **RAER (Resource-Aware Efficiency Requirements)**: bản cam kết kỹ thuật định lượng rõ quy mô input (`N`), giới hạn thời gian (`<= X ms`) và giới hạn bộ nhớ (`<= Y KB`) làm chuẩn dừng tay.
-- **5 Tầng thiết kế tối ưu**: thang ưu tiên sửa hiệu năng từ cao xuống thấp (**Hệ thống -> Thuật toán -> Code -> OS -> Phần cứng**) để thu lợi 10x mà code vẫn dễ đọc.
-- **Single-flight (`golang.org/x/sync/singleflight`)**: công cụ Tầng 1 gộp các goroutine gọi trùng một khóa cùng lúc về duy nhất 1 lời gọi backend rồi chia sẻ chung kết quả.
-
-</Concepts>
-
----
-
-## 3. Giữ kỷ luật sắt qua vòng lặp TFBO 9 bước
-
-> "Hãy làm cho nó chạy được trước, rồi làm cho nó đúng đắn, rồi mới làm cho nó nhanh."
-> &mdash; *Kent Beck*
-
-Tối ưu hiệu năng thiếu dây an toàn rất dễ biến một API chạy đúng 30 ms thành một con bug 3 ms sai lệch số tiền! Quy trình **TFBO (Test → Fix → Benchmark → Optimize)** dựng vách ngăn rạch ròi giữa **Pha Chức năng** (Unit/Integration test chốt logic biên chuẩn xác 100%) với **Pha Hiệu năng** (đo baseline so với RAER, soi đúng nút thắt #1 bằng `pprof`, sửa duy nhất *một* tầng thiết kế rồi bắt buộc quay ngược về Bước 1 chạy lại Unit Test!).
-
-<GoEffTfboWorkflow />
-
-Tránh hai lỗi rất hay gặp khi đội nhóm lười chạy đủ quy trình TFBO:
-
-1. **Sửa gộp hai tầng tối ưu vào một PR.** Vừa đổi `bufio.Scanner` sang mảng byte thủ công, vừa chia thêm goroutine chạy song song cùng một commit — tới lúc latency tụt 15% hoặc dính race condition chẳng biết do phần nào gây ra. Mỗi vòng TFBO chỉ thay đúng **một tầng** và lưu bảng benchmark trước/sau.
-2. **Viết mẹo đường nóng mà thiếu chú thích lý do.** Với những đoạn code buộc phải hy sinh chút độ gọn (như ép kiểu chuỗi không copy hoặc tái sử dụng mảng qua pool), luôn đính kèm **số liệu benchmark chứng minh tại sao cần nó** và bình luận nhắc ranh giới bất biến để người bảo trì sau không vô tình phá hỏng tối ưu!
-
-| Kỷ luật TFBO | Hệ quả nếu bỏ qua | Thực hành chuẩn xác |
-| :--- | :--- | :--- |
-| **Test đúng trước (`Functionality`)** | Code chạy cực nhanh nhưng trả nhầm tổng tiền | Giữ bộ test edge case & fuzz luôn xanh 100% trước khi tối ưu |
-| **Đo kiểm theo RAER** | Sa đà sửa vặt không điểm dừng mãi chẳng ship | Dừng tay và chốt PR ngay khi benchmark vượt qua ngưỡng RAER |
-| **Mỗi vòng sửa đúng 1 thứ** | Trộn thay đổi làm mờ nguyên nhân tụt p99 / bug race | Mỗi commit chỉ sửa 1 tầng thiết kế, đối chiếu qua `benchstat` |
-| **Ghi chú lý do code tối ưu** | Đồng đội dọn cho đẹp làm rớt hiệu năng trở lại | Kèm số benchmark & lưu ý bất biến ngay cạnh đoạn code đặc biệt |
-
-<Figure src={metronomeImg} alt="Bộ máy đồng hồ nhịp cơ học Maelzel bằng đồng thau với quả lắc cân chỉnh nhịp" caption="Giống nhịp đếm của chiếc metronome, vòng lặp TFBO giữ tiết tấu ổn định: dừng lại đúng vạch RAER chứ không biến code sạch thành mê cung vì những mili-giây không ai cảm nhận." sourceTitle="Wikimedia Commons: Metronome Maelzel mechanism" sourceUrl="https://commons.wikimedia.org/wiki/File:Metronome_Ma%C3%ABlzel_mechanism.jpg" />
-
-Thử bấm qua ba tình huống chốt chặn phổ biến trong trình mô phỏng quyết định TFBO bên dưới — nhận diện lúc nào dừng ship luôn, lúc nào nâng hẳn lên Tầng 2:
-
-<GoEffTfboDecisionDemo />
-
-<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
-
-- **Chu trình TFBO**: **Test** (chức năng) -> **Fix** (sửa đúng) -> **Benchmark** (đối chiếu RAER & soi 1 điểm nghẽn) -> **Optimize** (1 tầng thiết kế) -> **Quay lại Test**.
-- **Mốc Baseline**: số đo tốc độ & lượng alloc ghi lại trước khi chạm tay tối ưu để đối chứng định lượng công bằng sau mỗi thay đổi.
-
-</Concepts>
-
----
-
-## 4. Stack Frame vs. Heap trên CPU: câu chuyện 1 lệnh máy vs. trả giá 2 lần
-
-Bất kỳ ai mới chuyển qua Go cũng từng thắc mắc: *"Go có bộ dọn rác GC tự động rồi thì việc một hàm viết `return &u` hay `return u` có gì khác nhau đâu?"*
-
-Hãy ví bộ nhớ giống hai cách đầu bếp lấy gia vị lúc nấu:
-- **Stack** chính là túi tạp dề đeo trước bụng mỗi đầu bếp: thò tay lấy trong tích tắc bằng phép cộng trừ thanh ghi (`SUB SP, #32`), đồ nằm nóng sẵn trong L1 cache, và giây phút nấu xong món (`return`), trượt thanh ghi `SP` ngược lên giải phóng toàn bộ bộ nhớ tạm **chẳng tốn lấy 1 nanô-giây dọn dẹp**! Quan trọng hơn: mỗi goroutine sở hữu riêng Stack nên không bao giờ cần Lock, không đụng Atomic đa nhân và không kích hoạt Write Barrier của GC.
-- **Heap** là kho tổng có bảo vệ khóa cửa (`runtime.mallocgc`): mỗi lần xin một biến trên Heap phải dò tìm kích thước trống, xóa trắng bit cũ (`memclrHeapBytes`), ghi sổ theo dõi con trỏ cho Garbage Collector, rồi vài mili-giây sau đội thu gom GC phải vất vả đánh dấu (Mark) và quét dọn (Sweep) — thậm chí bắt goroutine người dùng làm chậm lại đi dọn phụ (**Mark Assist**) khi tốc độ xả rác vượt quá khả năng thu gom! Chưa kể các khối trên Heap thường nằm rải rác qua nhiều trang nhớ, làm tăng nguy cơ vấp cache miss CPU.
-
-Đây chính là lý do truyền các struct nhỏ (`Order`, `Money`, `Point`) **theo giá trị (`func Total(o Order)`)** thay vì quen tay trả con trỏ `*Order` khắp nơi giúp giữ trọn dữ liệu nóng trên Stack, triệt tiêu hàng triệu lần cấp phát Heap mỗi giây dưới tải lớn.
-
-<GoEffStackFrameTrace />
-
-| Thuộc tính | Stack Frame Goroutine (`SUB SP`) | Heap được quản lý bởi GC (`newobject`) |
-| :--- | :--- | :--- |
-| **Chi phí cấp phát** | **1 lệnh CPU** (~0,3 ns dịch chuyển `SP`) | ~20–60 ns tìm slot size-class + xóa byte |
-| **Chi phí giải phóng** | **0 ns** ngay khi hàm `return` (`ADD SP`) | GC quét con trỏ Tri-color & Sweep về sau |
-| **Độ thân thiện Cache** | **Nóng sẵn L1** (tái sử dụng liên tiếp trên 1 luồng) | Nằm rải rác qua các mspan; dễ cache miss hơn |
-| **Ảnh hưởng lên GC** | Vô hình với `GOGC` & `GOMEMLIMIT` | Cộng thẳng vào `heap_live`, đẩy tần suất GC |
-
-<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
-
-- **Con trỏ đỉnh Stack (`SP`)**: thanh ghi phần cứng đánh dấu ranh giới khung hàm đang chạy; thêm hay xóa biến cục bộ chỉ cần cộng trừ đúng 1 hằng số kích thước khung.
-- **`runtime.mallocgc`**: hàm cốt lõi của Go runtime dùng xin bộ nhớ trên Heap, chia luồng nhanh theo `mcache` của từng `P` trước khi xin từ vùng chung.
-- **Mark Assist**: cơ chế hãm phanh của Go runtime ép chính goroutine đang cấp phát quá nhanh phải phụ quét vài phần tử GC để ngăn Heap tràn phình không kiểm soát.
-
-</Concepts>
-
----
-
-## 5. Đọc suy nghĩ của compiler qua Escape Analysis (`-gcflags="-m=2"`)
-
-Trong C/C++, bạn tự quyết định dùng `malloc` hay biến cục bộ; còn trong Go, **bạn cứ viết con trỏ hay giá trị cho tự nhiên, rồi pha Escape Analysis của trình biên dịch sẽ tự quyết định Stack hay Heap một cách tĩnh ngay lúc build!** Xem hai định luật bất biến nằm thẳng trong mã nguồn trình biên dịch `src/cmd/compile/internal/escape/escape.go`:
-
-<GitHubCode repo="golang/go" path="src/cmd/compile/internal/escape/escape.go" lines="L25-L34" url="https://github.com/golang/go/blob/master/src/cmd/compile/internal/escape/escape.go#L25-L34" caption="Hai nguyên tắc vàng viết ngay trong source code bộ phân tích escape của trình biên dịch Go: con trỏ trỏ vào Stack không bao giờ được lọt vào Heap hoặc sống dai hơn stack frame chứa nó.">
-```go
-// Hai bất biến cốt lõi compiler bắt buộc giữ:
-// (1) con trỏ trỏ tới biến trên Stack không bao giờ được lưu vào Heap, và
-// (2) con trỏ trỏ tới biến trên Stack không được sống lâu hơn vòng đời
-// của chính biến đó (ví dụ thoát ra ngoài khi hàm return hủy Stack frame,
-// hoặc sống vắt qua các vòng lặp cho các thực thể logic khác nhau).
-```
-</GitHubCode>
-
-<QuoteCard author="Bartłomiej Płotka" role="Tác giả Efficient Go & Đồng sáng lập Thanos" sourceTitle="Efficient Go: How Does Go Manage Memory?" sourceUrl="https://www.efficientgo.dev/">
-Đừng bao giờ đoán mò xem một biến nằm trên Stack hay bị đẩy lên Heap — hãy hỏi thẳng trình biên dịch bằng cờ -gcflags="-m=2". Chỉ bốn dòng log từ compiler cũng đủ lột trần những pha đóng hộp interface hay thoát slice mà mắt thường dễ dàng bỏ qua.
-</QuoteCard>
-
-Chạy thử ngay cờ `-gcflags="-m=2"` trên Go 1.27 cho ví dụ thực tế bên dưới: `InlineAdd` nhỏ gọn được inline sạch sẽ (`0 escapes`), trong khi trả `&onHeap` đẩy compiler phát ra dòng `flow: ~r0 <- &onHeap` và `moved to heap: onHeap`:
-
-<TerminalOutput command="go build -gcflags='-m=2' bce_escape.go" label="Apple M2 · Go 1.27" caption="Output thật từ trình biên dịch Go 1.27: hàm InlineAdd ở lại Stack và tự inline, còn trả con trỏ &onHeap kích hoạt cấp phát Heap ngay lập tức.">
+<TerminalOutput command="go run ." label="Go 1.27.1" caption="Chạy đúng như trên. Mức chậm 1% là giả định của bài báo, không phải số đo của service bạn.">
 ```text
-bce_escape.go:24:6: can inline InlineAdd with cost 4 as: func(int, int) int { return a + b }
-bce_escape.go:28:22: inlining call to InlineAdd
-bce_escape.go:3:21: s does not escape
-bce_escape.go:27:2: onHeap escapes to heap in EscapeDemo:
-bce_escape.go:27:2:   flow: ~r0 <- &onHeap:
-bce_escape.go:27:2:     from &onHeap (address-of) at bce_escape.go:29:9
-bce_escape.go:27:2:     from return &onHeap, onStack (return) at bce_escape.go:29:2
-bce_escape.go:27:2: moved to heap: onHeap
+  1 servers per page:   1.0% of pages are slow
+ 10 servers per page:   9.6% of pages are slow
+100 servers per page:  63.4% of pages are slow
 ```
 </TerminalOutput>
 
-Tự tay bấm qua 4 tình huống hay đẩy biến lên Heap nhất (`Trả *User`, `Đóng hộp any / fmt`, `make([]byte, n) động`, và `Closure giữ tham chiếu`) cùng cách viết lại về 0 cấp phát trong trình mô phỏng bên dưới:
+<GoP15TailFanout />
 
-Cũng đừng bỏ qua ngân sách **Function Inlining (`cost <= 80` nút AST)** của Go compiler. Những hàm nhỏ (`InlineAdd`, hàm getter hay setter option) được dán thẳng vào thân bên gọi ở pha SSA: một khi tham số con trỏ không còn vượt ranh giới giữa hai hàm nữa, chính phép inline tự động biến một biến sắp bị đẩy ra Heap thành biến nằm gọn hoàn toàn trên Stack!
+Nhân đôi số pod không làm thay đổi con số `0.01` trong chương trình đó. Chỉ có làm cho mỗi server ít chậm hơn mới đổi được, nghĩa là sửa code hoặc sửa thứ nó phải chờ. Vì vậy "cứ scale lên" có trần đối với độ trễ, dù với tải thì nó hiệu quả.
 
-<GoEscapeAnalysisDemo />
+Scale cũng có thể là cái bẫy về chi phí. Dự án Thanos (kho lưu trữ dài hạn cho metric của Prometheus) từng gặp chuyện này. Đoạn code compaction (gộp dữ liệu) đầu tiên được viết đơn giản có chủ đích, giả định một CPU và rất ít bộ nhớ. Người dùng gặp tình trạng compaction chậm không theo kịp dữ liệu đến, hoặc tốn hàng trăm GB bộ nhớ cho mỗi thao tác. Bartłomiej Płotka, người làm trong dự án, viết trong *Efficient Go* rằng nhóm đã bàn việc dựng một bộ lập lịch giao việc compaction cho nhiều máy, và việc đó nhiều khả năng làm độ phức tạp của hệ thống tăng gấp đôi hoặc gấp ba. Thay vào đó, vài ngày làm lại thuật toán và code đã giúp compaction nhanh gấp đôi và đọc dữ liệu từ đĩa theo dòng với bộ nhớ đỉnh rất thấp. Nhiều năm sau, dự án vẫn chưa có compaction phân tán nào ngoài sharding đơn giản.
 
-### Câu hỏi tự kiểm tra trước khi khám phá CPU cache & bộ nhớ Go
+Scale ngang vẫn ổn khi bạn thật sự cần. Nhưng nó kéo theo lệnh gọi mạng, lỗi một phần và thêm nhiều bộ phận chuyển động, và đôi khi vài ngày trong code tránh được tất cả những thứ đó. Muốn biết mình đang ở trường hợp nào thì phải đo.
 
-1. Tại sao khi một trang gọi song song qua 10 microservice mà mỗi con chạy đạt `99%` ổn định, tỷ lệ request ngoài cùng bị dính độ trễ đuôi lại nhảy vọt lên gần `9,56%`? *(Xem Mục 1)*
-2. Viết ra một bản **hợp đồng RAER** cụ thể cho API nhập dữ liệu và giải thích vì sao sửa ở Tầng 1–2 lại cho mức thắng 10x nhẹ nhàng hơn Tầng 3? *(Xem Mục 2)*
-3. Trong quy trình **TFBO**, tại sao tuyệt đối không sửa gộp cả thay đổi thuật toán lẫn tuning runtime vào cùng một PR? *(Xem Mục 3)*
-4. So sánh số lệnh CPU cần dùng để giải phóng một biến cục bộ trên Stack với hành trình thu hồi của một biến trỏ bị đẩy lên Heap? *(Xem Mục 4)*
-5. Dựa theo hai bất biến trong `escape.go`, vì sao `fmt.Println("items:", x)` hay `make([]byte, n)` lại hay làm biến thoát lên Heap? *(Xem Mục 5)*
+<Concepts>
 
-<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
-
-- **Cờ `-gcflags="-m=2"`**: tham số yêu cầu trình biên dịch in chi tiết lý do từng biến ở lại Stack hay theo luồng dữ liệu nào để thoát lên Heap (mức `-m=2` giải thích cả đường truyền con trỏ).
-- **Escape do đóng hộp Interface (Boxing)**: nhét giá trị vào `any` (`eface`) khi hàm nhận như `fmt.Println` không chứng minh được là nó không giữ tham chiếu lâu dài, buộc copy giá trị lên Heap.
-- **Function inlining (Chèn nội tuyến)**: compiler chép thẳng thân hàm nhỏ (`cost <= 80`) vào hàm gọi — vừa xóa chi phí gọi hàm vừa hay dẹp luôn lý do thoát con trỏ ra ngoài Stack frame!
+- **Công suất (capacity)**: tổng lưu lượng service xử lý được. Thêm pod làm nó tăng.
+- **Khuếch đại độ trễ đuôi (tail amplification)**: khi một request chờ `k` phần, xác suất ít nhất một phần chậm là `1 - (1 - p)^k`. Nó tăng rất nhanh theo `k`.
 
 </Concepts>
+
+---
+
+## Hiệu quả không đồng nghĩa với nhanh
+
+Người ta dùng chữ "performance" cho nhiều thứ. *Efficient Go* tách nó làm ba: **độ chính xác (accuracy)**, tức số kết quả sai; **tốc độ (speed)**, tức việc xong nhanh thế nào, đo bằng độ trễ hoặc thông lượng; và **hiệu quả (efficiency)**, tức mình tốn thêm bao nhiêu việc và tài nguyên. Ví dụ của Płotka về hiệu quả: lấy 64 byte dữ liệu có ích từ đĩa nhưng cấp phát 420 byte bộ nhớ để làm việc đó. Hiệu quả bộ nhớ khi đó khoảng 15% (64 trên 420 byte), bất kể tốc độ ra sao.
+
+Tốc độ và hiệu quả thường đi cùng nhau, vì chương trình làm ít việc hơn thường xong sớm hơn. Nhưng chúng cũng có thể tách rời. *Efficient Go* nêu một phép tìm kiếm đọc dữ liệu từ đĩa cả triệu lần. Đĩa nhanh hơn có thể cắt độ trễ xuống một phần mười, nhưng sửa code để chỉ đọc dữ liệu vài lần còn thắng hơn, và không tốn đồng phần cứng nào. Làm ít việc hơn thường là nước đi đầu tiên tốt hơn.
+
+Còn một lý do nữa để nhắm vào hiệu quả trước. Tốc độ rất mong manh: nó phụ thuộc vào máy, các tiến trình khác, giới hạn nhiệt và mạng. Lượng việc code của bạn làm, ví dụ gọi database bao nhiêu lần, là thứ bạn kiểm soát được và nó đi theo code sang mọi máy.
+
+Câu 97/3 của Knuth hợp ở đây. Phần lớn code không cần tối ưu, và một phần nhỏ thì cần. Rủi ro không nằm ở chuyện tối ưu nhiều hay ít, mà ở chỗ tối ưu mà không biết phần nào là phần nào. *Efficient Go* nói thẳng: lập trình viên đoán rất tệ phần nào của chương trình dùng nhiều tài nguyên nhất, và ở hầu hết chương trình, một phần nhỏ các thao tác (quy tắc Pareto, thường quanh 20%) chiếm phần lớn chi phí.
+
+Một lưu ý nhỏ về Big-O. Nó nói công việc tăng thế nào khi đầu vào lớn lên, không nói một bước mất bao lâu. Hai cách có cùng độ tăng có thể chênh nhau rất nhiều về thời gian thực, và với đầu vào nhỏ thì cách "tệ hơn" vẫn có thể thắng. Nên lập luận Big-O không thay được một lần đo. [Benchmarking trong Go](/blog/go-observability-metrics-microbenchmarks-benchstat/) chỉ cách đo theo nhiều cỡ đầu vào.
+
+Còn một chi phí dành cho bài về phần cứng và runtime: vì sao một giá trị nằm trên stack hay heap, và nó tốn gì. Chủ đề đó có nhà riêng ở [Phần cứng và GC trong Go](/blog/go-hardware-cpu-caches-virtual-memory-gc-allocator/).
+
+<Concepts>
+
+- **Chính xác, tốc độ, hiệu quả (accuracy, speed, efficiency)**: kết quả sai, thời gian mất và tài nguyên lãng phí. Đây là ba thứ khác nhau mà bạn có thể cải thiện hoặc đánh đổi.
+- **Tỉ lệ hiệu quả (efficiency ratio)**: công việc có ích chia cho tổng công việc hay tài nguyên đã dùng, tính cho một tài nguyên cụ thể như bộ nhớ.
+
+</Concepts>
+
+---
+
+## RAER: viết ngân sách trước
+
+"Làm cho nhanh hơn" không phải mục tiêu mà bạn có thể hoàn thành. **RAER** (Resource-Aware Efficiency Requirements) là một ngân sách ngắn, viết ra giấy, cho một thao tác. *Efficient Go* gợi ý một mục gồm: thao tác, cỡ và hình dạng dữ liệu, độ trễ tối đa, và giới hạn của các tài nguyên đáng quan tâm, thường là CPU và bộ nhớ. Bạn không cần một mục cho mọi hàm. Hãy bắt đầu với các thao tác được dùng nhiều nhất hoặc tốn kém nhất, rồi thêm khi nào thật sự cần.
+
+Tác dụng của các con số là một quy tắc dừng. Có ngân sách rồi, bước đầu của mọi đợt tối ưu là đo, và nếu đã nằm trong ngân sách thì xong việc.
+
+### RAER cho GET /todos
+
+`Todo` service ở bài HTTP có `GET /todos`, trả về mọi todo dưới dạng JSON. Đây là một RAER cho nó. Các con số này mình chọn làm ví dụ cho bài. Trong dự án thật, chúng đến từ người dùng hoặc từ kế hoạch công suất của bạn.
+
+```text
+Operation:    GET /todos (list all todos as JSON)
+Dataset:      1,000 todos
+p99 latency:  5 ms or less (handler only, measured in-process)
+Memory:       200 KB or less allocated per request
+CPU:          1 core
+```
+
+Để ý rằng cỡ dữ liệu là một phần của ngân sách. "5 ms" vô nghĩa cho tới khi bạn nói rõ là với bao nhiêu dữ liệu.
+
+### Đo thử
+
+Để kiểm tra ngân sách ta cần số đo. Chương trình dưới đây chạy `GET /todos` 2.000 lần trên một server trong bộ nhớ có `n` todo, rồi in p50 (trung vị), p99 và bộ nhớ cấp phát cho mỗi request. Đây là công cụ đo thô, không phải benchmark đúng nghĩa. [Benchmarking trong Go](/blog/go-observability-metrics-microbenchmarks-benchstat/) nói về cách đo đúng.
+
+Trước hết là các mảnh của service, chép nguyên từ bài HTTP (`Todo`, `store` có mutex với `add` và `list`, `server`, `listTodos` và `writeJSON`). Ở đây không có middleware, chỉ có router.
+
+```go
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"runtime"
+	"slices"
+	"strconv"
+	"sync"
+	"time"
+)
+
+type Todo struct {
+	ID    int    `json:"id"`
+	Title string `json:"title"`
+	Done  bool   `json:"done"`
+}
+
+type store struct {
+	mu    sync.Mutex
+	todos []Todo
+}
+
+func (s *store) add(title string) Todo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t := Todo{ID: len(s.todos) + 1, Title: title}
+	s.todos = append(s.todos, t)
+	return t
+}
+
+func (s *store) list() []Todo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]Todo, len(s.todos))
+	copy(out, s.todos)
+	return out
+}
+
+type server struct{ store *store }
+
+func (s *server) listTodos(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.store.list())
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		slog.Error("write response", "err", err)
+	}
+}
+```
+
+Rồi đến `main` làm nhiệm vụ đo. Nó đọc `n` từ dòng lệnh (`os.Args[1]`, đổi sang số nguyên bằng `strconv.Atoi`) và dựng store. `httptest.NewRequest` và `httptest.NewRecorder` thuộc thư viện chuẩn: chúng cho router xử lý một request mà không cần mạng, như ở [bài HTTP](/blog/go-http-service-net-http-json-middleware/). `runtime.ReadMemStats` điền các bộ đếm về heap, và `TotalAlloc` là tổng số byte đã cấp phát cho đến lúc đó, nên hiệu của nó chia cho số request chính là lượng cấp phát mỗi request. `slices.Sort` sắp xếp các thời gian để ta lấy được giá trị giữa và phân vị thứ 99. `for range requests` lặp đúng chừng đó lần ([Bộ nhớ trong Go](/blog/go-memory-data-types-slices-maps-strings/) có nói về range trên số nguyên).
+
+```go
+func main() {
+	n, _ := strconv.Atoi(os.Args[1])
+	s := &server{store: &store{}}
+	for i := 1; i <= n; i++ {
+		s.store.add("todo " + strconv.Itoa(i))
+	}
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /todos", s.listTodos)
+
+	const requests = 2000
+	times := make([]time.Duration, 0, requests)
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	for range requests {
+		req := httptest.NewRequest("GET", "/todos", nil)
+		rec := httptest.NewRecorder()
+		start := time.Now()
+		mux.ServeHTTP(rec, req)
+		times = append(times, time.Since(start))
+	}
+	runtime.ReadMemStats(&after)
+
+	slices.Sort(times)
+	fmt.Printf("todos=%d requests=%d\n", n, requests)
+	fmt.Printf("p50=%v p99=%v\n", times[requests/2], times[requests*99/100])
+	fmt.Printf("allocated per request: %d KB\n", (after.TotalAlloc-before.TotalAlloc)/requests/1024)
+}
+```
+
+Recorder giữ body phản hồi trong bộ nhớ, nên con số cấp phát có tính cả bản sao phản hồi đó. Không sao, vì ta chỉ so sánh giữa các cỡ dữ liệu.
+
+<TerminalOutput command="for n in 1000 10000 100000; do go run . $n; done" label="Apple M2 · Go 1.27.1" caption="Một lần chạy thật. p99 dao động khá mạnh giữa các lần chạy (một lần chạy trước cho 251 µs ở 1.000 todo và 19,9 ms ở 100.000), nên hãy coi đây là bậc độ lớn, không phải giá trị chính xác.">
+```text
+todos=1000 requests=2000
+p50=113.583µs p99=352.458µs
+allocated per request: 86 KB
+todos=10000 requests=2000
+p50=1.180333ms p99=3.060083ms
+allocated per request: 1027 KB
+todos=100000 requests=2000
+p50=12.468792ms p99=32.296792ms
+allocated per request: 15438 KB
+```
+</TerminalOutput>
+
+<GoP15RaerCard />
+
+Với 1.000 todo, đúng cỡ dữ liệu RAER nêu, handler nằm xa bên trong ngân sách: 352 µs so với 5 ms, 86 KB so với 200 KB. Theo quy tắc dừng thì không có gì phải làm. Ở 10.000 todo, p99 vẫn đạt (3,06 ms) nhưng bộ nhớ vượt ngân sách gấp năm lần (1.027 KB). Ở 100.000 thì cả hai đều trượt. Bộ nhớ và độ trễ cùng tăng gần tỉ lệ với số todo, và ngân sách cho ta biết cái nào hỏng trước.
+
+Bạn thử với ngân sách của riêng mình ở dưới. Đổi giới hạn và xem kết luận thay đổi.
+
+<GoP15RaerCheckDemo />
+
+<Concepts>
+
+- **RAER (Resource-Aware Efficiency Requirements)**: ngân sách viết ra cho một thao tác: thao tác, cỡ dữ liệu, giới hạn độ trễ p99, giới hạn CPU và bộ nhớ.
+- **Quy tắc dừng**: nếu số đo nằm trong RAER thì dừng. Không tối ưu thêm.
+- **p50 và p99**: thời gian request ở giữa, và mốc thời gian mà 99 trên 100 request nhanh hơn.
+
+</Concepts>
+
+---
+
+## Năm tầng để tối ưu
+
+Giả sử `GET /todos` trượt ngân sách ở 10.000 todo. Bắt đầu từ đâu? *Efficient Go* liệt kê năm **tầng thiết kế tối ưu (optimization design levels)**, từ trên xuống: hệ thống, thuật toán và cấu trúc dữ liệu, code, hệ điều hành, và phần cứng. Mỗi tầng là một chỗ bạn có thể làm công việc rẻ đi.
+
+<GoP15Levels />
+
+Lý do bắt đầu từ trên cùng như sau. *Efficient Go* dẫn các nghiên cứu cũ cho thấy ở mỗi tầng thường có thể tăng tốc khoảng 10 đến 20 lần. Thay đổi ở tầng cao cũng có thể làm các tầng thấp bớt giá trị. Nếu mỗi request chỉ trả 50 todo thay vì 10.000, công sức bạn bỏ ra để bớt cấp phát trên đường đi 10.000 phần tử là uổng. Chiều ngược lại không đúng: sửa ở tầng code không làm giới hạn trang trở nên thừa.
+
+Có tầng không phải do bạn quyết. Là lập trình viên Go, thường bạn không chọn được bộ lập lịch của hệ điều hành hay CPU, dù bạn đặt được giới hạn container và nên hiểu chúng làm gì. Płotka cũng lưu ý rằng một tầng đã cho bạn mức tăng 10 đến 20 lần thì rất tốn kém để vắt thêm, và đó là lúc nhìn sang tầng khác có lời.
+
+Trong phần còn lại của series, các tầng ứng với: [Go trong production](/blog/go-production-stdlib-cpu-cache-gc-kubernetes/) và [Phần cứng và GC trong Go](/blog/go-hardware-cpu-caches-virtual-memory-gc-allocator/) nói về tầng 4 và 5, [Mẫu tối ưu trong Go](/blog/go-three-rs-optimization-patterns-streaming-pooling/) nói về tầng 2 và 3.
+
+<Concepts>
+
+- **Tầng thiết kế tối ưu**: một trong năm chỗ để làm công việc rẻ đi: hệ thống, thuật toán và cấu trúc dữ liệu, code, hệ điều hành, phần cứng.
+- **Mỗi lần một tầng**: mỗi vòng chỉ đổi một tầng, để biết cái gì có tác dụng.
+
+</Concepts>
+
+---
+
+## TFBO: vòng lặp giữ bạn trung thực
+
+Tối ưu có thể làm hỏng chương trình. Một thay đổi tiết kiệm được một lần sao chép cũng có thể chia sẻ một slice mà hai goroutine giờ cùng ghi. *Efficient Go* xử lý chuyện này bằng một quy trình chín bước gọi là **TFBO**: Test, Fix, Benchmark, Optimize. Nó chia việc thành hai giai đoạn không bao giờ trộn lẫn.
+
+<GoP15TfboLoop />
+
+**Giai đoạn chức năng (bước 1 đến 3).** Viết test cho điều code phải làm và chạy chúng. Nếu qua, đi tiếp. Nếu không, sửa code, chưa tối ưu gì cả, rồi test lại. Test trước, vì như *Efficient Go* trích dẫn, làm một chương trình đúng chạy nhanh dễ hơn nhiều so với làm một chương trình nhanh chạy đúng.
+
+**Giai đoạn hiệu năng (bước 4 đến 8).** Đo mốc ban đầu, chính là việc ta vừa làm với chương trình in p99 và KB. Rồi so với RAER (bước 5). Trong ngân sách? Phát hành (bước 9). Chưa? Tìm điểm nghẽn (bước 6), chọn một tầng (bước 7) và tối ưu (bước 8). Sau đó quay lại bước 1: chạy test trên code đã tối ưu, rồi chạy lại đúng phép đo cũ và so với mốc ban đầu.
+
+Hai thói quen trong vòng lặp này đỡ đau đầu nhất:
+
+1. **Tìm điểm nghẽn trước khi đổi gì.** Ta đoán rất tệ. Với `GET /todos` ở 10.000 todo, ngân sách cho biết bộ nhớ mỗi request là vấn đề, nhưng không cho biết dòng nào cấp phát. Profile mới cho biết, và [Profiling trong Go](/blog/go-profiling-pprof-flamegraphs-off-cpu-continuous/) chỉ cách đọc một profile.
+2. **Mỗi vòng đổi một tầng, và test sau mỗi thay đổi.** Płotka thú nhận từng bỏ qua test sau một thay đổi nhỏ, rồi không biết trong vài thay đổi cái nào làm hỏng, và phải hoàn tác tất cả. Chạy một lượt test hẹp sau mỗi lần thử rất rẻ.
+
+Với service của ta, quá trình đi như sau. Bước 4 là phép đo ở trên. Bước 5 cho thấy bộ nhớ vượt ngân sách ở 10.000 todo. Bước 6 cần một profile, mình để cho bài profiling. Bước 7 là chọn giữa các tầng: trả về từng trang todo là thay đổi ở tầng hệ thống, còn mã hóa JSON rẻ hơn là thay đổi ở tầng code. Cái nào đúng phụ thuộc người dùng cần gì, và đó là lý do RAER nêu cỡ dữ liệu ngay từ đầu.
+
+Mỗi vòng kết thúc bằng cùng một câu hỏi: giờ đã trong ngân sách chưa? Khi câu trả lời là có thì dừng. Viết lại code dễ đọc để tiết kiệm thêm vài micro giây mà không ai yêu cầu chính là loại tối ưu sớm mà Knuth cảnh báo.
+
+Tiếp theo trong series: [Phần cứng và GC trong Go](/blog/go-hardware-cpu-caches-virtual-memory-gc-allocator/) cho những gì nằm dưới ngân sách, [Benchmarking trong Go](/blog/go-observability-metrics-microbenchmarks-benchstat/) để đo cho đúng, [Profiling trong Go](/blog/go-profiling-pprof-flamegraphs-off-cpu-continuous/) cho bước 6, và [Mẫu tối ưu trong Go](/blog/go-three-rs-optimization-patterns-streaming-pooling/) cho bước 8.
+
+<Concepts>
+
+- **TFBO (Test, Fix, Benchmark, Optimize)**: vòng lặp chín bước: test và sửa cho tới khi đúng, đo theo RAER, rồi tối ưu một tầng và quay lại test.
+- **Mốc ban đầu (baseline)**: phép đo thực hiện trước khi đổi gì. Mọi số đo sau đều so với nó.
+- **Điểm nghẽn (bottleneck)**: nơi tốn phần lớn một loại tài nguyên. Chương trình thường chỉ có vài điểm nghẽn.
+
+</Concepts>
+
+---
+
+## Điểm rút ra (Key takeaways)
+
+- **Thêm pod tăng công suất, không làm một request nhanh hơn.** Nếu request chờ nhiều phần, xác suất có ít nhất một phần chậm là `1 - (1 - p)^k`, và pod mới không đổi `p`.
+- **Hiệu quả là làm ít việc hơn.** Sửa thuật toán hoặc code trước có thể tránh chi phí và độ phức tạp của scale ngang, như chuyện compaction của Thanos cho thấy.
+- **Viết RAER trước khi tối ưu.** Thao tác, cỡ dữ liệu, độ trễ p99, bộ nhớ và CPU. Cỡ dữ liệu là một phần của ngân sách.
+- **Trong ngân sách nghĩa là dừng.** Ngoài ngân sách thì tìm điểm nghẽn, đổi một trong năm tầng và chạy lại vòng TFBO, bắt đầu bằng test.
+- **Bắt đầu từ trên cùng.** Đổi ở tầng hệ thống hoặc thuật toán có thể khiến việc ở tầng code trở nên không cần thiết.
+
+---
+
+## Câu hỏi ôn tập (Review questions)
+
+1. Một trang chờ 10 server. Mỗi server chậm ở 1 request trên 100. Vì sao trang chậm khoảng 9,6% số lần, và vì sao thêm 10 pod không đổi điều đó? *(Xem "Vì sao thêm pod không chữa được độ trễ đuôi")*
+2. Một lần lấy dữ liệu trả 64 byte có ích nhưng cấp phát 420. Hiệu quả bộ nhớ là bao nhiêu, và vì sao đĩa nhanh hơn vẫn có thể là cách sửa sai? *(Xem "Hiệu quả không đồng nghĩa với nhanh")*
+3. Vì sao RAER của `GET /todos` nêu 1.000 todo? Cũng handler đó thì ở 10.000 chuyện gì xảy ra? *(Xem "RAER: viết ngân sách trước")*
+4. Bạn có thể trả từng trang 50 todo, hoặc mã hóa JSON rẻ hơn. Đó là những tầng nào, và bạn thử cái nào trước? *(Xem "Năm tầng để tối ưu")*
+5. Vì sao bước 8 của TFBO đưa bạn quay lại bước 1 chứ không đi thẳng sang bước 9? *(Xem "TFBO: vòng lặp giữ bạn trung thực")*
 
 </Vi>

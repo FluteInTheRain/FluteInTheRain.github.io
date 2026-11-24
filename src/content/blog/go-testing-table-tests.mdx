@@ -1,0 +1,1330 @@
+---
+title: "Go testing"
+title_vi: "Test trong Go"
+description: "Test Go with the standard library: _test.go files, table-driven subtests, helpers, coverage, -short, build tags, time without sleeping, httptest and a first look at -race."
+description_vi: "Test Go chỉ với thư viện chuẩn: file _test.go, table-driven test, helper, coverage, -short, build tag, thời gian không cần sleep, httptest và làm quen với -race."
+date: 2026-11-23
+category: "backend"
+tags: ["golang", "testing", "table-driven-tests", "httptest", "100-go-mistakes"]
+cover: "../../assets/series/golang/go-gopher-pencil-helmet.jpg"
+cover_alt: "Pencil drawing of the Go gopher wearing a helmet, drawn by Renee French"
+draft: false
+sources:
+  - { title: "100 Go Mistakes and How to Avoid Them", author: "Teiva Harsanyi", chapters: "Mistakes #82, #83, #84, #85, #86, #87, #88, #90", url: "https://100go.co/" }
+  - { title: "Flaky Tests at Google and How We Mitigate Them", author: "John Micco (Google Testing Blog)", url: "https://testing.googleblog.com/2016/05/flaky-tests-at-google-and-how-we.html" }
+  - { title: "Introducing the Go Race Detector", author: "Dmitry Vyukov and Andrew Gerrand (The Go Blog)", url: "https://go.dev/blog/race-detector" }
+  - { title: "Package testing", author: "The Go Authors", url: "https://pkg.go.dev/testing" }
+  - { title: "Package httptest", author: "The Go Authors", url: "https://pkg.go.dev/net/http/httptest" }
+  - { title: "Testing flags (go command)", author: "The Go Authors", url: "https://pkg.go.dev/cmd/go#hdr-Testing_flags" }
+  - { title: "Car crash test at 40 km/h with dummies (CC BY-SA 4.0), used as the hero image", author: "Transport for NSW", url: "https://commons.wikimedia.org/wiki/File:Crash-test-with-airbag-and-safty-belt.jpg" }
+  - { title: "Go gopher pencil helmet (CC BY 3.0), used as the cover", author: "Renee French", url: "https://commons.wikimedia.org/wiki/File:Go_gopher_pencil_helmet.jpg" }
+---
+
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import En from '../../components/mdx/En.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import GoP06Coverage from '../../components/mdx/GoP06Coverage.astro';
+import GoP06Files from '../../components/mdx/GoP06Files.astro';
+import GoP06Helper from '../../components/mdx/GoP06Helper.astro';
+import GoP06SlowTests from '../../components/mdx/GoP06SlowTests.astro';
+import GoP06Time from '../../components/mdx/GoP06Time.astro';
+import GoTableTestDemo from '../../components/mdx/GoTableTestDemo.astro';
+import QuoteCard from '../../components/mdx/QuoteCard.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import heroCrash from '../../assets/blog/go-testing-table-tests/crash-test.jpg';
+
+<En>
+
+<Figure src={heroCrash} alt="A car crash test at 40 km/h with dummies in the seats, filmed from above, some with seat belts and an airbag and some with none" caption="A crash test does not argue about how safe a car is. It crashes it, the same way every time, and reads the numbers. A good unit test does the same to a function." sourceTitle="Wikimedia Commons: Crash-test-with-airbag-and-safty-belt.jpg (CC BY-SA 4.0, Transport for NSW)" sourceUrl="https://commons.wikimedia.org/wiki/File:Crash-test-with-airbag-and-safty-belt.jpg" />
+
+> "Almost 16% of our tests have some level of flakiness associated with them!"
+> &mdash; *Google Testing Blog*
+
+### A test that fails for no reason is worse than no test
+
+Google measured its own test suite and found that about 1.5% of all test runs report a "flaky" result: the same code both passes and fails. Almost 16% of its tests are flaky at some level, and about 84% of the pass-to-fail changes its build system saw involved a flaky test. People learn to ignore a test that cries wolf, and then they ignore the real failure too.
+
+Go's answer is small. Testing is built into the language tools: no framework to install, no assertion library, no runner config. You write ordinary Go in a file ending in `_test.go` and run `go test`. This post shows the habits that keep those tests fast, readable and not flaky.
+
+<Callout type="note" title="TL;DR">
+Put tests in `_test.go` files next to the code and run them with `go test`. Write many cases as one table-driven test with `t.Run` subtests, so adding a case costs one line. Keep tests fast and repeatable: pass the time in instead of calling `time.Now()`, never wait with `time.Sleep`, and fence off slow tests with `-short` or a build tag. Use `httptest` to test HTTP handlers in memory, and run `go test -race` to catch data races.
+</Callout>
+
+Two things to know before the first test. Go has no `assert` function: you write a plain `if got != want` and call `t.Errorf` with your own message. And there is no test runner to configure, because `go test` is part of the `go` command you already use.
+
+---
+
+## Your first test
+
+We need something to test. This function turns text like `"8080"` into a TCP port number, and returns an error for bad input. If errors are new to you, they have their own post: [Go errors, defer and panic](/blog/go-errors-defer-panic/). Here you only need to know that a function can return an `error` next to its result, and that `nil` means "no error".
+
+```go
+// port.go
+package port
+
+import (
+	"fmt"
+	"strconv"
+)
+
+// Parse turns text like "8080" into a TCP port number.
+func Parse(s string) (int, error) {
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, fmt.Errorf("port %q is not a number", s)
+	}
+	if n < 1 || n > 65535 {
+		return 0, fmt.Errorf("port %d is out of range 1-65535", n)
+	}
+	return n, nil
+}
+```
+
+A test goes in a file whose name ends in `_test.go`, in the same folder. The `go` command compiles these files only when you run tests, so they never end up in your program. A test is a function named `TestSomething` that takes one `*testing.T`. That `t` is your handle to the test: you use it to report failures.
+
+<GoP06Files />
+
+```go
+// port_test.go
+package port
+
+import "testing"
+
+func TestParseValid(t *testing.T) {
+	got, err := Parse("8080")
+	if err != nil {
+		t.Fatalf("Parse(\"8080\") returned error: %v", err)
+	}
+	if got != 8080 {
+		t.Errorf("Parse(\"8080\") = %d, want 8080", got)
+	}
+}
+```
+
+There are two ways to fail. `t.Errorf` marks the test failed and keeps going, so you see every problem at once. `t.Fatalf` marks it failed and stops this test right there; use it when the next lines would be meaningless, like checking `got` after an error. The `%q`, `%d` and `%v` are format verbs: the table in [Go variables, types, pointers and functions](/blog/go-variables-types-pointers-functions/) lists them.
+
+<TerminalOutput command="go test -v" label="Go 1.27.1 · darwin/arm64" caption="-v lists every test. Without it, a passing package prints only PASS and the package line.">
+```text
+=== RUN   TestParseValid
+--- PASS: TestParseValid (0.00s)
+PASS
+ok  	example.com/port	0.217s
+```
+</TerminalOutput>
+
+<Concepts>
+
+- **`_test.go` file**: a file the `go` command compiles only for `go test`. Tests sit next to the code they check.
+- **`*testing.T`**: the value every test receives. Its methods (`Errorf`, `Fatalf`, `Run`, `Helper`...) report results.
+- **`t.Errorf` vs `t.Fatalf`**: both fail the test; `Fatalf` also stops it immediately.
+
+</Concepts>
+
+---
+
+## Table-driven tests
+
+Writing one test function per case copies the same four steps again and again: call, expect, compare, report. Go's habit is to write that logic once and put the cases in a table, a slice where each element is one case. Adding a case then costs one line.
+
+Two pieces of syntax are used here. The table's element type is a struct (a bundle of named fields, covered in [Go structs, methods and interfaces](/blog/go-structs-methods-interfaces/)) declared inline without a name. And `t.Run(name, func(t *testing.T) { ... })` runs a subtest: the function literal is a closure, explained in [Go errors, defer and panic](/blog/go-errors-defer-panic/). All you need now is that each case runs as its own named test. Read `[]struct{...}{...}` as: a slice whose elements are an unnamed struct type, followed by the elements themselves.
+
+```go
+package port
+
+import "testing"
+
+func TestParse(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    int
+		wantErr bool
+	}{
+		{"normal port", "8080", 8080, false},
+		{"lowest port", "1", 1, false},
+		{"highest port", "65535", 65535, false},
+		{"zero", "0", 0, true},
+		{"too big", "65536", 0, true},
+		{"not a number", "http", 0, true},
+		{"empty", "", 0, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := Parse(tc.input)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Parse(%q) error = %v, wantErr %v", tc.input, err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("Parse(%q) = %d, want %d", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+```
+
+<GoTableTestDemo />
+
+The line `if (err != nil) != tc.wantErr` compares two true/false values: "did we get an error?" and "did we expect one?". It is true, and the test fails, only when the two disagree.
+
+Each case shows up as its own line in the output, named after its `name` field with spaces turned into underscores. That is why good case names matter: they are what you read when something breaks.
+
+<TerminalOutput command="go test -v" label="Go 1.27.1 · darwin/arm64" caption="One parent test, seven subtests. Each name comes straight from the table. (Run with the table test alone in the package.)">
+```text
+=== RUN   TestParse
+=== RUN   TestParse/normal_port
+=== RUN   TestParse/lowest_port
+=== RUN   TestParse/highest_port
+=== RUN   TestParse/zero
+=== RUN   TestParse/too_big
+=== RUN   TestParse/not_a_number
+=== RUN   TestParse/empty
+--- PASS: TestParse (0.00s)
+    --- PASS: TestParse/normal_port (0.00s)
+    --- PASS: TestParse/lowest_port (0.00s)
+    --- PASS: TestParse/highest_port (0.00s)
+    --- PASS: TestParse/zero (0.00s)
+    --- PASS: TestParse/too_big (0.00s)
+    --- PASS: TestParse/not_a_number (0.00s)
+    --- PASS: TestParse/empty (0.00s)
+PASS
+ok  	example.com/port	0.502s
+```
+</TerminalOutput>
+
+If one case is wrong (here we changed the expected value of `highest port` to 65534), the failure points at that exact case and its line. You can also rerun just one subtest with `-run`, writing the parent and the subtest name joined by a slash. Without `^` and `$`, `TestParse` is a substring match and would also run `TestParseValid`.
+
+<TerminalOutput command="go test" label="Go 1.27.1 · darwin/arm64 · one expected value changed to 65534" caption="The failing subtest is named, and the message shows the input, the result and the expectation.">
+```text
+--- FAIL: TestParse (0.00s)
+    --- FAIL: TestParse/highest_port (0.00s)
+        port_test.go:27: Parse("65535") = 65535, want 65534
+FAIL
+exit status 1
+FAIL	example.com/port	0.209s
+```
+</TerminalOutput>
+
+<TerminalOutput command="go test -v -run '^TestParse$/too_big'" label="Go 1.27.1 · darwin/arm64" caption="-run takes a pattern: TestParse, a slash, then the subtest name. ^ and $ anchor the first part, so TestParseValid does not match.">
+```text
+=== RUN   TestParse
+=== RUN   TestParse/too_big
+--- PASS: TestParse (0.00s)
+    --- PASS: TestParse/too_big (0.00s)
+PASS
+ok  	example.com/port	0.208s
+```
+</TerminalOutput>
+
+<Callout type="tip" title="Write the error message for the person who reads it at 2 a.m.">
+A good failure message has three things: the call, what you got, what you wanted. `Parse("65535") = 65535, want 65534` needs no debugger. `t.Errorf("failed")` sends you to read the test.
+</Callout>
+
+<Concepts>
+
+- **Table-driven test**: one test function with a slice of cases and one loop that runs the same checks on each.
+- **Subtest**: a named test started with `t.Run` inside another test. It reports, filters and fails on its own.
+- **`-run`**: a `go test` flag that runs only tests whose names match a pattern.
+
+</Concepts>
+
+---
+
+## Helpers and fixtures
+
+Some checks repeat across tests, so you move them into a helper function. Call `t.Helper()` on its first line. Without it, a failure is reported at the line inside the helper; with it, Go reports the line that called the helper, which is where you want to look.
+
+This test file also uses `package port_test` instead of `package port`. A test file may live in a separate `_test` package: it can then only use what the package exports, the way real callers do, so it checks your public API rather than your internals.
+
+```go
+package port_test
+
+import (
+	"testing"
+
+	"example.com/port"
+)
+
+func wantPort(t *testing.T, input string, want int) {
+	t.Helper()
+	got, err := port.Parse(input)
+	if err != nil {
+		t.Fatalf("Parse(%q): %v", input, err)
+	}
+	if got != want {
+		t.Errorf("Parse(%q) = %d, want %d", input, got, want)
+	}
+}
+
+func TestHelpers(t *testing.T) {
+	wantPort(t, "8080", 8080)
+	wantPort(t, "443", 80)
+}
+```
+
+<TerminalOutput command="go test" label="Go 1.27.1 · darwin/arm64 · with t.Helper()" caption="Line 22 is the call wantPort(t, &quot;443&quot;, 80) in TestHelpers: the line you need to edit.">
+```text
+--- FAIL: TestHelpers (0.00s)
+    port_test.go:22: Parse("443") = 443, want 80
+FAIL
+exit status 1
+FAIL	example.com/port	0.448s
+```
+</TerminalOutput>
+
+<TerminalOutput command="go test" label="Go 1.27.1 · darwin/arm64 · same file with the t.Helper() line removed" caption="Line 15 is the t.Errorf inside the helper. It is the same for every failing call, so it tells you nothing about which one failed.">
+```text
+--- FAIL: TestHelpers (0.00s)
+    port_test.go:15: Parse("443") = 443, want 80
+FAIL
+exit status 1
+FAIL	example.com/port	1.116s
+```
+</TerminalOutput>
+
+<GoP06Helper />
+
+For files and other set-up, the `testing` package has two tools. `t.TempDir()` gives you a fresh folder that Go deletes when the test ends. `t.Cleanup(fn)` registers a function to run after the test, like a `defer` that also covers subtests. Fixed input files belong in a folder named `testdata`, which the `go` tool ignores when it builds packages.
+
+```go
+package port_test
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestReadConfig(t *testing.T) {
+	dir := t.TempDir() // a fresh folder, deleted when the test ends
+	path := filepath.Join(dir, "port.txt")
+	if err := os.WriteFile(path, []byte("8080\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { t.Log("cleanup runs last") })
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("read %q", data)
+}
+```
+
+<TerminalOutput command="go test -v -run TestReadConfig" label="Go 1.27.1 · darwin/arm64" caption="The cleanup message prints after the test body, even though it was registered in the middle.">
+```text
+=== RUN   TestReadConfig
+    fixture_test.go:21: read "8080\n"
+    fixture_test.go:15: cleanup runs last
+--- PASS: TestReadConfig (0.00s)
+PASS
+ok  	example.com/port	0.602s
+```
+</TerminalOutput>
+
+<Concepts>
+
+- **Helper function**: a function that takes `t` and does a repeated check. `t.Helper()` makes failures point at its caller.
+- **`package x_test`**: a test file in a separate package that can use only the exported names of `x`.
+- **`testdata/`**: a folder for fixture files (fixed sample inputs). The `go` tool skips it when building.
+- **`t.TempDir`, `t.Cleanup`**: a throwaway folder for the test, and a function to run when the test ends.
+
+</Concepts>
+
+---
+
+## Running tests: flags that find bugs
+
+`go test ./...` runs every package under the current folder. A few flags change how the tests run, and they find real bugs. The full list is in the `go` command docs (see sources).
+
+| Flag | What it does | Why you want it |
+|---|---|---|
+| `-v` | print every test and subtest | see what ran |
+| `-run <pattern>` | run only matching tests | iterate on one case |
+| `-count=1` | ignore the result cache | rerun tests that read files or the network |
+| `-short` | skip tests that call `testing.Short()` | fast loop (see "Slow tests") |
+
+When you run a list of packages such as `./...`, Go caches passing results, so an unchanged package prints `(cached)` the next time. Use `-count=1` when you want a real rerun.
+
+Two more flags, one line each. Calling `t.Parallel()` at the top of a test lets it run alongside other parallel tests; that is faster only when the tests share nothing (no file, global variable or database row). `-shuffle=on` runs tests in random order and prints the seed, so a failing order can be replayed with `-shuffle=<seed>`; it exposes tests that depend on each other. `-parallel N` caps how many parallel tests run at once.
+
+<Concepts>
+
+- **Test cache**: when you run a package list like `./...`, Go remembers a passing result and prints `(cached)` when nothing changed. `-count=1` turns it off.
+- **`t.Parallel()`**: lets this test run at the same time as other parallel tests.
+- **`-shuffle`**: runs tests in a random order to expose hidden dependencies between them.
+
+</Concepts>
+
+---
+
+## Coverage
+
+Coverage tells you which lines of your code ran during the tests. Add `-cover` for one number, or write a profile with `-coverprofile` and read it per function with `go tool cover`. Below, the package has only one test, `Parse("8080")`, so two of the six statements in `Parse` (the two error returns) never ran.
+
+<TerminalOutput command="go test -cover" label="Go 1.27.1 · darwin/arm64 · only TestOnlyOne in the folder" caption="One test, one happy-path case: two thirds of the statements ran.">
+```text
+PASS
+coverage: 66.7% of statements
+ok  	example.com/port	1.028s
+```
+</TerminalOutput>
+
+<TerminalOutput command="go test -coverprofile=c.out && go tool cover -func=c.out" label="Go 1.27.1 · darwin/arm64" caption="The profile is a file. go tool cover reads it, per function.">
+```text
+PASS
+coverage: 66.7% of statements
+ok  	example.com/port	0.914s
+example.com/port/port.go:10:	Parse		66.7%
+total:				(statements)	66.7%
+```
+</TerminalOutput>
+
+<GoP06Coverage />
+
+With the full table from earlier, the same command reports `100.0% of statements`. Treat coverage as a way to find code no test touches, not as a score to chase. 100% only says every line ran, not that the checks on it were any good.
+
+<Concepts>
+
+- **Coverage**: the share of statements your tests executed. It finds untested code. It does not prove the tested code is correct.
+- **`-coverprofile`**: writes per-line coverage to a file that `go tool cover` can summarize or turn into an HTML report.
+
+</Concepts>
+
+---
+
+## Slow tests: `-short`, build tags, environment
+
+A pyramid is the usual picture of test types: many fast unit tests at the bottom, fewer slow integration tests (a real database, a real network) above them. Go has three simple ways to keep the slow ones from blocking everyone.
+
+1. **`-short`.** A slow test checks `testing.Short()` and skips itself. `go test -short` is then your fast loop.
+2. **A build tag.** A first line `//go:build integration` keeps the file out unless you ask: `go test -tags=integration`.
+3. **An environment variable.** The test reads `os.Getenv("...")` and skips if it is not set. Use it for things like a database address.
+
+```go
+package session
+
+import (
+	"testing"
+	"time"
+)
+
+func TestSlowDatabase(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	time.Sleep(2 * time.Second) // stand-in for a slow real database call
+}
+```
+
+```go
+//go:build integration
+
+package session
+
+import "testing"
+
+func TestAgainstRealDatabase(t *testing.T) {
+	t.Log("talking to the real database")
+}
+```
+
+<TerminalOutput command="go test -v" label="Go 1.27.1 · darwin/arm64 · last lines" caption="Without -short the slow test really waits two seconds.">
+```text
+=== RUN   TestSlowDatabase
+--- PASS: TestSlowDatabase (2.00s)
+PASS
+ok  	example.com/session	2.812s
+```
+</TerminalOutput>
+
+<TerminalOutput command="go test -short -v" label="Go 1.27.1 · darwin/arm64 · last lines" caption="With -short the same test is skipped in milliseconds, and says why.">
+```text
+=== RUN   TestSlowDatabase
+    session_test.go:10: skipping in short mode
+--- SKIP: TestSlowDatabase (0.00s)
+PASS
+ok  	example.com/session	0.335s
+```
+</TerminalOutput>
+
+<TerminalOutput command="go test -tags=integration -v -run Real" label="Go 1.27.1 · darwin/arm64" caption="The tagged file is compiled only when you pass the tag.">
+```text
+=== RUN   TestAgainstRealDatabase
+    integration_test.go:8: talking to the real database
+--- PASS: TestAgainstRealDatabase (0.00s)
+PASS
+ok  	example.com/session	0.704s
+```
+</TerminalOutput>
+
+<TerminalOutput command="go test -v -run Real" label="Go 1.27.1 · darwin/arm64 · no tag" caption="Without the tag the file is not even compiled, so nothing matches.">
+```text
+testing: warning: no tests to run
+PASS
+ok  	example.com/session	0.213s
+```
+</TerminalOutput>
+
+<GoP06SlowTests />
+
+<Concepts>
+
+- **Build tag**: a `//go:build name` line at the top of a file. The file is compiled only when `-tags=name` is given.
+- **`testing.Short()`**: true when `go test -short` was used. Slow tests check it and call `t.Skip`.
+
+</Concepts>
+
+---
+
+## Time without `time.Sleep`
+
+A test that sleeps is guessing how long the work takes. Sleep 100 ms and it passes on your laptop and fails on a busy CI machine; sleep 5 seconds and the whole suite crawls. The fix depends on why you were waiting.
+
+If the code you test reads the clock, do not let it read the clock. Pass the time in. `Expired` below takes `now` as a parameter instead of calling `time.Now()` inside, so a test can pick any moment it likes, and it runs in microseconds.
+
+```go
+package session
+
+import "time"
+
+// Expired reports whether a session created at `created` is too old at time `now`.
+func Expired(created, now time.Time, ttl time.Duration) bool {
+	return now.Sub(created) > ttl
+}
+```
+
+```go
+package session
+
+import (
+	"testing"
+	"time"
+)
+
+func TestExpired(t *testing.T) {
+	created := time.Date(2026, 11, 23, 9, 0, 0, 0, time.UTC)
+	ttl := 30 * time.Minute
+
+	tests := []struct {
+		name string
+		now  time.Time
+		want bool
+	}{
+		{"just created", created, false},
+		{"29 minutes later", created.Add(29 * time.Minute), false},
+		{"31 minutes later", created.Add(31 * time.Minute), true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Expired(created, tc.now, ttl); got != tc.want {
+				t.Errorf("Expired(...) = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+```
+
+<TerminalOutput command="go test -v -run TestExpired" label="Go 1.27.1 · darwin/arm64" caption="Three moments in time, none of them waited for. 31 minutes passes in no time at all.">
+```text
+=== RUN   TestExpired
+=== RUN   TestExpired/just_created
+=== RUN   TestExpired/29_minutes_later
+=== RUN   TestExpired/31_minutes_later
+--- PASS: TestExpired (0.00s)
+    --- PASS: TestExpired/just_created (0.00s)
+    --- PASS: TestExpired/29_minutes_later (0.00s)
+    --- PASS: TestExpired/31_minutes_later (0.00s)
+```
+</TerminalOutput>
+
+<GoP06Time />
+
+The other reason to sleep is waiting for work running in the background, a goroutine (you will meet them in [Go goroutines, channels and select](/blog/go-goroutines-channels-select/)). The rule there is the same in spirit: wait for a signal that the work is done, such as a channel or a `sync.WaitGroup`, not for a clock. When you have no signal to wait on, poll the condition in a loop with a deadline instead of one long sleep.
+
+<Concepts>
+
+- **Flaky test**: a test that sometimes passes and sometimes fails with no code change. Sleeping for a fixed time is a common cause.
+- **Pass the time in**: take `now` as a parameter so a test can control it, instead of calling `time.Now()` inside the function.
+
+</Concepts>
+
+---
+
+## Testing HTTP handlers
+
+A Go web handler is a function that gets a request and a response writer. The `net/http/httptest` package, part of the standard library, lets you call that function directly, with no network port and no server. `httptest.NewRequest` builds a request. `httptest.NewRecorder` stands in for the response writer and remembers the status, headers and body for you to check. In the handler below, `fmt.Fprintf(w, ...)` is `Printf` writing into the response `w`, and `r.URL.Query().Get("name")` reads the `?name=` part of the URL.
+
+```go
+package ht
+
+import (
+	"fmt"
+	"net/http"
+)
+
+// Hello greets the name in the ?name= query parameter.
+func Hello(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		http.Error(w, "name is required", http.StatusBadRequest)
+		return
+	}
+	fmt.Fprintf(w, "hello, %s", name)
+}
+```
+
+```go
+package ht
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
+
+func TestHello(t *testing.T) {
+	tests := []struct {
+		name       string
+		url        string
+		wantStatus int
+		wantBody   string
+	}{
+		{"with a name", "/hello?name=Linh", http.StatusOK, "hello, Linh"},
+		{"missing name", "/hello", http.StatusBadRequest, "name is required\n"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.url, nil)
+			rec := httptest.NewRecorder()
+
+			Hello(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Errorf("status = %d, want %d", rec.Code, tc.wantStatus)
+			}
+			if rec.Body.String() != tc.wantBody {
+				t.Errorf("body = %q, want %q", rec.Body.String(), tc.wantBody)
+			}
+		})
+	}
+}
+```
+
+<TerminalOutput command="go test -v" label="Go 1.27.1 · darwin/arm64" caption="A normal table test. The handler ran in memory, and the whole file took a fraction of a second.">
+```text
+=== RUN   TestHello
+=== RUN   TestHello/with_a_name
+=== RUN   TestHello/missing_name
+--- PASS: TestHello (0.00s)
+    --- PASS: TestHello/with_a_name (0.00s)
+    --- PASS: TestHello/missing_name (0.00s)
+PASS
+ok  	example.com/ht	0.513s
+```
+</TerminalOutput>
+
+To test code that is an HTTP client, `httptest.NewServer` starts a real server on a free local port and gives you its URL, so you can point the client at it. Its sibling package `testing/iotest` has readers that fail on purpose, to test code that reads streams.
+
+<Concepts>
+
+- **`httptest.NewRecorder`**: a fake response writer that records the status code, headers and body.
+- **`httptest.NewRequest`**: builds an HTTP request in memory, without any network.
+- **`httptest.NewServer`**: starts a real temporary local server, for testing HTTP clients.
+
+</Concepts>
+
+---
+
+## `-race`: a first look
+
+A data race happens when two goroutines touch the same variable at the same time and at least one of them writes. These bugs pass most test runs and then fail in production, so you cannot find them by running a test again. Go can instrument the program to watch memory accesses: add `-race`.
+
+The Go team added the race detector in 2012. Its announcement says it had found 42 races in the standard library by then, and that it became part of Go's own continuous build. Add `go test -race ./...` to your CI from day one; it makes tests slower, but it is the cheapest way to find this kind of bug.
+
+<QuoteCard author="Dmitry Vyukov and Andrew Gerrand" role="The Go Blog" sourceTitle="Introducing the Go Race Detector" sourceUrl="https://go.dev/blog/race-detector">
+The technology was integrated with Go in September 2012; since then it has detected 42 races in the standard library. It is now part of our continuous build process, where it continues to catch race conditions as they arise.
+</QuoteCard>
+
+In a test where two goroutines (functions running at the same time as the rest of the program; post 7 explains them) both add to one counter, plain `go test` prints PASS, while `go test -race` prints `WARNING: DATA RACE`, then the read, the previous write, the goroutine for each and the file and line of each access.
+
+How the detector works, and how to fix a race, is in [Go concurrency: scheduler, channels, context and mutexes](/blog/go-concurrency-scheduler-channels-context-mutexes/).
+
+<Concepts>
+
+- **Data race**: two goroutines access one variable at once and at least one writes. The result depends on timing.
+- **`-race`**: a flag that builds the program with checks that report data races as they happen. Slower, but it finds bugs plain runs miss.
+
+</Concepts>
+
+---
+
+## Key takeaways
+
+- Tests are plain Go in `_test.go` files, run by `go test`; there is no framework, and failures are reported with `t.Errorf` and `t.Fatalf`.
+- Put many cases in one table and run each with `t.Run`, so adding a case is one line and a failure names its case.
+- Make time an input and wait for signals, not clocks, so tests are fast and do not flake.
+- Fence off slow tests with `-short`, a build tag or an environment variable, and run `-shuffle=on` and `-race` regularly.
+- Use `httptest` to test handlers in memory, and read `-cover` as a map of untested code, not a score.
+
+## Review questions
+
+1. Why would you pick `t.Fatalf` over `t.Errorf` after checking an error? (See "Your first test".)
+2. What happens to the failure line in the output if you forget `t.Helper()` in a helper? (See "Helpers and fixtures".)
+3. Why does a test with `time.Sleep(100 * time.Millisecond)` fail on a busy CI machine, and what is the fix when the code reads the clock? (See "Time without `time.Sleep`".)
+4. A test passes alone but fails when you run the whole package with `-shuffle=on`. What is the likely cause? (See "Running tests".)
+5. How can a `go test` run pass while `go test -race` fails on the same code? (See "`-race`: a first look".)
+
+### Coming later in the series
+
+Goroutines and channels, the code the race example hides, are in [Go goroutines, channels and select](/blog/go-goroutines-channels-select/). Benchmarks and profiling, the other half of measuring Go code, come in the deep-dive posts.
+
+</En>
+
+<Vi>
+
+<Figure src={heroCrash} alt="Thử nghiệm va chạm xe ở 40 km/h với các hình nộm ngồi trên xe, quay từ trên cao: có hình nộm thắt dây an toàn và có túi khí, có hình nộm chỉ thắt dây, có hình nộm không có gì" caption="Thử va chạm không tranh luận xem xe an toàn đến đâu. Nó đâm xe, lần nào cũng đúng một kiểu, rồi đọc số đo. Một unit test tốt làm đúng như vậy với một hàm." sourceTitle="Wikimedia Commons: Crash-test-with-airbag-and-safty-belt.jpg (CC BY-SA 4.0, Transport for NSW)" sourceUrl="https://commons.wikimedia.org/wiki/File:Crash-test-with-airbag-and-safty-belt.jpg" />
+
+> "Almost 16% of our tests have some level of flakiness associated with them!"
+> &mdash; *Google Testing Blog*
+
+### Test thỉnh thoảng đỏ vô cớ còn tệ hơn không có test
+
+Google đo chính bộ test của mình và thấy khoảng 1,5% lượt chạy test báo kết quả "flaky": cùng một đoạn code lúc pass lúc fail. Gần 16% số test của họ ít nhiều có tính flaky, và khoảng 84% lần build chuyển từ pass sang fail có liên quan tới một test flaky. Người ta quen dần với test hay báo động giả, rồi bỏ qua luôn cả lỗi thật.
+
+Cách Go giải quyết khá gọn. Công cụ test có sẵn trong ngôn ngữ: không cần cài framework, không cần thư viện assert, không cần cấu hình runner. Bạn viết Go bình thường trong file có đuôi `_test.go` rồi chạy `go test`. Bài này chỉ ra những thói quen giúp test nhanh, dễ đọc và không flaky.
+
+<Callout type="note" title="TL;DR">
+Đặt test trong file `_test.go` cạnh code và chạy bằng `go test`. Nhiều case thì gom vào một table-driven test với subtest `t.Run`, thêm một case chỉ tốn một dòng. Giữ test nhanh và lặp lại được: truyền thời gian vào thay vì gọi `time.Now()`, đừng chờ bằng `time.Sleep`, và tách test chậm bằng `-short` hoặc build tag. Dùng `httptest` để test HTTP handler ngay trong bộ nhớ, và chạy `go test -race` để bắt data race.
+</Callout>
+
+Hai điều cần biết trước khi viết test đầu tiên. Go không có hàm `assert`: bạn tự viết `if got != want` và gọi `t.Errorf` với thông báo của mình. Và không có runner nào để cấu hình, vì `go test` là một phần của lệnh `go` bạn đã dùng.
+
+---
+
+## Test đầu tiên
+
+Cần có thứ gì đó để test. Hàm này đổi chuỗi như `"8080"` thành số cổng TCP, và trả về lỗi nếu đầu vào sai. Nếu lỗi còn mới với bạn, đã có bài riêng: [Go errors, defer and panic](/blog/go-errors-defer-panic/). Ở đây chỉ cần biết một hàm có thể trả về `error` bên cạnh kết quả, và `nil` nghĩa là "không có lỗi".
+
+```go
+// port.go
+package port
+
+import (
+	"fmt"
+	"strconv"
+)
+
+// Parse turns text like "8080" into a TCP port number.
+func Parse(s string) (int, error) {
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, fmt.Errorf("port %q is not a number", s)
+	}
+	if n < 1 || n > 65535 {
+		return 0, fmt.Errorf("port %d is out of range 1-65535", n)
+	}
+	return n, nil
+}
+```
+
+Test nằm trong file có tên kết thúc bằng `_test.go`, cùng thư mục. Lệnh `go` chỉ biên dịch các file này khi chạy test, nên chúng không bao giờ lọt vào chương trình của bạn. Một test là hàm tên `TestSomething` nhận một `*testing.T`. Biến `t` là tay nắm của bạn với test: dùng nó để báo lỗi.
+
+<GoP06Files />
+
+```go
+// port_test.go
+package port
+
+import "testing"
+
+func TestParseValid(t *testing.T) {
+	got, err := Parse("8080")
+	if err != nil {
+		t.Fatalf("Parse(\"8080\") returned error: %v", err)
+	}
+	if got != 8080 {
+		t.Errorf("Parse(\"8080\") = %d, want 8080", got)
+	}
+}
+```
+
+Có hai cách báo lỗi. `t.Errorf` đánh dấu test fail nhưng vẫn chạy tiếp, nên bạn thấy hết các vấn đề một lượt. `t.Fatalf` đánh dấu fail và dừng test ngay tại đó; dùng khi các dòng sau vô nghĩa, ví dụ kiểm tra `got` sau khi đã có lỗi. `%q`, `%d`, `%v` là các verb định dạng: bảng trong [Go variables, types, pointers and functions](/blog/go-variables-types-pointers-functions/) liệt kê hết.
+
+<TerminalOutput command="go test -v" label="Go 1.27.1 · darwin/arm64" caption="-v liệt kê từng test. Không có nó, package pass chỉ in PASS và dòng tên package.">
+```text
+=== RUN   TestParseValid
+--- PASS: TestParseValid (0.00s)
+PASS
+ok  	example.com/port	0.217s
+```
+</TerminalOutput>
+
+<Concepts>
+
+- **File `_test.go`**: file mà lệnh `go` chỉ biên dịch khi chạy `go test`. Test nằm cạnh code mà nó kiểm tra.
+- **`*testing.T`**: giá trị mà mọi test nhận được. Các method của nó (`Errorf`, `Fatalf`, `Run`, `Helper`...) báo kết quả.
+- **`t.Errorf` và `t.Fatalf`**: cả hai đều làm test fail; `Fatalf` còn dừng test ngay.
+
+</Concepts>
+
+---
+
+## Table-driven test
+
+Viết mỗi case một hàm test sẽ chép đi chép lại cùng bốn bước: gọi, đặt kỳ vọng, so sánh, báo lỗi. Thói quen của Go là viết logic đó một lần và để các case vào một bảng, tức một slice mà mỗi phần tử là một case. Thêm case chỉ tốn một dòng.
+
+Đoạn code dùng hai cú pháp. Kiểu phần tử của bảng là một struct (nhóm các field có tên, xem [Go structs, methods and interfaces](/blog/go-structs-methods-interfaces/)) khai báo ngay tại chỗ, không đặt tên. Và `t.Run(name, func(t *testing.T) { ... })` chạy một subtest: hàm literal đó là closure, giải thích trong [Go errors, defer and panic](/blog/go-errors-defer-panic/). Lúc này chỉ cần biết mỗi case chạy như một test riêng có tên. Đọc `[]struct{...}{...}` như sau: một slice mà phần tử là struct không tên, theo sau là chính các phần tử đó.
+
+```go
+package port
+
+import "testing"
+
+func TestParse(t *testing.T) {
+	tests := []struct {
+		name    string
+		input   string
+		want    int
+		wantErr bool
+	}{
+		{"normal port", "8080", 8080, false},
+		{"lowest port", "1", 1, false},
+		{"highest port", "65535", 65535, false},
+		{"zero", "0", 0, true},
+		{"too big", "65536", 0, true},
+		{"not a number", "http", 0, true},
+		{"empty", "", 0, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := Parse(tc.input)
+			if (err != nil) != tc.wantErr {
+				t.Fatalf("Parse(%q) error = %v, wantErr %v", tc.input, err, tc.wantErr)
+			}
+			if got != tc.want {
+				t.Errorf("Parse(%q) = %d, want %d", tc.input, got, tc.want)
+			}
+		})
+	}
+}
+```
+
+<GoTableTestDemo />
+
+Dòng `if (err != nil) != tc.wantErr` so sánh hai giá trị đúng/sai: "có nhận được lỗi không?" và "có mong đợi lỗi không?". Nó đúng, và test fail, chỉ khi hai giá trị này khác nhau.
+
+Mỗi case hiện thành một dòng riêng trong kết quả, lấy tên từ field `name` với dấu cách đổi thành gạch dưới. Vì vậy tên case rất quan trọng: đó là thứ bạn đọc khi có gì đó hỏng.
+
+<TerminalOutput command="go test -v" label="Go 1.27.1 · darwin/arm64" caption="Một test cha, bảy subtest. Mỗi tên lấy thẳng từ bảng.">
+```text
+=== RUN   TestParse
+=== RUN   TestParse/normal_port
+=== RUN   TestParse/lowest_port
+=== RUN   TestParse/highest_port
+=== RUN   TestParse/zero
+=== RUN   TestParse/too_big
+=== RUN   TestParse/not_a_number
+=== RUN   TestParse/empty
+--- PASS: TestParse (0.00s)
+    --- PASS: TestParse/normal_port (0.00s)
+    --- PASS: TestParse/lowest_port (0.00s)
+    --- PASS: TestParse/highest_port (0.00s)
+    --- PASS: TestParse/zero (0.00s)
+    --- PASS: TestParse/too_big (0.00s)
+    --- PASS: TestParse/not_a_number (0.00s)
+    --- PASS: TestParse/empty (0.00s)
+PASS
+ok  	example.com/port	0.502s
+```
+</TerminalOutput>
+
+Nếu một case sai (ở đây ta đổi giá trị mong đợi của `highest port` thành 65534), lỗi chỉ đúng case đó và đúng dòng. Bạn cũng có thể chạy lại riêng một subtest bằng `-run`, viết tên test cha và tên subtest nối với nhau bằng dấu gạch chéo. Không có `^` và `$`, `TestParse` khớp theo chuỗi con và sẽ chạy luôn `TestParseValid`.
+
+<TerminalOutput command="go test" label="Go 1.27.1 · darwin/arm64 · một giá trị mong đợi đổi thành 65534" caption="Subtest fail được gọi đích danh, và thông báo cho thấy đầu vào, kết quả và giá trị mong đợi.">
+```text
+--- FAIL: TestParse (0.00s)
+    --- FAIL: TestParse/highest_port (0.00s)
+        port_test.go:27: Parse("65535") = 65535, want 65534
+FAIL
+exit status 1
+FAIL	example.com/port	0.209s
+```
+</TerminalOutput>
+
+<TerminalOutput command="go test -v -run '^TestParse$/too_big'" label="Go 1.27.1 · darwin/arm64" caption="-run nhận một pattern: TestParse, dấu gạch chéo, rồi tên subtest. ^ và $ neo phần đầu, nên TestParseValid không khớp.">
+```text
+=== RUN   TestParse
+=== RUN   TestParse/too_big
+--- PASS: TestParse (0.00s)
+    --- PASS: TestParse/too_big (0.00s)
+PASS
+ok  	example.com/port	0.208s
+```
+</TerminalOutput>
+
+<Callout type="tip" title="Viết thông báo lỗi cho người đọc nó lúc 2 giờ sáng">
+Một thông báo lỗi tốt có ba thứ: lời gọi, thứ bạn nhận được, thứ bạn mong đợi. `Parse("65535") = 65535, want 65534` không cần debugger. `t.Errorf("failed")` bắt bạn phải đọc cả test.
+</Callout>
+
+<Concepts>
+
+- **Table-driven test**: một hàm test có một slice các case và một vòng lặp chạy cùng các kiểm tra cho từng case.
+- **Subtest**: test có tên, bắt đầu bằng `t.Run` bên trong một test khác. Nó tự báo kết quả, tự lọc và tự fail.
+- **`-run`**: cờ của `go test` chỉ chạy các test có tên khớp pattern.
+
+</Concepts>
+
+---
+
+## Helper và fixture
+
+Có những bước kiểm tra lặp lại giữa nhiều test, nên bạn chuyển chúng vào một hàm helper. Gọi `t.Helper()` ở dòng đầu tiên của nó. Không có dòng này, lỗi được báo tại dòng bên trong helper; có nó, Go báo dòng đã gọi helper, đúng chỗ bạn cần xem.
+
+File test này còn dùng `package port_test` thay vì `package port`. Một file test có thể nằm trong package `_test` riêng: khi đó nó chỉ dùng được những gì package xuất ra, giống người dùng thật, nên nó kiểm tra API công khai chứ không phải phần bên trong.
+
+```go
+package port_test
+
+import (
+	"testing"
+
+	"example.com/port"
+)
+
+func wantPort(t *testing.T, input string, want int) {
+	t.Helper()
+	got, err := port.Parse(input)
+	if err != nil {
+		t.Fatalf("Parse(%q): %v", input, err)
+	}
+	if got != want {
+		t.Errorf("Parse(%q) = %d, want %d", input, got, want)
+	}
+}
+
+func TestHelpers(t *testing.T) {
+	wantPort(t, "8080", 8080)
+	wantPort(t, "443", 80)
+}
+```
+
+<TerminalOutput command="go test" label="Go 1.27.1 · darwin/arm64 · có t.Helper()" caption="Dòng 22 là lời gọi wantPort(t, &quot;443&quot;, 80) trong TestHelpers: dòng bạn cần sửa.">
+```text
+--- FAIL: TestHelpers (0.00s)
+    port_test.go:22: Parse("443") = 443, want 80
+FAIL
+exit status 1
+FAIL	example.com/port	0.448s
+```
+</TerminalOutput>
+
+<TerminalOutput command="go test" label="Go 1.27.1 · darwin/arm64 · cùng file, đã bỏ dòng t.Helper()" caption="Dòng 15 là t.Errorf bên trong helper. Lời gọi nào fail cũng ra dòng này, nên nó không cho biết lời gọi nào sai.">
+```text
+--- FAIL: TestHelpers (0.00s)
+    port_test.go:15: Parse("443") = 443, want 80
+FAIL
+exit status 1
+FAIL	example.com/port	1.116s
+```
+</TerminalOutput>
+
+<GoP06Helper />
+
+Với file và các bước chuẩn bị khác, package `testing` có hai công cụ. `t.TempDir()` cho bạn một thư mục mới mà Go xóa khi test kết thúc. `t.Cleanup(fn)` đăng ký một hàm chạy sau khi test xong, giống `defer` nhưng bao cả subtest. File đầu vào cố định nên để trong thư mục tên `testdata`, thư mục mà công cụ `go` bỏ qua khi build package.
+
+```go
+package port_test
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
+
+func TestReadConfig(t *testing.T) {
+	dir := t.TempDir() // a fresh folder, deleted when the test ends
+	path := filepath.Join(dir, "port.txt")
+	if err := os.WriteFile(path, []byte("8080\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { t.Log("cleanup runs last") })
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("read %q", data)
+}
+```
+
+<TerminalOutput command="go test -v -run TestReadConfig" label="Go 1.27.1 · darwin/arm64" caption="Thông báo cleanup in sau thân test, dù được đăng ký ở giữa chừng.">
+```text
+=== RUN   TestReadConfig
+    fixture_test.go:21: read "8080\n"
+    fixture_test.go:15: cleanup runs last
+--- PASS: TestReadConfig (0.00s)
+PASS
+ok  	example.com/port	0.602s
+```
+</TerminalOutput>
+
+<Concepts>
+
+- **Hàm helper**: hàm nhận `t` và làm một bước kiểm tra lặp lại. `t.Helper()` làm lỗi chỉ về nơi gọi nó.
+- **`package x_test`**: file test nằm trong package riêng, chỉ dùng được các tên được xuất của `x`.
+- **`testdata/`**: thư mục chứa file fixture (đầu vào mẫu cố định). Công cụ `go` bỏ qua nó khi build.
+- **`t.TempDir`, `t.Cleanup`**: thư mục dùng một lần cho test, và hàm chạy khi test kết thúc.
+
+</Concepts>
+
+---
+
+## Chạy test: các cờ giúp tìm lỗi
+
+`go test ./...` chạy mọi package dưới thư mục hiện tại. Một vài cờ đổi cách chạy test, và chúng tìm ra lỗi thật. Danh sách đầy đủ nằm trong tài liệu lệnh `go` (xem phần nguồn).
+
+| Cờ | Tác dụng | Vì sao nên dùng |
+|---|---|---|
+| `-v` | in từng test và subtest | thấy cái gì đã chạy |
+| `-run <pattern>` | chỉ chạy test khớp | lặp nhanh trên một case |
+| `-count=1` | bỏ qua cache kết quả | chạy lại test đọc file hoặc mạng |
+| `-short` | bỏ qua test gọi `testing.Short()` | vòng lặp nhanh (xem "Test chậm") |
+
+Khi chạy một danh sách package như `./...`, Go cache kết quả pass, nên package không đổi sẽ in `(cached)` ở lần sau. Dùng `-count=1` khi bạn muốn chạy lại thật.
+
+Thêm hai cờ nữa, mỗi cờ một dòng. Gọi `t.Parallel()` ở đầu một test cho phép nó chạy cùng các test song song khác; chỉ nhanh hơn khi các test không dùng chung gì (không file, biến toàn cục hay dòng database). `-shuffle=on` chạy test theo thứ tự ngẫu nhiên và in ra seed, để chạy lại đúng thứ tự gây lỗi bằng `-shuffle=<seed>`; nó lộ ra các test phụ thuộc lẫn nhau. `-parallel N` giới hạn số test song song chạy cùng lúc.
+
+<Concepts>
+
+- **Test cache**: khi chạy danh sách package như `./...`, Go nhớ kết quả pass và in `(cached)` khi không có gì đổi. `-count=1` tắt nó đi.
+- **`t.Parallel()`**: cho phép test này chạy cùng lúc với các test song song khác.
+- **`-shuffle`**: chạy test theo thứ tự ngẫu nhiên để lộ ra những phụ thuộc ngầm giữa chúng.
+
+</Concepts>
+
+---
+
+## Coverage
+
+Coverage cho biết dòng code nào đã chạy trong lúc test. Thêm `-cover` để lấy một con số, hoặc ghi profile bằng `-coverprofile` rồi đọc theo từng hàm bằng `go tool cover`. Bên dưới, package chỉ có một test là `Parse("8080")`, nên hai trong sáu câu lệnh của `Parse` (hai lệnh trả về lỗi) chưa bao giờ chạy.
+
+<TerminalOutput command="go test -cover" label="Go 1.27.1 · darwin/arm64 · trong thư mục chỉ có TestOnlyOne" caption="Một test, một case đường đi thuận lợi: hai phần ba số câu lệnh đã chạy.">
+```text
+PASS
+coverage: 66.7% of statements
+ok  	example.com/port	1.028s
+```
+</TerminalOutput>
+
+<TerminalOutput command="go test -coverprofile=c.out && go tool cover -func=c.out" label="Go 1.27.1 · darwin/arm64" caption="Profile là một file. go tool cover đọc nó, theo từng hàm.">
+```text
+PASS
+coverage: 66.7% of statements
+ok  	example.com/port	0.914s
+example.com/port/port.go:10:	Parse		66.7%
+total:				(statements)	66.7%
+```
+</TerminalOutput>
+
+<GoP06Coverage />
+
+Với bảng đầy đủ ở trên, cùng lệnh đó báo `100.0% of statements`. Hãy coi coverage là cách tìm code không test nào chạm tới, không phải điểm số để chạy theo. 100% chỉ nói mọi dòng đã chạy, không nói các kiểm tra trên đó tốt hay không.
+
+<Concepts>
+
+- **Coverage**: tỉ lệ câu lệnh mà test đã thực thi. Nó tìm ra code chưa được test. Nó không chứng minh code đã test là đúng.
+- **`-coverprofile`**: ghi coverage từng dòng vào một file để `go tool cover` tóm tắt hoặc đổi thành báo cáo HTML.
+
+</Concepts>
+
+---
+
+## Test chậm: `-short`, build tag, biến môi trường
+
+Hình kim tự tháp là cách vẽ quen thuộc cho các loại test: nhiều unit test nhanh ở đáy, ít integration test chậm hơn ở trên (database thật, mạng thật). Go có ba cách đơn giản để test chậm không làm cả nhóm phải chờ.
+
+1. **`-short`.** Test chậm kiểm tra `testing.Short()` và tự bỏ qua. `go test -short` khi đó là vòng lặp nhanh của bạn.
+2. **Build tag.** Dòng đầu `//go:build integration` giữ file ngoài cuộc trừ khi bạn yêu cầu: `go test -tags=integration`.
+3. **Biến môi trường.** Test đọc `os.Getenv("...")` và bỏ qua nếu chưa đặt. Dùng cho những thứ như địa chỉ database.
+
+```go
+package session
+
+import (
+	"testing"
+	"time"
+)
+
+func TestSlowDatabase(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping in short mode")
+	}
+	time.Sleep(2 * time.Second) // stand-in for a slow real database call
+}
+```
+
+```go
+//go:build integration
+
+package session
+
+import "testing"
+
+func TestAgainstRealDatabase(t *testing.T) {
+	t.Log("talking to the real database")
+}
+```
+
+<TerminalOutput command="go test -v" label="Go 1.27.1 · darwin/arm64 · những dòng cuối" caption="Không có -short, test chậm thật sự chờ hai giây.">
+```text
+=== RUN   TestSlowDatabase
+--- PASS: TestSlowDatabase (2.00s)
+PASS
+ok  	example.com/session	2.812s
+```
+</TerminalOutput>
+
+<TerminalOutput command="go test -short -v" label="Go 1.27.1 · darwin/arm64 · những dòng cuối" caption="Có -short, cùng test đó bị bỏ qua trong vài mili giây và nói rõ lý do.">
+```text
+=== RUN   TestSlowDatabase
+    session_test.go:10: skipping in short mode
+--- SKIP: TestSlowDatabase (0.00s)
+PASS
+ok  	example.com/session	0.335s
+```
+</TerminalOutput>
+
+<TerminalOutput command="go test -tags=integration -v -run Real" label="Go 1.27.1 · darwin/arm64" caption="File có tag chỉ được biên dịch khi bạn truyền tag.">
+```text
+=== RUN   TestAgainstRealDatabase
+    integration_test.go:8: talking to the real database
+--- PASS: TestAgainstRealDatabase (0.00s)
+PASS
+ok  	example.com/session	0.704s
+```
+</TerminalOutput>
+
+<TerminalOutput command="go test -v -run Real" label="Go 1.27.1 · darwin/arm64 · không có tag" caption="Không có tag thì file thậm chí không được biên dịch, nên không có gì khớp.">
+```text
+testing: warning: no tests to run
+PASS
+ok  	example.com/session	0.213s
+```
+</TerminalOutput>
+
+<GoP06SlowTests />
+
+<Concepts>
+
+- **Build tag**: dòng `//go:build name` ở đầu file. File chỉ được biên dịch khi có `-tags=name`.
+- **`testing.Short()`**: đúng khi chạy `go test -short`. Test chậm kiểm tra nó rồi gọi `t.Skip`.
+
+</Concepts>
+
+---
+
+## Thời gian mà không cần `time.Sleep`
+
+Test có sleep là test đang đoán. Sleep 100 ms thì chạy ổn trên laptop nhưng fail trên máy CI đang bận; sleep 5 giây thì cả bộ test chạy lê thê. Cách sửa tùy vào lý do bạn phải chờ.
+
+Nếu code cần test đọc đồng hồ, đừng để nó đọc đồng hồ. Hãy truyền thời gian vào. `Expired` bên dưới nhận `now` làm tham số thay vì gọi `time.Now()` bên trong, nên test chọn được bất kỳ thời điểm nào nó muốn và chạy trong vài micro giây.
+
+```go
+package session
+
+import "time"
+
+// Expired reports whether a session created at `created` is too old at time `now`.
+func Expired(created, now time.Time, ttl time.Duration) bool {
+	return now.Sub(created) > ttl
+}
+```
+
+```go
+package session
+
+import (
+	"testing"
+	"time"
+)
+
+func TestExpired(t *testing.T) {
+	created := time.Date(2026, 11, 23, 9, 0, 0, 0, time.UTC)
+	ttl := 30 * time.Minute
+
+	tests := []struct {
+		name string
+		now  time.Time
+		want bool
+	}{
+		{"just created", created, false},
+		{"29 minutes later", created.Add(29 * time.Minute), false},
+		{"31 minutes later", created.Add(31 * time.Minute), true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := Expired(created, tc.now, ttl); got != tc.want {
+				t.Errorf("Expired(...) = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+```
+
+<TerminalOutput command="go test -v -run TestExpired" label="Go 1.27.1 · darwin/arm64" caption="Ba thời điểm, không cái nào phải chờ. 31 phút trôi qua trong chớp mắt.">
+```text
+=== RUN   TestExpired
+=== RUN   TestExpired/just_created
+=== RUN   TestExpired/29_minutes_later
+=== RUN   TestExpired/31_minutes_later
+--- PASS: TestExpired (0.00s)
+    --- PASS: TestExpired/just_created (0.00s)
+    --- PASS: TestExpired/29_minutes_later (0.00s)
+    --- PASS: TestExpired/31_minutes_later (0.00s)
+```
+</TerminalOutput>
+
+<GoP06Time />
+
+Lý do khác để sleep là chờ công việc chạy nền, một goroutine (bạn sẽ gặp chúng trong [Go goroutines, channels and select](/blog/go-goroutines-channels-select/)). Nguyên tắc ở đó cùng tinh thần: chờ một tín hiệu báo việc đã xong, như channel hoặc `sync.WaitGroup`, đừng chờ theo đồng hồ. Khi không có tín hiệu nào để chờ, hãy kiểm tra điều kiện trong một vòng lặp có hạn chót thay vì một lần sleep dài.
+
+<Concepts>
+
+- **Flaky test**: test lúc pass lúc fail dù code không đổi. Sleep một khoảng cố định là nguyên nhân thường gặp.
+- **Truyền thời gian vào**: nhận `now` làm tham số để test điều khiển được, thay vì gọi `time.Now()` bên trong hàm.
+
+</Concepts>
+
+---
+
+## Test HTTP handler
+
+HTTP handler trong Go là một hàm nhận request và một response writer. Package `net/http/httptest` của thư viện chuẩn cho phép bạn gọi thẳng hàm đó, không cần mở cổng mạng hay server. `httptest.NewRequest` dựng một request. `httptest.NewRecorder` đóng vai response writer và ghi nhớ status, header và body để bạn kiểm tra. Trong handler bên dưới, `fmt.Fprintf(w, ...)` là `Printf` ghi vào response `w`, còn `r.URL.Query().Get("name")` đọc phần `?name=` của URL.
+
+```go
+package ht
+
+import (
+	"fmt"
+	"net/http"
+)
+
+// Hello greets the name in the ?name= query parameter.
+func Hello(w http.ResponseWriter, r *http.Request) {
+	name := r.URL.Query().Get("name")
+	if name == "" {
+		http.Error(w, "name is required", http.StatusBadRequest)
+		return
+	}
+	fmt.Fprintf(w, "hello, %s", name)
+}
+```
+
+```go
+package ht
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+)
+
+func TestHello(t *testing.T) {
+	tests := []struct {
+		name       string
+		url        string
+		wantStatus int
+		wantBody   string
+	}{
+		{"with a name", "/hello?name=Linh", http.StatusOK, "hello, Linh"},
+		{"missing name", "/hello", http.StatusBadRequest, "name is required\n"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tc.url, nil)
+			rec := httptest.NewRecorder()
+
+			Hello(rec, req)
+
+			if rec.Code != tc.wantStatus {
+				t.Errorf("status = %d, want %d", rec.Code, tc.wantStatus)
+			}
+			if rec.Body.String() != tc.wantBody {
+				t.Errorf("body = %q, want %q", rec.Body.String(), tc.wantBody)
+			}
+		})
+	}
+}
+```
+
+<TerminalOutput command="go test -v" label="Go 1.27.1 · darwin/arm64" caption="Một table test bình thường. Handler chạy trong bộ nhớ, cả file mất chưa tới một giây.">
+```text
+=== RUN   TestHello
+=== RUN   TestHello/with_a_name
+=== RUN   TestHello/missing_name
+--- PASS: TestHello (0.00s)
+    --- PASS: TestHello/with_a_name (0.00s)
+    --- PASS: TestHello/missing_name (0.00s)
+PASS
+ok  	example.com/ht	0.513s
+```
+</TerminalOutput>
+
+Để test code là một HTTP client, `httptest.NewServer` khởi động một server thật trên một cổng cục bộ còn trống và đưa bạn URL của nó, để bạn trỏ client vào. Package anh em `testing/iotest` có các reader cố tình lỗi, dùng để test code đọc luồng dữ liệu.
+
+<Concepts>
+
+- **`httptest.NewRecorder`**: response writer giả, ghi lại status code, header và body.
+- **`httptest.NewRequest`**: dựng một HTTP request trong bộ nhớ, không cần mạng.
+- **`httptest.NewServer`**: khởi động một server cục bộ thật và tạm thời, để test HTTP client.
+
+</Concepts>
+
+---
+
+## `-race`: làm quen
+
+Data race xảy ra khi hai goroutine cùng chạm vào một biến cùng lúc và ít nhất một bên ghi. Loại lỗi này qua được hầu hết các lần chạy test rồi mới hỏng ở production, nên chạy lại test không tìm ra nó. Go có thể gắn thêm mã theo dõi truy cập bộ nhớ vào chương trình: thêm `-race`.
+
+Nhóm Go thêm race detector năm 2012. Bài giới thiệu nói đến lúc đó nó đã tìm ra 42 race trong thư viện chuẩn, và nó trở thành một phần của quá trình build liên tục của Go. Hãy thêm `go test -race ./...` vào CI ngay từ đầu; test sẽ chậm hơn, nhưng đây là cách rẻ nhất để bắt loại lỗi này.
+
+<QuoteCard author="Dmitry Vyukov and Andrew Gerrand" role="The Go Blog" sourceTitle="Introducing the Go Race Detector" sourceUrl="https://go.dev/blog/race-detector">
+The technology was integrated with Go in September 2012; since then it has detected 42 races in the standard library. It is now part of our continuous build process, where it continues to catch race conditions as they arise.
+</QuoteCard>
+
+Trong một test mà hai goroutine (hàm chạy cùng lúc với phần còn lại của chương trình; bài 7 giải thích) cùng cộng vào một biến đếm, `go test` thường in PASS, còn `go test -race` in `WARNING: DATA RACE`, rồi đến lần đọc, lần ghi trước đó, goroutine của từng lần và file cùng dòng của mỗi lần truy cập.
+
+Cách detector hoạt động và cách sửa một race nằm ở [Go concurrency: scheduler, channels, context and mutexes](/blog/go-concurrency-scheduler-channels-context-mutexes/).
+
+<Concepts>
+
+- **Data race**: hai goroutine cùng truy cập một biến và ít nhất một bên ghi. Kết quả phụ thuộc vào thời điểm.
+- **`-race`**: cờ build chương trình kèm các kiểm tra báo data race ngay khi nó xảy ra. Chậm hơn, nhưng tìm ra lỗi mà lần chạy thường bỏ sót.
+
+</Concepts>
+
+---
+
+## Điểm rút ra (Key takeaways)
+
+- Test là Go thường trong file `_test.go`, chạy bằng `go test`; không có framework, và lỗi được báo bằng `t.Errorf` và `t.Fatalf`.
+- Gom nhiều case vào một bảng và chạy từng case bằng `t.Run`: thêm case chỉ một dòng, và khi fail thì biết ngay case nào.
+- Biến thời gian thành đầu vào và chờ tín hiệu thay vì chờ đồng hồ, để test nhanh và không flaky.
+- Tách test chậm bằng `-short`, build tag hoặc biến môi trường, và chạy `-shuffle=on` cùng `-race` thường xuyên.
+- Dùng `httptest` để test handler trong bộ nhớ, và đọc `-cover` như bản đồ code chưa được test, không phải điểm số.
+
+## Câu hỏi ôn tập (Review questions)
+
+1. Vì sao nên chọn `t.Fatalf` thay vì `t.Errorf` sau khi kiểm tra một lỗi? (Xem "Test đầu tiên".)
+2. Dòng báo lỗi trong kết quả sẽ ra sao nếu bạn quên `t.Helper()` trong helper? (Xem "Helper và fixture".)
+3. Vì sao test có `time.Sleep(100 * time.Millisecond)` fail trên máy CI đang bận, và cách sửa khi code đọc đồng hồ là gì? (Xem "Thời gian mà không cần `time.Sleep`".)
+4. Một test chạy riêng thì pass nhưng fail khi chạy cả package với `-shuffle=on`. Nguyên nhân nhiều khả năng là gì? (Xem "Chạy test".)
+5. Làm sao `go test` có thể pass trong khi `go test -race` fail trên cùng một đoạn code? (Xem "`-race`: làm quen".)
+
+### Sẽ có trong các bài sau
+
+Goroutine và channel, phần code mà ví dụ race đang giấu, nằm ở [Go goroutines, channels and select](/blog/go-goroutines-channels-select/). Benchmark và profiling, nửa còn lại của việc đo code Go, có trong các bài đào sâu.
+
+</Vi>

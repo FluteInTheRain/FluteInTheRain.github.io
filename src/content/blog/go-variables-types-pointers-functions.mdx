@@ -1,0 +1,1108 @@
+---
+title: "Go types and functions"
+title_vi: "Kiểu dữ liệu và hàm trong Go"
+description: "A rocket lost to one integer conversion. Learn Go variables, zero values, numeric types, multiple returns, pointers, defer and the := shadowing trap, with real output."
+description_vi: "Một cú ép kiểu số làm nổ cả tên lửa Ariane 5. Học biến, zero value, kiểu số, hàm nhiều giá trị trả về, con trỏ, defer và bẫy := che biến, kèm output chạy thật."
+date: 2026-11-23
+category: "backend"
+tags: ["golang", "types", "functions", "pointers", "defer", "100-go-mistakes"]
+cover: "../../assets/series/golang/go-gopher-pencil-running.jpg"
+cover_alt: "Pencil drawing of the Go gopher running, drawn by Renee French"
+draft: false
+sources:
+  - { title: "100 Go Mistakes and How to Avoid Them", author: "Teiva Harsanyi", chapters: "Ch. 2 (#1, #2), Ch. 3 (#17-#19), Ch. 6 (#42, #47)", url: "https://100go.co/" }
+  - { title: "Efficient Go", author: "Bartlomiej Plotka", chapters: "Ch. 2" }
+  - { title: "Go FAQ: When are function parameters passed by value?", author: "The Go Authors", url: "https://go.dev/doc/faq#pass_by_value" }
+  - { title: "Defer, Panic, and Recover", author: "Andrew Gerrand (The Go Blog)", url: "https://go.dev/blog/defer-panic-and-recover" }
+  - { title: "The Go Programming Language Specification: Constants", author: "The Go Authors", url: "https://go.dev/ref/spec#Constants" }
+  - { title: "Cluster (spacecraft): Ariane flight 501 failure (Wikipedia)", url: "https://en.wikipedia.org/wiki/Cluster_(spacecraft)" }
+  - { title: "Ariane flight V88 (Wikipedia)", url: "https://en.wikipedia.org/wiki/Ariane_flight_V88" }
+  - { title: "Line of Sight in Code", author: "Mat Ryer", url: "https://medium.com/@matryer/line-of-sight-in-code-186dd7cdea88" }
+  - { title: "Vernier caliper Messschieber (CC BY-SA 3.0)", author: "ArtMechanic", url: "https://commons.wikimedia.org/wiki/File:Messschieber.jpg" }
+  - { title: "Go gopher pencil running (CC BY 3.0)", author: "Renee French", url: "https://commons.wikimedia.org/wiki/File:Go_gopher_pencil_running.jpg" }
+---
+
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import En from '../../components/mdx/En.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import GoPassByValueStepper from '../../components/mdx/GoPassByValueStepper.astro';
+import GoP02Ariane from '../../components/mdx/GoP02Ariane.astro';
+import GoP02DeferStack from '../../components/mdx/GoP02DeferStack.astro';
+import GoP02HappyPath from '../../components/mdx/GoP02HappyPath.astro';
+import GoP02Shadow from '../../components/mdx/GoP02Shadow.astro';
+import GoP02Wrap from '../../components/mdx/GoP02Wrap.astro';
+import QuoteCard from '../../components/mdx/QuoteCard.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import heroCaliper from '../../assets/blog/go-variables-types-pointers-functions/micrometer-caliper.jpg';
+
+<En>
+
+<Figure src={heroCaliper} alt="Metal vernier caliper clamped on a small part, reading an exact width" caption="A caliper reads an exact width. A Go number type has an exact width too, and a value that is wider than its slot gets cut to fit." sourceTitle="Wikimedia Commons: Vernier caliper Messschieber" sourceUrl="https://commons.wikimedia.org/wiki/File:Messschieber.jpg" />
+
+> "A function always gets a copy of the thing being passed, as if there were an assignment statement assigning the value to the parameter."
+> &mdash; *The Go FAQ*
+
+### A rocket, a number that did not fit
+
+On 4 June 1996 the first Ariane 5 rocket left the pad in French Guiana and was destroyed 37 seconds later. The inquiry traced it to guidance software that converted a 64-bit floating-point number to a 16-bit signed integer without a check. The value was too big for 16 bits, so the conversion overflowed, and the flight computer read an error message as if it were flight data.
+
+<GoP02Ariane />
+
+You will probably never write rocket software, but the same bug is one innocent line away in any language where numbers have a fixed size, and Go will not warn you. This post covers the building blocks you need first:
+
+1. Variables and zero values: how to declare things, and why Go has no "undefined".
+2. Types, constants and conversions: why `int32 + int64` does not compile, and what happens when a number overflows.
+3. Functions: multiple return values, and keeping the normal path easy to read.
+4. Pointers, `defer` and the `:=` trap: what "everything is passed by value" really means, when to pass a pointer, and the first bug most newcomers hit.
+
+<Callout type="note" title="TL;DR">
+Go gives every variable a type and a zero value, converts between number types only when you ask, and wraps integers around silently when they overflow. Functions can return several values. Every argument is a copy: pass a pointer when the function must change the caller's variable. `defer` runs a call when the function ends, in reverse order, with its arguments fixed at the `defer` line. And `:=` inside a block creates a new variable, which can hide the one you meant to set.
+</Callout>
+
+If you have not run a Go program yet, start with [Go basics](/blog/go-first-program-modules-packages/). This post assumes you can `go run` a file.
+
+<Concepts>
+
+- **Zero value**: the value a variable has when you declare it without giving one. Each type has its own: `0`, `""`, `false`, `nil`.
+- **Compile error**: a mistake the compiler catches before the program runs. Go reports many mistakes at this stage instead of leaving them for run time.
+- **Pass by value**: handing a function a copy of the argument, so the function cannot change your original.
+
+</Concepts>
+
+---
+
+## Variables and zero values
+
+A variable is a named box that holds one value of one type. Go has two ways to make one. `var count int` says "a box called `count` that holds an `int`". `city := "Hanoi"` says "make a box called `city` and put this value in it", and Go works out the type itself. The short form `:=` is what you will write most of the time, but it only works inside functions.
+
+The part that feels new is what is in the box when you do not say. In Go it is always the **zero value** of the type, so a variable is never "undefined" and never holds leftover garbage:
+
+```go
+package main
+
+import "fmt"
+
+func main() {
+	var count int
+	var name string
+	var ok bool
+	var price float64
+	var p *int // a pointer, covered below
+	var items []string // a slice (a list), see Go collections
+
+	fmt.Printf("int=%d string=%q bool=%t float64=%g\n", count, name, ok, price)
+	fmt.Printf("pointer=%v slice=%v (nil? %t)\n", p, items, items == nil)
+
+	city := "Hanoi" // := declares and assigns, only inside functions
+	var temp = 31.5 // type worked out from the value
+	fmt.Printf("%s %T, %v %T\n", city, city, temp, temp)
+
+	a, b := 1, "two" // several at once
+	a, c := 3, "new" // fine: c is new, so := is allowed
+	fmt.Println(a, b, c)
+}
+```
+
+`fmt.Printf` prints text with placeholders called verbs: each `%` plus a letter is replaced by one of the values after the string. These are the ones this series uses:
+
+| Verb | Prints | Example |
+| :--- | :--- | :--- |
+| `%v` | the value in its default form | `31.5` |
+| `%d` | an integer in decimal | `42` |
+| `%s` | a string as it is | `Hanoi` |
+| `%q` | a string in double quotes, escapes shown | `"Hanoi"`, and `""` for an empty string |
+| `%t` | a bool | `true` |
+| `%g` | a float in its shortest form | `0` for `0.0` |
+| `%T` | the type of the value | `string`, `float64` |
+| `%p` | a memory address (pointers, below) | `0x4e44bc396020` |
+| `%x` | bytes or a number in hexadecimal | `6869` for the bytes of `hi` |
+| `% x` | the same with a space between bytes | `68 69` |
+| `%c` | the character for a code point | `A` for 65 |
+| `U+%04X` | a code point written as `U+0041` | `U+0041` |
+| `\n` | not a verb: a new line | ends the line |
+
+You do not need to memorise the table. Later posts link back here when a new verb shows up.
+
+<TerminalOutput command="go run ./vars" label="Apple M2 · Go 1.27" caption="Every variable starts at its zero value. %T prints the type Go picked, and %q shows the empty string as quotes.">
+```text
+int=0 string="" bool=false float64=0
+pointer=<nil> slice=[] (nil? true)
+Hanoi string, 31.5 float64
+3 two new
+```
+</TerminalOutput>
+
+| Type | Zero value |
+| :--- | :--- |
+| `int`, `float64` and the other numbers | `0` |
+| `string` | `""` (empty, never `nil`) |
+| `bool` | `false` |
+| pointer (`*T`) | `nil` |
+| slice, map | `nil` (see [Go collections](/blog/go-slices-maps-strings/)) |
+
+Zero values are why Go code often skips setup code: a counter starts at 0 without you writing `= 0`. Structs, which group several values, get the same treatment: each field starts at its own zero value. They have their own post, [Go structs and interfaces](/blog/go-structs-methods-interfaces/).
+
+Go is also strict about leftovers. A variable you declare and never use is a compile error, and so is an unused import. Efficient Go points out that this surprises newcomers but keeps code clean. If you really want to ignore a value, say so with the blank name `_`.
+
+<TerminalOutput command="go build ./unused" label="Apple M2 · Go 1.27" caption="An unused variable stops the build. The compiler names the variable.">
+```text
+# demo/unused
+unused/main.go:4:2: declared and not used: count
+```
+</TerminalOutput>
+
+Two more rules about `:=`. It needs at least one new name on the left, which is why `a, c := 3, "new"` above is legal even though `a` already exists. And it cannot be used outside a function; at the top of a file you must write `var`.
+
+<Concepts>
+
+- **`var` and `:=`**: `var x T` declares a variable of type `T`. `x := v` declares and assigns in one step and infers the type, but only inside functions.
+- **`nil`**: Go's name for "points at nothing". It is the zero value of pointers, slices, maps and a few other types.
+- **Blank identifier `_`**: a write-only name. Assigning to it tells the compiler you are ignoring that value on purpose.
+
+</Concepts>
+
+---
+
+## Types, constants and conversions
+
+Go's number types have fixed sizes, and the name says the size: `int8`, `int16`, `int32`, `int64` and their unsigned twins `uint8` to `uint64`. Plain `int` and `uint` are the exceptions: they match the machine, so 64 bits on a 64-bit computer. Use `int` unless you have a reason to pick a size. Floating-point numbers are `float32` and `float64` (use `float64`). A `byte` is another name for `uint8`.
+
+The rule that surprises people: **Go never converts between number types for you.** Adding an `int32` to an `int64` is a compile error, even though nothing would be lost.
+
+<TerminalOutput command="go build ./bad" label="Apple M2 · Go 1.27" caption="Mixing int32 and int64 in one expression does not compile.">
+```text
+# demo/bad
+bad/main.go:6:11: invalid operation: small + big (mismatched types int32 and int64)
+```
+</TerminalOutput>
+
+You convert on purpose, by writing the target type like a function: `int64(small) + big`. This is also where data gets lost, so the conversion is where you should look when you review code. Converting a float to an int cuts off the decimals, it does not round.
+
+```go
+var small int32 = 7
+var big int64 = 1_000_000
+total := int64(small) + big
+fmt.Println(total) // 1000007
+
+f := 9.99
+fmt.Println(int(f)) // 9
+```
+
+### Constants and iota
+
+A `const` is a name for a value fixed at compile time. A constant with no declared type is **untyped** and takes the type of whatever it meets, so `const n = 1000` works with both an `int` and a `float64`. The exception is a value that does not fit: adding `const half = 0.5` to an `int` fails with `half (untyped float constant 0.5) truncated to int`.
+
+For a numbered list of related constants, Go has `iota`. The example below starts with `type Weekday int`. `type` gives an existing type a new name, so the compiler keeps weekdays apart from plain ints. Post 4 uses `type` for structs, in [Go structs and interfaces](/blog/go-structs-methods-interfaces/).
+
+Inside one `const ( ... )` block, `iota` counts 0, 1, 2 and so on, one step per line. A line with no value of its own repeats the line above, so `Monday` below means `Monday Weekday = iota` and gets 1.
+
+```go
+type Weekday int
+
+const (
+	Sunday Weekday = iota // 0
+	Monday                // 1
+	Tuesday               // 2
+)
+
+fmt.Println(Sunday, Monday, Tuesday) // 0 1 2
+```
+
+This is Go's version of an enum. There is no `enum` keyword, only a named type plus constants.
+
+### The octal trap
+
+Here is a bug that compiles, runs and gives a plausible answer. A number written with a leading zero is **octal** (base 8), so `010` is 8.
+
+```go
+fmt.Println(100 + 010)  // 108, not 110
+fmt.Println(100 + 0o10) // 108, but now it says "octal" out loud
+fmt.Println(0o755, 0755, 755)
+```
+
+The same mistake hides in file permissions, which are written in octal: the Unix permission `rwxr-xr-x` is `0o755`. As a plain number that is 493, and `0755` is the same 493, while `755` is a different number. Write octal with the `0o` prefix, as 100 Go Mistakes recommends, so the next reader does not have to guess.
+
+<TerminalOutput command="go run ./types" label="Apple M2 · Go 1.27" caption="The conversion, weekday and octal snippets above, run together in one program.">
+```text
+1000007
+9
+0 1 2
+108
+108
+493 493 755
+```
+</TerminalOutput>
+
+<Concepts>
+
+- **Untyped constant**: a constant written as a bare number like `0.5` or `1000`. It takes a type only where it is used, so it fits into whichever number type you combine it with.
+- **`iota`**: a counter that starts at 0 in each `const` block and goes up by one per line. Used to build enum-like lists.
+- **Conversion**: writing `T(value)` to turn a value into type `T`. Go requires it between different number types.
+- **Octal**: base 8. In Go a literal starting with `0` is octal; `0o` makes that explicit.
+
+</Concepts>
+
+---
+
+## Overflow and floating point
+
+An integer has a fixed number of bits, so it has a largest value. Add one to it and the number **wraps around** to the smallest value. Go does this silently at run time: no panic, no error. (If the compiler can see the overflow in a constant, it refuses to build.)
+
+```go
+var small uint8 = 255
+small++
+fmt.Println("uint8 after 255+1:", small)
+
+var big int64 = 40000
+fmt.Println("int16(40000):", int16(big))
+```
+
+<TerminalOutput command="go run ./overflow" label="Apple M2 · Go 1.27" caption="Two silent wrap-arounds. The second is the Ariane 5 kind of bug: a conversion to a narrower type.">
+```text
+uint8 after 255+1: 0
+int16(40000): -25536
+```
+</TerminalOutput>
+
+<GoP02Wrap />
+
+That `int16(40000)` is the shape of the Ariane 5 failure: a wide number squeezed into a narrower slot. The value that overflowed was the rocket's horizontal bias, which on Ariane 5 grew larger than the Ariane 4 design had expected. Go would have let the same conversion through without a sound.
+
+Most of the time you do not need to worry. A request counter in an `int` will not reach 2^63. Check for overflow when you use small integer types, handle very large numbers, or convert from a wide type to a narrow one. The check is a plain comparison before the operation: for an addition, `a > math.MaxInt-b` tells you the sum would overflow.
+
+### Floats are approximations
+
+`float64` stores numbers in binary, and a fraction like `0.1` has no exact binary form, so tiny errors creep in:
+
+```go
+a, b := 0.1, 0.2
+fmt.Println(a+b, a+b == 0.3)
+```
+
+The output is `0.30000000000000004 false`. Compare floats with a small tolerance instead of `==`, and store money as whole cents in an integer.
+
+<Concepts>
+
+- **Overflow (wrap-around)**: a result too big for the type. Go's integers wrap to the other end of their range instead of failing.
+- **Floating point**: how computers store fractional numbers using a fixed number of bits. The result is close to, not exactly, the true value.
+
+</Concepts>
+
+---
+
+## Functions
+
+A function says its inputs and outputs in the signature: `func divide(a, b int) (int, error)`. Types come after the names, and neighbours of the same type can share one: `a, b int`. A function can return **more than one value**, and Go uses this everywhere. The usual shape is "the result, plus an error", and the caller checks the error right away.
+
+```go
+func divide(a, b int) (int, error) {
+	if b == 0 {
+		return 0, errors.New("divide by zero")
+	}
+	return a / b, nil
+}
+
+q, err := divide(7, 2)
+```
+
+Calling `divide(7, 2)` gives `3 <nil>`, and `divide(7, 0)` gives the error `divide by zero`. `nil` here means "no error". (`errors.New` comes from the standard `errors` package and builds an error value from a message.)
+
+There are no exceptions to catch here: an error is just a value you receive. That idea has its own post, [Go errors](/blog/go-errors-defer-panic/).
+
+### Keep the happy path on the left
+
+Because Go makes you check errors at every step, a function can easily turn into a staircase of nested `if`/`else`. The fix is to return early and keep the normal flow in one straight column. Mat Ryer put it as "Align the happy path to the left".
+
+<GoP02HappyPath />
+
+```go
+func join(s1, s2 string, max int) (string, error) {
+	if s1 == "" {
+		return "", errors.New("s1 is empty")
+	}
+	if s2 == "" {
+		return "", errors.New("s2 is empty")
+	}
+	concat := s1 + s2
+	if len(concat) > max {
+		return "", errors.New("result too long")
+	}
+	return concat, nil
+}
+```
+
+Every `if` that returns needs no `else`. Read down the left edge and you see the success path; the indented lines are the ways it can fail.
+
+Return values can also be named, which has a trap that is about errors, so it lives in [Go errors](/blog/go-errors-defer-panic/).
+
+<Concepts>
+
+- **Multiple return values**: a function can hand back several results at once. By convention the last one is an `error`.
+- **Happy path**: the sequence of steps when nothing goes wrong. Keeping it unindented makes a function easy to scan.
+
+</Concepts>
+
+---
+
+## Pointers and pass by value
+
+In Go, a function call **copies every argument** into the function's own variables. That is the whole rule, and the Go FAQ states it flatly: a function always gets a copy of the thing passed, as if the value had been assigned to the parameter. If you change the copy, the original does not change.
+
+A pointer is how you let a function change the original. `&x` means "the address of `x`", and `*p` means "the thing `p` points at". Passing `&x` still copies, but what gets copied is the address, so the function reaches your variable through it. Play with the three cases below before reading on.
+
+<GoPassByValueStepper />
+
+Here is the same experiment as a real program. The `%p` verb prints the memory address, so you can see the copy living somewhere else:
+
+```go
+func bumpByValue(v int) {
+	v += 50
+	fmt.Printf("  inside bumpByValue: v=%d at %p\n", v, &v)
+}
+
+func bumpByPointer(p *int) {
+	if p == nil {
+		return
+	}
+	*p += 50
+	fmt.Printf("  inside bumpByPointer: p=%p *p=%d\n", p, *p)
+}
+
+func main() {
+	x := 10
+	fmt.Printf("main: x=%d at %p\n", x, &x)
+	bumpByValue(x)
+	fmt.Println("after value:", x)
+	bumpByPointer(&x)
+	fmt.Println("after pointer:", x)
+}
+```
+
+<TerminalOutput command="go run ./ptr" label="Apple M2 · Go 1.27" caption="v is a copy at a different address, so x stays 10. The pointer version writes through the address and x becomes 60. Your addresses will differ.">
+```text
+main: x=10 at 0x4e44bc396020
+  inside bumpByValue: v=60 at 0x4e44bc396040
+after value: 10
+  inside bumpByPointer: p=0x4e44bc396020 *p=60
+after pointer: 60
+```
+</TerminalOutput>
+
+### When to pass a pointer
+
+Default to passing plain values. Reach for `*T` in these cases:
+
+| Pass a pointer when | Why |
+| :--- | :--- |
+| the function must change the caller's variable | a copy cannot do that |
+| the value is large | copying a pointer is cheaper; when unsure how large is large, benchmark |
+| the type must not be copied (for example locks from the `sync` package) | a copy would break it, see [Context and locks](/blog/go-context-timeouts-mutexes/) |
+| `nil` should mean "no value" | only pointers can be `nil` |
+
+### Pointers are small and safe
+
+A pointer in Go cannot be moved around. Writing `p++` to step to the next memory cell does not compile. The Go FAQ gives the reason in one word, safety: without pointer arithmetic (outside the `unsafe` package, a special package whose job is to bypass these safety checks) the language can never produce an illegal address.
+
+<TerminalOutput command="go build ./ptrarith" label="Apple M2 · Go 1.27" caption="There is no p++ on a pointer.">
+```text
+# demo/ptrarith
+ptrarith/main.go:6:2: invalid operation: p++ (non-numeric type *int)
+```
+</TerminalOutput>
+
+You still can crash by following a pointer that points at nothing. The zero value of a pointer is `nil`, and `*np` on a `nil` pointer panics. So check `p != nil` when a pointer could be absent.
+
+```go
+var np *int // nil
+fmt.Println(*np)
+```
+
+<TerminalOutput command="go run ./nilptr" label="Apple M2 · Go 1.27" caption="Following a nil pointer stops the program with a panic.">
+```text
+panic: runtime error: invalid memory address or nil pointer dereference
+[signal SIGSEGV: segmentation violation code=0x2 addr=0x0 pc=0x100c04fdc]
+```
+</TerminalOutput>
+
+Methods (functions attached to a struct) can take their receiver by value or by pointer, and the same rule applies. That belongs with structs, in [Go structs and interfaces](/blog/go-structs-methods-interfaces/).
+
+<Concepts>
+
+- **Pointer**: a variable that holds the memory address of another variable. `&x` takes an address, `*p` follows one.
+- **Dereference**: following a pointer to the value it points at, written `*p`.
+- **Panic**: a run-time crash that unwinds the program. A nil dereference causes one.
+
+</Concepts>
+
+---
+
+## defer
+
+Cleanup is where bugs hide: you open a file, then there are four places to return early, and you must close it in all of them. `defer` solves that. `defer someCall()` does not run the call now. It puts the call on a list, and Go runs the list when the **surrounding function returns**, even through an early return or a panic. Open and `defer Close()` on the next line, and you cannot forget.
+
+The Go blog's article on defer boils it down to three rules. Calls are pushed on a list. They run in **last in, first out** order after the function returns. And arguments are evaluated when the `defer` statement runs, not later.
+
+```go
+func main() {
+	for i := 1; i <= 3; i++ {
+		defer fmt.Println("deferred", i)
+	}
+	fmt.Println("function body done")
+}
+```
+
+<TerminalOutput command="go run ./deferd" label="Apple M2 · Go 1.27" caption="Reverse order: the last defer registered is the first to run.">
+```text
+function body done
+deferred 3
+deferred 2
+deferred 1
+```
+</TerminalOutput>
+
+<GoP02DeferStack />
+
+Reverse order is deliberate. Things opened first usually depend on each other in layers, like a connection and then a transaction on it, so they must be closed from the inside out.
+
+### Arguments are fixed at the defer line
+
+This one catches people, and 100 Go Mistakes gives it a whole entry. The arguments of a deferred call are computed immediately, so a later change to the variable does not reach them.
+
+```go
+func main() {
+	x := 10
+	defer fmt.Println("first:", x) // x is 10 right now, so 10 is what gets saved
+	x = 99
+	defer fmt.Println("second:", x) // x is 99 right now
+}
+```
+
+The stepper above has a third tab that walks through exactly this.
+
+<TerminalOutput command="go run ./deferd" label="Apple M2 · Go 1.27" caption="Each deferred call kept the x it saw at its own defer line, and they ran in reverse order.">
+```text
+second: 99
+first: 10
+```
+</TerminalOutput>
+
+So a `defer` line freezes the values it uses. If you need a deferred call to see a later value, there is a way, but it needs closures (small functions written inline), which [Go errors](/blog/go-errors-defer-panic/) teaches. That post also picks `defer` up again, together with `defer` inside a loop and `panic` with `recover`.
+
+<Concepts>
+
+- **`defer`**: schedules a call to run when the current function ends, however it ends.
+- **LIFO (last in, first out)**: like a stack of plates: the most recently added is the first taken off.
+
+</Concepts>
+
+---
+
+## Shadowing, the first trap
+
+Now that you know `:=`, here is how it bites. Every `{ ... }` block (an `if`, a `for`, a plain pair of braces) is its own **scope**: names declared inside live only until the closing brace. If you write `x := ...` inside a block, and `x` already exists outside, Go does not set the outer `x`. It makes a brand-new `x` that **shadows** the outer one.
+
+This is the trap from 100 Go Mistakes, boiled down to plain numbers. The outer `count` stays `0`, because `count := ...` inside the `if` declared a second variable:
+
+<GoP02Shadow />
+
+```go
+func buggy(n int) int {
+	count := 0
+	if n > 0 {
+		count := n * 2 // a new count, only inside this block
+		fmt.Println("inside block:", count)
+	}
+	return count // the outer count was never touched
+}
+
+func fixed(n int) int {
+	count := 0
+	if n > 0 {
+		count = n * 2 // plain =, assigns to the outer count
+	}
+	return count
+}
+
+func main() {
+	fmt.Println("buggy:", buggy(5))
+	fmt.Println("fixed:", fixed(5))
+}
+```
+
+<TerminalOutput command="go run ./shadow" label="Apple M2 · Go 1.27" caption="The block printed 10 and looked fine, but the function still returned 0. The fix assigns with = to the variable declared once, outside.">
+```text
+inside block: 10
+buggy: 0
+fixed: 10
+```
+</TerminalOutput>
+
+The compiler accepts it because the inner `count` is used (it is printed). The fix is to declare the variable first and use plain `=` inside the block. Reusing a name in a block is sometimes handy, so there is no blanket ban, but whenever a value "goes missing" after an `if` block, look for a `:=` that quietly made a second variable. The same trap shows up with `err`, and you will meet it in [Go errors](/blog/go-errors-defer-panic/).
+
+<Concepts>
+
+- **Scope**: the region of code where a name is valid. Each pair of braces opens a new one.
+- **Shadowing**: declaring a name in an inner scope that already exists in an outer scope, so the inner one hides the outer one.
+
+</Concepts>
+
+---
+
+## Key takeaways
+
+- Variables never start undefined. Every type has a zero value, so a freshly declared variable is safe to use, and an unused variable is a compile error.
+- Convert numbers on purpose, and treat every conversion as a risk. Go never mixes number types silently, but it wraps integers around silently, and a narrowing conversion that overflows is the kind of bug behind Ariane 5.
+- Return early and keep the happy path on the left.
+- Everything is a copy. Pass a pointer when a function must change your variable, the value is large, or `nil` should mean absent. Otherwise pass the value.
+- `defer` fixes its arguments at the `defer` line and runs in reverse order, and `:=` in an inner block creates a new variable.
+
+## Review questions
+
+1. Why does `total := small + big` fail when `small` is `int32` and `big` is `int64`, and how do you fix it? (Types, constants and conversions)
+2. What does `int16(40000)` print, and why does Go not stop you? (Overflow and floating point)
+3. A function takes `v int` and does `v += 50`. Why does the caller's variable stay the same, and what one change would make it update? (Pointers and pass by value)
+4. What does this print, and why: `x := 1; defer fmt.Println(x); x = 2`? (defer)
+5. After an `if` block, the outer `count` is still `0` even though the block ran `count := n * 2`. What happened? (Shadowing, the first trap)
+
+### Coming later in the series
+
+Two Go habits that raise questions, `init` functions and getters and setters, are covered in [Go interfaces deep dive](/blog/go-abstractions-interfaces-generics-errors/).
+
+</En>
+
+<Vi>
+
+<Figure src={heroCaliper} alt="Thước cặp kim loại kẹp một chi tiết nhỏ, đọc chiều rộng chính xác" caption="Thước cặp đọc một bề rộng chính xác. Kiểu số trong Go cũng có bề rộng cố định, giá trị nào rộng hơn ô chứa thì bị cắt cho vừa." sourceTitle="Wikimedia Commons: Vernier caliper Messschieber" sourceUrl="https://commons.wikimedia.org/wiki/File:Messschieber.jpg" />
+
+> "A function always gets a copy of the thing being passed, as if there were an assignment statement assigning the value to the parameter."
+> &mdash; *Go FAQ* (tạm dịch: "Một hàm luôn nhận bản sao của thứ được truyền vào, như thể có một câu lệnh gán giá trị đó cho tham số.")
+
+### Một quả tên lửa và con số không vừa ô
+
+Ngày 4/6/1996, tên lửa Ariane 5 đầu tiên rời bệ phóng ở Guiana thuộc Pháp và bị phá hủy sau 37 giây. Hội đồng điều tra lần ra phần mềm dẫn đường ép một số thực 64 bit sang số nguyên có dấu 16 bit mà không kiểm tra. Giá trị quá lớn so với 16 bit nên phép ép kiểu bị tràn, và máy tính bay đọc thông báo lỗi như thể đó là dữ liệu chuyến bay.
+
+<GoP02Ariane />
+
+Chắc bạn không viết phần mềm tên lửa, nhưng lỗi y hệt chỉ cách một dòng code vô hại ở bất kỳ ngôn ngữ nào có kiểu số kích thước cố định, và Go không cảnh báo gì. Bài này đi qua những phần nền tảng bạn cần nắm trước:
+
+1. Biến và zero value: khai báo thế nào, và vì sao Go không có "undefined".
+2. Kiểu, hằng số và ép kiểu: vì sao `int32 + int64` không biên dịch được, và chuyện gì xảy ra khi số bị tràn.
+3. Hàm: nhiều giá trị trả về, và giữ đường chạy bình thường dễ đọc.
+4. Con trỏ, `defer` và bẫy `:=`: "mọi thứ truyền theo giá trị" thật sự nghĩa là gì, khi nào truyền con trỏ, và lỗi đầu tiên người mới hay dính.
+
+<Callout type="note" title="Tóm tắt nhanh">
+Go gán cho mọi biến một kiểu và một zero value, chỉ đổi giữa các kiểu số khi bạn yêu cầu, và để số nguyên tràn vòng lại một cách âm thầm. Hàm có thể trả về nhiều giá trị. Mọi đối số đều là bản sao: muốn hàm sửa biến của bên gọi thì truyền con trỏ. `defer` chạy một lời gọi khi hàm kết thúc, theo thứ tự ngược, với đối số đã chốt tại dòng `defer`. Còn `:=` trong một khối sẽ tạo biến mới, có thể che mất biến bạn định gán.
+</Callout>
+
+Nếu bạn chưa chạy chương trình Go nào, hãy đọc [Go cơ bản](/blog/go-first-program-modules-packages/) trước. Bài này giả định bạn đã biết `go run` một file.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Zero value (giá trị không)**: giá trị của biến khi bạn khai báo mà không gán. Mỗi kiểu có giá trị riêng: `0`, `""`, `false`, `nil`.
+- **Lỗi biên dịch (compile error)**: lỗi trình biên dịch bắt được trước khi chương trình chạy. Go bắt nhiều lỗi ở bước này thay vì để đến lúc chạy.
+- **Truyền theo giá trị (pass by value)**: đưa cho hàm một bản sao của đối số, nên hàm không sửa được bản gốc của bạn.
+
+</Concepts>
+
+---
+
+## Biến và zero value
+
+Biến là một ô nhớ có tên, chứa một giá trị thuộc một kiểu. Go có hai cách tạo biến. `var count int` nghĩa là "một ô tên `count` chứa `int`". `city := "Hanoi"` nghĩa là "tạo ô tên `city` và bỏ giá trị này vào", Go tự suy ra kiểu. Dạng ngắn `:=` là thứ bạn viết nhiều nhất, nhưng chỉ dùng được bên trong hàm.
+
+Điều mới mẻ là trong ô có gì khi bạn không nói. Ở Go luôn là **zero value** của kiểu đó, nên biến không bao giờ "undefined" và không bao giờ chứa rác còn sót lại:
+
+```go
+package main
+
+import "fmt"
+
+func main() {
+	var count int
+	var name string
+	var ok bool
+	var price float64
+	var p *int // con trỏ, phần dưới sẽ nói
+	var items []string // slice (danh sách), xem Go collections
+
+	fmt.Printf("int=%d string=%q bool=%t float64=%g\n", count, name, ok, price)
+	fmt.Printf("pointer=%v slice=%v (nil? %t)\n", p, items, items == nil)
+
+	city := "Hanoi" // := vừa khai báo vừa gán, chỉ trong hàm
+	var temp = 31.5 // kiểu suy ra từ giá trị
+	fmt.Printf("%s %T, %v %T\n", city, city, temp, temp)
+
+	a, b := 1, "two" // nhiều biến một lúc
+	a, c := 3, "new" // hợp lệ: c là tên mới nên được dùng :=
+	fmt.Println(a, b, c)
+}
+```
+
+`fmt.Printf` in chữ có chỗ trống gọi là verb: mỗi `%` kèm một chữ cái được thay bằng một giá trị đứng sau chuỗi. Đây là những verb series này dùng:
+
+| Verb | In ra | Ví dụ |
+| :--- | :--- | :--- |
+| `%v` | giá trị ở dạng mặc định | `31.5` |
+| `%d` | số nguyên hệ thập phân | `42` |
+| `%s` | chuỗi nguyên văn | `Hanoi` |
+| `%q` | chuỗi trong ngoặc kép, hiện cả ký tự escape | `"Hanoi"`, và `""` cho chuỗi rỗng |
+| `%t` | một bool | `true` |
+| `%g` | số thực ở dạng ngắn nhất | `0` cho `0.0` |
+| `%T` | kiểu của giá trị | `string`, `float64` |
+| `%p` | địa chỉ bộ nhớ (con trỏ, phần dưới) | `0x4e44bc396020` |
+| `%x` | byte hoặc số ở hệ thập lục phân | `6869` cho các byte của `hi` |
+| `% x` | như trên, có dấu cách giữa các byte | `68 69` |
+| `%c` | ký tự ứng với một code point | `A` cho 65 |
+| `U+%04X` | code point viết dạng `U+0041` | `U+0041` |
+| `\n` | không phải verb: xuống dòng | kết thúc dòng |
+
+Bạn không cần thuộc bảng này. Các bài sau sẽ link về đây khi có verb mới.
+
+<TerminalOutput command="go run ./vars" label="Apple M2 · Go 1.27" caption="Mọi biến đều bắt đầu từ zero value. %T in ra kiểu mà Go đã chọn, và %q cho thấy chuỗi rỗng dưới dạng cặp ngoặc kép.">
+```text
+int=0 string="" bool=false float64=0
+pointer=<nil> slice=[] (nil? true)
+Hanoi string, 31.5 float64
+3 two new
+```
+</TerminalOutput>
+
+| Kiểu | Zero value |
+| :--- | :--- |
+| `int`, `float64` và các kiểu số khác | `0` |
+| `string` | `""` (rỗng, không bao giờ là `nil`) |
+| `bool` | `false` |
+| con trỏ (`*T`) | `nil` |
+| slice, map | `nil` (xem [Go collections](/blog/go-slices-maps-strings/)) |
+
+Nhờ zero value mà code Go thường bỏ được bước khởi tạo: bộ đếm bắt đầu từ 0 mà bạn không cần viết `= 0`. Struct, kiểu gom nhiều giá trị lại, cũng được đối xử như vậy: từng field bắt đầu từ zero value của nó. Struct có bài riêng, [Go structs và interface](/blog/go-structs-methods-interfaces/).
+
+Go cũng khắt khe với đồ thừa. Biến khai báo mà không dùng là lỗi biên dịch, import không dùng cũng vậy. Efficient Go nhận xét điều này làm người mới ngạc nhiên nhưng giữ code gọn. Nếu thật sự muốn bỏ qua một giá trị, hãy nói rõ bằng tên trống `_`.
+
+<TerminalOutput command="go build ./unused" label="Apple M2 · Go 1.27" caption="Biến không dùng làm build thất bại. Trình biên dịch gọi đúng tên biến.">
+```text
+# demo/unused
+unused/main.go:4:2: declared and not used: count
+```
+</TerminalOutput>
+
+Thêm hai quy tắc về `:=`. Vế trái phải có ít nhất một tên mới, nên `a, c := 3, "new"` ở trên hợp lệ dù `a` đã có. Và không dùng được ngoài hàm; ở đầu file bạn phải viết `var`.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **`var` và `:=`**: `var x T` khai báo biến kiểu `T`. `x := v` khai báo và gán một bước, tự suy ra kiểu, nhưng chỉ dùng trong hàm.
+- **`nil`**: cách Go nói "không trỏ vào đâu". Là zero value của con trỏ, slice, map và vài kiểu khác.
+- **Tên trống `_` (blank identifier)**: tên chỉ để ghi, không đọc lại được. Gán vào nó là báo trình biên dịch rằng bạn cố ý bỏ qua giá trị đó.
+
+</Concepts>
+
+---
+
+## Kiểu, hằng số và ép kiểu
+
+Các kiểu số của Go có kích thước cố định, và tên kiểu nói luôn kích thước: `int8`, `int16`, `int32`, `int64` cùng bản không dấu `uint8` đến `uint64`. `int` và `uint` trơn là ngoại lệ: chúng theo máy, tức 64 bit trên máy 64 bit. Cứ dùng `int` trừ khi có lý do chọn cỡ khác. Số thực là `float32` và `float64` (dùng `float64`). `byte` là tên khác của `uint8`.
+
+Quy tắc hay làm người ta bất ngờ: **Go không bao giờ tự đổi kiểu số giúp bạn.** Cộng `int32` với `int64` là lỗi biên dịch, dù chẳng mất thông tin gì.
+
+<TerminalOutput command="go build ./bad" label="Apple M2 · Go 1.27" caption="Trộn int32 và int64 trong một biểu thức thì không biên dịch được.">
+```text
+# demo/bad
+bad/main.go:6:11: invalid operation: small + big (mismatched types int32 and int64)
+```
+</TerminalOutput>
+
+Bạn ép kiểu có chủ đích bằng cách viết tên kiểu đích như một hàm: `int64(small) + big`. Đây cũng là chỗ dữ liệu bị mất, nên khi review code hãy nhìn vào các phép ép kiểu. Ép số thực sang số nguyên là cắt bỏ phần thập phân, không làm tròn.
+
+```go
+var small int32 = 7
+var big int64 = 1_000_000
+total := int64(small) + big
+fmt.Println(total) // 1000007
+
+f := 9.99
+fmt.Println(int(f)) // 9
+```
+
+### Hằng số và iota
+
+`const` là tên cho một giá trị cố định từ lúc biên dịch. Hằng số không khai báo kiểu là **untyped** (chưa gắn kiểu) và nhận kiểu của thứ nó gặp, nên `const n = 1000` dùng được với cả `int` lẫn `float64`. Ngoại lệ là giá trị không vừa: cộng `const half = 0.5` vào một `int` báo lỗi `half (untyped float constant 0.5) truncated to int`.
+
+Với một dãy hằng số liên quan, Go có `iota`. Ví dụ bên dưới mở đầu bằng `type Weekday int`. `type` đặt tên mới cho một kiểu có sẵn, để trình biên dịch phân biệt ngày trong tuần với số nguyên trơn. Bài 4 dùng `type` cho struct, trong [Go structs và interface](/blog/go-structs-methods-interfaces/).
+
+Trong một khối `const ( ... )`, `iota` đếm 0, 1, 2... mỗi dòng một bước. Dòng nào không ghi giá trị riêng thì lặp lại dòng trên, nên `Monday` bên dưới nghĩa là `Monday Weekday = iota` và nhận số 1.
+
+```go
+type Weekday int
+
+const (
+	Sunday Weekday = iota // 0
+	Monday                // 1
+	Tuesday               // 2
+)
+
+fmt.Println(Sunday, Monday, Tuesday) // 0 1 2
+```
+
+Đây là cách Go làm enum. Không có từ khóa `enum`, chỉ có một kiểu đặt tên cộng với các hằng số.
+
+### Bẫy số bát phân
+
+Đây là lỗi vẫn biên dịch, vẫn chạy và cho ra đáp án nghe hợp lý. Số viết với số 0 đứng đầu là **bát phân** (cơ số 8), nên `010` bằng 8.
+
+```go
+fmt.Println(100 + 010)  // 108, không phải 110
+fmt.Println(100 + 0o10) // 108, nhưng giờ code nói rõ là bát phân
+fmt.Println(0o755, 0755, 755)
+```
+
+Cùng một lỗi này còn nấp trong quyền file, vốn được viết bằng bát phân: quyền Unix `rwxr-xr-x` là `0o755`. Dưới dạng số thường đó là 493, `0755` cũng là 493, còn `755` là một số khác hẳn. Hãy viết bát phân với tiền tố `0o`, đúng như 100 Go Mistakes khuyên, để người đọc sau khỏi phải đoán.
+
+<TerminalOutput command="go run ./types" label="Apple M2 · Go 1.27" caption="Các đoạn ép kiểu, ngày trong tuần và bát phân ở trên, chạy chung trong một chương trình.">
+```text
+1000007
+9
+0 1 2
+108
+108
+493 493 755
+```
+</TerminalOutput>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Hằng số chưa gắn kiểu (untyped constant)**: hằng số viết trơn như `0.5` hay `1000`. Nó chỉ nhận kiểu ở chỗ được dùng, nên khớp với kiểu số nào bạn kết hợp.
+- **`iota`**: bộ đếm bắt đầu từ 0 trong mỗi khối `const` và tăng một sau mỗi dòng. Dùng để làm danh sách kiểu enum.
+- **Ép kiểu (conversion)**: viết `T(value)` để đổi giá trị sang kiểu `T`. Go bắt buộc làm vậy giữa các kiểu số khác nhau.
+- **Bát phân (octal)**: cơ số 8. Trong Go, số bắt đầu bằng `0` là bát phân; `0o` làm rõ điều đó.
+
+</Concepts>
+
+---
+
+## Tràn số và số thực
+
+Số nguyên có số bit cố định, nên có giá trị lớn nhất. Cộng thêm một thì số **quay vòng** về giá trị nhỏ nhất. Go làm vậy âm thầm lúc chạy: không panic, không lỗi. (Nếu trình biên dịch thấy tràn ngay trong một hằng số, nó từ chối build.)
+
+```go
+var small uint8 = 255
+small++
+fmt.Println("uint8 after 255+1:", small)
+
+var big int64 = 40000
+fmt.Println("int16(40000):", int16(big))
+```
+
+<TerminalOutput command="go run ./overflow" label="Apple M2 · Go 1.27" caption="Hai lần quay vòng âm thầm. Lần thứ hai là kiểu lỗi của Ariane 5: ép sang kiểu hẹp hơn.">
+```text
+uint8 after 255+1: 0
+int16(40000): -25536
+```
+</TerminalOutput>
+
+<GoP02Wrap />
+
+Dòng `int16(40000)` kia chính là hình dạng của vụ Ariane 5: nhét một số rộng vào ô hẹp hơn. Giá trị bị tràn là độ lệch ngang (horizontal bias) của tên lửa, trên Ariane 5 nó lớn hơn mức thiết kế Ariane 4 đã dự tính. Go sẽ cho phép ép kiểu y hệt đó chạy qua mà không báo gì.
+
+Phần lớn thời gian bạn không cần lo. Bộ đếm request trong một `int` sẽ không chạm tới 2^63. Hãy kiểm tra tràn khi dùng kiểu số nguyên nhỏ, xử lý số rất lớn, hoặc ép từ kiểu rộng sang kiểu hẹp. Cách kiểm tra là một phép so sánh trước khi tính: với phép cộng, `a > math.MaxInt-b` cho biết tổng sẽ tràn.
+
+### Số thực là số xấp xỉ
+
+`float64` lưu số ở dạng nhị phân, và phân số như `0.1` không có dạng nhị phân chính xác, nên có sai số rất nhỏ:
+
+```go
+a, b := 0.1, 0.2
+fmt.Println(a+b, a+b == 0.3)
+```
+
+Output là `0.30000000000000004 false`. Hãy so số thực với một ngưỡng nhỏ thay vì `==`, và lưu tiền bằng số xu nguyên trong một số nguyên.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Tràn số (overflow, quay vòng)**: kết quả quá lớn so với kiểu. Số nguyên của Go quay sang đầu bên kia của dải giá trị thay vì báo lỗi.
+- **Số thực dấu phẩy động (floating point)**: cách máy tính lưu số có phần thập phân bằng số bit cố định. Kết quả gần đúng chứ không chính xác tuyệt đối.
+
+</Concepts>
+
+---
+
+## Hàm
+
+Hàm nói rõ đầu vào và đầu ra ngay trong chữ ký: `func divide(a, b int) (int, error)`. Kiểu viết sau tên, và các tham số cạnh nhau cùng kiểu có thể dùng chung một kiểu: `a, b int`. Hàm có thể trả về **nhiều giá trị**, và Go dùng điều này khắp nơi. Dạng quen thuộc là "kết quả, cộng một error", và bên gọi kiểm tra error ngay.
+
+```go
+func divide(a, b int) (int, error) {
+	if b == 0 {
+		return 0, errors.New("divide by zero")
+	}
+	return a / b, nil
+}
+
+q, err := divide(7, 2)
+```
+
+Gọi `divide(7, 2)` cho `3 <nil>`, còn `divide(7, 0)` cho lỗi `divide by zero`. `nil` ở đây nghĩa là "không có lỗi". (`errors.New` nằm trong package chuẩn `errors`, tạo một giá trị lỗi từ một thông điệp.)
+
+Ở đây không có exception để bắt: error chỉ là một giá trị bạn nhận về. Ý tưởng này có bài riêng, [Go errors](/blog/go-errors-defer-panic/).
+
+### Giữ đường chạy chính ở bên trái
+
+Vì Go bắt bạn kiểm tra lỗi ở từng bước, hàm rất dễ biến thành cầu thang `if`/`else` lồng nhau. Cách sửa là return sớm và giữ luồng bình thường thẳng một cột. Mat Ryer diễn đạt là "Align the happy path to the left" (dồn đường chạy thuận về bên trái).
+
+<GoP02HappyPath />
+
+```go
+func join(s1, s2 string, max int) (string, error) {
+	if s1 == "" {
+		return "", errors.New("s1 is empty")
+	}
+	if s2 == "" {
+		return "", errors.New("s2 is empty")
+	}
+	concat := s1 + s2
+	if len(concat) > max {
+		return "", errors.New("result too long")
+	}
+	return concat, nil
+}
+```
+
+Mỗi `if` có return thì không cần `else`. Đọc dọc mép trái là thấy đường thành công; các dòng thụt vào là những cách nó có thể hỏng.
+
+Giá trị trả về cũng có thể đặt tên, và cách này có một cái bẫy liên quan tới error, nên nó nằm ở [Go errors](/blog/go-errors-defer-panic/).
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Nhiều giá trị trả về (multiple return values)**: hàm trả về nhiều kết quả cùng lúc. Theo quy ước, giá trị cuối là `error`.
+- **Đường chạy chính (happy path)**: chuỗi bước khi mọi thứ suôn sẻ. Giữ nó không thụt vào giúp hàm dễ lướt đọc.
+
+</Concepts>
+
+---
+
+## Con trỏ và truyền theo giá trị
+
+Trong Go, mỗi lời gọi hàm **chép mọi đối số** vào các biến riêng của hàm. Đó là toàn bộ quy tắc, và Go FAQ nói thẳng: hàm luôn nhận một bản sao của thứ được truyền, như thể giá trị được gán vào tham số. Sửa bản sao thì bản gốc không đổi.
+
+Con trỏ là cách để hàm sửa được bản gốc. `&x` nghĩa là "địa chỉ của `x`", còn `*p` nghĩa là "thứ mà `p` trỏ tới". Truyền `&x` vẫn là chép, nhưng thứ được chép là địa chỉ, nên hàm với tay tới biến của bạn qua nó. Hãy thử cả ba trường hợp bên dưới rồi đọc tiếp.
+
+<GoPassByValueStepper />
+
+Đây là cùng thí nghiệm dưới dạng chương trình thật. Verb `%p` in địa chỉ bộ nhớ, nên bạn thấy bản sao nằm ở chỗ khác:
+
+```go
+func bumpByValue(v int) {
+	v += 50
+	fmt.Printf("  inside bumpByValue: v=%d at %p\n", v, &v)
+}
+
+func bumpByPointer(p *int) {
+	if p == nil {
+		return
+	}
+	*p += 50
+	fmt.Printf("  inside bumpByPointer: p=%p *p=%d\n", p, *p)
+}
+
+func main() {
+	x := 10
+	fmt.Printf("main: x=%d at %p\n", x, &x)
+	bumpByValue(x)
+	fmt.Println("after value:", x)
+	bumpByPointer(&x)
+	fmt.Println("after pointer:", x)
+}
+```
+
+<TerminalOutput command="go run ./ptr" label="Apple M2 · Go 1.27" caption="v là bản sao ở địa chỉ khác nên x vẫn 10. Bản con trỏ ghi qua địa chỉ và x thành 60. Địa chỉ của bạn sẽ khác.">
+```text
+main: x=10 at 0x4e44bc396020
+  inside bumpByValue: v=60 at 0x4e44bc396040
+after value: 10
+  inside bumpByPointer: p=0x4e44bc396020 *p=60
+after pointer: 60
+```
+</TerminalOutput>
+
+### Khi nào truyền con trỏ
+
+Mặc định truyền giá trị trơn. Chỉ dùng `*T` trong các trường hợp này:
+
+| Truyền con trỏ khi | Vì sao |
+| :--- | :--- |
+| hàm phải sửa biến của bên gọi | bản sao không làm được |
+| giá trị lớn | chép một con trỏ rẻ hơn; chưa chắc "lớn" là bao nhiêu thì benchmark |
+| kiểu không được chép (ví dụ khóa trong package `sync`) | chép sẽ làm hỏng nó, xem [Context và khóa](/blog/go-context-timeouts-mutexes/) |
+| `nil` nên nghĩa là "không có giá trị" | chỉ con trỏ mới có thể là `nil` |
+
+### Con trỏ nhỏ và an toàn
+
+Con trỏ trong Go không dịch đi được. Viết `p++` để nhảy sang ô nhớ kế tiếp thì không biên dịch. Go FAQ giải thích bằng một từ: an toàn, vì không có số học con trỏ (ngoài package `unsafe`, một package đặc biệt chuyên để bỏ qua các kiểm tra an toàn này) thì ngôn ngữ không bao giờ tạo ra một địa chỉ bất hợp lệ.
+
+<TerminalOutput command="go build ./ptrarith" label="Apple M2 · Go 1.27" caption="Con trỏ không có p++.">
+```text
+# demo/ptrarith
+ptrarith/main.go:6:2: invalid operation: p++ (non-numeric type *int)
+```
+</TerminalOutput>
+
+Bạn vẫn có thể làm sập chương trình bằng cách đi theo con trỏ không trỏ vào đâu. Zero value của con trỏ là `nil`, và `*np` trên con trỏ `nil` sẽ panic. Vì vậy hãy kiểm tra `p != nil` khi con trỏ có thể vắng mặt.
+
+```go
+var np *int // nil
+fmt.Println(*np)
+```
+
+<TerminalOutput command="go run ./nilptr" label="Apple M2 · Go 1.27" caption="Đi theo con trỏ nil làm chương trình dừng với một panic.">
+```text
+panic: runtime error: invalid memory address or nil pointer dereference
+[signal SIGSEGV: segmentation violation code=0x2 addr=0x0 pc=0x100c04fdc]
+```
+</TerminalOutput>
+
+Method (hàm gắn với một struct) cũng có thể nhận receiver theo giá trị hoặc theo con trỏ, và quy tắc giống hệt. Phần đó thuộc về struct, trong [Go structs và interface](/blog/go-structs-methods-interfaces/).
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Con trỏ (pointer)**: biến giữ địa chỉ bộ nhớ của một biến khác. `&x` lấy địa chỉ, `*p` đi theo địa chỉ.
+- **Dereference (giải tham chiếu)**: đi theo con trỏ tới giá trị nó trỏ vào, viết là `*p`.
+- **Panic**: sự cố lúc chạy làm chương trình sập dần. Truy cập qua con trỏ nil gây ra panic.
+
+</Concepts>
+
+---
+
+## defer
+
+Dọn dẹp là nơi lỗi hay ẩn: bạn mở một file, rồi có bốn chỗ có thể return sớm, và phải đóng file ở cả bốn. `defer` giải quyết chuyện này. `defer someCall()` không chạy lời gọi ngay. Nó đặt lời gọi vào một danh sách, và Go chạy danh sách đó khi **hàm bao quanh return**, kể cả khi return sớm hay panic. Mở file rồi `defer Close()` ở dòng kế tiếp thì bạn không thể quên.
+
+Bài của blog Go về defer gói gọn thành ba quy tắc. Các lời gọi được đẩy vào danh sách. Chúng chạy theo thứ tự **vào sau ra trước (LIFO)** sau khi hàm return. Và đối số được tính khi câu lệnh `defer` chạy, không phải sau đó.
+
+```go
+func main() {
+	for i := 1; i <= 3; i++ {
+		defer fmt.Println("deferred", i)
+	}
+	fmt.Println("function body done")
+}
+```
+
+<TerminalOutput command="go run ./deferd" label="Apple M2 · Go 1.27" caption="Thứ tự ngược: defer đăng ký cuối cùng chạy đầu tiên.">
+```text
+function body done
+deferred 3
+deferred 2
+deferred 1
+```
+</TerminalOutput>
+
+<GoP02DeferStack />
+
+Thứ tự ngược là có chủ ý. Thứ mở trước thường là nền cho thứ mở sau, như một kết nối rồi một transaction trên đó, nên phải đóng từ trong ra ngoài.
+
+### Đối số được chốt tại dòng defer
+
+Cái này làm nhiều người vấp, và 100 Go Mistakes dành hẳn một mục. Đối số của lời gọi defer được tính ngay lập tức, nên việc biến đổi giá trị sau đó không ảnh hưởng tới chúng.
+
+```go
+func main() {
+	x := 10
+	defer fmt.Println("first:", x) // x đang là 10, nên 10 là thứ được lưu
+	x = 99
+	defer fmt.Println("second:", x) // x đang là 99
+}
+```
+
+Bộ mô phỏng ở trên có tab thứ ba đi qua đúng trường hợp này.
+
+<TerminalOutput command="go run ./deferd" label="Apple M2 · Go 1.27" caption="Mỗi lời gọi defer giữ x mà nó thấy tại dòng defer của chính nó, và chúng chạy theo thứ tự ngược.">
+```text
+second: 99
+first: 10
+```
+</TerminalOutput>
+
+Vậy một dòng `defer` đóng băng các giá trị nó dùng. Nếu cần lời gọi defer thấy giá trị về sau, có cách làm, nhưng cần closure (hàm nhỏ viết ngay tại chỗ), thứ mà [Go errors](/blog/go-errors-defer-panic/) dạy. Bài đó cũng quay lại `defer`, cùng với `defer` trong vòng lặp và `panic` với `recover`.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **`defer`**: hẹn một lời gọi chạy khi hàm hiện tại kết thúc, bất kể kết thúc kiểu nào.
+- **LIFO (vào sau ra trước)**: như chồng đĩa: cái đặt lên sau cùng là cái được lấy ra đầu tiên.
+
+</Concepts>
+
+---
+
+## Che biến, cái bẫy đầu tiên
+
+Giờ bạn đã biết `:=`, đây là cách nó cắn. Mỗi khối `{ ... }` (một `if`, một `for`, hay cặp ngoặc trơn) là một **scope** riêng: tên khai báo bên trong chỉ sống tới dấu đóng ngoặc. Nếu bạn viết `x := ...` trong khối mà `x` đã có bên ngoài, Go không gán cho `x` bên ngoài. Nó tạo một `x` hoàn toàn mới **che (shadow)** cái bên ngoài.
+
+Đây là cái bẫy trong 100 Go Mistakes, rút gọn thành các con số thuần. `count` bên ngoài vẫn là `0`, vì `count := ...` trong `if` khai báo biến thứ hai:
+
+<GoP02Shadow />
+
+```go
+func buggy(n int) int {
+	count := 0
+	if n > 0 {
+		count := n * 2 // count mới, chỉ trong khối này
+		fmt.Println("inside block:", count)
+	}
+	return count // count bên ngoài chưa hề bị đụng tới
+}
+
+func fixed(n int) int {
+	count := 0
+	if n > 0 {
+		count = n * 2 // dấu = trơn, gán vào count bên ngoài
+	}
+	return count
+}
+
+func main() {
+	fmt.Println("buggy:", buggy(5))
+	fmt.Println("fixed:", fixed(5))
+}
+```
+
+<TerminalOutput command="go run ./shadow" label="Apple M2 · Go 1.27" caption="Khối lệnh in ra 10 và trông bình thường, nhưng hàm vẫn trả về 0. Bản sửa gán bằng = vào biến khai báo một lần ở ngoài.">
+```text
+inside block: 10
+buggy: 0
+fixed: 10
+```
+</TerminalOutput>
+
+Trình biên dịch chấp nhận vì `count` bên trong có được dùng (nó được in ra). Cách sửa là khai báo biến trước rồi dùng `=` trơn trong khối. Dùng lại tên trong khối đôi khi tiện, nên không có lệnh cấm tuyệt đối, nhưng hễ một giá trị "biến mất" sau khối `if`, hãy tìm xem có `:=` nào lặng lẽ tạo biến thứ hai không. Cùng cái bẫy này xuất hiện với `err`, và bạn sẽ gặp nó trong [Go errors](/blog/go-errors-defer-panic/).
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Scope (phạm vi)**: vùng code mà một tên còn hiệu lực. Mỗi cặp ngoặc nhọn mở một scope mới.
+- **Che biến (shadowing)**: khai báo ở scope trong một tên đã có ở scope ngoài, khiến tên trong che mất tên ngoài.
+
+</Concepts>
+
+---
+
+## Điểm rút ra (Key takeaways)
+
+- Biến không bao giờ bắt đầu ở trạng thái undefined. Mỗi kiểu có zero value, nên biến vừa khai báo dùng được ngay, và biến không dùng là lỗi biên dịch.
+- Ép kiểu số có chủ đích, và coi mỗi phép ép là một rủi ro. Go không bao giờ trộn kiểu số âm thầm, nhưng nó quay vòng số nguyên âm thầm, và phép ép sang kiểu hẹp bị tràn là loại lỗi đứng sau vụ Ariane 5.
+- Return sớm và giữ đường chạy chính ở bên trái.
+- Mọi thứ là bản sao. Truyền con trỏ khi hàm phải sửa biến của bạn, giá trị lớn, hoặc `nil` nên nghĩa là vắng mặt. Còn lại truyền giá trị.
+- `defer` chốt đối số tại dòng `defer` và chạy theo thứ tự ngược, còn `:=` trong khối trong tạo biến mới.
+
+## Câu hỏi ôn tập (Review questions)
+
+1. Vì sao `total := small + big` lỗi khi `small` là `int32` và `big` là `int64`, và sửa thế nào? (Kiểu, hằng số và ép kiểu)
+2. `int16(40000)` in ra gì, và vì sao Go không ngăn bạn? (Tràn số và số thực)
+3. Một hàm nhận `v int` và làm `v += 50`. Vì sao biến của bên gọi không đổi, và đổi gì để nó cập nhật? (Con trỏ và truyền theo giá trị)
+4. Đoạn này in ra gì, và vì sao: `x := 1; defer fmt.Println(x); x = 2`? (defer)
+5. Sau một khối `if`, `count` bên ngoài vẫn là `0` dù khối đã chạy `count := n * 2`. Chuyện gì đã xảy ra? (Che biến, cái bẫy đầu tiên)
+
+### Sắp tới trong series
+
+Hai thói quen Go hay gây thắc mắc, hàm `init` và getter/setter, được nói ở [Go interfaces deep dive](/blog/go-abstractions-interfaces-generics-errors/).
+
+</Vi>
