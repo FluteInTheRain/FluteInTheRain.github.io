@@ -164,7 +164,9 @@ rising in difficulty. Interview and AI questions mix freely inside a set.
   unanswerable. Checked by reading each stem with the others hidden.
 - **Calculation questions**: always state every formula the reader needs, inside the question. They test
   whether the reader can apply the formulas, not whether they remember them (Khang, 2026-11-20).
-- **Numbers**: figures invented for a scenario are labelled "illustrative" and never presented as measured.
+- **Numbers** (amended 2026-11-24): no "illustrative", "minh họa" or "made up" labels. A figure invented for a scenario is
+  introduced inside the sentence ("Say a replica applies 0.4 TB per hour", "Giả sử ...") so it is never read as a measured
+  or quoted value. The `context.illustrative` flag and its italic note no longer exist.
   Every computed answer is verified by running code.
 - **Screen**: the scenario stays pinned (top or left) while questions appear one at a time and are
   graded immediately. Score shows per set and in total.

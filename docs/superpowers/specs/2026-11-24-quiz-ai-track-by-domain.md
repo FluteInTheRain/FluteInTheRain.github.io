@@ -46,6 +46,12 @@ Write the scenario as short lines, never one block of text. In `context.text` (s
 - consecutive lines that start with `• ` become one bullet list (`src/components/quiz/QuizContext.astro`);
 - put each figure on its own bullet; `code` between backticks is a formula or token.
 
+## No "illustrative" labels (Khang, 2026-11-24)
+
+Scenarios and questions never carry notes such as "illustrative", "minh họa", "the numbers are made up". An invented
+figure is introduced inside the sentence ("Say FPT trades at 60,000 VND", "Giả sử ...") so it is not read as a real quote.
+The `context.illustrative` flag and the italic note under the scenario were removed.
+
 ## Where it is enforced
 
 - `src/data/quiz/domains.ts`: one entry per quiz post, `code` or `human`. A quiz folder with no entry

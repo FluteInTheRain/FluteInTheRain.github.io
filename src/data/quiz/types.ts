@@ -51,7 +51,7 @@ export interface QuizSet {
   /** "set-04" */
   id: string;
   title: L10n;
-  context: { text: L10n; illustrative?: boolean; media?: QuizMedia[] };
+  context: { text: L10n; media?: QuizMedia[] };
   /** exactly 5, difficulty never decreasing */
   questions: QuizQuestion[];
 }
