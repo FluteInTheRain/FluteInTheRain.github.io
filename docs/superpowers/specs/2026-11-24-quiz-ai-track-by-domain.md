@@ -35,6 +35,17 @@ A real situation the reader has to judge with the skill itself. No AI in the sto
 `case` questions keep the same shape as the others (level, difficulty, `reread` anchor, `say` line, `ref`).
 For `case` the `say` line is a spoken line for an interview or a design review, not an AI-review habit.
 
+## Scenarios in human-skill quizzes (Khang, 2026-11-24)
+
+The scenario card of each case set starts from a **real case or a problem the reader meets in real life**
+(a dividend announcement, an ex-date, a forum reflex, a price that moves with no news), not from a bare
+list of figures. Facts and numbers still come from the post or a cited source; do not invent any.
+
+Write the scenario as short lines, never one block of text. In `context.text` (same format in `en` and `vi`):
+- one paragraph per line; blank lines are ignored;
+- consecutive lines that start with `• ` become one bullet list (`src/components/quiz/QuizContext.astro`);
+- put each figure on its own bullet; `code` between backticks is a formula or token.
+
 ## Where it is enforced
 
 - `src/data/quiz/domains.ts`: one entry per quiz post, `code` or `human`. A quiz folder with no entry
