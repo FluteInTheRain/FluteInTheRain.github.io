@@ -4,7 +4,7 @@ Used by `src/components/mdx/DiagramIcon.astro` (`<DiagramIcon name="db" ... />` 
 
 Extracted from Iconify JSON packages (body + viewBox only, no package installed):
 
-- `logos`: Gil Barbara, CC0-1.0 (https://github.com/gilbarbara/logos)
+- `logos`: Gil Barbara, CC0-1.0 (https://github.com/gilbarbara/logos). The `gopher` drawing follows the Go gopher by Renee French (CC BY 4.0).
 - `fluent-emoji-flat`: Microsoft Fluent UI Emoji, MIT (https://github.com/microsoft/fluentui-emoji)
 - `flat-color-icons`: Icons8, MIT (https://github.com/icons8/flat-color-icons)
 - `fluent-color`: Microsoft Fluent UI System Color Icons, MIT (https://github.com/microsoft/fluentui-system-icons)
@@ -89,3 +89,46 @@ Extracted from Iconify JSON packages (body + viewBox only, no package installed)
 | `netflix.svg` | logos | netflix-icon | Netflix |
 | `cloudflare.svg` | logos | cloudflare-icon | Cloudflare |
 | `google-cloud.svg` | logos | google-cloud | Google Cloud |
+| `go.svg` | logos | go | Go itself: the toolchain, the runtime or a Go program |
+| `gopher.svg` | logos | gopher | one goroutine |
+| `cpu.svg` | flat-color-icons | electronics | CPU core / processor |
+| `heap.svg` | fluent-emoji-flat | card-file-box | heap / memory region |
+| `stack.svg` | fluent-emoji-flat | books | call stack / goroutine stack |
+| `chan-in.svg` | fluent-emoji-flat | inbox-tray | channel / queue, receive side |
+| `chan-out.svg` | fluent-emoji-flat | outbox-tray | send into a channel / queue |
+| `gc.svg` | fluent-emoji-flat | broom | garbage collector |
+| `garbage.svg` | fluent-emoji-flat | wastebasket | garbage / freed memory |
+| `recycle.svg` | fluent-emoji-flat | recycling-symbol | reuse / sync.Pool |
+| `test.svg` | fluent-emoji-flat | test-tube | test / experiment |
+| `bug.svg` | fluent-emoji-flat | lady-beetle | bug / data race / defect |
+| `hot.svg` | fluent-emoji-flat | fire | hot path / CPU hot spot / flame graph |
+| `slow.svg` | fluent-emoji-flat | snail | slow path / high latency |
+| `fast.svg` | fluent-emoji-flat | rabbit | fast path / low latency |
+| `panic.svg` | fluent-emoji-flat | collision | panic / crash |
+| `stop.svg` | fluent-emoji-flat | stop-sign | cancel / stop signal |
+| `signal.svg` | fluent-emoji-flat | satellite-antenna | broadcast signal (ctx.Done, closed channel) |
+| `interface.svg` | fluent-emoji-flat | electric-plug | interface: anything that fits the socket |
+| `generic.svg` | fluent-emoji-flat | puzzle-piece | type parameter / pluggable piece |
+| `struct.svg` | fluent-emoji-flat | card-index | struct / record with fields |
+| `doc.svg` | fluent-emoji-flat | page-facing-up | JSON / response body / document |
+| `web.svg` | fluent-emoji-flat | globe-with-meridians | HTTP / public endpoint / the internet |
+| `loop.svg` | fluent-emoji-flat | repeat-button | loop / iteration |
+| `stream.svg` | fluent-emoji-flat | water-wave | byte stream / streaming |
+| `config.svg` | fluent-emoji-flat | gear | setting / runtime knob |
+| `build.svg` | fluent-emoji-flat | hammer-and-wrench | build / compile / tooling |
+| `measure.svg` | fluent-emoji-flat | straight-ruler | measure / size / alignment |
+| `idea.svg` | fluent-emoji-flat | light-bulb | rule of thumb / takeaway |
+| `ladder.svg` | fluent-emoji-flat | ladder | learning ladder / levels |
+| `question.svg` | fluent-emoji-flat | speech-balloon | interview question / conversation |
+| `goal.svg` | fluent-emoji-flat | trophy | goal met / budget passed |
+| `idle.svg` | fluent-emoji-flat | zzz | idle / parked / blocked goroutine |
+| `timer.svg` | fluent-emoji-flat | timer-clock | timer / ticker |
+| `deadlock.svg` | fluent-emoji-flat | chains | deadlock / stuck together |
+| `random.svg` | fluent-emoji-flat | game-die | random choice (select, map order) |
+| `speedup.svg` | fluent-emoji-flat | rocket | speed-up / optimized result |
+| `throttle.svg` | fluent-emoji-flat | thermometer | CPU throttling / pressure |
+| `label.svg` | fluent-emoji-flat | label | tag / metric label |
+| `terminal.svg` | flat-color-icons | command-line | terminal / go command |
+| `code.svg` | fluent-color | code-24 | source code |
+| `tree.svg` | flat-color-icons | tree-structure | call tree / package tree |
+| `parallel.svg` | flat-color-icons | parallel-tasks | parallel work |

@@ -13,22 +13,22 @@ const { series, parts } = view;
 const ACTS = series.acts.map((a) => a.id);
 const act = (id: string) => series.acts[actIndex(series, id)];
 for (const p of parts) actIndex(series, p.part.act); // unknown act ids fail the build here
-const W = 900;
+const W = ACTS.length >= 5 ? 1120 : 900;
 // 4 columns (the UI/UX series) keep 180px boxes; 3 or fewer get 230px so longer topics and blurbs fit
 const colW = ACTS.length <= 3 ? 230 : 180;
 const gapX = ACTS.length > 1 ? (W - 24 - ACTS.length * colW) / (ACTS.length - 1) : 0;
 const nodeH = 64;
-const gapY = 18;
+const gapY = 22;
 const top = 74;
 const colX = (c: number) => 12 + c * (colW + gapX);
 
 const rowInAct = new Map<string, number>();
-const pos = new Map<string, { x: number; y: number; col: number }>();
+const pos = new Map<string, { x: number; y: number; col: number; row: number }>();
 const nodes = parts.map((p) => {
   const col = ACTS.indexOf(p.part.act);
   const row = rowInAct.get(p.part.act) ?? 0;
   rowInAct.set(p.part.act, row + 1);
-  const at = { x: colX(col), y: top + row * (nodeH + gapY), col };
+  const at = { x: colX(col), y: top + row * (nodeH + gapY), col, row };
   pos.set(p.part.slug, at);
   return { ...p, ...at };
 });
@@ -40,7 +40,9 @@ const links = parts.flatMap((p) =>
 );
 // Spread the ends of several arrows along a node's edge so they do not meet in one point.
 // Ports are grouped by side: arrows leave from the right (or left, for same-column loops)
-// and arrive on the left; each group is sorted by the other end's height.
+// and arrive on the left; adjacent vertical steps in the same column drop straight down.
+const isAdjacentDown = (a: { col: number; row: number }, b: { col: number; row: number }) =>
+  a.col === b.col && b.row === a.row + 1;
 const portY = (key: string, list: { id: number; other: number }[]) => {
   const sorted = [...list].sort((m, n) => m.other - n.other);
   return new Map(sorted.map((e, i) => [`${key}:${e.id}`, (i + 1) / (sorted.length + 1)]));
@@ -48,6 +50,7 @@ const portY = (key: string, list: { id: number; other: number }[]) => {
 const groups = new Map<string, { id: number; other: number }[]>();
 const add = (key: string, id: number, other: number) => groups.set(key, [...(groups.get(key) ?? []), { id, other }]);
 links.forEach((l, id) => {
+  if (isAdjacentDown(l.a, l.b)) return;
   add(`${l.from}:${l.a.col === l.b.col ? 'L' : 'R'}`, id, l.b.y);
   add(`${l.to}:L`, id, l.a.y);
 });
@@ -57,17 +60,21 @@ const at = (key: string, id: number) => 10 + (nodeH - 20) * (frac.get(`${key}:${
 
 const edges = links.map((l, id) => {
   const { a, b } = l;
-  const y2 = b.y + at(`${l.to}:L`, id);
   let d: string;
-  if (a.col === b.col) {
-    // same column: loop out on the left side, wider for longer jumps
+  if (isAdjacentDown(a, b)) {
+    const cx = a.x + colW / 2;
+    d = `M ${cx} ${a.y + nodeH} L ${cx} ${b.y - 3}`;
+  } else if (a.col === b.col) {
+    // non-adjacent same column: loop out on the left side, wider for longer jumps
     const y1 = a.y + at(`${l.from}:L`, id);
+    const y2 = b.y + at(`${l.to}:L`, id);
     const bulge = 14 + Math.abs(y2 - y1) / 8;
     d = `M ${a.x} ${y1} C ${a.x - bulge} ${y1}, ${b.x - bulge} ${y2}, ${b.x - 3} ${y2}`;
   } else {
     const x1 = a.x + colW;
     const y1 = a.y + at(`${l.from}:R`, id);
     const x2 = b.x - 3;
+    const y2 = b.y + at(`${l.to}:L`, id);
     const mid = (x1 + x2) / 2;
     d = `M ${x1} ${y1} C ${mid} ${y1}, ${mid} ${y2}, ${x2} ${y2}`;
   }
@@ -84,12 +91,12 @@ const pad = (n: number) => String(n).padStart(2, '0');
       <button type="button" class="smap-btn" data-path={p.id} aria-pressed="false"><T en={p.label.en} vi={p.label.vi} /></button>
     ))}
   </div>
-  {series.paths.map((p) => (
+  {series.paths.map((p) => p.who && (
     <p class="smap-who" data-who={p.id} hidden><T en={p.who.en} vi={p.who.vi} /></p>
   ))}
 
   <div class="smap-scroll">
-    <svg viewBox={`0 0 ${W} ${H}`} role="group" aria-label="Series reading map" aria-describedby={`${uid}-desc`}>
+    <svg viewBox={`0 0 ${W} ${H}`} style={ACTS.length >= 5 ? 'min-width: 840px' : undefined} role="group" aria-label="Series reading map" aria-describedby={`${uid}-desc`}>
       <desc id={`${uid}-desc`}>
         Map of the {parts.length} parts in {ACTS.length} groups: {ACTS.map((a) => `${act(a).label.en} (${parts.filter((p) => p.part.act === a).map((p) => p.n).join(', ')})`).join('; ')}. Arrows point from a part to the parts that build on it.
       </desc>
@@ -133,7 +140,6 @@ const pad = (n: number) => String(n).padStart(2, '0');
   </div>
 
   <div class="smap-detail" aria-live="polite">
-    <p class="smap-hint" data-hook=""><T en="Hover or tab to a part to see what it builds on and what it unlocks." vi="Rê chuột hoặc Tab tới một bài để xem nó dựa trên bài nào và mở đường cho bài nào." /></p>
     {parts.map((p) => (
       <p data-hook={p.part.slug} hidden><strong>{pad(p.n)} · <T en={p.part.topic.en} vi={p.part.topic.vi} /></strong> — <T en={p.part.hook.en} vi={p.part.hook.vi} /></p>
     ))}
@@ -232,7 +238,6 @@ const pad = (n: number) => String(n).padStart(2, '0');
   .smap.is-focus .smap-node.is-hi { opacity: 1; }
   .smap-edge.is-hi { opacity: 1; stroke: var(--red); stroke-width: 2.2; marker-end: var(--m-hi); }
 
-  .smap-detail { margin-top: 12px; min-height: 3em; font-size: 15px; line-height: 1.55; color: var(--text-body); }
+  .smap-detail { margin-top: 12px; min-height: 1.5em; font-size: 15px; line-height: 1.55; color: var(--text-body); }
   .smap-detail p { margin: 0; }
-  .smap-hint { color: var(--text-muted); }
 </style>

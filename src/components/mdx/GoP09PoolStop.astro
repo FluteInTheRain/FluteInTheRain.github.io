@@ -1,0 +1,98 @@
+---
+// The two ways the early-stop pool shuts down (code in "Stopping a pool early").
+// 6 goroutines without the selects, 1 after cancel: both numbers come from the program and output in the post.
+function arrow(x1: number, y1: number, x2: number, y2: number) {
+  const a = Math.atan2(y2 - y1, x2 - x1);
+  const len = 8;
+  const p1 = [x2 - len * Math.cos(a - 0.45), y2 - len * Math.sin(a - 0.45)];
+  const p2 = [x2 - len * Math.cos(a + 0.45), y2 - len * Math.sin(a + 0.45)];
+  return {
+    line: `M ${x1} ${y1} L ${x2 - 6 * Math.cos(a)} ${y2 - 6 * Math.sin(a)}`,
+    head: `${x2},${y2} ${p1[0].toFixed(1)},${p1[1].toFixed(1)} ${p2[0].toFixed(1)},${p2[1].toFixed(1)}`,
+  };
+}
+
+import DiagramIcon from './DiagramIcon.astro';
+// Icons: chan-in = jobs, worker = workers, signal = ctx.Done, gopher = goroutine, ok = finished. Motion: fm-flow on the step arrows, fm-pulse on the red leak warning.
+const W = 900;
+const H = 326;
+const bw = 190;
+const bh = 96;
+const xs = [10, 240, 470, 700];
+type Step = { en: string[]; vi: string[]; icon: string };
+const rows: { y: number; titleEn: string; titleVi: string; steps: Step[] }[] = [
+  {
+    y: 40,
+    titleEn: '1. main reads every result',
+    titleVi: '1. main đọc hết mọi kết quả',
+    steps: [
+      { icon: 'chan-in', en: ['the producer', 'closes jobs'], vi: ['producer', 'đóng jobs'] },
+      { icon: 'worker', en: ["each worker's range", 'ends, wg.Done() runs'], vi: ['vòng range của từng', 'worker kết thúc,', 'wg.Done() chạy'] },
+      { icon: 'gopher', en: ['the closer: wg.Wait()', 'returns, closes results'], vi: ['goroutine đóng:', 'wg.Wait() trả về,', 'đóng results'] },
+      { icon: 'ok', en: ["main's loop over", 'results ends'], vi: ['vòng lặp của main', 'trên results kết thúc'] },
+    ],
+  },
+  {
+    y: 184,
+    titleEn: '2. main calls cancel() after one result',
+    titleVi: '2. main gọi cancel() sau một kết quả',
+    steps: [
+      { icon: 'signal', en: ['ctx.Done() closes'], vi: ['ctx.Done() đóng'] },
+      { icon: 'worker', en: ['producer and workers', 'leave via ctx.Done()'], vi: ['producer và các worker', 'thoát qua ctx.Done()'] },
+      { icon: 'gopher', en: ['the closer: wg.Wait()', 'returns, closes results'], vi: ['goroutine đóng:', 'wg.Wait() trả về,', 'đóng results'] },
+      { icon: 'ok', en: ['goroutines still alive: 1', '(only main)'], vi: ['goroutine còn sống: 1', '(chỉ còn main)'] },
+    ],
+  },
+];
+---
+<figure class="gp09pool">
+  <div class="gp09pool-scroll">
+  <svg viewBox={`0 0 ${W} ${H}`} role="img" aria-label="Two shutdown paths of the worker pool. Top: main reads every result, so closing jobs ends the workers, and the closer then closes results. Bottom: main calls cancel, the producer and workers leave through ctx.Done, and only main is left.">
+    {rows.map((r) => (
+      <g>
+        <text x="10" y={r.y - 14} class="gp09pool-h">
+          <tspan data-lang-en>{r.titleEn}</tspan>
+          <tspan data-lang-vi>{r.titleVi}</tspan>
+        </text>
+        {r.steps.map((s, i) => (
+          <g class="gp09pool-box">
+            <rect x={xs[i]} y={r.y} width={bw} height={bh} rx="8" />
+            <DiagramIcon name={s.icon} x={xs[i] + bw - 22} y={r.y + bh - 18} size={26} />
+            {s.en.map((line, li) => <text x={xs[i] + 12} y={r.y + 26 + li * 20} class={li === 0 ? 'gp09pool-name' : ''}><tspan data-lang-en>{line}</tspan></text>)}
+            {s.vi.map((line, li) => <text x={xs[i] + 12} y={r.y + 26 + li * 20} class={li === 0 ? 'gp09pool-name' : ''}><tspan data-lang-vi>{line}</tspan></text>)}
+          </g>
+        ))}
+        {[0, 1, 2].map((i) => {
+          const a = arrow(xs[i] + bw + 4, r.y + bh / 2, xs[i + 1] - 4, r.y + bh / 2);
+          return <g class="gp09pool-arrow"><path class="fm-flow-slow" d={a.line} /><polygon points={a.head} /></g>;
+        })}
+      </g>
+    ))}
+    <text x="10" y="312" class="gp09pool-bad fm-pulse">
+      <tspan data-lang-en>Without the ctx.Done() cases, the workers block on their next send to results: 6 goroutines stay alive.</tspan>
+      <tspan data-lang-vi>Không có các nhánh ctx.Done(), worker kẹt ở lệnh gửi kế tiếp vào results: 6 goroutine còn sống.</tspan>
+    </text>
+  </svg>
+  </div>
+  <figcaption>
+    <span data-lang-en>Both paths end the same way: the closer waits for every worker, then closes results. Only the first step differs, a closed jobs channel or a closed ctx.Done().</span>
+    <span data-lang-vi>Hai đường kết thúc giống nhau: goroutine đóng chờ mọi worker xong rồi đóng results. Chỉ bước đầu khác, một là channel jobs đóng, hai là ctx.Done() đóng.</span>
+  </figcaption>
+</figure>
+
+<style>
+  .gp09pool { margin: 2em 0; width: 100%; }
+  .gp09pool-scroll { overflow-x: auto; }
+  .gp09pool svg { display: block; width: 100%; min-width: 640px; height: auto; }
+  .gp09pool text { font-size: 14px; fill: var(--text-body); }
+  .gp09pool .gp09pool-h { font-size: 16px; font-weight: 700; fill: var(--text); }
+  .gp09pool-box rect { fill: var(--bg-alt); stroke: var(--text-muted); stroke-width: 1.2; }
+  .gp09pool-box.is-bad rect { fill: var(--red-tint-bg); stroke: var(--red); stroke-dasharray: 4 3; }
+  .gp09pool .gp09pool-name { font-weight: 700; fill: var(--text); }
+  .gp09pool .gp09pool-bad { fill: var(--red); font-weight: 700; }
+  .gp09pool .gp09pool-muted { fill: var(--text-muted); }
+  .gp09pool-arrow path { fill: none; stroke: var(--text-muted); stroke-width: 1.5; }
+  .gp09pool-arrow polygon { fill: var(--text-muted); }
+  .gp09pool-rule { stroke: var(--border); }
+  .gp09pool figcaption { margin-top: 10px; font-size: 14px; color: var(--text-muted); line-height: 1.55; text-align: center; }
+</style>
