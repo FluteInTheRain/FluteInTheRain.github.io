@@ -3,6 +3,12 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-23 — Xuất bản bài 2–4 series backend
+
+- **Đã làm (branch `content/publish-backend-2-4`):** flip `draft: true` → `false` cho `backend-rest-api-design`, `backend-validation-schemas`, `backend-layered-architecture`. Build 68 → 71 pages, 47 test pass; không bài nào link tới bài backend chưa xuất bản.
+- **Ai quyết:** user ("Public các bài còn lại").
+- **Chưa chốt:** wave B (bài 5–7) bắt đầu ngay sau entry này.
+
 ## 2026-11-22 — Sửa bài stocks post 1 sau khi PR #20 đã merge: cơ chế EPS kiểm toán sai
 
 - **Bối cảnh:** PR #20 (nhánh `feat/stocks-basics-post1`) được merge vào main trong lúc session còn đang chạy fix wave — main lên live với bản sai ở mục 2: bài giải thích EPS kiểm toán FPT 5,216 thấp hơn phép chia đơn giản ≈5,504 là do "weighted-average share count + cổ tức cổ phần 15% phát hành giữa năm" — **sai chiều** (weighted-average 1,699,740,091 thấp hơn end-count 1,703,507,121 nên chỉ làm EPS cao hơn ≈5,516). Cơ chế thật (Note 25 BCTN FPT 2025): EPS = (9,376,127,629,501 − 510,167,707,669 trích quỹ khen thưởng và phúc lợi) ÷ weighted-average 1,699,740,091 ≈ 5,216.
