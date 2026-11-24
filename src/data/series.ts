@@ -21,14 +21,12 @@ export interface SeriesCoverArt {
   tagline: string;
   /** hue (OKLCH degrees) of the series colour on its cover */
   hue: number;
-  subtitle: L10n;
   image: ImageMetadata;
   alt: string;
-  /** CSS object-position for the photo plate */
+  /** CSS object-position for the cover photo */
   position: string;
-  /** small label at the cover's foot */
-  imprint: string;
-  credit: { title: string; author: string; url: string; license: string };
+  /** `origin` names the host when it is not Wikimedia Commons (read by SeriesCover.astro) */
+  credit: { title: string; author: string; url: string; license: string; origin?: string };
 }
 
 /** one column of the reading map; `id` is what `SeriesPart.act` refers to */
@@ -99,14 +97,9 @@ const refactoringUi: Series = {
     title: { accent: 'UI Design', rest: ' for Developers' },
     tagline: 'Ship interfaces that don’t look generated',
     hue: 265,
-    subtitle: {
-      en: 'Hierarchy · Spacing · Type · Colour · Depth',
-      vi: 'Phân cấp · Khoảng cách · Chữ · Màu · Chiều sâu',
-    },
     image: coverUi,
     alt: 'A spiral staircase with a wrought-iron balustrade in the Bauhaus University main building in Weimar, lit by tall windows.',
     position: '50% 55%',
-    imprint: 'UI / UX',
     credit: {
       title: 'Weimar Bauhaus-Universität Hauptgebäude 406',
       author: 'GFreihalter',
@@ -369,14 +362,9 @@ const ddia: Series = {
     title: { accent: 'Data', rest: ' Systems Under Pressure' },
     tagline: 'Explained by the outages that shaped them',
     hue: 35,
-    subtitle: {
-      en: 'Storage · Replication · Consensus · Streams',
-      vi: 'Lưu trữ · Replication · Đồng thuận · Luồng',
-    },
     image: coverData,
     alt: 'An IDE hard drive with its cover removed, showing the silver platter, the actuator arm and the read/write head.',
     position: '55% 50%',
-    imprint: 'SYSTEM DESIGN',
     credit: {
       title: 'Open hard-drive',
       author: 'Zzubnik',
@@ -654,14 +642,9 @@ const golang: Series = {
     title: { lead: 'How ', accent: 'Go', rest: ' Actually Works' },
     tagline: 'From the scheduler to the cache line',
     hue: 205,
-    subtitle: {
-      en: 'Fundamentals · Internals · Benchmarking · Optimization',
-      vi: 'Cơ bản · Bản chất Runtime · Đo đạc · Tối ưu Go',
-    },
     image: coverGo,
     alt: 'Black and white stones on a wooden board during a game of Go.',
     position: '50% 60%',
-    imprint: 'GOLANG',
     credit: {
       title: 'Go -- 2021 -- 6732',
       author: 'Dietmar Rabich',
@@ -917,14 +900,9 @@ const stocksBasics: Series = {
     title: { accent: 'Stock Market', rest: ' Basics' },
     tagline: 'Own a slice of a company, safely',
     hue: 75,
-    subtitle: {
-      en: 'Ownership · Orders · Numbers · Discipline',
-      vi: 'Sở hữu · Lệnh · Con số · Kỷ luật',
-    },
     image: coverStocks,
     alt: 'Brokers on the New York Stock Exchange trading floor in black and white, one holding up a slip of paper.',
     position: '62% 55%',
-    imprint: 'STOCKS',
     credit: {
       title: 'NY stock exchange traders floor',
       author: 'Thomas J. O\'Halloran (Library of Congress)',
@@ -1149,14 +1127,9 @@ const backend: Series = {
     title: { lead: 'How ', accent: 'Backend', rest: ' Actually Works' },
     tagline: 'What happens after the request lands',
     hue: 150,
-    subtitle: {
-      en: 'Requests · APIs · Layers · Ops',
-      vi: 'Request · API · Tầng · Vận hành',
-    },
     image: coverBackend,
     alt: 'Blue and yellow network cables running into a rack of servers in a data center.',
     position: '50% 50%',
-    imprint: 'BACKEND',
     credit: {
       title: 'IBM Portable Modular Data Center',
       author: 'Raysonho @ Open Grid Scheduler / Grid Engine',
@@ -1406,14 +1379,9 @@ const aiTrading: Series = {
     title: { accent: 'AI', rest: ' for Market Systems' },
     tagline: 'From the first order to the agent that decides',
     hue: 285,
-    subtitle: {
-      en: 'Market · Machine Learning · Deep Learning · RL & Agents',
-      vi: 'Thị trường · Machine Learning · Học sâu · RL & Agent',
-    },
     image: coverAi,
     alt: 'Robonaut 2, a humanoid robot, facing an astronaut in a white spacesuit against a deep blue background.',
     position: '30% 50%',
-    imprint: 'AI × MARKETS',
     credit: {
       title: 'Face-Off Robonaut',
       author: 'Robert Markowitz (NASA)',
