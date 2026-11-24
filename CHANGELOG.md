@@ -3,6 +3,14 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-24 — Bìa sách series v2: ảnh thật, tiêu đề lớn, màu nhấn theo series
+
+- **Quyết định (user, sau nhiều vòng dựng mẫu HTML → PNG, tham khảo bìa Kurose & Ross):** một layout cho cả 6 series — ảnh thật phủ kín bìa, tiêu đề lớn ở đầu bìa (Noto Sans 600, **từ chủ đề** như "AI", "Go", "Backend" tô màu series), một đường kẻ mảnh, phụ đề một dòng, tên "Khang Nguyen" góc dưới bên phải (cùng font/cỡ/độ đậm với phụ đề). Chữ trên mặt bìa **chỉ tiếng Anh** (user yêu cầu) — ngoại lệ so với quy tắc `{ en, vi }`, chỉ áp cho mặt bìa; credit/pitch vẫn song ngữ. Chọn kiểu nhấn bằng màu, không phải cỡ chữ.
+- **Ảnh (đều thật, từ Wikimedia Commons, ghi đủ credit):** UI Design = cầu thang xoắn Bauhaus Weimar (CC BY-SA 3.0); Data Systems = ổ cứng mở nắp (PD); Go = quân cờ vây (CC BY-SA 4.0); Stock Basics = sàn NYSE đen trắng (PD); Backend = rack IBM cáp xanh/vàng (CC BY 3.0); AI Trading = Robonaut đối mặt phi hành gia (PD). Tên bìa Data Systems đổi thành "Data Systems Under Pressure" (chỉ trên bìa, `series.title` giữ nguyên).
+- **Đã làm (nhánh `feat/series-covers-v2`, plan `docs/superpowers/plans/2026-11-24-series-covers-v2.md`):** 6 ảnh vào `src/assets/series/cover-*.jpg` (max 1600px); `SeriesCoverArt` thêm `title {lead?, accent, rest?}`, `tagline`, `hue`, bỏ `subtitle`/`imprint`, khai báo `credit.origin?`; `BookCover.astro` viết lại (giữ gáy, mép trang, nghiêng phối cảnh; thumbnail `sm` chỉ hiện tiêu đề); xóa 6 ảnh bìa cũ không còn dùng.
+- **Kiểm tra:** `npm run build` 60 pages sạch, `node --test` 47/47 pass; xem mắt 6 trang `/blog/series/<id>/` và thumbnail ở blog index (desktop, light).
+- **Chưa chốt / chưa kiểm:** chưa kiểm 360px thật và dark mode bằng trình duyệt thật (headless không ép được viewport hẹp; bìa là vật thể giữ nguyên màu ở cả 2 theme); ảnh Backend/UI dọc 1600×2400 khá nặng (0.8–1.4MB), có thể nén thêm nếu cần; số `position` từng ảnh có thể tinh lại.
+
 ## 2026-11-22 — Bài 1 series stocks-basics: "Cổ phiếu thật ra là gì"
 
 - **Đã làm:** publish bài 1 series `stocks-basics` (`/blog/what-is-a-stock-ownership-dividends/`, `draft: false`): body song ngữ EN/VI (5 mục + key takeaways + 5 câu ôn tập), hero chứng khoán 1863 (Wikimedia CC0), demo island "Your slice" (Task 3), quiz 8 bộ câu hỏi (`/quiz/`, Task 4), số liệu thật FPT/VNM tài chính 2025 từ 2 báo cáo thường niên đã kiểm toán + VSDC (cổ tức) + HOSE (ex-date) — đủ nguồn trong frontmatter `sources`. Bài publish khiến series card `stocks-basics` hiện trên blog index (thứ 4) và part 1 trên trang cover chuyển thành link "Bắt đầu từ Bài 1 →".
