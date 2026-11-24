@@ -4,17 +4,23 @@
 // are skipped by the prev/next links in production.
 
 import type { ImageMetadata } from 'astro';
-import draftingSet from '../assets/series/drafting-set.jpg';
-import ramac305 from '../assets/series/ibm-305-ramac.jpg';
-import goGophers from '../assets/series/go-gopher-five-years.jpg';
-import stockCert from '../assets/series/stock-certificate-1892.jpg';
-import hoseBuilding from '../assets/series/ai-trading/hose-building.jpg';
-import backendPlate from '../assets/series/backend-plate.png';
+import coverUi from '../assets/series/cover-ui-bauhaus-stair.jpg';
+import coverData from '../assets/series/cover-data-hard-drive.jpg';
+import coverGo from '../assets/series/cover-go-stones.jpg';
+import coverStocks from '../assets/series/cover-stocks-nyse-floor.jpg';
+import coverBackend from '../assets/series/cover-backend-rack.jpg';
+import coverAi from '../assets/series/cover-ai-robonaut.jpg';
 
 export interface L10n { en: string; vi: string }
 
 /** what the book cover shows (BookCover.astro) and how its photo is credited */
 export interface SeriesCoverArt {
+  /** cover title in parts: `accent` is the topic word, drawn in the series colour. English only. */
+  title: { lead?: string; accent: string; rest?: string };
+  /** one-line cover subtitle, English only */
+  tagline: string;
+  /** hue (OKLCH degrees) of the series colour on its cover */
+  hue: number;
   subtitle: L10n;
   image: ImageMetadata;
   alt: string;
@@ -89,17 +95,24 @@ const refactoringUi: Series = {
     en: 'Built on Refactoring UI by Adam Wathan and Steve Schoger, then extended with live demos, real-product screenshots and audits of this very site.',
     vi: 'Dựa trên Refactoring UI của Adam Wathan và Steve Schoger, bổ sung demo tương tác, ảnh chụp sản phẩm thật và các lần soát lỗi ngay trên chính blog này.',
   },
-  // A drafting set keeps every instrument in its own slot on a grid: the series' idea of fixed scales over eyeballing.
   cover: {
+    title: { accent: 'UI Design', rest: ' for Developers' },
+    tagline: 'Ship interfaces that don’t look generated',
+    hue: 265,
     subtitle: {
       en: 'Hierarchy · Spacing · Type · Colour · Depth',
       vi: 'Phân cấp · Khoảng cách · Chữ · Màu · Chiều sâu',
     },
-    image: draftingSet,
-    alt: 'A vintage drafting set open on graph paper: compasses, dividers and ruling pens, each resting in its own slot of a blue velvet case.',
-    position: '55% 60%',
+    image: coverUi,
+    alt: 'A spiral staircase with a wrought-iron balustrade in the Bauhaus University main building in Weimar, lit by tall windows.',
+    position: '50% 55%',
     imprint: 'UI / UX',
-    credit: { title: 'Anker compass set in case', author: 'Slashme', url: 'https://commons.wikimedia.org/wiki/File:Anker_compass_set_in_case.jpg', license: 'CC0' },
+    credit: {
+      title: 'Weimar Bauhaus-Universität Hauptgebäude 406',
+      author: 'GFreihalter',
+      url: 'https://commons.wikimedia.org/wiki/File:Weimar_Bauhaus-Universit%C3%A4t_Hauptgeb%C3%A4ude_406.jpg',
+      license: 'CC BY-SA 3.0',
+    },
   },
   outcomes: [
     {
@@ -352,17 +365,24 @@ const ddia: Series = {
     en: 'Built on Designing Data-Intensive Applications (2nd edition) by Martin Kleppmann and Chris Riccomini, extended with postmortems, architecture diagrams and live demos.',
     vi: 'Dựa trên Designing Data-Intensive Applications (bản 2) của Martin Kleppmann và Chris Riccomini, bổ sung postmortem thật, sơ đồ kiến trúc và demo tương tác.',
   },
-  // An IBM 305 RAMAC, the first computer sold with a hard disk (1956): the series starts at one disk and ends at many machines.
   cover: {
+    title: { accent: 'Data', rest: ' Systems Under Pressure' },
+    tagline: 'Explained by the outages that shaped them',
+    hue: 35,
     subtitle: {
       en: 'Storage · Replication · Consensus · Streams',
       vi: 'Lưu trữ · Replication · Đồng thuận · Luồng',
     },
-    image: ramac305,
-    alt: 'An IBM 305 RAMAC installation at the U.S. Army Red River Arsenal: tall cabinets, the 350 disk unit visible behind glass, and an operator at the console.',
-    position: '50% 45%',
+    image: coverData,
+    alt: 'An IDE hard drive with its cover removed, showing the silver platter, the actuator arm and the read/write head.',
+    position: '55% 50%',
     imprint: 'SYSTEM DESIGN',
-    credit: { title: 'IBM 305 RAMAC', author: 'U.S. Army Red River Arsenal', url: 'https://commons.wikimedia.org/wiki/File:BRL61-IBM_305_RAMAC.jpeg', license: 'Public domain' },
+    credit: {
+      title: 'Open hard-drive',
+      author: 'Zzubnik',
+      url: 'https://commons.wikimedia.org/wiki/File:Open_hard-drive.jpg',
+      license: 'Public domain',
+    },
   },
   outcomes: [
     {
@@ -631,19 +651,22 @@ const golang: Series = {
     vi: 'Phần 1–3 tổng hợp từ tài liệu chuẩn Go (Effective Go, The Go Blog); Phần 4–7 đúc kết từ 100 Go Mistakes (Teiva Harsanyi); Phần 8–12 dựa trên Efficient Go (Bartłomiej Płotka), chạy kiểm chứng trực tiếp trên Go 1.27 kèm mô phỏng tương tác.',
   },
   cover: {
+    title: { lead: 'How ', accent: 'Go', rest: ' Actually Works' },
+    tagline: 'From the scheduler to the cache line',
+    hue: 205,
     subtitle: {
       en: 'Fundamentals · Internals · Benchmarking · Optimization',
       vi: 'Cơ bản · Bản chất Runtime · Đo đạc · Tối ưu Go',
     },
-    image: goGophers,
-    alt: 'Three Go gophers gathered around an old reel-to-reel computer by Renee French.',
-    position: '50% 45%',
+    image: coverGo,
+    alt: 'Black and white stones on a wooden board during a game of Go.',
+    position: '50% 60%',
     imprint: 'GOLANG',
     credit: {
-      title: 'Go gopher five years',
-      author: 'Renee French',
-      url: 'https://commons.wikimedia.org/wiki/File:Go_gopher_five_years.jpg',
-      license: 'CC BY 3.0',
+      title: 'Go -- 2021 -- 6732',
+      author: 'Dietmar Rabich',
+      url: 'https://commons.wikimedia.org/wiki/File:Go_--_2021_--_6732.jpg',
+      license: 'CC BY-SA 4.0',
     },
   },
   outcomes: [
@@ -890,21 +913,23 @@ const stocksBasics: Series = {
     en: 'Assembled from Vietnamese market mechanics (HOSE, HNX and VSDC rules, fee schedules, issuer filings) plus investing classics: The Intelligent Investor (Graham), One Up on Wall Street (Lynch) and The Psychology of Money (Housel).',
     vi: 'Tổng hợp từ cơ chế thị trường Việt (quy định HOSE, HNX, VSDC, bảng phí, báo cáo doanh nghiệp) cùng các kinh điển về đầu tư: The Intelligent Investor (Graham), One Up on Wall Street (Lynch) và The Psychology of Money (Housel).',
   },
-  // A lithographed 1892 stock certificate: the "basic" unit of the market, before it was a number on a screen.
   cover: {
+    title: { accent: 'Stock Market', rest: ' Basics' },
+    tagline: 'Own a slice of a company, safely',
+    hue: 75,
     subtitle: {
       en: 'Ownership · Orders · Numbers · Discipline',
       vi: 'Sở hữu · Lệnh · Con số · Kỷ luật',
     },
-    image: stockCert,
-    alt: 'A lithographed stock certificate from 1892 with ornate borders and a central vignette.',
-    position: '50% 55%',
+    image: coverStocks,
+    alt: 'Brokers on the New York Stock Exchange trading floor in black and white, one holding up a slip of paper.',
+    position: '62% 55%',
     imprint: 'STOCKS',
     credit: {
-      title: 'Original company stock certificate',
-      author: 'Downingsf',
-      url: 'https://commons.wikimedia.org/wiki/File:Original_company_stock_certificate.jpg',
-      license: 'CC BY-SA 3.0',
+      title: 'NY stock exchange traders floor',
+      author: 'Thomas J. O\'Halloran (Library of Congress)',
+      url: 'https://commons.wikimedia.org/wiki/File:NY_stock_exchange_traders_floor_LC-U9-10548-6.jpg',
+      license: 'Public domain',
     },
   },
   outcomes: [
@@ -1120,22 +1145,23 @@ const backend: Series = {
     en: 'Backend knowledge demonstrated in Python with FastAPI. FastAPI: Modern Python Web Development (Bill Lubanovic, O’Reilly 2023) is one of the references, alongside MDN, OWASP, the 12-factor app, and official docs.',
     vi: 'Kiến thức backend minh họa bằng Python với FastAPI. FastAPI: Modern Python Web Development (Bill Lubanovic, O’Reilly 2023) là một trong các tài liệu tham khảo, bên cạnh MDN, OWASP, 12-factor app và tài liệu chính thức.',
   },
-  // The plate is the series' own demo service: the page every FastAPI app gives you for free.
   cover: {
+    title: { lead: 'How ', accent: 'Backend', rest: ' Actually Works' },
+    tagline: 'What happens after the request lands',
+    hue: 150,
     subtitle: {
       en: 'Requests · APIs · Layers · Ops',
       vi: 'Request · API · Tầng · Vận hành',
     },
-    image: backendPlate,
-    alt: 'Swagger UI page of the series’ small FastAPI demo service, listing its /health, /cases and /reports endpoints with Try it out buttons.',
-    position: '50% 42%',
+    image: coverBackend,
+    alt: 'Blue and yellow network cables running into a rack of servers in a data center.',
+    position: '50% 50%',
     imprint: 'BACKEND',
     credit: {
-      title: 'Swagger UI of the series demo service',
-      author: 'captured locally',
-      url: 'https://fastapi.tiangolo.com/',
-      license: 'screenshot',
-      origin: 'FastAPI docs',
+      title: 'IBM Portable Modular Data Center',
+      author: 'Raysonho @ Open Grid Scheduler / Grid Engine',
+      url: 'https://commons.wikimedia.org/wiki/File:IBMPortableModularDataCenter3.jpg',
+      license: 'CC BY 3.0',
     },
   },
   outcomes: [
@@ -1376,21 +1402,23 @@ const aiTrading: Series = {
     en: 'Built on the public curriculum and research of 51labs (Machine Learning for Financial Market), extended with public papers and Vietnamese market cases.',
     vi: 'Dựa trên chương trình và nghiên cứu công khai của 51labs (Machine Learning for Financial Market), bổ sung paper công khai và case thị trường Việt Nam.',
   },
-  // The Ho Chi Minh Stock Exchange building (District 1, HCMC): where Vietnamese orders are matched.
   cover: {
+    title: { accent: 'AI', rest: ' for Market Systems' },
+    tagline: 'From the first order to the agent that decides',
+    hue: 285,
     subtitle: {
       en: 'Market · Machine Learning · Deep Learning · RL & Agents',
       vi: 'Thị trường · Machine Learning · Học sâu · RL & Agent',
     },
-    image: hoseBuilding,
-    alt: 'The Ho Chi Minh Stock Exchange building on Nguyen Thai Binh street, District 1: a restored French-colonial facade under a clear sky.',
-    position: '50% 40%',
+    image: coverAi,
+    alt: 'Robonaut 2, a humanoid robot, facing an astronaut in a white spacesuit against a deep blue background.',
+    position: '30% 50%',
     imprint: 'AI × MARKETS',
     credit: {
-      title: 'So Giao Dich chung khoan tphcm, Nguyen Thai Binh, Quan 1, TPHCM',
-      author: 'trungydang',
-      url: 'https://commons.wikimedia.org/wiki/File:So_Giao_Dich_chung_khoan_tphcm-Nguy%E1%BB%85n_Th%C3%A1i_B%C3%ACnh,_Qu%E1%BA%ADn_1,_TPHCM,_Vi%E1%BB%87t_Nam_-_panoramio.jpg',
-      license: 'CC BY 3.0',
+      title: 'Face-Off Robonaut',
+      author: 'Robert Markowitz (NASA)',
+      url: 'https://commons.wikimedia.org/wiki/File:Face-Off_Robonaut.jpg',
+      license: 'Public domain',
     },
   },
   outcomes: [
