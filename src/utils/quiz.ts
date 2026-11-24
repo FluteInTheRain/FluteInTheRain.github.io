@@ -14,7 +14,9 @@ const blank = (s: unknown) => typeof s !== 'string' || s.trim() === '';
 
 /** question types and tracks that only make sense when the reader writes or reviews code with AI */
 const AI_TYPES = ['ai-review', 'ai-advice'];
-const AI_WORDS = /\b(AI|A\.I\.|LLM|ChatGPT|GPT|Claude|Copilot|Gemini|Cursor|chatbot)\b|trí tuệ nhân tạo/i;
+// "AI" is matched case-sensitively: Vietnamese "ai" means "who" and must stay usable
+const AI_ABBR = /\bAI\b|\bA\.I\./;
+const mentionsAi = (t: string) => AI_ABBR.test(t) || /\b(LLM|ChatGPT|GPT|Claude|Copilot|Gemini|Cursor|chatbot)\b|trí tuệ nhân tạo/i.test(t);
 
 /**
  * every problem found in a set; [] when the set is valid. `postAnchors` = heading slugs of the post.
@@ -64,7 +66,7 @@ export function validateSet(set: QuizSet, postAnchors: Set<string>, domain: Quiz
       if (AI_TYPES.includes(q.type)) add(`${w}: type "${q.type}" judges AI output, which does not fit a human-skill post; use single, scenario, diagram or multi`);
       if (q.type === 'code-output') add(`${w}: a human-skill post has no code to run; use another type`);
       const text = [q.stem?.en, q.stem?.vi, ...q.options.flatMap((o) => [o.text?.en, o.text?.vi])].join(' ');
-      if (AI_WORDS.test(text)) add(`${w}: the stem or an option mentions AI; a human-skill quiz asks about the skill, not about AI output`);
+      if (mentionsAi(text)) add(`${w}: the stem or an option mentions AI; a human-skill quiz asks about the skill, not about AI output`);
     } else if (q.track === 'case') {
       add(`${w}: track "case" is for human-skill posts; a code post uses "interview" or "ai"`);
     }

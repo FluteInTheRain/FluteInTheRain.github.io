@@ -43,9 +43,10 @@ For `case` the `say` line is a spoken line for an interview or a design review, 
 - `src/utils/quiz.test.ts`: unit tests for the rule, and the 8-set totals check follows the domain
   (`interview 20 + ai 20`, or `interview 20 + case 20`).
 
-## Pending
+## Status
 
-`what-is-a-stock-ownership-dividends` was written before this rule and still has 20 `ai` questions.
-It is listed in `PENDING_REWRITE` in `quiz.test.ts` and checked as a `code` post until its 20 AI
-questions are replaced with `case` questions. Remove it from that list in the same change.
-The AI trading series is treated as `code`: it is about building AI and data systems.
+`what-is-a-stock-ownership-dividends` was the first quiz written before this rule. Its 20 `ai` questions
+were replaced with 20 `case` questions on 2026-11-24 (set-01 to set-08, one set per agent, every
+calculation has a `verifiedBy`), and the set-08 context no longer mentions AI.
+The AI trading series is treated as `code`: it is about building AI and data systems (Khang agreed, 2026-11-24).
+The validator matches "AI" case-sensitively, because Vietnamese "ai" means "who".

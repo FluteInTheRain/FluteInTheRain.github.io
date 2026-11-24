@@ -195,6 +195,16 @@ test('a human-skill quiz rejects an option or stem that mentions AI', () => {
   assert.ok(has(validateSet(s, anchors(), 'human'), /mentions AI/));
 });
 
+test('a human-skill quiz allows the Vietnamese word "ai" (who)', () => {
+  const s = clone(fixture());
+  for (const q of s.questions) { q.track = 'case'; q.type = 'scenario'; }
+  s.questions[0].stem.en = 'Who receives more cash?';
+  s.questions[0].stem.vi = 'Ai là người nhận được nhiều tiền mặt hơn?';
+  for (const o of s.questions[0].options) { o.text.en = 'Minh'; o.text.vi = 'Minh'; }
+  const id = s.questions[0].id;
+  assert.ok(!validateSet(s, anchors(), 'human').some((p) => p.startsWith(`${id}:`) && /mentions AI/.test(p)));
+});
+
 test('a code quiz keeps the ai track and rejects the case track', () => {
   const s = clone(fixture());
   assert.ok(!has(validateSet(s, anchors(), 'code'), /track "ai"|track "case"/));
@@ -207,14 +217,10 @@ const contentDirs = fs.existsSync(QUIZ_DIR)
   ? fs.readdirSync(QUIZ_DIR, { withFileTypes: true }).filter((d) => d.isDirectory() && !d.name.startsWith('_')).map((d) => d.name)
   : [];
 
-// Quizzes written before the domain rule that still carry AI-output questions. They are checked as code
-// posts until rewritten with `case` questions; remove the slug from this list as part of that rewrite.
-const PENDING_REWRITE = new Set(['what-is-a-stock-ownership-dividends']);
-const domainOf = (slug: string): QuizDomain => (PENDING_REWRITE.has(slug) ? 'code' : QUIZ_DOMAIN[slug]);
+const domainOf = (slug: string): QuizDomain => QUIZ_DOMAIN[slug];
 
-test('every quiz folder declares its domain, and only human-skill posts may be pending a rewrite', () => {
+test('every quiz folder declares its domain', () => {
   for (const slug of contentDirs) assert.ok(QUIZ_DOMAIN[slug], `${slug}: add it to src/data/quiz/domains.ts (code or human)`);
-  for (const slug of PENDING_REWRITE) assert.equal(QUIZ_DOMAIN[slug], 'human', `${slug}: only a human-skill post can wait for a rewrite`);
 });
 
 for (const slug of contentDirs) {

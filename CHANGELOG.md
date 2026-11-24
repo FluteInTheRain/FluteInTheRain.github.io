@@ -7,8 +7,10 @@ Không cần đọc lại toàn bộ chat history — file này là nguồn sự
 
 - **Đã làm (nhánh `chore/quiz-ai-track-by-domain`, spec `docs/superpowers/specs/2026-11-24-quiz-ai-track-by-domain.md`):** thêm `QuizDomain` (`code` | `human`) và `src/data/quiz/domains.ts` (mỗi bài có quiz phải khai báo). `validateSet(set, anchors, domain)`: bài `human` cấm `track: ai`, type `ai-review` / `ai-advice` / `code-output` và mọi stem/đáp án nhắc AI/LLM/ChatGPT/Claude...; bài `code` cấm `track: case`. Track mới `case` = tình huống thật tự đánh giá bằng kỹ năng đó (đọc số liệu, chọn cách xử lý, chỉ ra lỗi suy luận của người). Test tổng 8 bộ theo lĩnh vực: `interview 20 + ai 20` (code) hoặc `interview 20 + case 20` (human). Thêm dòng quy ước vào `AGENTS.md`, ghi chú sửa đổi vào spec thiết kế quiz.
 - **Ai quyết:** user (bài về kỹ năng con người như cổ phiếu, UX/UI không nên có câu đánh giá kết quả AI; thay bằng loại câu hỏi khác). AI chọn tên track `case` và danh sách lĩnh vực.
-- **Kiểm tra:** `node --test` 58 pass, build 74 trang.
-- **Chưa chốt:** quiz `what-is-a-stock-ownership-dividends` còn 20 câu `ai`, đang nằm trong `PENDING_REWRITE` (kiểm như bài code) cho tới khi viết lại bằng câu `case`. Series UI/UX và stocks-basics bài sau chưa có quiz; khi làm phải khai báo `human`. Series ai-trading xếp `code` (bài về xây hệ thống AI/dữ liệu) — user chưa xác nhận.
+- **Quiz cổ phiếu viết lại:** `what-is-a-stock-ownership-dividends` thay 20 câu `ai` bằng 20 câu `case` (8 agent Sonnet, mỗi bộ 1 agent; phép tính đều có `verifiedBy` chạy bằng Python; context set-08 bỏ "AI factories"). Giờ 20 `interview` + 20 `case`, 4 câu `multi`, không còn chữ AI. Bỏ `PENDING_REWRITE`. Validator khớp "AI" phân biệt hoa thường vì tiếng Việt "ai" nghĩa là "who" (lỗi này agent phát hiện và đã sửa).
+- **Ai quyết:** user chốt series ai-trading giữ `code`, và bảo viết lại quiz cổ phiếu; không hiển thị domain/track lên UI.
+- **Kiểm tra:** `node --test` 59 pass, build 74 trang. Chưa xem các câu mới trên trang thật (light/dark, EN/VI, 360px).
+- **Chưa chốt / yếu:** vài câu `case` gần trùng nhau giữa các bộ vì mỗi agent chỉ thấy bộ của mình: s03q3 và s08q3 cùng phép tính "2.000 cổ phiếu Vinamilk × lợi nhuận mỗi cổ phiếu"; s02q4 và s03q5 cùng lỗi "Vinamilk lãi nhiều hơn nên mỗi cổ phiếu lãi nhiều hơn". Ý lỏng trong bài gốc: "cổ tức cao nhất từ 2018" của Vinamilk không kiểm chứng được từ bài. Series UI/UX và stocks-basics bài sau chưa có quiz; khi làm phải khai báo `human` trong `domains.ts`.
 
 ## 2026-11-24 — Quiz DDIA đợt 1: trade-offs, sharding, transactions (3 bài × 8 bộ × 5 câu)
 

@@ -3,10 +3,12 @@
 //   node scripts/quiz/validate.ts <set-file.json> [...]
 //
 // Prints each problem and exits 1 if there is any. The post is taken from the folder name of the file:
-// src/data/quiz/<post-slug>/set-NN.json checks anchors against src/content/blog/<post-slug>.mdx.
+// src/data/quiz/<post-slug>/set-NN.json checks anchors against src/content/blog/<post-slug>.mdx, and applies the
+// code / human domain rule from src/data/quiz/domains.ts (a human-skill post may not ask about AI output).
 import fs from 'node:fs';
 import path from 'node:path';
 import { englishAnchors, validateSet } from '../../src/utils/quiz.ts';
+import { QUIZ_DOMAIN } from '../../src/data/quiz/domains.ts';
 
 const files = process.argv.slice(2);
 if (files.length === 0) {
@@ -18,8 +20,10 @@ for (const f of files) {
   const slug = path.basename(path.dirname(path.resolve(f)));
   const post = path.resolve('src/content/blog', `${slug}.mdx`);
   if (!fs.existsSync(post)) { console.error(`${f}: no post at ${post}`); bad++; continue; }
+  const domain = QUIZ_DOMAIN[slug];
+  if (!domain) { console.error(`${f}: add "${slug}" to src/data/quiz/domains.ts (code or human)`); bad++; continue; }
   const set = JSON.parse(fs.readFileSync(f, 'utf8'));
-  const problems = validateSet(set, englishAnchors(fs.readFileSync(post, 'utf8')));
+  const problems = validateSet(set, englishAnchors(fs.readFileSync(post, 'utf8')), domain);
   if (path.basename(f) !== `${set.id}.json`) problems.push(`file name should be ${set.id}.json`);
   if (problems.length) { bad++; console.error(`${f}:\n  - ${problems.join('\n  - ')}`); }
   else console.log(`${f}: ok`);
