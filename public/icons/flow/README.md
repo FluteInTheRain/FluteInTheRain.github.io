@@ -44,4 +44,3 @@ Used by `src/components/demos/AnimatedFlow.tsx` (node `icon` key -> file). Extra
 | `profiler.svg` | fluent-emoji-flat | magnifying-glass-tilted-right |
 | `robot.svg` | fluent-emoji-flat | robot |
 | `swagger.svg` | logos | swagger |
->>>>>>> feat/backend-post-03-schemas

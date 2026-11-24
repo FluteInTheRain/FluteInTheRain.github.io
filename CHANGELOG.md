@@ -3,6 +3,14 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-23 — Wave B series backend: viết bài 5–7 (draft)
+
+- **Đã làm (branch `feat/backend-wave-b`, 3 agent Sonnet song song mỗi bài 1 worktree):** **Bài 5** `backend-database-access-layer`: hook Val Town post-mortem (31/12/2024, pool không timeout, 6 giờ 49 phút); `SqlCaseRepository` sau seam bài 4 (service không đổi), session-per-request bằng dependency `yield` (commit/rollback), `scope="function"`, pool cạn → `QueuePool` timeout, N+1 21 vs 2 query, `create_all` không phải migration; DDIA split khai báo 1 lần. **Bài 6** `backend-async-concurrency-workers`: hook Cloudflare 2/7/2019; `time.sleep` trong `async def` 10,05 s vs 1,06 s, bẫy `requests` trong async, GIL + `ProcessPoolExecutor`, `--workers 3` mỗi process một bộ đếm, `BackgroundTasks` mất khi `kill -9`. **Bài 7** `backend-auth-oauth2-jwt`: hook USPS/Krebs 2018 (60 triệu user); Argon2id vs sha256, session vs JWT khi logout, `OAuth2PasswordBearer` + PyJWT (401/expired/tampered/`alg=none`), scope → 403, BOLA → 404. 20 file demo `p05–p07_*` (thêm vào `demo/README.md`), 18 sơ đồ `BeP05–07*`, ảnh bìa chụp thật, hero ảnh public domain.
+- **Controller review:** agent không đọc được ảnh (hook `rtk`) → lead tự xem từng lát figshot (JPEG nhỏ). Bắt và sửa: bài 6 hình workers ghi pid `48989` **bịa** (không có trong capture) → đổi thành "never answered"; bài 6 2 nhãn VI chưa dịch trong cây quyết định; bài 5 chú thích "ô nhỏ ở 0 s" mà ô không nhìn thấy → bỏ; alt ảnh hero của cả 3 bài mô tả sai ảnh (tả theo tiêu đề Commons, không theo ảnh) → viết lại theo ảnh thật. Kiểm nguồn 3 hook khớp (Val Town kể đúng nguyên nhân đã đính chính). Sửa thêm dấu `>>>>>>>` sót trong `public/icons/flow/README.md` từ lần merge wave A.
+- **Ai quyết:** user ("làm 3 bài tiếp theo"); chọn nội dung từng bài do agent theo brief.
+- **Kiểm tra:** build + 47 test sạch; mọi fence python khớp byte `demo/*.py`; không link gãy; `post-check.sh` sạch cả 3 bài; secret JWT trong demo là giá trị giả đọc từ env.
+- **Chưa chốt:** 3 bài `draft: true` chờ user đọc; PR #55 (publish bài 2–4) chờ user merge (lệnh merge của AI bị chặn); wave C (8–10) sau khi user duyệt wave B.
+
 ## 2026-11-23 — Xuất bản bài 2–4 series backend
 
 - **Đã làm (branch `content/publish-backend-2-4`):** flip `draft: true` → `false` cho `backend-rest-api-design`, `backend-validation-schemas`, `backend-layered-architecture`. Build 68 → 71 pages, 47 test pass; không bài nào link tới bài backend chưa xuất bản.
