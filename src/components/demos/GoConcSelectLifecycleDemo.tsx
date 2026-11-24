@@ -188,7 +188,7 @@ export default function GoConcSelectLifecycleDemo() {
             select &amp; nil channel
           </button>
           <button type="button" className={scenario === 'etcd' ? 'sd-btn is-on' : 'sd-btn'} onClick={() => { setScenario('etcd'); setStep(3); }}>
-            etcd String() deadlock
+            String() self-deadlock
           </button>
         </div>
 

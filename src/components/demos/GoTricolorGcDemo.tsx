@@ -78,7 +78,7 @@ const SCENARIOS: Record<
         titleEn: 'Concurrent Sweep frees White slots without moving live objects',
         titleVi: 'Pha Quét đồng thời trả các ô Trắng về mcache/mheap — không dời ô sống',
         noteEn: 'Go GC is non-moving/non-compacting (using TCMalloc size classes instead of copying pointers), so C and D sweep cleanly to free lists with zero object relocation!',
-        noteVi: 'Khác Java, Go GC KHÔNG dời vị trí biến sống nên khỏi cần sửa hàng triệu con trỏ; C và D tự trả slot trống về mspan theo đúng size-class.',
+        noteVi: 'Go GC KHÔNG dời vị trí biến sống nên khỏi cần sửa hàng triệu con trỏ; C và D tự trả slot trống về mspan theo đúng size-class.',
         nodes: [
           { id: 'Root->A', label: 'A (kept)', color: 'black' },
           { id: 'A->B', label: 'B (kept)', color: 'black' },
