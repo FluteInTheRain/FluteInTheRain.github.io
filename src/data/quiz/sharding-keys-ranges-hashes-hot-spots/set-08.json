@@ -1,0 +1,429 @@
+{
+  "id": "set-08",
+  "title": {
+    "en": "The ping that slowed the cluster",
+    "vi": "Cú ping làm chậm cả cụm"
+  },
+  "context": {
+    "illustrative": true,
+    "text": {
+      "en": "A chat service keeps messages in a database of 24 nodes with replication factor 3. Messages are partitioned by `(channel_id, bucket)`, where the bucket is a time window. Reads use quorum: a read waits for 2 of the 3 replicas of the partition. Between the API and the database sits a tier of 8 data-service instances. Each instance merges identical reads that are in flight at the same moment into one database query. A load balancer sends each request to a random instance.\nA huge server posts an announcement that notifies everyone. Within seconds, 12,000 reads per second ask for the latest messages of that one channel, all in the same bucket. One database node serves about 3,000 reads per second of this kind.",
+      "vi": "Một dịch vụ chat lưu tin nhắn trong database 24 node, replication factor 3. Tin nhắn được chia partition theo `(channel_id, bucket)`, trong đó bucket là một khoảng thời gian. Đọc dùng quorum: một lệnh đọc chờ 2 trong 3 replica của partition. Giữa API và database có một tầng 8 instance data service. Mỗi instance gộp các lệnh đọc giống hệt nhau đang chạy cùng lúc thành một truy vấn database. Load balancer gửi mỗi request tới một instance ngẫu nhiên.\nMột server khổng lồ đăng thông báo gọi mọi người. Trong vài giây, 12.000 lượt đọc mỗi giây cùng hỏi tin mới nhất của đúng một kênh đó, tất cả trong cùng một bucket. Một node database phục vụ được khoảng 3.000 lượt đọc mỗi giây loại này."
+    },
+    "media": [
+      {
+        "kind": "figure",
+        "component": "PingStorm",
+        "alt": {
+          "en": "Reads for one chat channel go through 8 data-service instances to a cluster of 24 database nodes, where 3 nodes hold the partition being read.",
+          "vi": "Các lệnh đọc của một kênh chat đi qua 8 instance data service tới cụm 24 node database, trong đó 3 node giữ partition đang được đọc."
+        }
+      }
+    ]
+  },
+  "questions": [
+    {
+      "id": "s08q1",
+      "level": "apply",
+      "track": "ai",
+      "type": "ai-review",
+      "difficulty": 3,
+      "topic": "Request coalescing",
+      "stem": {
+        "en": "You ask an AI assistant to write the merge step of a data service. It produces the code below. In a test, 12,000 concurrent reads of the same channel and bucket still run 12,000 database queries. Which change fixes it?",
+        "vi": "Bạn nhờ một AI viết bước gộp lệnh đọc của data service. Nó đưa đoạn code dưới đây. Khi test, 12.000 lệnh đọc đồng thời của cùng một kênh và bucket vẫn chạy 12.000 truy vấn database. Thay đổi nào sửa được lỗi?"
+      },
+      "media": [
+        {
+          "kind": "code",
+          "lang": "python",
+          "code": "# AI-written merge step in a data service\ninflight = {}\n\nasync def read_messages(channel_id, bucket, request_id):\n    key = request_id\n    if key not in inflight:\n        inflight[key] = asyncio.create_task(db_query(channel_id, bucket))\n    task = inflight[key]\n    try:\n        return await task\n    finally:\n        inflight.pop(key, None)\n"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Key the map by `user_id`, so each user's own reads are merged together.",
+            "vi": "Dùng `user_id` làm key của map, để lệnh đọc của mỗi người dùng gộp với nhau."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Raise the database client pool size so that the queries finish faster.",
+            "vi": "Tăng kích thước pool kết nối tới database để các truy vấn xong nhanh hơn."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Key the map by `(channel_id, bucket)`, so same-row reads share one query.",
+            "vi": "Dùng `(channel_id, bucket)` làm key của map, để các lệnh đọc cùng dữ liệu dùng chung một truy vấn."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Wrap `db_query` in a retry, so that any failed query is tried again.",
+            "vi": "Bọc `db_query` bằng retry, để truy vấn lỗi được thử lại."
+          }
+        }
+      ],
+      "answer": [
+        "c"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "Two reads can share a query only when they ask for the same rows. Here the key is `request_id`, which is different for every request, so no read ever finds an in-flight query to join. Keyed by `(channel_id, bucket)`, the first read starts one query and the other 11,999 wait for its answer.",
+          "vi": "Hai lệnh đọc chỉ dùng chung được một truy vấn khi chúng hỏi cùng dữ liệu. Ở đây key là `request_id`, mỗi request một giá trị khác nhau, nên không lệnh đọc nào tìm thấy truy vấn đang chạy để nhập vào. Với key `(channel_id, bucket)`, lệnh đọc đầu tiên mở một truy vấn và 11.999 lệnh còn lại chờ kết quả của nó."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "12,000 readers are mostly 12,000 different users, so each one still gets its own query. The key must name the data being read, not the person reading it.",
+            "vi": "12.000 lượt đọc phần lớn là của 12.000 người khác nhau, nên mỗi người vẫn có truy vấn riêng. Key phải nêu dữ liệu được đọc, không phải người đọc."
+          },
+          "b": {
+            "en": "A bigger pool lets more duplicate queries run at once, which sends even more load to the same 3 replicas. The problem is the number of queries, not their speed.",
+            "vi": "Pool lớn hơn cho phép nhiều truy vấn trùng chạy cùng lúc, tức dồn thêm tải vào cùng 3 replica. Vấn đề là số truy vấn, không phải tốc độ của chúng."
+          },
+          "d": {
+            "en": "Retries add queries. Nothing in the test failed: the code just never merges anything.",
+            "vi": "Retry chỉ thêm truy vấn. Trong test không có gì thất bại: code đơn giản là chưa gộp được gì."
+          }
+        },
+        "reread": {
+          "anchor": "four-tools-for-cooling-a-hot-key",
+          "label": {
+            "en": "Four tools for cooling a hot key",
+            "vi": "Bốn cách hạ nhiệt một hot key"
+          }
+        },
+        "say": {
+          "en": "When AI writes a merge or cache layer, check what the key is: it must be the data being read, and run a test that counts the real queries.",
+          "vi": "Khi AI viết tầng gộp hoặc cache, hãy kiểm tra key là gì: phải là dữ liệu được đọc, và chạy một test đếm số truy vấn thật."
+        }
+      },
+      "ref": "Post: Four tools for cooling a hot key; Discord blog: https://discord.com/blog/how-discord-stores-trillions-of-messages (data services merge identical reads of the same row)",
+      "verifiedBy": "python3 q1.py (asyncio test: 12,000 concurrent reads of channel 7, bucket 42, one instance, db_query takes 20 ms)\nkey = request_id        -> 12000 queries\nkey = (channel, bucket) -> 1 queries"
+    },
+    {
+      "id": "s08q2",
+      "level": "apply",
+      "track": "interview",
+      "type": "scenario",
+      "difficulty": 4,
+      "topic": "A real case: Discord and the @everyone ping",
+      "stem": {
+        "en": "Each of the 8 instances receives about 1,500 of the 12,000 reads per second. For this channel an instance keeps one database query in flight at a time: reads that arrive meanwhile wait and share its answer. One query takes 20 ms. Use these formulas:\n- `queries per second per instance = 1000 ms / query time in ms`\n- `total queries per second = queries per second per instance × 8 instances`\n- `replica reads per second = queries per second × 2` (a quorum read contacts 2 replicas)\nWithout merging, every read is its own query. How many replica reads per second reach the hot partition with the merge, and without it?",
+        "vi": "Mỗi instance trong 8 instance nhận khoảng 1.500 trong 12.000 lượt đọc mỗi giây. Với kênh này, một instance chỉ giữ một truy vấn database chạy tại một thời điểm: các lệnh đọc đến trong lúc đó sẽ chờ và dùng chung kết quả. Một truy vấn mất 20 ms. Dùng các công thức sau:\n- `truy vấn mỗi giây mỗi instance = 1000 ms / thời gian truy vấn (ms)`\n- `tổng truy vấn mỗi giây = truy vấn mỗi giây mỗi instance × 8 instance`\n- `lượt đọc replica mỗi giây = truy vấn mỗi giây × 2` (một lệnh đọc quorum liên hệ 2 replica)\nNếu không gộp, mỗi lệnh đọc là một truy vấn riêng. Partition nóng nhận bao nhiêu lượt đọc replica mỗi giây khi có gộp, và khi không gộp?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "800 with the merge, 24,000 without",
+            "vi": "800 khi có gộp, 24.000 khi không gộp"
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "400 with the merge, 12,000 without",
+            "vi": "400 khi có gộp, 12.000 khi không gộp"
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "100 with the merge, 24,000 without",
+            "vi": "100 khi có gộp, 24.000 khi không gộp"
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "1,200 with the merge, 24,000 without",
+            "vi": "1.200 khi có gộp, 24.000 khi không gộp"
+          }
+        }
+      ],
+      "answer": [
+        "a"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "Per instance: 1000 / 20 = 50 queries per second. Over 8 instances: 400 queries per second. Each contacts 2 replicas: 800 replica reads per second. Without merging, 12,000 reads × 2 = 24,000. The merge cuts the load 30 times, yet it is still 8 queries per round, one from each instance.",
+          "vi": "Mỗi instance: 1000 / 20 = 50 truy vấn mỗi giây. Trên 8 instance: 400 truy vấn mỗi giây. Mỗi truy vấn liên hệ 2 replica: 800 lượt đọc replica mỗi giây. Nếu không gộp, 12.000 lượt đọc × 2 = 24.000. Việc gộp giảm tải 30 lần, nhưng mỗi vòng vẫn có 8 truy vấn, mỗi instance một."
+        },
+        "whyWrong": {
+          "b": {
+            "en": "This forgets that a quorum read contacts 2 replicas. It counts queries (400 and 12,000), not reads on replicas.",
+            "vi": "Cách này quên rằng đọc quorum liên hệ 2 replica. Nó đếm truy vấn (400 và 12.000) chứ không đếm lượt đọc trên replica."
+          },
+          "c": {
+            "en": "This counts one instance only (50 × 2 = 100). All 8 instances send their own query, so the total is 8 times larger.",
+            "vi": "Cách này chỉ tính một instance (50 × 2 = 100). Cả 8 instance đều gửi truy vấn riêng, nên tổng lớn hơn 8 lần."
+          },
+          "d": {
+            "en": "This divides the 12,000 reads by 20 as if 20 were a number of requests. The 20 is milliseconds per query, so it turns into 50 queries per second per instance.",
+            "vi": "Cách này lấy 12.000 lượt đọc chia cho 20 như thể 20 là số request. 20 là mili giây mỗi truy vấn, nên nó cho ra 50 truy vấn mỗi giây mỗi instance."
+          }
+        },
+        "reread": {
+          "anchor": "a-real-case-discord-and-the-everyone-ping",
+          "label": {
+            "en": "A real case: Discord and the `@everyone` ping",
+            "vi": "Ca thật: Discord và ping `@everyone`"
+          }
+        },
+        "say": {
+          "en": "Merging identical reads turns a crowd into a few queries: here 24,000 replica reads a second become 800, because the load now follows time, not users.",
+          "vi": "Gộp các lệnh đọc giống nhau biến đám đông thành vài truy vấn: ở đây 24.000 lượt đọc replica mỗi giây còn 800, vì tải giờ phụ thuộc vào thời gian chứ không phải số người dùng."
+        }
+      },
+      "ref": "Post: A real case: Discord and the @everyone ping; Discord blog: https://discord.com/blog/how-discord-stores-trillions-of-messages",
+      "verifiedBy": "python3 -c \"q=1000/20; print(q, q*8, q*8*2, 12000*2)\"  (queries/s per instance, total queries/s, replica reads/s with merge, replica reads/s without)\n50.0 400.0 800.0 24000\nWrong answers: 100 = one instance only (50*2); 400 / 12000 = no quorum factor; 1200 = 12000/20*2 (reads divided by ms)"
+    },
+    {
+      "id": "s08q3",
+      "level": "analyze",
+      "track": "ai",
+      "type": "multi",
+      "difficulty": 4,
+      "topic": "Skewed workloads and celebrity hot spots",
+      "stem": {
+        "en": "During the spike the dashboard shows average CPU across the 24 nodes at 31%, while read p99 for that channel is far above normal. An AI assistant says: \"There is plenty of spare capacity, so the slowness must be a client bug.\" Which two points show the conclusion is wrong?",
+        "vi": "Trong lúc tải tăng vọt, dashboard cho thấy CPU trung bình của 24 node là 31%, trong khi p99 đọc của kênh đó cao hơn hẳn bình thường. Một AI nói: \"Còn nhiều dư năng lực, nên chậm là do lỗi phía client.\" Hai điểm nào cho thấy kết luận này sai?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Quorum reads skip the slowest replicas, so one hot partition cannot raise p99.",
+            "vi": "Đọc quorum bỏ qua các replica chậm nhất, nên một partition nóng không thể làm p99 tăng."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "The hot partition's reads land on its 3 replicas, and an average over 24 nodes hides them.",
+            "vi": "Các lệnh đọc của partition nóng dồn vào 3 replica của nó, và trung bình trên 24 node che mất chúng."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Idle nodes hold copies of the hot partition too, and will share its reads soon.",
+            "vi": "Các node rảnh cũng giữ bản sao của partition nóng, và sẽ sớm chia sẻ lệnh đọc của nó."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "A low average CPU proves that disks and network are healthy on every node as well.",
+            "vi": "CPU trung bình thấp chứng tỏ đĩa và mạng trên mọi node cũng đang khoẻ."
+          }
+        },
+        {
+          "id": "e",
+          "text": {
+            "en": "A quorum read needs 2 of the 3 replicas, so reads of that channel wait on busy nodes.",
+            "vi": "Đọc quorum cần 2 trong 3 replica, nên lệnh đọc của kênh đó phải chờ các node đang bận."
+          }
+        }
+      ],
+      "answer": [
+        "b",
+        "e"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "Load is not shared evenly: all 12,000 reads aim at one partition, so they fall on the 3 nodes that hold it. An average over 24 nodes mixes 3 overloaded nodes with 21 quiet ones and looks calm. And a quorum read must hear from 2 of those 3 replicas, so a reader of that channel waits on a busy node whichever idle node it entered through. Check the busiest node, not the average.",
+          "vi": "Tải không chia đều: cả 12.000 lệnh đọc nhắm vào một partition nên đổ lên 3 node giữ nó. Trung bình trên 24 node trộn 3 node quá tải với 21 node rảnh nên trông bình thường. Và đọc quorum phải nghe từ 2 trong 3 replica đó, nên người đọc kênh ấy phải chờ một node đang bận, dù họ vào qua node rảnh nào. Hãy xem node bận nhất, đừng xem trung bình."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "A quorum read waits for 2 of 3 replicas, and here all 3 are overloaded, so even the 2 fastest are slow.",
+            "vi": "Đọc quorum chờ 2 trong 3 replica, và ở đây cả 3 đều quá tải, nên 2 replica nhanh nhất cũng chậm."
+          },
+          "c": {
+            "en": "Only the nodes that hold the partition can answer for it. The idle ones do not have the data, so they cannot share these reads.",
+            "vi": "Chỉ các node giữ partition mới trả lời được cho nó. Các node rảnh không có dữ liệu, nên không chia sẻ được các lệnh đọc này."
+          },
+          "d": {
+            "en": "CPU says nothing about disks or network. A node can sit at 31% CPU and still have a saturated disk or link.",
+            "vi": "CPU không nói gì về đĩa hay mạng. Một node có thể ở 31% CPU mà đĩa hoặc đường mạng vẫn đã bão hoà."
+          }
+        },
+        "reread": {
+          "anchor": "3-skewed-workloads-and-celebrity-hot-spots",
+          "label": {
+            "en": "3. Skewed workloads and celebrity hot spots",
+            "vi": "3. Dữ liệu lệch và điểm nóng \"người nổi tiếng\""
+          }
+        },
+        "say": {
+          "en": "When AI reads an average and says there is spare capacity, ask which node is busiest: skew hides inside averages.",
+          "vi": "Khi AI đọc một số trung bình và bảo còn dư năng lực, hãy hỏi node nào bận nhất: độ lệch nằm ẩn trong số trung bình."
+        }
+      },
+      "ref": "Post: A real case: Discord and the @everyone ping; Discord blog: https://discord.com/blog/how-discord-stores-trillions-of-messages (a hot partition frequently affected latency across the whole cluster)"
+    },
+    {
+      "id": "s08q4",
+      "level": "evaluate",
+      "track": "interview",
+      "type": "scenario",
+      "difficulty": 5,
+      "topic": "Request routing",
+      "stem": {
+        "en": "Each instance merges identical in-flight reads and runs one 20 ms query at a time for the row, but the balancer spreads one channel's reads over all 8 instances. Which change cuts the load on the hot partition the most?",
+        "vi": "Mỗi instance gộp các lệnh đọc giống nhau đang chạy và chỉ chạy một truy vấn 20 ms tại một thời điểm cho dòng đó, nhưng balancer rải các lệnh đọc của một kênh ra cả 8 instance. Thay đổi nào giảm tải cho partition nóng nhiều nhất?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Add 8 more instances behind the same balancer, so each takes fewer reads.",
+            "vi": "Thêm 8 instance sau cùng balancer, để mỗi instance nhận ít lệnh đọc hơn."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Route reads by user ID, so each user always reaches the same instance.",
+            "vi": "Định tuyến lệnh đọc theo user ID, để mỗi người dùng luôn tới cùng một instance."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Add suffixes `#00` to `#99` to the key, so one bucket's reads spread over 100 partitions.",
+            "vi": "Thêm hậu tố `#00` đến `#99` vào key, để lệnh đọc của một bucket rải ra 100 partition."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Route reads by channel ID with consistent hashing, so one instance sees all of a channel's reads.",
+            "vi": "Định tuyến lệnh đọc theo channel ID bằng consistent hashing, để một instance thấy mọi lệnh đọc của kênh."
+          }
+        }
+      ],
+      "answer": [
+        "d"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "A merge only works on reads that meet in the same place. Today 8 instances each send their own query for the channel: 400 queries a second, 800 replica reads. If one instance owns the channel, every read meets there and only 50 queries a second go out, 100 replica reads. Discord did this too: its data services route by channel ID with consistent hashing so identical reads land on one instance.",
+          "vi": "Việc gộp chỉ hiệu quả với các lệnh đọc gặp nhau ở cùng một chỗ. Hiện giờ 8 instance mỗi cái gửi truy vấn riêng cho kênh: 400 truy vấn mỗi giây, 800 lượt đọc replica. Nếu một instance sở hữu kênh, mọi lệnh đọc gặp nhau ở đó và chỉ 50 truy vấn mỗi giây đi ra, tức 100 lượt đọc replica. Discord cũng làm vậy: data service của họ định tuyến theo channel ID bằng consistent hashing để các lệnh đọc giống nhau dồn về một instance."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "With 16 instances, each still sends its own query: 800 queries a second and 1,600 replica reads, twice as many as today. More instances means fewer reads per instance but more copies of the same query.",
+            "vi": "Với 16 instance, mỗi instance vẫn gửi truy vấn riêng: 800 truy vấn mỗi giây và 1.600 lượt đọc replica, gấp đôi hiện tại. Nhiều instance hơn nghĩa là mỗi instance nhận ít lệnh đọc hơn nhưng có nhiều bản sao hơn của cùng một truy vấn."
+          },
+          "b": {
+            "en": "Everyone reading the announcement reads the same channel, whoever they are. Sticking a user to an instance still leaves every instance holding reads for that channel.",
+            "vi": "Mọi người đọc thông báo đều đọc cùng một kênh, bất kể là ai. Gắn mỗi người dùng với một instance vẫn để instance nào cũng có lệnh đọc của kênh đó."
+          },
+          "c": {
+            "en": "Salting splits writes. A read of one bucket must now query all 100 salts and merge: 12,000 × 100 = 1,200,000 reads a second. It turns a read storm into a much bigger one.",
+            "vi": "Thêm muối chia nhỏ việc ghi. Đọc một bucket giờ phải hỏi cả 100 salt rồi gộp: 12.000 × 100 = 1.200.000 lượt đọc mỗi giây. Nó biến bão đọc thành bão đọc lớn hơn nhiều."
+          }
+        },
+        "reread": {
+          "anchor": "a-real-case-discord-and-the-everyone-ping",
+          "label": {
+            "en": "A real case: Discord and the `@everyone` ping",
+            "vi": "Ca thật: Discord và ping `@everyone`"
+          }
+        },
+        "say": {
+          "en": "To merge identical reads you must send them to the same place, so I would route by channel ID with consistent hashing. Salting would multiply the reads, because every read has to ask all the salts.",
+          "vi": "Muốn gộp các lệnh đọc giống nhau thì phải đưa chúng về cùng một chỗ, nên tôi sẽ định tuyến theo channel ID bằng consistent hashing. Thêm muối sẽ nhân số lệnh đọc lên, vì mỗi lệnh đọc phải hỏi mọi salt."
+        }
+      },
+      "ref": "Post: A real case: Discord and the @everyone ping; Discord blog: https://discord.com/blog/how-discord-stores-trillions-of-messages (consistent hash-based routing by channel ID to enable effective coalescing)",
+      "verifiedBy": "python3 -c \"q=1000/20; print(q*16, q*16*2, q*2, 12000*100)\"  (16 instances: queries/s and replica reads/s; routed by channel: replica reads/s; salting: partition reads/s)\n800.0 1600.0 100.0 1200000\nToday: 8 instances = 400 queries/s = 800 replica reads/s; routed by channel = 1 instance = 50 queries/s = 100 replica reads/s."
+    },
+    {
+      "id": "s08q5",
+      "level": "evaluate",
+      "track": "ai",
+      "type": "ai-advice",
+      "difficulty": 5,
+      "topic": "Automatic vs. manual rebalancing",
+      "stem": {
+        "en": "An AI assistant, asked how to survive the spike, says: \"Add 6 nodes now and turn on automatic rebalance, so shards move onto the new nodes while the traffic is high.\" Which verdict is the most accurate?",
+        "vi": "Một AI được hỏi cách vượt qua đợt tăng tải, trả lời: \"Thêm 6 node ngay và bật rebalance tự động, để shard chuyển sang node mới trong lúc traffic đang cao.\" Nhận định nào chính xác nhất?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Go ahead: the new nodes take a share of the hot partition's reads once they join.",
+            "vi": "Cứ làm: node mới sẽ nhận một phần lệnh đọc của partition nóng ngay khi tham gia."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Go ahead: automatic rebalance is safe because it moves data in small background steps.",
+            "vi": "Cứ làm: rebalance tự động an toàn vì nó chuyển dữ liệu theo các bước nhỏ chạy nền."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Hold it: copying data loads the saturated replicas, and the hot partition keeps 3 copies.",
+            "vi": "Hoãn lại: sao chép dữ liệu đè thêm lên các replica đang bão hoà, và partition nóng vẫn chỉ có 3 bản sao."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Do it with a faster rebalance, so the data finishes moving before the spike ends.",
+            "vi": "Cứ làm nhưng rebalance nhanh hơn, để dữ liệu chuyển xong trước khi đợt tăng tải kết thúc."
+          }
+        }
+      ],
+      "answer": [
+        "c"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "Rebalancing copies data across the network, and that copying lands on the same replicas that are already saturated. It can also trigger a loop: an overloaded node answers heartbeats slowly, its peers think it is dead and start moving its shards, and the extra copying overloads more nodes (a cascading failure). More nodes do not help this spike anyway: the partition has 3 replicas, however big the cluster gets. Cut the reads first, for example by merging identical ones, and rebalance when traffic is calm.",
+          "vi": "Rebalance sao chép dữ liệu qua mạng, và việc sao chép đó rơi vào đúng các replica đang bão hoà. Nó còn có thể kích hoạt một vòng lặp: node quá tải trả lời heartbeat chậm, các node khác tưởng nó đã chết và bắt đầu dời shard của nó, rồi việc sao chép thêm làm quá tải thêm node (sập dây chuyền, cascading failure). Thêm node cũng không giúp gì cho đợt tăng tải này: partition có 3 replica, cụm lớn đến đâu cũng vậy. Hãy giảm số lệnh đọc trước, ví dụ bằng cách gộp các lệnh đọc giống nhau, và rebalance khi traffic đã yên."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "A new node only gets data when a rebalance gives it some, and the hot partition still lives on its 3 replicas. Nodes added during the spike do not take its reads.",
+            "vi": "Node mới chỉ có dữ liệu khi rebalance chuyển cho nó, và partition nóng vẫn nằm trên 3 replica của nó. Node thêm vào trong lúc tăng tải không nhận lệnh đọc của partition đó."
+          },
+          "b": {
+            "en": "Small steps still cost network and disk on nodes with no spare capacity. Automation also reacts to a slow node by moving more data, which can start a cascade.",
+            "vi": "Các bước nhỏ vẫn tốn mạng và đĩa trên những node không còn dư năng lực. Tự động hoá còn phản ứng với node chậm bằng cách chuyển thêm dữ liệu, có thể gây sập dây chuyền."
+          },
+          "d": {
+            "en": "A faster rebalance puts more load on the saturated nodes at once. Speed makes the cascade risk worse, and the hot partition's 3 copies stay the same.",
+            "vi": "Rebalance nhanh hơn đè nhiều tải hơn lên các node đang bão hoà cùng lúc. Tốc độ làm rủi ro sập dây chuyền tệ hơn, và 3 bản sao của partition nóng vẫn như cũ."
+          }
+        },
+        "reread": {
+          "anchor": "automatic-vs-manual-rebalancing-watch-out-for-cascades",
+          "label": {
+            "en": "Automatic vs. manual rebalancing: watch out for cascades",
+            "vi": "Tự động rebalance hay để người duyệt: cẩn thận hiệu ứng domino"
+          }
+        },
+        "say": {
+          "en": "When AI says add nodes and rebalance during an incident, ask which partition is hot and whether the move adds load right now.",
+          "vi": "Khi AI bảo thêm node và rebalance giữa sự cố, hãy hỏi partition nào đang nóng và việc chuyển dữ liệu có thêm tải ngay lúc này không."
+        }
+      },
+      "ref": "Post: Automatic vs. manual rebalancing: watch out for cascades"
+    }
+  ]
+}
