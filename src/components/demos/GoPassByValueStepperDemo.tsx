@@ -296,8 +296,8 @@ export default function GoPassByValueStepperDemo() {
         <code>{st.out.length ? st.out.join('  ·  ') : '—'}</code>
       </div>
       <p className="gpv-foot">
-        <span data-lang-en>Addresses are made up to keep the picture short. Real ones look like 0xc000012345.</span>
-        <span data-lang-vi>Địa chỉ ở đây là số tự đặt cho gọn. Địa chỉ thật trông như 0xc000012345.</span>
+        <span data-lang-en>Addresses are kept short here. Real ones look like 0xc000012345.</span>
+        <span data-lang-vi>Địa chỉ ở đây được viết gọn. Địa chỉ thật trông như 0xc000012345.</span>
       </p>
     </div>
   );

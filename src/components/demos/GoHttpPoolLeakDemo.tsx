@@ -129,7 +129,7 @@ export default function GoHttpPoolLeakDemo() {
         <div className="ghpl-pane">
           <div className="ghpl-hdr">
             <span data-lang-en>Go Source Trace</span>
-            <span data-lang-vi>Code Go Minh Họa</span>
+            <span data-lang-vi>Code Go</span>
           </div>
           <div className="ghpl-code">
             {SCENARIOS[mode].code.map((line, i) => (
