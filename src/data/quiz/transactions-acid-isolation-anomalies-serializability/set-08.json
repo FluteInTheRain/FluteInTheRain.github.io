@@ -1,0 +1,417 @@
+{
+  "id": "set-08",
+  "title": {
+    "en": "Serializable at what price",
+    "vi": "Cái giá của serializable"
+  },
+  "context": {
+    "illustrative": true,
+    "text": {
+      "en": "A payments service must keep three workloads correct, and each one needs its own serializable strategy.\n- Workload A: a hot counter for one card programme. Updates are tiny and stay on one shard. A single-shard transaction takes 0.05 ms and a cross-shard one takes 1 ms.\n- Workload B: a ledger with 2,000 transfers per second and reports that read many rows for 5 minutes. It runs on PostgreSQL at SERIALIZABLE.\n- Workload C: a worker takes payment instructions from a queue and updates the ledger. The broker comes from another vendor than the ledger database and sends a message again if it is not acknowledged. The worker runs on one VM that restarts at every deploy.",
+      "vi": "Một dịch vụ thanh toán phải giữ ba workload luôn đúng, và mỗi workload cần một chiến lược serializable riêng.\n- Workload A: một bộ đếm nóng cho một chương trình thẻ. Mỗi lần cập nhật rất nhỏ và nằm trong một shard. Một giao dịch trong một shard mất 0,05 ms, một giao dịch xuyên shard mất 1 ms.\n- Workload B: sổ cái với 2.000 lệnh chuyển mỗi giây và các báo cáo đọc nhiều dòng suốt 5 phút. Nó chạy trên PostgreSQL ở mức SERIALIZABLE.\n- Workload C: một worker lấy lệnh thanh toán từ queue rồi cập nhật sổ cái. Broker của hãng khác với database sổ cái và gửi lại tin nhắn nếu chưa được ack. Worker chạy trên một VM, restart mỗi lần deploy."
+    },
+    "media": [
+      {
+        "kind": "figure",
+        "component": "SerializablePrice",
+        "alt": {
+          "en": "Three lanes: a hot counter with transactions waiting for one thread, a ledger where a 5-minute report runs beside many short transfers, and a worker that takes queue messages into the ledger database.",
+          "vi": "Ba làn: bộ đếm nóng với giao dịch xếp hàng chờ một luồng, sổ cái nơi báo cáo 5 phút chạy cạnh nhiều lệnh chuyển ngắn, và worker lấy tin nhắn từ queue vào database sổ cái."
+        }
+      }
+    ]
+  },
+  "questions": [
+    {
+      "id": "s08q1",
+      "level": "apply",
+      "track": "ai",
+      "type": "ai-review",
+      "difficulty": 3,
+      "topic": "3. Serializable Snapshot Isolation (SSI)",
+      "stem": {
+        "en": "An AI assistant writes the ledger transfer below and says: \"SERIALIZABLE makes this safe, so no more error handling is needed.\" Under load, about 20% of transfers fail with SQLSTATE 40001 and users see HTTP 500. Which change fixes the cause?",
+        "vi": "Một AI viết hàm chuyển tiền cho sổ cái dưới đây và nói: \"SERIALIZABLE làm nó an toàn, nên không cần xử lý lỗi thêm.\" Khi tải cao, khoảng 20% lệnh chuyển lỗi với SQLSTATE 40001 và người dùng thấy HTTP 500. Thay đổi nào sửa đúng nguyên nhân?"
+      },
+      "media": [
+        {
+          "kind": "code",
+          "lang": "python",
+          "code": "def transfer(db, src, dst, amount):\n    with db.transaction(isolation=\"SERIALIZABLE\"):\n        bal = db.query_one(\"SELECT balance FROM accounts WHERE id = %s\", src)\n        if bal < amount:\n            raise InsufficientFunds()\n        db.execute(\"UPDATE accounts SET balance = balance - %s WHERE id = %s\", amount, src)\n        db.execute(\"UPDATE accounts SET balance = balance + %s WHERE id = %s\", amount, dst)\n\n@app.post(\"/transfer\")\ndef handle(req):\n    transfer(db, req.src, req.dst, req.amount)  # any database error becomes HTTP 500\n    return ok()\n"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Lower the level to READ COMMITTED so the database stops aborting transfers.",
+            "vi": "Hạ mức xuống READ COMMITTED để database thôi huỷ các lệnh chuyển."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Run the whole transaction again after a 40001, a few times, with a short delay.",
+            "vi": "Chạy lại cả transaction sau lỗi 40001, vài lần, với một khoảng trễ ngắn."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Catch the 40001 error and commit the two balance updates anyway.",
+            "vi": "Bắt lỗi 40001 rồi vẫn commit hai lệnh cập nhật số dư."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Give the request a longer timeout so the database can decide in time.",
+            "vi": "Cho request timeout dài hơn để database kịp quyết định."
+          }
+        }
+      ],
+      "answer": ["b"],
+      "explanation": {
+        "whyRight": {
+          "en": "Under SERIALIZABLE the database may refuse to commit a transaction that could break the serial order. It reports 40001, and the application must run the whole transaction again, reads included, because the first attempt left no effect. A cap on attempts and a short delay keep retries from piling up. Retries cost work: if 20% of attempts abort, one transfer needs 1 / (1 − 0.2) = 1.25 attempts on average, so 2,000 transfers per second become 2,500 attempts per second.",
+          "vi": "Ở mức SERIALIZABLE, database có thể từ chối commit một transaction có nguy cơ phá thứ tự tuần tự. Nó báo 40001, và ứng dụng phải chạy lại cả transaction, gồm cả phần đọc, vì lần thử đầu không để lại tác dụng nào. Giới hạn số lần thử và một khoảng trễ ngắn giúp retry không dồn lại. Retry tốn thêm công: nếu 20% lần thử bị huỷ, mỗi lệnh chuyển cần trung bình 1 / (1 − 0,2) = 1,25 lần thử, nên 2.000 lệnh chuyển mỗi giây thành 2.500 lần thử mỗi giây."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "The errors vanish because the protection vanishes. Two transfers can again read the same balance and both pass the check.",
+            "vi": "Lỗi biến mất vì lớp bảo vệ biến mất. Hai lệnh chuyển lại có thể đọc cùng một số dư và cùng qua bước kiểm tra."
+          },
+          "c": {
+            "en": "An aborted transaction has no effect and cannot be committed. The code would also skip the balance check it was aborted for.",
+            "vi": "Transaction đã bị huỷ không còn tác dụng và không commit được. Code còn bỏ qua đúng phép kiểm tra số dư khiến nó bị huỷ."
+          },
+          "d": {
+            "en": "The abort is a decision about conflicting transactions, not a slow answer. Waiting longer changes nothing.",
+            "vi": "Việc huỷ là quyết định về các transaction xung đột, không phải câu trả lời chậm. Chờ lâu hơn không đổi được gì."
+          }
+        },
+        "reread": {
+          "anchor": "3-serializable-snapshot-isolation-ssi",
+          "label": {
+            "en": "3. Serializable Snapshot Isolation (SSI)",
+            "vi": "3. Serializable Snapshot Isolation (SSI)"
+          }
+        },
+        "say": {
+          "en": "When AI says serializable needs no error handling, I check for a retry of the whole transaction on 40001, with a cap and a delay.",
+          "vi": "Khi AI nói serializable không cần xử lý lỗi, mình kiểm tra có retry cả transaction khi gặp 40001 không, kèm giới hạn và khoảng trễ."
+        }
+      },
+      "ref": "Post: Key takeaways; 3. Serializable Snapshot Isolation (SSI); numbers are illustrative",
+      "verifiedBy": "python3 -c \"p=0.20;tps=2000;print(1/(1-p), tps/(1-p))\" -> 1.25 2500.0"
+    },
+    {
+      "id": "s08q2",
+      "level": "apply",
+      "track": "interview",
+      "type": "scenario",
+      "difficulty": 4,
+      "topic": "1. Actual serial execution (single-threaded + stored procedures)",
+      "stem": {
+        "en": "The hot counter runs on an engine that executes transactions one at a time on a single thread. A single-shard transaction takes 0.05 ms and a cross-shard one takes 1 ms. 5% of transactions are cross-shard. What throughput does the thread reach?\n\nFormulas given:\n- `average time per transaction = (1 − cross-shard share) × 0.05 ms + cross-shard share × 1 ms`\n- `transactions per second = 1,000 ms ÷ average time per transaction`",
+        "vi": "Bộ đếm nóng chạy trên một engine thực thi từng transaction một trên một luồng duy nhất. Một giao dịch trong một shard mất 0,05 ms, một giao dịch xuyên shard mất 1 ms. 5% giao dịch là xuyên shard. Luồng đó đạt thông lượng bao nhiêu?\n\nCông thức cho sẵn:\n- `thời gian trung bình mỗi giao dịch = (1 − tỉ lệ xuyên shard) × 0,05 ms + tỉ lệ xuyên shard × 1 ms`\n- `giao dịch mỗi giây = 1.000 ms ÷ thời gian trung bình mỗi giao dịch`"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "About 20,000 per second",
+            "vi": "Khoảng 20.000 mỗi giây"
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "About 19,050 per second",
+            "vi": "Khoảng 19.050 mỗi giây"
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "About 10,256 per second",
+            "vi": "Khoảng 10.256 mỗi giây"
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "About 1,000 per second",
+            "vi": "Khoảng 1.000 mỗi giây"
+          }
+        }
+      ],
+      "answer": ["c"],
+      "explanation": {
+        "whyRight": {
+          "en": "Average time = 0.95 × 0.05 + 0.05 × 1 = 0.0475 + 0.05 = 0.0975 ms. Then 1,000 ms ÷ 0.0975 ms is about 10,256 per second. Only 5% of the transactions are cross-shard, but they take 20 times longer, so they use about half of the thread's time and cut the throughput roughly in half.",
+          "vi": "Thời gian trung bình = 0,95 × 0,05 + 0,05 × 1 = 0,0475 + 0,05 = 0,0975 ms. Rồi 1.000 ms ÷ 0,0975 ms xấp xỉ 10.256 mỗi giây. Chỉ 5% giao dịch là xuyên shard, nhưng chúng lâu gấp 20 lần, nên chiếm khoảng một nửa thời gian của luồng và kéo thông lượng gần một nửa."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "This ignores the cross-shard transactions and uses only the 0.05 ms cost.",
+            "vi": "Cách này bỏ qua giao dịch xuyên shard và chỉ dùng chi phí 0,05 ms."
+          },
+          "b": {
+            "en": "This averages the two rates (95% of 20,000 plus 5% of 1,000). The thread spends time, not rates, so the times must be averaged.",
+            "vi": "Cách này lấy trung bình hai tốc độ (95% của 20.000 cộng 5% của 1.000). Luồng tiêu tốn thời gian chứ không phải tốc độ, nên phải lấy trung bình thời gian."
+          },
+          "d": {
+            "en": "This treats every transaction as cross-shard, but 95% of them stay on one shard.",
+            "vi": "Cách này coi mọi giao dịch đều xuyên shard, trong khi 95% chỉ nằm trong một shard."
+          }
+        },
+        "reread": {
+          "anchor": "1-actual-serial-execution-single-threaded--stored-procedures",
+          "label": {
+            "en": "1. Actual serial execution (single-threaded + stored procedures)",
+            "vi": "1. Chạy tuần tự thật sự (một luồng + stored procedure)"
+          }
+        },
+        "say": {
+          "en": "Serial execution is fast while transactions stay in one shard, and a small share of cross-shard work can take half the thread's time.",
+          "vi": "Chạy tuần tự rất nhanh khi giao dịch nằm trong một shard, và một phần nhỏ giao dịch xuyên shard có thể chiếm nửa thời gian của luồng."
+        }
+      },
+      "ref": "Post: 1. Actual serial execution (single-threaded + stored procedures); numbers are illustrative",
+      "verifiedBy": "python3 -c \"x=0.05;a=(1-x)*0.05+x*1;print(a, 1000/a, 1000/0.05, (1-x)*1000/0.05+x*1000/1)\" -> 0.0975 10256.410256410257 20000.0 19050.0"
+    },
+    {
+      "id": "s08q3",
+      "level": "analyze",
+      "track": "ai",
+      "type": "multi",
+      "difficulty": 4,
+      "topic": "2. Two-Phase Locking (2PL / SS2PL)",
+      "stem": {
+        "en": "An AI assistant recommends moving the ledger to a database whose SERIALIZABLE works by locking what transactions read and write, calling it \"the traditional, proven choice\". The 5-minute reports stay. Tick the two statements that correctly describe what the team should expect.",
+        "vi": "Một AI khuyên chuyển sổ cái sang database có SERIALIZABLE hoạt động bằng cách khoá những gì transaction đọc và ghi, và gọi đó là \"lựa chọn truyền thống, đã được kiểm chứng\". Các báo cáo 5 phút vẫn giữ nguyên. Chọn hai nhận định mô tả đúng điều nhóm nên chờ đợi."
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "A report reads from a snapshot, so no transfer ever waits for it.",
+            "vi": "Báo cáo đọc từ snapshot, nên không lệnh chuyển nào phải chờ nó."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "A report keeps read locks for minutes, so transfers on those rows wait.",
+            "vi": "Báo cáo giữ lock đọc hàng phút, nên lệnh chuyển trên các dòng đó phải chờ."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Locking avoids deadlocks, because every transaction takes its locks in order.",
+            "vi": "Khoá tránh được deadlock, vì mọi transaction xin lock theo cùng thứ tự."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Two transactions can wait on each other, so the database aborts one.",
+            "vi": "Hai transaction có thể chờ lẫn nhau, nên database huỷ một trong hai."
+          }
+        },
+        {
+          "id": "e",
+          "text": {
+            "en": "It guarantees less than snapshot-based serializable, because it is older.",
+            "vi": "Nó bảo đảm ít hơn serializable dựa trên snapshot, vì nó có từ lâu hơn."
+          }
+        }
+      ],
+      "answer": ["b", "d"],
+      "explanation": {
+        "whyRight": {
+          "en": "With locking, readers block writers and writers block readers. A long report holds shared locks until it commits, so transfers that need those rows queue behind it and the tail latency grows. Locks also let two transactions wait for each other in a circle. The database breaks the circle by aborting one of them, so the application still has to cope with an aborted transaction.",
+          "vi": "Với cơ chế khoá, người đọc chặn người ghi và người ghi chặn người đọc. Một báo cáo dài giữ lock chia sẻ cho tới khi commit, nên các lệnh chuyển cần những dòng đó phải xếp hàng sau nó và độ trễ đuôi tăng. Lock cũng có thể khiến hai transaction chờ nhau thành vòng tròn. Database phá vòng đó bằng cách huỷ một bên, nên ứng dụng vẫn phải xử lý được transaction bị huỷ."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "Reading from a snapshot is how the snapshot-based mode works. With locking, reads take real locks that block writers.",
+            "vi": "Đọc từ snapshot là cách của chế độ dựa trên snapshot. Với cơ chế khoá, lệnh đọc xin lock thật và chặn người ghi."
+          },
+          "c": {
+            "en": "Queries touch rows in the order their logic needs, not in one shared order, so circular waits happen often.",
+            "vi": "Câu truy vấn chạm vào các dòng theo thứ tự logic của nó, không theo một thứ tự chung, nên chờ vòng tròn xảy ra thường xuyên."
+          },
+          "e": {
+            "en": "Both reach serializable, the same guarantee. They differ in cost and in how they fail, not in how strong they are.",
+            "vi": "Cả hai đều đạt serializable, cùng mức bảo đảm. Chúng khác nhau về chi phí và cách thất bại, không khác về độ mạnh."
+          }
+        },
+        "reread": {
+          "anchor": "2-two-phase-locking-2pl--ss2pl",
+          "label": {
+            "en": "2. Two-Phase Locking (2PL / SS2PL)",
+            "vi": "2. Two-Phase Locking (2PL / SS2PL)"
+          }
+        },
+        "say": {
+          "en": "When AI calls the locking mode the proven choice, I ask what a long report does to writers, and where the aborts come from.",
+          "vi": "Khi AI gọi chế độ khoá là lựa chọn đã kiểm chứng, mình hỏi báo cáo dài làm gì với người ghi, và các lần huỷ đến từ đâu."
+        }
+      },
+      "ref": "Post: 2. Two-Phase Locking (2PL / SS2PL)"
+    },
+    {
+      "id": "s08q4",
+      "level": "evaluate",
+      "track": "interview",
+      "type": "scenario",
+      "difficulty": 5,
+      "topic": "Exactly-once processing without 2PC",
+      "stem": {
+        "en": "For workload C, which design gives each payment instruction exactly one effect on the ledger, even when the worker VM dies at any moment?",
+        "vi": "Với workload C, thiết kế nào cho mỗi lệnh thanh toán đúng một tác dụng lên sổ cái, kể cả khi VM của worker chết vào bất kỳ lúc nào?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Tie the broker and the ledger together with XA, coordinated by the worker.",
+            "vi": "Gắn broker và sổ cái bằng XA, do chính worker điều phối."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Write the ledger update first, acknowledge after, and let redelivery retry.",
+            "vi": "Ghi cập nhật sổ cái trước, ack sau, và để việc gửi lại tự retry."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Let the ledger's own two-phase commit over Raft include the broker.",
+            "vi": "Để two-phase commit nội bộ trên Raft của sổ cái bao luôn cả broker."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Save each message id under a UNIQUE key in the ledger transaction, then acknowledge.",
+            "vi": "Lưu mỗi message id dưới khoá UNIQUE trong transaction của sổ cái, rồi mới ack."
+          }
+        }
+      ],
+      "answer": ["d"],
+      "explanation": {
+        "whyRight": {
+          "en": "The message id and the ledger update commit together in one local transaction, and the acknowledgement comes only after the commit. If the worker dies before the acknowledgement, the broker sends the message again, the UNIQUE key rejects the second insert, and the ledger is not changed twice. There is no coordinator and no in-doubt lock across two systems.",
+          "vi": "Message id và cập nhật sổ cái được commit cùng nhau trong một transaction cục bộ, và ack chỉ gửi sau khi commit. Nếu worker chết trước khi ack, broker gửi lại tin nhắn, khoá UNIQUE từ chối lần chèn thứ hai, và sổ cái không bị đổi hai lần. Không có coordinator và không có lock in-doubt giữa hai hệ thống."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "The coordinator lives on the worker VM. If it dies between the two phases, the locks stay in doubt until it comes back or someone decides by hand.",
+            "vi": "Coordinator nằm trên VM của worker. Nếu nó chết giữa hai pha, các lock vẫn ở trạng thái in-doubt cho tới khi nó sống lại hoặc có người quyết định thủ công."
+          },
+          "b": {
+            "en": "A crash after the write and before the acknowledgement makes the broker redeliver, and the ledger is updated a second time.",
+            "vi": "Crash sau khi ghi và trước khi ack khiến broker gửi lại, và sổ cái bị cập nhật lần thứ hai."
+          },
+          "c": {
+            "en": "That style works only when every participant runs the same database software. A broker from another vendor is outside it.",
+            "vi": "Kiểu đó chỉ chạy khi mọi bên tham gia dùng chung một phần mềm database. Broker của hãng khác nằm ngoài phạm vi đó."
+          }
+        },
+        "reread": {
+          "anchor": "exactly-once-processing-without-2pc",
+          "label": {
+            "en": "Exactly-once processing without 2PC",
+            "vi": "Xử lý đúng một lần (exactly-once) mà không cần 2PC"
+          }
+        },
+        "say": {
+          "en": "I would not span the broker and the database with 2PC. I would record the message id in the same local transaction and acknowledge after the commit, so a redelivery is harmless.",
+          "vi": "Mình sẽ không bắc 2PC qua broker và database. Mình ghi message id trong cùng transaction cục bộ rồi ack sau khi commit, nên gửi lại cũng vô hại."
+        }
+      },
+      "ref": "Post: Exactly-once processing without 2PC; Heterogeneous XA vs. homogeneous Raft-backed 2PC"
+    },
+    {
+      "id": "s08q5",
+      "level": "evaluate",
+      "track": "ai",
+      "type": "ai-advice",
+      "difficulty": 5,
+      "topic": "5. Three ways to get serializability",
+      "stem": {
+        "en": "An AI assistant advises: \"Serial execution on one thread is the strongest and simplest option, because it removes every race. Use it for the counter, the ledger and the reports.\" Which response is best?",
+        "vi": "Một AI khuyên: \"Chạy tuần tự trên một luồng là lựa chọn mạnh và đơn giản nhất, vì nó loại bỏ mọi race. Dùng nó cho bộ đếm, sổ cái và các báo cáo.\" Phản hồi nào tốt nhất?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Keep it for the short one-shard counter, and pick another technique for the reports.",
+            "vi": "Giữ nó cho bộ đếm ngắn trong một shard, và chọn kỹ thuật khác cho các báo cáo."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Accept it: one thread removes every race, so it suits the ledger and reports too.",
+            "vi": "Chấp nhận: một luồng loại bỏ mọi race, nên cũng hợp với sổ cái và báo cáo."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Reject it: running one transaction at a time cannot be serializable for money.",
+            "vi": "Bác bỏ: chạy từng transaction một không thể là serializable cho tiền."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Use locking for the counter too, so several threads can update it at once.",
+            "vi": "Dùng khoá cho cả bộ đếm, để nhiều luồng cập nhật nó cùng lúc."
+          }
+        }
+      ],
+      "answer": ["a"],
+      "explanation": {
+        "whyRight": {
+          "en": "Serial execution fits short transactions that stay in one shard, which is the counter. It does not fit a 5-minute report: one slow query on the thread stalls every transaction behind it. Choose per workload by how long transactions run, what they touch, and what happens when they conflict.",
+          "vi": "Chạy tuần tự hợp với transaction ngắn nằm trong một shard, đúng như bộ đếm. Nó không hợp với báo cáo 5 phút: một câu truy vấn chậm trên luồng làm mọi transaction phía sau đứng chờ. Hãy chọn theo từng workload: transaction chạy bao lâu, chạm vào gì, và chuyện gì xảy ra khi chúng xung đột."
+        },
+        "whyWrong": {
+          "b": {
+            "en": "Removing races is true, but the price is that one slow transaction blocks the whole thread. Long reports make that price too high.",
+            "vi": "Loại bỏ race là đúng, nhưng cái giá là một transaction chậm chặn cả luồng. Báo cáo dài làm cái giá đó quá cao."
+          },
+          "c": {
+            "en": "Running transactions one at a time is the simplest way to be serializable. The limit is speed, not correctness.",
+            "vi": "Chạy từng transaction một là cách đơn giản nhất để đạt serializable. Giới hạn nằm ở tốc độ, không phải ở tính đúng."
+          },
+          "d": {
+            "en": "Every update hits the same counter row, so the threads queue on one lock anyway and the locks add overhead.",
+            "vi": "Mọi lần cập nhật đều chạm cùng một dòng bộ đếm, nên các luồng vẫn xếp hàng trên một lock và lock còn thêm chi phí."
+          }
+        },
+        "reread": {
+          "anchor": "5-three-ways-to-get-serializability",
+          "label": {
+            "en": "5. Three ways to get serializability",
+            "vi": "5. Ba cách đạt serializability"
+          }
+        },
+        "say": {
+          "en": "When AI offers one technique for every workload, I ask what each workload does to it: how long its transactions run, and what they touch.",
+          "vi": "Khi AI đưa một kỹ thuật cho mọi workload, mình hỏi từng workload tác động gì lên nó: transaction chạy bao lâu và chạm vào gì."
+        }
+      },
+      "ref": "Post: 5. Three ways to get serializability; 1. Actual serial execution (single-threaded + stored procedures)"
+    }
+  ]
+}
