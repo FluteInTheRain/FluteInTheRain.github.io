@@ -1,21 +1,23 @@
 ---
 title: "Go optimization patterns"
 title_vi: "Mẫu tối ưu trong Go"
-description: "Combine RAER, benchstat, and pprof with Go 1.27 benchmarks: cut bytes.Split, parse bytes directly, stream in 8 KB Heap, and shard without channel contention."
-description_vi: "Đi trọn vẹn case study tối ưu hóa Efficient Go trên Go 1.27: bỏ bytes.Split, parse thẳng []byte, đọc streaming vài KB Heap, chia khúc SectionReader nhanh gấp 4x và tránh bẫy sync.Pool."
-date: 2026-11-20
+description: "Take one Go function from 52 ms and 30 MiB to 14 ms and 8 KiB, then 4 ms on four cores, with benchstat at every step, and learn when sync.Pool helps and when it only adds risk."
+description_vi: "Đưa một hàm Go từ 52 ms và 30 MiB xuống 14 ms và 8 KiB, rồi 4 ms trên bốn nhân, mỗi bước có benchstat, kèm lúc nào sync.Pool có ích và lúc nào chỉ thêm rủi ro."
+date: 2026-11-23
 category: "backend"
-tags: ["golang", "efficient-go", "optimization", "streaming", "sync-pool", "concurrency"]
+tags: ["golang", "efficient-go", "optimization", "streaming", "sync-pool", "benchstat"]
 cover: "../../assets/series/golang/go-gopher-pencil-swim.jpg"
 cover_alt: "Pencil drawing of the Go gopher swimming, drawn by Renee French"
 draft: false
 sources:
-  - { title: "Efficient Go: Data-Driven Performance Optimization", author: "Bartłomiej Płotka", chapters: "Ch. 10 & 11", url: "https://www.efficientgo.dev/" }
-  - { title: "Sum6Reader & optimization ladder (efficientgo/examples)", author: "Bartłomiej Płotka", url: "https://github.com/efficientgo/examples/blob/3b473a0075bdab7ce11c4d284a9031ef5fcf4341/pkg/sum/sum.go#L250-L305" }
-  - { title: "sync.Pool Documentation", author: "The Go Authors", url: "https://pkg.go.dev/sync#Pool" }
+  - { title: "Efficient Go: Data-Driven Performance Optimization", author: "Bartłomiej Płotka", chapters: "Ch. 10 (Optimization Examples) and Ch. 11 (Optimization Patterns)", url: "https://www.efficientgo.dev/" }
+  - { title: "efficientgo/examples: the Sum code from the book", author: "Bartłomiej Płotka", url: "https://github.com/efficientgo/examples" }
+  - { title: "sync.Pool documentation", author: "The Go Authors", url: "https://pkg.go.dev/sync#Pool" }
+  - { title: "golang/go issue #23199: sync: Pool example suggests incorrect usage", author: "Joe Tsai (dsnet)", url: "https://github.com/golang/go/issues/23199" }
+  - { title: "Go 1.27.1 source, src/fmt/print.go: (*pp).free drops an oversized buffer and puts back only the printer", author: "The Go Authors", url: "https://github.com/golang/go/blob/go1.27.1/src/fmt/print.go#L155-L174" }
+  - { title: "benchstat: statistical comparison of Go benchmarks", author: "The Go Authors", url: "https://pkg.go.dev/golang.org/x/perf/cmd/benchstat" }
+  - { title: "io.SectionReader", author: "The Go Authors", url: "https://pkg.go.dev/io#SectionReader" }
   - { title: "Waterwheel and sluice gate at Odell Mill (CC BY-SA 2.0)", author: "Nigel Stickells", url: "https://commons.wikimedia.org/wiki/File:Waterwheel_and_Sluice_Gate_at_Odell_Mill_-_geograph.org.uk_-_290595.jpg" }
-  - { title: "Container cranes at Ship Dock, Goole (CC BY-SA 2.0)", author: "George Robinson", url: "https://commons.wikimedia.org/wiki/File:Container_Cranes,_Ship_Dock_-_geograph.org.uk_-_456695.jpg" }
-  - { title: "Crates of returnable glass bottles at 31c3 (CC0)", author: "JkoLd19d", url: "https://commons.wikimedia.org/wiki/File:Crates_of_empty_Club_Mate_bottles_at_31c3.jpg" }
   - { title: "Go gopher pencil swim (CC BY 3.0)", author: "Renee French", url: "https://commons.wikimedia.org/wiki/File:Go_gopher_pencil_swim.jpg" }
 ---
 
@@ -23,164 +25,269 @@ import Callout from '../../components/mdx/Callout.astro';
 import Concepts from '../../components/mdx/Concepts.astro';
 import En from '../../components/mdx/En.astro';
 import Figure from '../../components/mdx/Figure.astro';
-import GitHubCode from '../../components/mdx/GitHubCode.astro';
-import GoEffShardedWorkersVsPool from '../../components/mdx/GoEffShardedWorkersVsPool.astro';
-import GoEffStreamingBuffer from '../../components/mdx/GoEffStreamingBuffer.astro';
-import GoEffSumEvolutionDemo from '../../components/mdx/GoEffSumEvolutionDemo.astro';
-import GoEffSumLatencyPipeline from '../../components/mdx/GoEffSumLatencyPipeline.astro';
-import GoEffThreeRsHierarchy from '../../components/mdx/GoEffThreeRsHierarchy.astro';
+import GoP19Ladder from '../../components/mdx/GoP19Ladder.astro';
+import GoP19Sharding from '../../components/mdx/GoP19Sharding.astro';
+import GoP19StreamWindow from '../../components/mdx/GoP19StreamWindow.astro';
+import GoP19SumLadder from '../../components/mdx/GoP19SumLadder.astro';
+import GoP19ThreeRs from '../../components/mdx/GoP19ThreeRs.astro';
 import GoSyncPoolLifecycleDemo from '../../components/mdx/GoSyncPoolLifecycleDemo.astro';
-import GoThreeRsReaderStreamCode from '../../components/mdx/GoThreeRsReaderStreamCode.astro';
-import GoThreeRsStructSlicePrealloc from '../../components/mdx/GoThreeRsStructSlicePrealloc.astro';
-import QuoteCard from '../../components/mdx/QuoteCard.astro';
 import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
 import Vi from '../../components/mdx/Vi.astro';
 import heroSluice from '../../assets/blog/go-three-rs-optimization-patterns-streaming-pooling/watermill-sluice-gate.jpg';
-import dockCranes from '../../assets/blog/go-three-rs-optimization-patterns-streaming-pooling/freight-container-yard.jpg';
-import bottleCrates from '../../assets/blog/go-three-rs-optimization-patterns-streaming-pooling/returnable-bottle-crates.jpg';
 
 <En>
 
-<Figure src={heroSluice} alt="Historic timber sluice gate regulating river stream flow onto an overshot watermill wheel" caption="A watermill sluice processes an entire river safely using one steady narrow channel rather than trying to dam every drop at once—just like streaming 100 million lines through a fixed 8 KB slice." sourceTitle="Wikimedia Commons: Waterwheel and Sluice Gate at Odell Mill" sourceUrl="https://commons.wikimedia.org/wiki/File:Waterwheel_and_Sluice_Gate_at_Odell_Mill_-_geograph.org.uk_-_290595.jpg" />
+<Figure src={heroSluice} alt="Historic timber sluice gate letting a controlled stream of river water onto an overshot watermill wheel" caption="A mill takes a whole river through one narrow channel at a steady rate. Streaming a big file through one small buffer works the same way." sourceTitle="Wikimedia Commons: Waterwheel and Sluice Gate at Odell Mill" sourceUrl="https://commons.wikimedia.org/wiki/File:Waterwheel_and_Sluice_Gate_at_Odell_Mill_-_geograph.org.uk_-_290595.jpg" />
 
-> "Do what's needed to satisfy functional and efficiency goals... Perfect is the enemy of good."
-> &mdash; *Bartłomiej Płotka*, *Efficient Go*
+> "Optimizations/pessimizations don't generalize very well. It all depends on the code, so measure each time and don't cast absolute judgments."
+> &mdash; *Bartosz Adamczewski*, quoted in *Efficient Go*
 
-### Capstone: optimizing a 300 MB Go bottleneck step-by-step via Three Rs
+### A short function that allocates four times the size of its file
 
-We started this series learning slices, interfaces, and goroutines, uncovered Go's runtime pitfalls, and mastered RAER contracts, cache locality, `benchstat`, and `pprof`. Now let's synthesize everything on one realistic bottleneck (`Sum()`): call `os.ReadFile`, split lines with `bytes.Split`, convert each line via `strconv.ParseInt(string(line), 10, 64)`, and sum them up. On a 36 MB file with 10 million lines, that tiny 12-line function allocates **304 MB on the heap** and stalls on garbage collection.
+*Efficient Go* works one small function through every idea in this post. `Sum` reads a file of integers, one per line, and adds them up. It looks harmless. On a 7.4 MB file with 1,000,000 lines, my first version takes 52 ms and allocates 29.9 MiB per call, about four times the size of the file it reads.
 
-Instead of sprinkling premature `sync.Pool` objects or clever `unsafe` casts upfront, this final case study applies **benchmark-driven engineering in action**—iterating through three distinct RAER targets (fast 1-core latency, tiny 10 KB fixed heap memory, and fast 4-core parallelism). Here are the four concrete steps covered in this capstone:
+By the end of the post the same job takes 14 ms and 8 KiB on one core, and 4 ms on four cores. Every speed-up below is a [`benchstat`](/blog/go-observability-metrics-microbenchmarks-benchstat/) comparison from real runs on Go 1.27.1, Apple M2. For each step you get what changed, why it helped, and what it cost.
 
-1. **The Three Rs optimization hierarchy**: Do Less Work first, then **Reduce**, **Reuse**, and only cautiously **Recycle**.
-2. **Cutting `bytes.Split`, `string()`, and `strconv` waste**: step-by-step pprof fixes across `Sum1` → `Sum4`.
-3. **O(1) memory streaming (`Sum6Reader`)**: beating `bufio.Scanner` speed with a single reusable 8 KB slice.
-4. **Parallelism without channel contention &amp; `sync.Pool` myths**: why naive worker channels slow down 14x while `io.NewSectionReader` shards speed up 4x—and when `sync.Pool` actually raises peak heap!
-
-<Callout type="note" title="TL;DR">
-Eliminate wasteful work (**Do Less Work**) before adding clever memory pools. Walk the **Three Rs** strictly in order: **Reduce** allocations (tailor hot loops like replacing `bytes.Split` and parse `[]byte` directly without `string()`), **Reuse** caller-owned slices (`8 KB` sliding `buf`), and reserve **Recycle (`sync.Pool`)** only for multi-goroutine high-churn temporary buffers proven by macrobenchmarks. Never stream tiny 10 ns items one-by-one over Go channels (`14x` slower!); shard large files with `io.NewSectionReader` so workers read and compute independently.
+<Callout type="tip" title="Recap from earlier posts">
+You will use [goroutines and channels](/blog/go-goroutines-channels-select/) and the [worker pool](/blog/go-concurrency-patterns-worker-pools-pipelines/) from the concurrency levels, plus the heap, escape analysis and `sync.Pool` basics from [Go hardware and GC](/blog/go-hardware-cpu-caches-virtual-memory-gc-allocator/). Writing benchmarks with `b.Loop()` and reading `benchstat` is in [Go benchmarking](/blog/go-observability-metrics-microbenchmarks-benchstat/); finding the hot lines is in [Go profiling](/blog/go-profiling-pprof-flamegraphs-off-cpu-continuous/); writing the goal down first is in [When to optimize](/blog/go-efficiency-workflow-raer-tfbo-hardware-memory/).
 </Callout>
 
+<Callout type="note" title="TL;DR">
+Ask "can we skip this work?" before anything else, then walk the Three Rs in order: **Reduce** allocations, **Reuse** memory you own, and only then **Recycle** with `sync.Pool`. A streaming reader with one 8 KiB buffer kept the speed of reading the whole file and cut memory from 7.0 MiB to 8.2 KiB, whatever the file size. To use four cores, give each worker its own byte range of the file; sending every line through one channel made the same job about 9 times slower than one core. `sync.Pool` saved 97.8% of the bytes allocated in this case study and only 2.4% of the time, so measure before you add one.
+</Callout>
+
+## Do less work first, then the Three Rs
+
+Every allocation costs twice. You pay when the memory is handed out, and you pay again when the garbage collector has to trace it and free it (post 16 shows how). So the cheapest allocation is the one you never make, and the cheapest work is the work you skip.
+
+*Efficient Go* puts this in an order. Start with **do less work**: remove steps nobody needs. Then the **Three Rs** for memory, as *Efficient Go* tells it, from a FOSDEM 2018 talk by Bryan Boreham: **Reduce** how much you allocate, **Reuse** memory you already hold, **Recycle** what is left through a shared pool or the garbage collector. Each step is riskier than the one before it, which is why the order matters.
+
+<GoP19ThreeRs />
+
+Here is what each step usually looks like in Go code. Pre-sizing a slice with `make([]T, 0, n)` when you know `n` is a **Reduce** move; the [slice header post](/blog/go-memory-data-types-slices-maps-strings/) explains why `append` otherwise keeps reallocating.
+
+| Step | Plain meaning | Typical Go move |
+| :--- | :--- | :--- |
+| 0. Do less work | Skip work no one needs | Drop a check you never use; do not build a list you only loop over once |
+| 1. Reduce | Allocate less | `make([]T, 0, n)` when `n` is known; take a `[]byte` or an `io.Reader` instead of returning a new slice; avoid needless `string(b)` conversions |
+| 2. Reuse | One buffer serves many calls | A buffer the caller passes in and owns; `buf = buf[:0]` between uses |
+| 3. Recycle | A shared pool of interchangeable objects | `sync.Pool` |
+
+*Efficient Go* also lists garbage-collector help under Recycle: fewer pointers in your structs, and `GOGC` and `GOMEMLIMIT` tuning. Those are in [Go hardware and GC](/blog/go-hardware-cpu-caches-virtual-memory-gc-allocator/). This post covers the pool.
+
 <Concepts>
 
-- **Zero-copy conversion (`unsafe.String`)**: creating a Go `string` header pointing straight at an immutable `[]byte` slice without copying bytes on the heap—fast yet unsafe if the backing slice mutates concurrently.
-- **Sliding-window streaming buffer**: reusing a small fixed slice (`8 KB`) via `r.Read(buf[offset:])` and copying any incomplete trailing bytes before `\n` back to `buf[0:]`, yielding constant `O(1)` RAM on multi-GB files.
-- **Channel lock contention**: performance collapse when thousands of tiny messages pass over a shared `chan T`, forcing goroutines to serialize on `runtime.chansend` mutex locks.
-- **`sync.Pool`**: Go's per-P temporary object cache reused across concurrent goroutines between GC cycles—intended strictly for allocation latency reduction, not cache semantics or long-term memory capping.
+- **Three Rs (Reduce, Reuse, Recycle)**: an order for cutting memory waste. Reduce means allocate less, Reuse means keep and refill one object, Recycle means hand objects back to a shared pool. Try them in that order because each step is riskier than the last.
+- **Do less work**: before making work cheaper, ask whether the work is needed at all. It is the only step that has no downside.
 
 </Concepts>
 
 ---
 
-## 1. Do Less Work &amp; the Three Rs optimization order
+## Set a goal, then build the test and the benchmark
 
-Notice Bartłomiej's hierarchy before reaching for any pool library: **every extra memory allocation pays twice**—once on creation and again every time GC marks live pointers and flushes CPU caches. Apply patterns strictly left-to-right:
+Optimizing without a goal never ends, so write the goals first (post 15 calls them RAER). `Sum` gets three, scaled to this machine:
 
-<Figure src={bottleCrates} alt="Rows of stacked yellow returnable glass bottle crates waiting cleanly for reuse at a conference" caption="Reusable crates cut manufacturing waste to nearly zero cleanly—yet keeping too many crates idle in a warehouse raises storage peaks just like overusing sync.Pool." sourceTitle="Wikimedia Commons: Crates of empty Club Mate bottles at 31c3" sourceUrl="https://commons.wikimedia.org/wiki/File:Crates_of_empty_Club_Mate_bottles_at_31c3.jpg" />
+1. **Time:** at most 20 ns per line on one CPU. For 1,000,000 lines that is 20 ms.
+2. **Memory:** the same speed, with at most 10 KB allocated on the heap for any file size.
+3. **Four cores:** at most 6 ns per line with four CPUs available.
 
-- **Step 0 — Do Less Work**: strip debug logging on hot paths, drop redundant base checks, or split only on `'\n'` instead of calling multi-character generic utilities like `bytes.Split`.
-- **Step 1 — Reduce allocations**: write in-place index loops over `[]byte`, pre-allocate known slice/map sizes (`make([]T, 0, n)`), and design functions accepting `io.Reader` + `buf []byte` rather than returning fresh slices per call.
-- **Step 2 — Reuse caller memory**: reuse a single slice (`buf = buf[:0]`) or `bytes.Buffer.Reset()` in sequential loops, careful not to latch oversized 64 MB backing buffers forever.
-- **Step 3 — Recycle (`sync.Pool`)**: reach for `sync.Pool` only when many concurrent goroutines allocate identical short-lived scratch objects between GC cycles—and always `.Reset()` objects before calling `pool.Put(x)`.
+Here is the first version, `Sum1`. It reads the whole file, splits it into lines with `bytes.Split`, and parses each line with `strconv.ParseInt`:
 
 ```go
-// Three Rs order of preference:
-// 1. Reduce: pre-size slice capacity when length is known upfront
-items := make([]int64, 0, expectedLen)
-
-// 2. Reuse: pass caller-owned fixed scratch buffer cleanly down the stack
-func ProcessChunk(r io.Reader, scratch []byte) error { /* reuse scratch[:n] */ return nil }
-
-// 3. Recycle (last resort!): sync.Pool ONLY for proven multi-G short-lived churn
-buf := bufPool.Get().(*bytes.Buffer)
-buf.Reset() // MUST clear stale bytes before reuse!
-defer bufPool.Put(buf)
+func Sum1(fileName string) (ret int64, _ error) {
+	b, err := os.ReadFile(fileName)
+	if err != nil {
+		return 0, err
+	}
+	for _, line := range bytes.Split(b, []byte("\n")) {
+		if len(line) == 0 {
+			continue
+		}
+		num, err := strconv.ParseInt(string(line), 10, 64)
+		if err != nil {
+			return 0, err
+		}
+		ret += num
+	}
+	return ret, nil
+}
 ```
 
-<GoEffThreeRsHierarchy />
+`os.ReadFile` returns the whole file as one `[]byte`. `bytes.Split(b, sep)` cuts it at every `sep` and returns a `[][]byte`, one slice per line. `strconv.ParseInt(s, 10, 64)` turns text into an `int64`, in base 10, fitting 64 bits.
 
-<GoThreeRsStructSlicePrealloc />
+Before any speed work comes a test. Every version must give the same answer as a number computed while the input file is written. `TestMain` (about 15 lines, not shown) writes 1,000,000 random integers between −1,000,000 and 999,999, one per line, to a temporary file of 7,389,110 bytes, and keeps their sum in `want`. A small test calls each version and compares it with `want`. The benchmark checks it again on every iteration, so a "faster" version that is wrong cannot sneak through:
 
-<Concepts>
+```go
+func BenchmarkSum(b *testing.B) {
+	impls := []struct {
+		name string
+		fn   func(string) (int64, error)
+	}{
+		{"Sum1", Sum1}, {"Sum2", Sum2}, {"Sum3", Sum3},
+		{"Sum4", Sum4}, {"Sum5", Sum5}, {"Sum6", Sum6}, {"Sum6Pool", Sum6Pool},
+	}
+	for _, impl := range impls {
+		b.Run("impl="+impl.name, func(b *testing.B) {
+			for b.Loop() {
+				got, err := impl.fn(file)
+				if err != nil || got != want {
+					b.Fatal(got, err)
+				}
+			}
+		})
+	}
+}
+```
 
-- **Three Rs method (Reduce, Reuse, Recycle)**: disciplined progression starting from deleting allocations entirely (`Reduce`), keeping caller-owned buffers (`Reuse`), and only then pooling shared objects (`Recycle`).
-- **Over-sizing arrays trap**: reusing a buffer that grew to `64 MB` for a rare spike permanently pins `64 MB` on the heap unless you discard outliers (`if cap(b) &lt;= 64*1024 { pool.Put(b) }`).
+`b.Run` makes a sub-benchmark per version, named `impl=Sum1` and so on. `b.Loop()` is the loop from [Go benchmarking](/blog/go-observability-metrics-microbenchmarks-benchstat/). I ran the sequential versions with `-cpu 1`, which sets `GOMAXPROCS` to 1 so the garbage collector cannot hide cost on other cores, and `-count 10` so `benchstat` has ten samples per version:
 
-</Concepts>
-
----
-
-## 2. Case study: cutting `bytes.Split` and `string()` (`Sum1` → `Sum4`)
-
-Remember Rule 1 of Go performance tuning: **standard library helpers prioritize correctness over single-purpose speed**. On 2 million integer lines, let's watch `pprof` guide every hop across `Sum1` → `Sum4` (and measure the exact code live on Apple M2 Go 1.27 below!):
-
-<TerminalOutput command="go test -run '^$' -bench 'Benchmark(Sum|ConcurrentSum)' -benchmem -benchtime 500ms" label="Apple M2 · Go 1.27 (200k lines)" caption="Live Apple M2 benchmark progression: removing bytes.Split (-77% allocs), skipping string() copy, streaming in 216B Heap, and 4x speedup via sharded SectionReaders.">
 ```text
-BenchmarkSum1_BytesSplit-8                      	      87	   6008315 ns/op	 6201759 B/op	       6 allocs/op
-BenchmarkSum2_InPlaceScan-8                     	     120	   5935550 ns/op	 1401261 B/op	       5 allocs/op
-BenchmarkSum3_UnsafeString-8                    	     148	   4756267 ns/op	 1401261 B/op	       5 allocs/op
-BenchmarkSum4_CustomParseInt-8                  	     170	   3041474 ns/op	 1401257 B/op	       5 allocs/op
-BenchmarkSum5_BufioScanner-8                    	     142	   3878293 ns/op	    4312 B/op	       4 allocs/op
-BenchmarkSum6_Sliding8KBuffer-8                 	     240	   2872970 ns/op	     216 B/op	       3 allocs/op
-BenchmarkConcurrentSum_ChannelWorkers-8         	      13	  41354625 ns/op	 1605777 B/op	  200018 allocs/op
-BenchmarkConcurrentSum_ShardedSectionReader-8   	    1004	    727865 ns/op	   33704 B/op	      21 allocs/op
+go test -run '^$' -bench 'BenchmarkSum$' -benchmem -count 10 -cpu 1 > seq.txt
 ```
-</TerminalOutput>
 
-Notice Bartłomiej's famous lesson between `Sum3` and `Sum4`:
-- Step 1 (`Sum1` → `Sum2`): `bytes.Split` walked bytes twice and allocated a giant `[][]byte` table (`78.6%` of total memory in the reference 2M-line test, and `-4.8 MB` right here on M2!). Writing a 6-line `for` loop checking `b[i] == '\n'` eliminated that entire allocation class.
-- Step 2 (`Sum2` → `Sum3`): `pprof` immediately exposed `runtime.slicebytetostring` allocating immutable strings per line (`25 ms` on 2M lines in book, `4.76 ms` on M2). Using `unsafe.String(unsafe.SliceData(b), len(b))` bypassed string copies cleanly (**deliberate optimization**).
-- Step 3 (`Sum3` → `Sum4`): `strconv.ParseInt` still spent ~72% CPU verifying arbitrary number bases (`base 2..36`) and empty checks. Tailoring a tiny base-10 `parseIntBytes(b []byte)` cut latency another ~36–47% **AND removed `unsafe` completely**, making the final code both safer and 2x faster than `Sum1`!
+The file is in the operating system's cache after the first run, so these numbers measure CPU and memory work, not the disk. A cold disk would add a cost that none of these steps can remove.
+
+---
+
+## From Sum1 to Sum4: remove work, one step at a time
+
+Start from a profile (how to take one is in [Go profiling](/blog/go-profiling-pprof-flamegraphs-off-cpu-continuous/)). A 3-second CPU profile of `Sum1` says where the time goes: `bytes.Split` takes 36%, `strconv.ParseInt` takes 32%, and the write barrier the garbage collector needs (`gcWriteBarrier`) takes 14%. `bytes.Split` is the biggest piece, so change one thing: the split.
+
+**`Sum1` to `Sum2`: stop building a list of lines.** `bytes.Split` handles any separator and returns 1,000,000 slice headers (24 bytes each, about 22.9 MiB) just so we can loop over them once. We only split on `\n`, so walk the bytes ourselves and parse each line where it sits:
 
 ```go
-// In-place \n scanning + tailored byte parser beats bytes.Split + unsafe (Sum4)
-func parseIntBytes(in []byte) (int64, error) {
-	var n int64
-	factor, k := int64(1), 0
-	if in[0] == '-' { factor, k = -1, 1 }
-	for i := len(in) - 1; i >= k; i-- {
-		if in[i] < '0' || in[i] > '9' { return 0, strconv.ErrSyntax }
-		n += factor * int64(in[i]-'0')
+func Sum2(fileName string) (ret int64, _ error) {
+	b, err := os.ReadFile(fileName)
+	if err != nil {
+		return 0, err
+	}
+	var last int // where the current line starts
+	for i := 0; i < len(b); i++ {
+		if b[i] != '\n' {
+			continue
+		}
+		num, err := strconv.ParseInt(string(b[last:i]), 10, 64)
+		if err != nil {
+			return 0, err
+		}
+		ret += num
+		last = i + 1
+	}
+	return ret, nil
+}
+```
+
+**`Sum2` to `Sum3`: stop copying each line into a string.** `string(b[last:i])` copies the bytes. The profile of `Sum2` shows `runtime.slicebytetostring` at 9.5%. The table below says 5 allocations per call, not a million, so the copy does not hit the heap: asking the compiler with `-gcflags=-m` prints `string(b[last:i]) does not escape`, which means the copy lives on the stack. It is still a copy. Go 1.20 added `unsafe.String(ptr, len)`, which builds a string that points at the same bytes without copying:
+
+```go
+line := b[last:i]
+num, err := strconv.ParseInt(unsafe.String(unsafe.SliceData(line), len(line)), 10, 64)
+```
+
+`unsafe.SliceData(line)` is a pointer to the first byte. This is a deliberate trade: the string and the slice now share memory, so changing `b` later would change the string too. It is safe here because `b` is never touched after it is read. It is also the kind of code you should be able to justify in a review.
+
+**`Sum3` to `Sum4`: write the parser you need.** The profile of `Sum3` puts `strconv.ParseInt` at 49%. It supports bases 2 to 36, signs, overflow checks and several error cases. We only need base 10 and `int64`. Write that, and parse straight from the bytes, which removes `unsafe` too:
+
+```go
+var errSyntax = errors.New("not a valid integer")
+
+// ParseInt parses a base-10 int64 straight from bytes.
+func ParseInt(input []byte) (n int64, _ error) {
+	factor := int64(1)
+	k := 0
+	if input[0] == '-' {
+		factor *= -1
+		k++
+	}
+	for i := len(input) - 1; i >= k; i-- {
+		if input[i] < '0' || input[i] > '9' {
+			return 0, errSyntax
+		}
+		n += factor * int64(input[i]-'0')
 		factor *= 10
 	}
 	return n, nil
 }
 ```
 
-<GoEffSumLatencyPipeline />
+`Sum4` is `Sum2` with `num, err := ParseInt(b[last:i])` in the loop. Here are the four versions side by side. `benchstat` writes `~` when it cannot tell two results apart, and shows the spread (`± 10%`) next to each median. In the command, `benchstat` stands for `go run golang.org/x/perf/cmd/benchstat@latest`:
+
+<TerminalOutput command="benchstat -col /impl -filter '/impl:Sum1 OR /impl:Sum2 OR /impl:Sum3 OR /impl:Sum4' seq.txt" label="Apple M2 · Go 1.27.1 · 1,000,000 lines · -cpu 1" caption="Each column is compared with Sum1. Medians of 10 runs. The step from one column to the next: Sum2 -54.77% against Sum1, Sum3 about 11% faster than Sum2, Sum4 about 32% faster than Sum3.">
+```text
+goos: darwin
+goarch: arm64
+pkg: sumdemo
+cpu: Apple M2
+    │     Sum1     │                Sum2                 │                Sum3                 │                Sum4                 │
+    │    sec/op    │   sec/op     vs base                │   sec/op     vs base                │   sec/op     vs base                │
+Sum   52.07m ± 10%   23.55m ± 5%  -54.77% (p=0.000 n=10)   21.02m ± 7%  -59.63% (p=0.000 n=10)   14.36m ± 7%  -72.42% (p=0.000 n=10)
+
+    │     Sum1      │                 Sum2                 │                 Sum3                 │                 Sum4                 │
+    │     B/op      │     B/op      vs base                │     B/op      vs base                │     B/op      vs base                │
+Sum   29.938Mi ± 0%   7.047Mi ± 0%  -76.46% (p=0.000 n=10)   7.047Mi ± 0%  -76.46% (p=0.000 n=10)   7.047Mi ± 0%  -76.46% (p=0.000 n=10)
+
+    │    Sum1    │                Sum2                │                Sum3                │                Sum4                │
+    │ allocs/op  │ allocs/op   vs base                │ allocs/op   vs base                │ allocs/op   vs base                │
+Sum   6.000 ± 0%   5.000 ± 0%  -16.67% (p=0.000 n=10)   5.000 ± 0%  -16.67% (p=0.000 n=10)   5.000 ± 0%  -16.67% (p=0.000 n=10)
+```
+</TerminalOutput>
+
+Read it from left to right. Dropping the split cut time by 55% and memory by 76%. Skipping the string copy added another 11%, with no change in memory. The tailored parser added 32% more and deleted the `unsafe` call, so the final code is both faster and safer than `Sum3`. On the test machine in *Efficient Go* similar versions took 101, 50, 25 and 14 ms for 2,000,000 lines. The numbers differ, the shape does not.
+
+Goal 1 asked for 20 ms. `Sum2` (23.55 ms) and `Sum3` (21.02 ms) miss it, `Sum4` (14.36 ms) meets it. **Stop there.** More tuning would cost readability for no requirement.
+
+Be honest about what `Sum4` gave up; *Efficient Go* is. `strconv.ParseInt` handles cases our `ParseInt` does not. An empty line makes ours panic with `index out of range [0] with length 0`; `+5` is rejected as a syntax error, where `strconv` accepts it; and `99999999999999999999` overflows silently into `7766279631452241919`, where `strconv` returns an out-of-range error (I ran all three). That is fine when you control the input and wrong when you do not. This is the "trade features for speed" pattern from *Efficient Go*: the cheapest speed-up is often a feature you can live without.
 
 <Concepts>
 
-- **Tailored hot-path helper**: standard-library functions handle general edge cases (multi-char separators, 36 numeric bases, CRLF stripping); replacing one on a proven 70% hotspot yields cleaner speedups than low-level hacks.
-- **Trade-off reversal**: `Sum3` required `unsafe` pointers, yet optimizing one abstraction higher in `Sum4` deleted `unsafe` while doubling throughput cleanly!
+- **Tailored helper**: a small function that does only what your input needs. Standard-library functions are built for every case (any separator, any base), so on a proven hot path a narrower version can win; elsewhere keep the standard one.
+- **`unsafe.String`**: builds a `string` that points at existing bytes without copying them. Fast, but you promise the bytes will not change while the string is alive.
+- **`-gcflags=-m`**: asks the compiler to print its escape-analysis decisions, for example `does not escape` for values that stay on the stack (see post 16).
 
 </Concepts>
 
 ---
 
-## 3. Streaming O(1) Heap: beating `bufio.Scanner` with `Sum6Reader`
+## Streaming: memory that does not grow with the file
 
-Now suppose Requirement #2 arrives: **run `Sum()` on IoT hardware with `<= 10 KB` heap memory**, even if the file reaches 100 million lines (`360 MB`+). `Sum4` allocates `O(N)` RAM because `os.ReadFile` loads the entire file upfront.
+Goal 2 says at most 10 KB on the heap, for any file. `Sum4` allocates 7.0 MiB because `os.ReadFile` loads the whole file. A separate run at 100,000, 1,000,000 and 10,000,000 lines gave `Sum4` 745,864, 7,389,576 and 73,892,232 bytes per call: memory grows with the file. The fix is to read a piece, use it, and read the next piece into the same space. That is **streaming**.
 
-Switching to `bufio.NewScanner` (`Sum5`) drops heap down to `~4.3 KB` immediately—yet runs noticeably slower (`3.88 ms` vs. `2.87 ms` on M2; `157 ms` vs. `69 ms` in the 10M-line reference run) because `Scanner`'s default `ScanLines` handler checks carriage returns (`\r`) and extra slice bounds on every line. Look at how Bartłomiej solves both speed and `O(1)` memory in `efficientgo/examples/pkg/sum/sum.go` with **`Sum6Reader`**:
+The standard library's way is `bufio.Scanner`, which hands you one line at a time. `Sum5` is the same function with the file opened and read through it:
 
-<GitHubCode repo="efficientgo/examples" path="pkg/sum/sum.go" lines="L252-L296" url="https://github.com/efficientgo/examples/blob/3b473a0075bdab7ce11c4d284a9031ef5fcf4341/pkg/sum/sum.go#L252-L296" caption="Bounded 8 KB streaming reader (Sum6Reader) shifting split trailing digits across Read() calls in efficientgo/examples.">
 ```go
-// Sum6 is like Sum4, but trying to use max 10 KB of mem without scanner and bulk read.
-// Assuming no integer is larger than 8 000 digits.
-// Read more in "Efficient Go"; Example 10-8.
+func Sum5(fileName string) (ret int64, err error) {
+	f, err := os.Open(fileName)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		num, err := ParseInt(scanner.Bytes())
+		if err != nil {
+			return 0, err
+		}
+		ret += num
+	}
+	return ret, scanner.Err()
+}
+```
+
+Its memory is only 4.2 KiB, but it is slower. Writing the loop by hand gets both. `Sum6Reader` reads into a buffer the caller supplies:
+
+```go
 func Sum6(fileName string) (ret int64, err error) {
 	f, err := os.Open(fileName)
 	if err != nil {
 		return 0, err
 	}
-	defer errcapture.Do(&err, f.Close, "close file")
-
+	defer f.Close()
 	buf := make([]byte, 8*1024)
 	return Sum6Reader(f, buf)
 }
 
-func Sum6Reader(r io.Reader, buf []byte) (ret int64, err error) { // Just inlining this function saves 7% on latency
+func Sum6Reader(r io.Reader, buf []byte) (ret int64, err error) {
 	var offset, n int
 	for err != io.EOF {
 		n, err = r.Read(buf[offset:])
@@ -190,7 +297,6 @@ func Sum6Reader(r io.Reader, buf []byte) (ret int64, err error) { // Just inlini
 		n += offset
 
 		var last int
-		//for i := 0; i < n; i++ { // Funny enough this is 5% slower!
 		for i := range buf[:n] {
 			if buf[i] != '\n' {
 				continue
@@ -199,7 +305,6 @@ func Sum6Reader(r io.Reader, buf []byte) (ret int64, err error) { // Just inlini
 			if err != nil {
 				return 0, err
 			}
-
 			ret += num
 			last = i + 1
 		}
@@ -212,282 +317,743 @@ func Sum6Reader(r io.Reader, buf []byte) (ret int64, err error) { // Just inlini
 	return ret, nil
 }
 ```
-</GitHubCode>
 
-Notice two subtle engineering gems inside `Sum6Reader`:
-1. **`buf` spans exactly `8 * 1024` bytes (2 OS 4 KB pages)**, fitting cleanly in L1/L2 CPU cache while keeping heap usage constant even across 100M lines (in Go 1.27 our 200k-line benchmark kept total heap per op down at just `216 B`!).
-2. Whenever `r.Read` splits a multi-digit number across two chunks (say `458` at byte `8191` and `902\n` at start of chunk 2), `copy(buf, buf[last:n])` shifts those incomplete 3 trailing bytes to index `0` and sets `offset = 3` so the next `r.Read(buf[offset:])` appends directly behind them! Always close `f` reliably (`errcapture.Do`) and exhaust response/file readers until `io.EOF` before closing so TCP pools stay reusable.
+`io.Reader` is any value with a `Read(p []byte) (n int, err error)` method; `*os.File` and `strings.Reader` both have one. `Read` fills `p` with up to `len(p)` bytes and says how many it put there. At the end of the input it returns `io.EOF`, which is not a failure here, so the loop treats it as "process what you have, then stop".
 
-<GoEffStreamingBuffer />
+The hard part is the end of the buffer. A read stops wherever the buffer is full, which is usually in the middle of a number. The code keeps the unfinished tail: `offset = n - last` is how many bytes follow the last newline, and `copy(buf, buf[last:n])` moves them to the front. The next `Read` writes after them, so the number arrives whole:
 
-<GoThreeRsReaderStreamCode />
+<GoP19StreamWindow />
+
+You can watch this with a buffer much smaller than 8 KiB. Same function, a 10-byte buffer, and an input whose numbers do not line up with the buffer. This is a test in the same package as `Sum6Reader`:
+
+```go
+func TestSmallBuffer(t *testing.T) {
+	sum, err := Sum6Reader(strings.NewReader("12\n345\n6789\n10\n"), make([]byte, 10))
+	fmt.Println(sum, err)
+}
+```
+
+```text
+7156 <nil>
+```
+
+12 + 345 + 6789 + 10 is 7156, the same answer as reading the whole input at once. The test of every `Sum` version against `want` is what proves the stitching right on the real file.
+
+Now the numbers. `Sum6` reuses a buffer whose size we chose: 8 KiB is small enough to stay in the CPU cache and leaves room under the 10 KB goal.
+
+<TerminalOutput command="benchstat -col /impl -filter '/impl:Sum4 OR /impl:Sum5 OR /impl:Sum6' seq.txt" label="Apple M2 · Go 1.27.1 · 1,000,000 lines · -cpu 1" caption="Sum5 (bufio.Scanner) saves memory but is 44% slower than Sum4. Sum6 is statistically the same speed as Sum4 (~, p=0.063) with 8.18 KiB instead of 7.0 MiB.">
+```text
+goos: darwin
+goarch: arm64
+pkg: sumdemo
+cpu: Apple M2
+    │    Sum4     │                 Sum5                 │             Sum6              │
+    │   sec/op    │    sec/op     vs base                │   sec/op     vs base          │
+Sum   14.36m ± 7%   20.69m ± 20%  +44.12% (p=0.000 n=10)   13.99m ± 3%  ~ (p=0.063 n=10)
+
+    │      Sum4       │                 Sum5                 │                 Sum6                 │
+    │      B/op       │     B/op      vs base                │     B/op      vs base                │
+Sum   7216.383Ki ± 0%   4.180Ki ± 0%  -99.94% (p=0.000 n=10)   8.180Ki ± 0%  -99.89% (p=0.000 n=10)
+
+    │    Sum4    │                Sum5                │                Sum6                │
+    │ allocs/op  │ allocs/op   vs base                │ allocs/op   vs base                │
+Sum   5.000 ± 0%   4.000 ± 0%  -20.00% (p=0.000 n=10)   4.000 ± 0%  -20.00% (p=0.000 n=10)
+```
+</TerminalOutput>
+
+`Sum6` allocates 8,376 bytes per call at 100,000, 1,000,000 and 10,000,000 lines alike, so memory no longer depends on the file. Goal 2 is met: 8.18 KiB, at the speed of `Sum4`. Here is the whole ladder in one picture:
+
+<GoP19SumLadder />
+
+Streaming costs you something, too. The buffer must be bigger than the longest line, or the loop never finishes. I tried a 4-byte buffer with the input `123456` and the call never returned (the test hit its 5-second timeout), because `buf[offset:]` was empty and `Read` kept returning 0 bytes. `Sum6Reader` assumes no number is longer than about 8,000 digits. State an assumption like that where the next reader will see it.
+
+Passing the buffer in also decides who owns it. `Sum6Reader(r, buf)` allocates nothing itself, so a caller that sums many files can reuse one buffer for all of them. That is the **Reuse** step.
 
 <Concepts>
 
-- **`io.Reader` chunk boundary stitching**: handling split tokens at `buf` end via `offset = n - last` and `copy(buf, buf[last:n])` so fixed-size streaming produces identical output to full-file reads.
-- **Resource leaks (`errcapture` &amp; exhausting readers)**: always close `io.Closer` files cleanly (capturing deferred `Close()` flush errors) and drain HTTP `resp.Body` to `io.EOF` so sockets return cleanly to `Keep-Alive` pools.
+- **Streaming**: processing input in fixed-size pieces instead of loading it all. Memory stays constant, whatever the input size, as long as each piece can be handled on its own.
+- **`io.Reader`**: the interface behind files, network connections and in-memory text. `Read(p)` fills `p` and returns how many bytes it wrote; `io.EOF` means the input ended normally.
+- **Chunk boundary**: the place where one read ends and the next begins. Anything that can be cut there, such as a number or a line, must be carried over to the next read.
 
 </Concepts>
 
 ---
 
-## 4. Sharding without locks &amp; when `sync.Pool` hurts peak RAM
+## Four cores: sharding beats a worker pool
 
-Finally, Requirement #3 asks for **4x faster execution across 4 CPU cores**. Look at what goes wrong when newcomers apply textbook Go concurrency blindly:
+Goal 3 asks for 6 ns per line with four CPUs. Adding numbers does not care about order: the sum of the first half plus the sum of the second half is the sum of everything. So the work can be split. The question is how. I tried three ways on four cores (`-cpu 4`), each starting from the sequential `Sum4` or `Sum6` code.
 
-<Figure src={dockCranes} alt="Row of heavy gantry cranes loading stacked shipping containers onto parallel ship holds at dock" caption="Gantry cranes work fast when each crane owns its own isolated hold range—trying to hand every single crate across one shared central worker queue creates gridlock." sourceTitle="Wikimedia Commons: Container Cranes, Ship Dock, Goole" sourceUrl="https://commons.wikimedia.org/wiki/File:Container_Cranes,_Ship_Dock_-_geograph.org.uk_-_456695.jpg" />
-
-- **The Naive Channel Trap (`41.35 ms`, `200,018 allocs/op` on Apple M2!)**: one goroutine scans lines and sends `line` values across a shared `chan []byte` to 4 workers. Because parsing an integer takes ~10 ns while locking/waking `runtime.chansend` + `chanrecv` takes ~100 ns + heap slice copies, adding 4 goroutines runs **14x SLOWER than sequential `Sum6`**!
-- **The Coordination-Free Solution (`0.73 ms`, `33.7 KB`, `21 allocs/op` on Apple M2!)**: inspired directly by `fgprof` exposing 50% time spent in single-threaded disk reading, divide file size up front into 4 aligned line boundaries (`shardedRangeAt`), hand each worker its own **`io.NewSectionReader(f, begin, end-begin)`** plus an independent 8 KB buffer, and let each worker push **only one** final `int64` partial sum on completion (`4x` speedup!).
-
-And one sobering truth before wrapping every function in `sync.Pool`: when Bartłomiej benchmarked four buffer designs in a 5-minute `k6` macrobenchmark across 10M–100M lines (`no-buffering`, `sync.Pool`, `gobwas/pool`, and `static buffers`), `sync.Pool` cut cumulative garbage (`0.5 GB` vs. `3.3 GB`) yet **pushed peak live `HeapInuse` higher than simple no-pool local slices**—because GC had less urgency and retained pooled blocks! **Start simple (static buffer / `Sum6Reader`), measure macrobenchmarks, and reach for `sync.Pool` last.**
-
-Look inside `src/sync/pool.go` to see why `sync.Pool` beats coarse mutex pools (`local` per-P `poolLocal` slots padded cleanly to **128 bytes** to stop CPU false sharing across cores + a GC `victim` cache tier):
-
-<GitHubCode repo="golang/go" path="src/sync/pool.go" lines="L48-L78" url="https://github.com/golang/go/blob/master/src/sync/pool.go#L48-L78" caption="Inside Go's sync.Pool: per-P private/shared queues padded to 128-byte cache-line multiples to stop false sharing across cores, paired with a GC victim fallback.">
-```go
-type Pool struct {
-	noCopy     noCopy
-	local      unsafe.Pointer // [P]poolLocal per processor
-	localSize  uintptr
-	victim     unsafe.Pointer // survives 1 extra GC cycle
-	victimSize uintptr
-	New        func() any
-}
-
-type poolLocalInternal struct {
-	private any       // lock-free fast slot for current P
-	shared  poolChain // pushHead/popHead by owner; popTail stolen by peers
-}
-
-type poolLocal struct {
-	poolLocalInternal
-	pad [128 - unsafe.Sizeof(poolLocalInternal{})%128]byte // avoids false sharing!
-}
-```
-</GitHubCode>
-
-<QuoteCard author="Bryan Boreham" role="Distinguished Engineer, Grafana Labs" sourceTitle="Go GC & sync.Pool Production Experiences" sourceUrl="https://www.grafana.com/">
-sync.Pool shines when thousands of goroutines recycle uniformly sized short-lived scratch buffers inside one GC interval—always Reset buffers cleanly, reject oversized outliers before Put, and measure HeapInuse under realistic load.
-</QuoteCard>
-
-<GoSyncPoolLifecycleDemo />
+**One goroutine per line.** Easy to write, because a goroutine costs little (post 7):
 
 ```go
-var bufPool = sync.Pool{
-	New: func() any { return new(bytes.Buffer) },
-}
-
-func encodeSafe(w io.Writer, rec Record) error {
-	buf := bufPool.Get().(*bytes.Buffer)
-	buf.Reset() // mandatory: previous borrower's payload would leak silently otherwise!
-	defer func() {
-		// Prevent one huge 4 MB anomaly payload from sticking in victim/local across 2 GCs:
-		if buf.Cap() <= 64*1024 {
-			bufPool.Put(buf)
+var wg sync.WaitGroup
+var last int
+for i := 0; i < len(b); i++ {
+	if b[i] != '\n' {
+		continue
+	}
+	wg.Add(1)
+	go func(line []byte) {
+		defer wg.Done()
+		num, err := ParseInt(line)
+		if err != nil {
+			return
 		}
+		atomic.AddInt64(&ret, num) // add to the shared total without a lock
+	}(b[last:i])
+	last = i + 1
+}
+wg.Wait()
+```
+
+**A fixed pool fed through one channel.** The pool from [Go concurrency patterns](/blog/go-concurrency-patterns-worker-pools-pipelines/): 4 workers, a feeder that sends every line over a channel, and each worker adding up its own total:
+
+```go
+func ConcurrentSum2(fileName string, workers int) (ret int64, _ error) {
+	b, err := os.ReadFile(fileName)
+	if err != nil {
+		return 0, err
+	}
+	var wg sync.WaitGroup
+	workCh := make(chan []byte, 10)
+	wg.Add(workers + 1)
+	go func() { // the feeder
+		var last int
+		for i := 0; i < len(b); i++ {
+			if b[i] != '\n' {
+				continue
+			}
+			workCh <- b[last:i]
+			last = i + 1
+		}
+		close(workCh)
+		wg.Done()
 	}()
-	// ... marshal JSON into buf and write out ...
-	return nil
+	for i := 0; i < workers; i++ {
+		go func() {
+			var sum int64
+			for line := range workCh {
+				num, err := ParseInt(line)
+				if err != nil {
+					continue
+				}
+				sum += num
+			}
+			atomic.AddInt64(&ret, sum)
+			wg.Done()
+		}()
+	}
+	wg.Wait()
+	return ret, nil
 }
 ```
 
-<QuoteCard author="Bartłomiej Płotka" role="Author of Efficient Go & Prometheus Maintainer" sourceTitle="Efficient Go — Resource-Aware Efficiency Optimization" sourceUrl="https://www.bwplotka.dev/">
-Optimization should follow strict ROI order: do less unnecessary work first, shrink allocations cleanly, reuse caller-owned buffers in bounded streams, and adopt sync.Pool last once macrobenchmarks verify net gains.
-</QuoteCard>
+**Sharding.** Cut the file into four byte ranges, give each worker one range, and let each worker run the same `Sum6Reader` loop on its own range, with its own 8 KiB buffer. Nothing is shared while they work, and each worker sends one number at the end. The tool is `io.NewSectionReader(r, off, n)`: it returns a reader that sees only `n` bytes of `r` starting at `off`. `r` must be an `io.ReaderAt` (it has `ReadAt(p, off)`, which reads at a position and leaves no shared "current offset"), and `*os.File` is one, so four workers can read different places in the same file at once.
 
-| Optimization Pattern | When It Wins Big | Primary Hazard / Failure Mode | Mandatory Safeguard |
-| :--- | :--- | :--- | :--- |
-| **Reduce (`make([]T, 0, n)`, byte scans)** | Known length or generic stdlib overhead (`bytes.Split`) | Minimal; cleanest starting point | Measure `pprof` leaf hotspots first |
-| **Reuse (`Sum6Reader`, caller `buf`)** | Streaming files/sockets in fixed `O(1)` memory | Oversized spike buffers stay pinned | Bound scratch buffer size explicitly (`8 KB`) |
-| **Recycle (`sync.Pool`)** | High multi-goroutine churn on temporary buffers | Dirty data leak or raising peak `HeapInuse` | `.Reset()` before `Put` + drop `cap > 64 KiB` |
-| **Shard (`io.SectionReader`)** | CPU-bound multi-core parsing/compression | Line/record splits across byte boundaries | Snap bounds cleanly to next `\n` newline |
+The one subtlety is the cut. Splitting at `size/4` would cut a line in two, so each cut moves forward to the next line start:
 
 ```go
-// Shard file ranges upfront so 4 workers run concurrently with ZERO channel contention:
-begin, end := shardedRangeAt(workerID, workers, fileSize, file)
-sr := io.NewSectionReader(file, begin, end-begin) // independent lock-free slice of file
-localSum, _ := Sum6Reader(sr, make([]byte, 8*1024))
-results <- localSum // only 1 channel send per worker instead of 200,000!
+// boundary returns the first line start at or after pos.
+func boundary(r io.ReaderAt, pos, size int64) int64 {
+	if pos <= 0 {
+		return 0
+	}
+	if pos >= size {
+		return size
+	}
+	var one [1]byte
+	for p := pos - 1; p < size; p++ {
+		if _, err := r.ReadAt(one[:], p); err != nil {
+			return size
+		}
+		if one[0] == '\n' {
+			return p + 1
+		}
+	}
+	return size
+}
+
+func ConcurrentSum4(fileName string, workers int) (ret int64, err error) {
+	f, err := os.Open(fileName)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	s, err := f.Stat()
+	if err != nil {
+		return 0, err
+	}
+	size := s.Size()
+	per := size / int64(workers)
+	resultCh := make(chan int64)
+	for i := 0; i < workers; i++ {
+		go func(i int) {
+			begin := boundary(f, int64(i)*per, size)
+			end := size
+			if i != workers-1 {
+				end = boundary(f, int64(i+1)*per, size)
+			}
+			r := io.NewSectionReader(f, begin, end-begin)
+			sum, _ := Sum6Reader(r, make([]byte, 8*1024))
+			resultCh <- sum
+		}(i)
+	}
+	for i := 0; i < workers; i++ {
+		ret += <-resultCh
+	}
+	return ret, nil
+}
 ```
 
-<GoEffShardedWorkersVsPool />
+The shown code leaves out two things to keep the idea visible: an error from a worker's `Sum6Reader` is dropped (`sum, _ :=`), and a file that does not end in a newline loses its last line. Real code returns the error through the channel.
 
-Step through every version from `Sum1` (`6.0 ms` / `6.2 MB`) down to `Sharded SectionReader` (`0.73 ms` / `33.7 KB`) in this interactive `Sum()` optimization playground:
+<GoP19Sharding />
 
-<GoEffSumEvolutionDemo />
+The results, with `Sum6` run at `-cpu 4` as the baseline:
+
+<TerminalOutput command="benchstat -col /impl -filter '/impl:Sum6 OR /impl:Goroutine-per-line OR /impl:Channel-workers OR /impl:Sharded-SectionReader' conc.txt" label="Apple M2 · Go 1.27.1 · 1,000,000 lines · -cpu 4" caption="One goroutine per line is 1686% slower than Sum6, a channel-fed pool 787% slower, and sharding about 3 times faster (69% less time). The sharded run varies more (± 29%): the M2 has 4 performance and 4 efficiency cores, and -cpu 4 does not choose which ones.">
+```text
+goos: darwin
+goarch: arm64
+pkg: sumdemo
+cpu: Apple M2
+             │     Sum6     │            Goroutine-per-line            │            Channel-workers             │        Sharded-SectionReader         │
+             │    sec/op    │     sec/op      vs base                  │    sec/op      vs base                 │    sec/op     vs base                │
+Concurrent-4   13.820m ± 3%   246.862m ± 24%  +1686.24% (p=0.000 n=10)   122.570m ± 5%  +786.89% (p=0.000 n=10)   4.292m ± 29%  -68.94% (p=0.000 n=10)
+
+             │     Sum6     │              Goroutine-per-line              │              Channel-workers               │         Sharded-SectionReader          │
+             │     B/op     │       B/op        vs base                    │      B/op        vs base                   │     B/op       vs base                 │
+Concurrent-4   8.180Ki ± 0%   77529.474Ki ± 1%  +947729.29% (p=0.000 n=10)   7216.991Ki ± 0%  +88130.64% (p=0.000 n=10)   32.967Ki ± 0%  +303.03% (p=0.000 n=10)
+
+             │    Sum6    │               Goroutine-per-line               │           Channel-workers            │        Sharded-SectionReader         │
+             │ allocs/op  │    allocs/op      vs base                      │  allocs/op   vs base                 │  allocs/op   vs base                 │
+Concurrent-4   4.000 ± 0%   2000008.000 ± 0%  +50000100.00% (p=0.000 n=10)   14.000 ± 0%  +250.00% (p=0.000 n=10)   27.000 ± 0%  +575.00% (p=0.000 n=10)
+```
+</TerminalOutput>
+
+Sharding wins and meets goal 3: 4.29 ms is 4.3 ns per line. A second run of only `Sum6` and the sharded version (12 runs, 2 seconds each) gave 13.55 ms and 4.92 ms, about 2.8 times faster; so "about 3 times" is the honest summary. The sharded version uses 33 KiB, four 8 KiB buffers plus a little more.
+
+The other two lose badly, and the reason is the same: **the work per item is smaller than the cost of coordinating it.** Parsing one line takes about 14 ns. Starting a goroutine, or sending a value through a channel and waking a worker to receive it, costs more than that. A CPU profile of the channel version shows it: the time is in `runtime.schedule`, `runtime.chanrecv` and `runtime.chansend`, and `ParseInt` is not among the top entries. The goroutine-per-line version also allocates about two objects per line (2,000,008 per call).
+
+This does not make worker pools wrong. The pool from post 9 is the right tool when each job is expensive, like an HTTP call or a database query. It is the wrong tool when a job is a few nanoseconds. For cheap work, split the **data** up front and give each worker a large, independent piece. This is what *Efficient Go* calls a coordination-free algorithm, and it needs no lock, no channel per item and no scheduler traffic while the workers run.
+
+Two limits before you copy it. Sharding only helped here because the file was already in the page cache and parsing was the cost; on a cold disk, reading dominates and four workers will mostly wait together. And it only works for work whose pieces really are independent. The sum does not care about order; a running average that needs the previous line would not shard.
 
 <Concepts>
 
-- **Coordination-free sharding (`io.SectionReader`)**: partitioning independent byte ranges aligned cleanly on newline `\n` boundaries so workers never communicate or acquire shared locks mid-loop.
-- **Amortized channel batching**: sending one coarse batch or shard summary per goroutine rather than paying mutex + wake-up costs per individual integer or packet.
+- **Sharding**: splitting the input into independent ranges up front, one per worker, so workers never talk to each other until they report a final result.
+- **`io.SectionReader`**: a reader that exposes only a window `[off, off+n)` of an `io.ReaderAt`. Several of them can read different parts of one file at the same time.
+- **`io.ReaderAt`**: an interface with `ReadAt(p, off)`, a read at an explicit position. Unlike `Read`, it does not move a shared position, so it is safe to call from several goroutines.
+- **Coordination cost**: the time spent handing work to a goroutine (scheduling, locking, waking), which has to be smaller than the work itself for concurrency to pay.
 
 </Concepts>
+
+---
+
+## sync.Pool: when recycling pays and when it hurts
+
+Everything so far was Reduce and Reuse. The last R is the one people reach for first, which is the problem. The [basic mechanism of `sync.Pool`](/blog/go-hardware-cpu-caches-virtual-memory-gc-allocator/#three-practical-ways-to-cut-allocations-96) is in post 16: a per-processor cache of interchangeable temporary objects, which you pool as pointers. This section is about its costs.
+
+### A real case: a pool that kept a huge buffer alive
+
+In December 2017 Joe Tsai opened [golang/go issue 23199](https://github.com/golang/go/issues/23199), titled "sync: Pool example suggests incorrect usage". His point was that a pool assumes every entry costs about the same, but the `bytes.Buffer` in the documentation's example can hold anything from a few bytes to hundreds of megabytes. One large request grows a buffer; the buffer goes back to the pool; small requests keep picking it up, and the big allocation stays pinned. As of today the issue is still open.
+
+The standard library takes the point. In Go 1.27.1, `fmt` pools its printer state, and `(*pp).free` in `src/fmt/print.go` (lines 155 to 174) drops an oversized buffer (past 64 KiB) and puts back only the printer, with a comment that names issue 23199. Here is the same idea as a function of your own:
+
+```go
+var bufPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
+
+func render(w io.Writer, name string) error {
+	buf := bufPool.Get().(*bytes.Buffer)
+	buf.Reset() // clear what the last user left behind
+	defer func() {
+		if buf.Cap() <= 64<<10 { // same idea: do not keep a huge buffer
+			bufPool.Put(buf)
+		}
+	}()
+	fmt.Fprintf(buf, "hello, %s\n", name)
+	_, err := w.Write(buf.Bytes())
+	return err
+}
+```
+
+`buf.Reset()` empties the buffer but keeps its memory. Skipping it means the next caller sees the previous caller's bytes. `buf.Cap()` is the size of the memory behind it. Calling `render` twice with a `strings.Builder` as the writer prints:
+
+```text
+hello, gopher
+hello, pool
+```
+
+### Three ways a pool lets you down
+
+**1. You added it, and nothing changed.** The easiest slip is to grow a pooled slice and forget to store the bigger one back, so the pool keeps handing out the small original and every call regrows. I benchmarked a function that appends 1,000,000 bytes: with no reuse, with one static buffer, with a correct pool, and with a pool where the grown slice is not stored back:
+
+```go
+var pool = sync.Pool{New: func() any { b := make([]byte, 0, 1<<20); return &b }}
+
+// forgetful: grows the slice but never stores it back in the pool entry.
+var poolSmall = sync.Pool{New: func() any { b := make([]byte, 0, 64); return &b }}
+
+func fill(buf []byte) []byte {
+	buf = buf[:0]
+	for i := 0; i < 1_000_000; i++ {
+		buf = append(buf, 'a')
+	}
+	return buf
+}
+
+func BenchmarkFill(b *testing.B) {
+	b.Run("impl=alloc", func(b *testing.B) {
+		for b.Loop() {
+			sink = len(fill(nil))
+		}
+	})
+	b.Run("impl=static", func(b *testing.B) {
+		buf := make([]byte, 0, 1<<20)
+		for b.Loop() {
+			sink = len(fill(buf))
+		}
+	})
+	b.Run("impl=pool", func(b *testing.B) {
+		for b.Loop() {
+			bp := pool.Get().(*[]byte)
+			*bp = fill(*bp) // store the grown slice back
+			sink = len(*bp)
+			pool.Put(bp)
+		}
+	})
+	b.Run("impl=pool-forgot-store", func(b *testing.B) {
+		for b.Loop() {
+			bp := poolSmall.Get().(*[]byte)
+			buf := fill(*bp) // grows, but *bp still points at the small array
+			sink = len(buf)
+			poolSmall.Put(bp)
+		}
+	})
+}
+```
+
+(`sink` is a package-level `int` that keeps the compiler from deleting the work, as in post 17.)
+
+<TerminalOutput command="benchstat -col /impl fill.txt" label="Apple M2 · Go 1.27.1 · -cpu 1" caption="A correct pool beats plain allocation by 44% and uses no memory. The forgetful pool is 3.3% slower than not pooling at all (p=0.005): it does all the work of a pool and none of the benefit.">
+```text
+goos: darwin
+goarch: arm64
+pkg: sumdemo
+cpu: Apple M2
+     │    alloc    │               static                │                pool                 │         pool-forgot-store          │
+     │   sec/op    │   sec/op     vs base                │   sec/op     vs base                │   sec/op     vs base               │
+Fill   789.5µ ± 3%   459.9µ ± 2%  -41.75% (p=0.000 n=10)   438.4µ ± 2%  -44.47% (p=0.000 n=10)   815.2µ ± 7%  +3.26% (p=0.005 n=10)
+
+     │    alloc     │                static                 │                 pool                  │          pool-forgot-store          │
+     │     B/op     │     B/op      vs base                 │     B/op      vs base                 │     B/op      vs base               │
+Fill   4.999Mi ± 0%   0.000Mi ± 0%  -100.00% (p=0.000 n=10)   0.000Mi ± 0%  -100.00% (p=0.000 n=10)   4.999Mi ± 0%  +0.00% (p=0.000 n=10)
+
+     │   alloc    │               static               │                pool                │         pool-forgot-store         │
+     │ allocs/op  │ allocs/op  vs base                 │ allocs/op  vs base                 │ allocs/op   vs base               │
+Fill   30.00 ± 0%   0.00 ± 0%  -100.00% (p=0.000 n=10)   0.00 ± 0%  -100.00% (p=0.000 n=10)   31.00 ± 0%  +3.33% (p=0.000 n=10)
+```
+</TerminalOutput>
+
+Notice that the plain static buffer comes within 5% of the correct pool (459.9 µs against 438.4 µs). When the number of users is fixed, a buffer you own is simpler and cannot be emptied behind your back.
+
+**2. The pool empties itself.** The pool may drop anything at any time. After a garbage collection, entries move to a second tier (the "victim" cache); after the next one, they are gone. One processor makes this deterministic, so the program sets `GOMAXPROCS(1)` and counts how often the pool has to make a new buffer:
+
+```go
+package main
+
+import (
+	"fmt"
+	"runtime"
+	"sync"
+)
+
+func main() {
+	runtime.GOMAXPROCS(1) // one P, so Get always looks in the same place
+
+	created := 0
+	pool := sync.Pool{New: func() any {
+		created++
+		return new([64]byte)
+	}}
+
+	a := pool.Get() // pool is empty: New runs
+	pool.Put(a)
+	b := pool.Get()
+	fmt.Println("no GC:        same buffer:", a == b, " New calls:", created)
+
+	pool.Put(b)
+	runtime.GC()
+	c := pool.Get()
+	fmt.Println("after 1 GC:   same buffer:", b == c, " New calls:", created)
+
+	pool.Put(c)
+	runtime.GC()
+	runtime.GC()
+	d := pool.Get()
+	fmt.Println("after 2 GCs:  same buffer:", c == d, " New calls:", created)
+}
+```
+
+```text
+no GC:        same buffer: true  New calls: 1
+after 1 GC:   same buffer: true  New calls: 1
+after 2 GCs:  same buffer: false  New calls: 2
+```
+
+I ran it five times and got these three lines every time. With more than one processor, a goroutine can move to another one between `Put` and `Get`, and the buffer may be missed even after one GC, so do not build on the survival of a pooled object: the same program without the `GOMAXPROCS(1)` line printed `false` after one GC in most runs. A microbenchmark never sees this, because it never lets a GC happen between two uses. A real service does. Step through the three cases below: a hit on the processor's private slot, the victim tier across two GCs, and a buffer put back without `Reset`.
+
+<GoSyncPoolLifecycleDemo />
+
+**3. It saved allocations, not time or peak memory.** Apply the pool to the streaming sum. `Sum6Pool` is `Sum6` with the 8 KiB buffer borrowed from a `sync.Pool` of `*[]byte` instead of made on each call:
+
+```go
+var sumBufPool = sync.Pool{New: func() any { b := make([]byte, 8*1024); return &b }}
+
+func Sum6Pool(fileName string) (ret int64, err error) {
+	f, err := os.Open(fileName)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	bp := sumBufPool.Get().(*[]byte)
+	defer sumBufPool.Put(bp)
+	return Sum6Reader(f, *bp)
+}
+```
+
+<TerminalOutput command="benchstat -col /impl -filter '/impl:Sum6 OR /impl:Sum6Pool' seq.txt" label="Apple M2 · Go 1.27.1 · 1,000,000 lines · -cpu 1" caption="The pool removed 97.8% of the bytes allocated and 1 of 4 allocations, and made the call 2.4% faster. The p-value (0.043) is only just under 0.05.">
+```text
+goos: darwin
+goarch: arm64
+pkg: sumdemo
+cpu: Apple M2
+    │    Sum6     │              Sum6Pool              │
+    │   sec/op    │   sec/op     vs base               │
+Sum   13.99m ± 3%   13.65m ± 2%  -2.39% (p=0.043 n=10)
+
+    │    Sum6     │              Sum6Pool              │
+    │    B/op     │    B/op     vs base                │
+Sum   8376.0 ± 0%   185.0 ± 0%  -97.79% (p=0.000 n=10)
+
+    │   Sum6    │             Sum6Pool             │
+    │ allocs/op │ allocs/op   vs base              │
+Sum   4.000 ± 0%   3.000 ± 0%  -25.00% (p=0.000 n=10)
+```
+</TerminalOutput>
+
+The bytes allocated fell by almost 98%, and the time barely moved. The 8 KiB buffer was never what made `Sum6` slow: the reads and the parsing are. Pooling it also adds a `Get`, a `Put`, and a pointer type to keep right. *Efficient Go* ran the same experiment at larger scale: a service that sums files of 10 and 100 million lines, tested for five minutes under load with four buffering designs. The version with `sync.Pool` allocated far less in total (about 0.5 GB against 3.3 GB without buffering), yet the version with no buffering had the lowest peak heap, because the garbage collector ran more often. I did not reproduce that load test; I quote its result. The lesson is the one in this case study: pooling cuts allocation work, not necessarily memory, and only a macrobenchmark tells you whether your service gains.
+
+By *Efficient Go*'s account, the pool earns its keep when all four of these hold:
+
+- You reuse large or very many objects, so allocation itself is the cost.
+- You do not care about the contents, only about the memory block.
+- Several goroutines reuse them, in a number that changes.
+- The reuse happens between quick computations, at most one GC cycle apart.
+
+The standard library meets all four: `fmt` formats text in many goroutines, every call is short, every buffer is the same kind. In the HTTP service from [post 10](/blog/go-http-service-net-http-json-middleware/), `writeJSON` should not get a pool until a profile shows its allocations are the cost.
+
+<Concepts>
+
+- **Victim cache**: a second tier inside `sync.Pool`. At each garbage collection the pool's entries move into it, and the next collection discards them. This gives idle buffers one more cycle to be reused before they are freed.
+- **Pooling vs caching**: a pool holds interchangeable blocks, and you do not care which one you get. A cache maps keys to specific values and keeps them. Never use a `sync.Pool` for something that must survive, such as a connection or a login session.
+- **Static buffer**: a buffer your code owns for a fixed number of users. When the count of users is known, it is simpler than a pool and cannot disappear.
+
+</Concepts>
+
+---
+
+## You climbed the ladder
+
+This is the last post of the performance level, and the end of the ladder. Here is the whole climb, with the post to open when you forget a rule:
+
+<GoP19Ladder />
+
+- **Level 1, Write Go (posts 1 to 6):** [Go basics](/blog/go-first-program-modules-packages/), [types and functions](/blog/go-variables-types-pointers-functions/), [collections](/blog/go-slices-maps-strings/), [structs and interfaces](/blog/go-structs-methods-interfaces/), [errors](/blog/go-errors-defer-panic/), [testing](/blog/go-testing-table-tests/).
+- **Level 2, Run things at once (posts 7 to 10):** [goroutines and channels](/blog/go-goroutines-channels-select/), [context and locks](/blog/go-context-timeouts-mutexes/), [concurrency patterns](/blog/go-concurrency-patterns-worker-pools-pipelines/), [building an HTTP service](/blog/go-http-service-net-http-json-middleware/).
+- **Level 3, Under the hood and traps (posts 11 to 14):** [memory](/blog/go-memory-data-types-slices-maps-strings/), [interfaces deep dive](/blog/go-abstractions-interfaces-generics-errors/), [concurrency deep dive](/blog/go-concurrency-scheduler-channels-context-mutexes/), [Go in production](/blog/go-production-stdlib-cpu-cache-gc-kubernetes/).
+- **Level 4, Measure, then optimize (posts 15 to 19):** [when to optimize](/blog/go-efficiency-workflow-raer-tfbo-hardware-memory/), [hardware and GC](/blog/go-hardware-cpu-caches-virtual-memory-gc-allocator/), [benchmarking](/blog/go-observability-metrics-microbenchmarks-benchstat/), [profiling](/blog/go-profiling-pprof-flamegraphs-off-cpu-continuous/), and this post.
+
+The one habit to take from Level 4 is the loop this post ran six times: write down the goal, benchmark, profile, change one thing, compare with `benchstat`, and stop when the goal is met.
+
+The last step is to test yourself. [Go interview prep](/blog/go-interview-questions-output-live-coding/) asks the classic questions in the form they come up (what does this program print, write this live), and each answer points back to the post that teaches it.
 
 ---
 
 ## Key takeaways
 
-- **Follow the efficiency order strictly**: **Do Less Work** → **Reduce** allocations → **Reuse** caller slices → **Recycle (`sync.Pool`)** only when proven in multi-goroutine macrobenchmarks.
-- **Challenge general stdlib utilities inside proven hot spots**: replacing generic `bytes.Split` + `strconv.ParseInt` cut allocations and eliminated even `unsafe` code (`Sum4`).
-- **Stream large data with fixed caller-owned slices**: sliding an 8 KB `buf []byte` with `offset` tail-copying handles arbitrary file sizes in `O(1)` heap (`216 B` per op in Go 1.27!).
-- **Batch or shard parallel work upfront**: never pump tiny nanosecond tasks individually over a single channel (`14x` contention slowdown vs. `4x` speedup with `io.NewSectionReader`).
-- **Treat `sync.Pool` as an optimization, never a cache**: pooled items can vanish any GC cycle, and pooling can inflate peak live heap if short-lived GC cleanup was already fast enough.
+- **Do less work before anything else.** Cutting the list of lines (`Sum2`) and the generic parser (`Sum4`) took the job from 52.07 ms to 14.36 ms with no concurrency and no pool.
+- **Profile, change one thing, compare.** Each step above came from the biggest entry in a profile and a `benchstat` table; the unsafe step gave 11% and was deleted by the next one.
+- **Tailored code has a price.** `Sum4` panics on an empty line and `Sum6Reader` loops forever on a line longer than its buffer. Write those assumptions down.
+- **Stream to get constant memory.** One caller-owned 8 KiB buffer kept the speed of `Sum4` and used 8,376 bytes per call at 100,000 and at 10,000,000 lines.
+- **Shard cheap work; do not queue it.** One goroutine per line was 1686% slower and a channel-fed pool 787% slower than one core, because the work per line (about 14 ns) is smaller than the coordination. Four independent byte ranges were about 3 times faster.
+- **A pool saves allocations, not always time or peak memory.** `Sum6Pool` cut allocated bytes 97.8% and time 2.4%. Reset what you borrow, cap what you return, and never rely on an object surviving a GC.
 
 ---
 
 ## Review questions
 
-1. List the Three Rs optimization patterns in exact priority order, and give one concrete change from the `Sum` case study illustrating **Reduce** vs. **Reuse**. *(See Section 1 &amp; 2)*
-2. Midway through the case study, `Sum3` introduced an `unsafe` zero-copy `[]byte -> string` cast to bypass `runtime.slicebytetostring`. How did replacing `strconv.ParseInt` one step later in `Sum4` remove `unsafe` altogether while getting faster? *(See Section 2)*
-3. Walk through what happens in `Sum6Reader` if an integer `458902` gets split across byte 8,191 (`458`) and byte 8,192 (`902\n`) between two `r.Read()` calls. *(See Section 3)*
-4. Why did spawning 4 goroutine workers fed over `chan []byte` run **14x slower** than single-threaded `Sum6` (`41.35 ms` vs. `2.87 ms`) on Apple M2, and how did `io.NewSectionReader` reverse that to a **4x speedup** (`0.73 ms`)? *(See Section 4)*
-5. Why did Bartłomiej's 5-minute `k6` macrobenchmark show higher peak live heap usage with `sync.Pool` than with clean non-pooled allocations, and what four narrow criteria justify `sync.Pool`? *(See Section 4)*
+1. Put do-less-work, Reduce, Reuse and Recycle in the order you would try them, and name the change in the `Sum` case study that belongs to each. *(See the first and second sections)*
+2. `Sum3` removed a string copy with `unsafe.String`, and `Sum4` made it unnecessary. What did `Sum4` change, and what input does it fail on that `strconv.ParseInt` handles? *(See "From Sum1 to Sum4")*
+3. In `Sum6Reader`, a read ends after `678` of the number `6789`. Which two lines keep the number from being lost, and what does the loop do if one line is longer than the whole buffer? *(See "Streaming")*
+4. A channel-fed pool of 4 workers was far slower than one core, but four `io.NewSectionReader` shards were about 3 times faster. What does a line cost to parse, what does a channel hand-off cost, and why does sharding avoid the second? *(See "Four cores")*
+5. A teammate adds a `sync.Pool` and a benchmark shows 98% fewer bytes allocated and 2% less time. What would you check before merging, and which of the four pool criteria might not hold? *(See "sync.Pool")*
 
 </En>
 
 <Vi>
 
-<Figure src={heroSluice} alt="Cửa cống gỗ cổ điều tiết dòng nước sông chảy đều qua guồng nước nhà máy xay bột" caption="Cửa cống điều tiết cả con sông lớn bằng một máng dòng cố định thay vì ngăn đập chứa hết cả sông — giống hệt cách đọc streaming hàng trăm triệu dòng qua đúng một lát đệm 8 KB cố định." sourceTitle="Wikimedia Commons: Waterwheel and Sluice Gate at Odell Mill" sourceUrl="https://commons.wikimedia.org/wiki/File:Waterwheel_and_Sluice_Gate_at_Odell_Mill_-_geograph.org.uk_-_290595.jpg" />
+<Figure src={heroSluice} alt="Cửa cống gỗ cổ điều tiết dòng nước sông chảy đều lên bánh xe nước của một cối xay" caption="Cối xay đưa cả một dòng sông qua một lòng hẹp với nhịp đều. Đọc streaming một file lớn qua một buffer nhỏ cũng chạy theo cách đó." sourceTitle="Wikimedia Commons: Waterwheel and Sluice Gate at Odell Mill" sourceUrl="https://commons.wikimedia.org/wiki/File:Waterwheel_and_Sluice_Gate_at_Odell_Mill_-_geograph.org.uk_-_290595.jpg" />
 
-> "Cứ làm đúng đủ để đạt mục tiêu chức năng lẫn hiệu năng... Hoàn hảo quá mức chính là kẻ thù của sản phẩm tốt."
-> &mdash; *Bartłomiej Płotka*, *Efficient Go*
+> "Optimizations/pessimizations don't generalize very well. It all depends on the code, so measure each time and don't cast absolute judgments."
+> &mdash; *Bartosz Adamczewski*, được trích trong *Efficient Go*
 
-### Một hàm Go 12 dòng ăn 300 MB Heap — và cách sửa bài bản theo Three Rs
+### Một hàm ngắn cấp phát gấp bốn lần dung lượng file nó đọc
 
-Khép lại lộ trình từ Go căn bản, bẫy runtime tới RAER, phần cứng, `benchstat` và `pprof`, hãy thử gom trọn mọi mảnh ghép vào một hàm tưởng chừng vô hại (`Sum()` rút gọn bên dưới): gọi `os.ReadFile`, cắt bằng `bytes.Split`, ép chuỗi qua `strconv.ParseInt(string(line), 10, 64)` rồi cộng dồn. Đem chạy trên file 10 triệu dòng (36 MB), hàm 12 dòng này ngốn tới **304 MB Heap** và làm GC khựng liên tục.
+*Efficient Go* dùng một hàm nhỏ để đi qua mọi ý trong bài này. `Sum` đọc một file số nguyên, mỗi dòng một số, rồi cộng lại. Nhìn vô hại. Trên file 7,4 MB có 1.000.000 dòng, phiên bản đầu của mình chạy 52 ms và cấp phát 29,9 MiB mỗi lần gọi, gấp khoảng bốn lần dung lượng file.
 
-Thay vì đụng vào `sync.Pool` hay ép kiểu `unsafe` ngay từ đầu, case study `Sum()` đi hết một lộ trình tối ưu dựa trên số đo — giải trọn ba mục tiêu đặt ra ban đầu: chạy thật nhanh trên 1 nhân, giữ RAM dưới 10 KB dù file phình tới đâu, và tăng tốc tối đa trên 4 nhân CPU:
+Cuối bài, cùng việc đó chỉ còn 14 ms và 8 KiB trên một nhân, và 4 ms trên bốn nhân. Mọi mức tăng tốc dưới đây là một bảng so sánh [`benchstat`](/blog/go-observability-metrics-microbenchmarks-benchstat/) từ lần chạy thật trên Go 1.27.1, Apple M2. Với mỗi bước bạn thấy cái gì đổi, vì sao nhanh hơn và phải trả giá gì.
 
-1. **Thứ tự Three Rs**: luôn **Do Less Work** trước, rồi mới tới **Reduce** → **Reuse** → cuối cùng mới dùng **Recycle**.
-2. **Cắt đứt lãng phí ở `bytes.Split`, `string()` và `strconv`**: đi từng vòng theo `pprof` từ `Sum1` → `Sum4`.
-3. **Streaming chỉ tốn O(1) RAM (`Sum6Reader`)**: vượt mặt tốc độ `bufio.Scanner` chỉ bằng một mảng trượt 8 KB dùng lại.
-4. **Song song không đụng khóa &amp; bẫy `sync.Pool`**: lý do đẩy từng dòng qua channel bị chậm đi 14 lần trong khi chia khúc `io.NewSectionReader` nhanh lên gấp 4 — và lúc nào `sync.Pool` lại làm tăng đỉnh RAM.
-
-<Callout type="note" title="Tóm tắt nhanh (TL;DR)">
-Loại bỏ công việc thừa (**Do Less Work**) trước khi nghĩ tới chuyện giữ pool phức tạp. Đi đúng thứ tự **Three Rs**: **Reduce** cấp phát (bỏ `bytes.Split`, tự parse thẳng `[]byte` đỡ ép `string()`), **Reuse** buffer từ bên gọi (một `buf 8 KB` đọc trượt), và chỉ dùng **Recycle (`sync.Pool`)** khi nhiều goroutine xin-trả cùng loại object ngắn hạn có đo kiểm bằng macrobenchmark. Đừng đẩy từng việc nhỏ ~10 ns qua Go channel (chậm đi 14 lần vì khóa `chansend`!); hãy chia sẵn khúc file bằng `io.NewSectionReader` cho từng worker tự chạy độc lập.
+<Callout type="tip" title="Nhắc lại từ các bài trước">
+Bài này dùng [goroutine và channel](/blog/go-goroutines-channels-select/) cùng [worker pool](/blog/go-concurrency-patterns-worker-pools-pipelines/) ở cấp 2, và phần heap, escape analysis, kiến thức cơ bản về `sync.Pool` trong [Go hardware and GC](/blog/go-hardware-cpu-caches-virtual-memory-gc-allocator/). Cách viết benchmark bằng `b.Loop()` và đọc `benchstat` nằm ở [Go benchmarking](/blog/go-observability-metrics-microbenchmarks-benchstat/); cách tìm dòng nóng nằm ở [Go profiling](/blog/go-profiling-pprof-flamegraphs-off-cpu-continuous/); cách viết mục tiêu trước khi làm nằm ở [When to optimize](/blog/go-efficiency-workflow-raer-tfbo-hardware-memory/).
 </Callout>
 
-<Concepts title="Giải thích nhanh mấy thuật ngữ cho người mới">
+<Callout type="note" title="TL;DR">
+Hãy hỏi "bỏ được việc này không?" trước mọi thứ khác, rồi đi qua Three Rs theo thứ tự: **Reduce** (giảm) cấp phát, **Reuse** (dùng lại) vùng nhớ mình giữ, và chỉ sau cùng mới **Recycle** (tái chế) bằng `sync.Pool`. Một reader streaming dùng một buffer 8 KiB giữ nguyên tốc độ của việc đọc cả file và đưa bộ nhớ từ 7,0 MiB xuống 8,2 KiB, bất kể file lớn cỡ nào. Muốn dùng bốn nhân, hãy cho mỗi worker một đoạn byte riêng của file; gửi từng dòng qua một channel làm cùng việc đó chậm hơn khoảng 9 lần so với một nhân. `sync.Pool` tiết kiệm 97,8% số byte cấp phát trong ca này nhưng chỉ 2,4% thời gian, nên hãy đo trước khi thêm pool.
+</Callout>
 
-- **Chuyển đổi zero-copy (`unsafe.String`)**: dựng header `string` trỏ thẳng vào vùng byte có sẵn của `[]byte` mà không copy lên heap — rất nhanh nhưng nguy hiểm nếu mảng byte gốc bị sửa đổi song song.
-- **Sliding-window streaming buffer**: tái sử dụng một lát đệm nhỏ cố định (`8 KB`) bằng `r.Read(buf[offset:])`, chép mấy byte lẻ cuối chunk chưa gặp `\n` về đầu `buf[0:]` để đọc liên tục file hàng GB trong RAM cố định `O(1)`.
-- **Channel lock contention (nghẽn khóa trên channel)**: tình trạng hàng ngàn goroutine đâm đầu xếp hàng lấy khóa mutex bên trong `runtime.chansend` khi gửi liên tục từng gói việc siêu nhỏ.
-- **`sync.Pool`**: kho tái sử dụng biến tạm theo từng bộ xử lý `P` giữa hai kỳ dọn rác GC — chỉ giúp giảm độ trễ cấp phát chứ không giữ đồ thay cache lâu dài (GC có quyền xóa sạch bất cứ lúc nào).
+## Làm ít việc trước, rồi mới tới Three Rs
+
+Mỗi lần cấp phát tốn hai lần. Bạn trả khi vùng nhớ được cấp ra, rồi trả lần nữa khi garbage collector phải duyệt và giải phóng nó (bài 16 cho thấy cách). Nên cấp phát rẻ nhất là cái bạn không làm, và việc rẻ nhất là việc bạn bỏ qua.
+
+*Efficient Go* xếp những ý này theo thứ tự. Bắt đầu bằng **do less work** (làm ít việc hơn): bỏ những bước không ai cần. Rồi tới **Three Rs** cho bộ nhớ, theo lời sách kể về bài nói của Bryan Boreham ở FOSDEM 2018: **Reduce** lượng bạn cấp phát, **Reuse** vùng nhớ bạn đang giữ, **Recycle** phần còn lại qua một pool dùng chung hoặc qua garbage collector. Bước sau rủi ro hơn bước trước, nên thứ tự quan trọng.
+
+<GoP19ThreeRs />
+
+Mỗi bước thường trông thế này trong code Go. Chuẩn bị sẵn dung lượng slice bằng `make([]T, 0, n)` khi biết `n` là một nước **Reduce**; [bài về slice header](/blog/go-memory-data-types-slices-maps-strings/) giải thích vì sao nếu không thì `append` cứ phải cấp phát lại.
+
+| Bước | Nghĩa đơn giản | Nước đi thường gặp trong Go |
+| :--- | :--- | :--- |
+| 0. Do less work | Bỏ việc không ai cần | Bỏ một phép kiểm tra không dùng; đừng dựng danh sách chỉ để duyệt một lần |
+| 1. Reduce | Cấp phát ít hơn | `make([]T, 0, n)` khi biết `n`; nhận `[]byte` hoặc `io.Reader` thay vì trả về slice mới; tránh `string(b)` thừa |
+| 2. Reuse | Một buffer phục vụ nhiều lần gọi | Buffer do bên gọi truyền vào và sở hữu; `buf = buf[:0]` giữa các lần dùng |
+| 3. Recycle | Pool dùng chung các object hoán đổi được | `sync.Pool` |
+
+*Efficient Go* cũng xếp việc giúp garbage collector vào Recycle: ít con trỏ hơn trong struct, chỉnh `GOGC` và `GOMEMLIMIT`. Phần đó nằm ở [Go hardware and GC](/blog/go-hardware-cpu-caches-virtual-memory-gc-allocator/). Bài này nói về pool.
+
+<Concepts>
+
+- **Three Rs (Reduce, Reuse, Recycle)**: một thứ tự để giảm lãng phí bộ nhớ. Reduce là cấp phát ít hơn, Reuse là giữ và nạp lại một object, Recycle là trả object về pool dùng chung. Thử theo thứ tự đó vì bước sau rủi ro hơn bước trước.
+- **Do less work**: trước khi làm một việc rẻ đi, hãy hỏi việc đó có cần không. Đây là bước duy nhất không có mặt trái.
 
 </Concepts>
 
 ---
 
-## 1. Bớt việc thừa (Do Less Work) &amp; quy trình Three Rs
+## Đặt mục tiêu, rồi dựng test và benchmark
 
-Mỗi byte bạn cấp phát trên Heap thực ra phải trả giá tới **hai lần**: lần một khi đi xin chỗ, lần hai khi GC phải lùng con trỏ và làm văng sạch dữ liệu khỏi CPU cache. Luôn đi lần lượt từ trái sang phải:
+Tối ưu mà không có mục tiêu thì không bao giờ dừng, nên viết mục tiêu trước (bài 15 gọi là RAER). `Sum` có ba mục tiêu, tính theo máy này:
 
-<Figure src={bottleCrates} alt="Những chồng két chai thủy tinh tái sử dụng xếp gọn gàng chờ thu hồi sau hội thảo 31c3" caption="Két chai dùng lại giúp cắt sạch rác sản xuất — nhưng ôm quá nhiều két trống nằm kho lại ngốn diện tích, y hệt chuyện lạm dụng sync.Pool giữ bộ nhớ thừa trên đỉnh tải." sourceTitle="Wikimedia Commons: Crates of empty Club Mate bottles at 31c3" sourceUrl="https://commons.wikimedia.org/wiki/File:Crates_of_empty_Club_Mate_bottles_at_31c3.jpg" />
+1. **Thời gian:** tối đa 20 ns mỗi dòng trên một CPU. Với 1.000.000 dòng là 20 ms.
+2. **Bộ nhớ:** cùng tốc độ đó, và cấp phát tối đa 10 KB trên heap cho mọi cỡ file.
+3. **Bốn nhân:** tối đa 6 ns mỗi dòng khi có bốn CPU.
 
-- **Bước 0 — Bớt việc thừa (Do Less Work)**: dẹp bớt log Debug thừa, hoặc tự duyệt dấu `'\n'` thay vì gọi hàm đa năng như `bytes.Split`.
-- **Bước 1 — Reduce (giảm cấp phát)**: quét trực tiếp theo chỉ số slice `[]byte`, ước lượng sẵn kích thước bằng `make([]T, 0, n)`, thiết kế hàm nhận `io.Reader` + `buf []byte` từ ngoài thay vì cứ mỗi vòng lặp lại `return` struct mới.
-- **Bước 2 — Reuse (dùng lại buffer)**: giữ lại một slice (`buf = buf[:0]`) hoặc `bytes.Buffer.Reset()`, chú ý không vô tình ghim lại một mảng lỡ phình tới 64 MB mãi mãi.
-- **Bước 3 — Recycle (`sync.Pool`)**: chỉ đụng tới cuối cùng cho kịch bản nhiều goroutine song song xin/trả biến tạm giống hệt nhau — và nhớ `.Reset()` sạch trước khi gọi `pool.Put(x)`.
+Đây là phiên bản đầu, `Sum1`. Nó đọc cả file, cắt thành dòng bằng `bytes.Split`, rồi parse từng dòng bằng `strconv.ParseInt`:
 
 ```go
-// Thứ tự ưu tiên Three Rs trong Efficient Go:
-// 1. Reduce: luôn ước lượng sẵn sức chứa nếu biết trước cỡ dữ liệu
-items := make([]int64, 0, expectedLen)
-
-// 2. Reuse: nhận slice buffer cố định từ hàm gọi truyền xuống (không xin heap mới)
-func ProcessChunk(r io.Reader, scratch []byte) error { /* dùng lại scratch[:n] */ return nil }
-
-// 3. Recycle (chỉ khi đo thấy cần thiết): Reset sạch trước khi trả lại sync.Pool
-buf := bufPool.Get().(*bytes.Buffer)
-buf.Reset()
-defer bufPool.Put(buf)
+func Sum1(fileName string) (ret int64, _ error) {
+	b, err := os.ReadFile(fileName)
+	if err != nil {
+		return 0, err
+	}
+	for _, line := range bytes.Split(b, []byte("\n")) {
+		if len(line) == 0 {
+			continue
+		}
+		num, err := strconv.ParseInt(string(line), 10, 64)
+		if err != nil {
+			return 0, err
+		}
+		ret += num
+	}
+	return ret, nil
+}
 ```
 
-<GoEffThreeRsHierarchy />
+`os.ReadFile` trả cả file thành một `[]byte`. `bytes.Split(b, sep)` cắt nó ở mỗi `sep` và trả về một `[][]byte`, mỗi dòng một slice. `strconv.ParseInt(s, 10, 64)` đổi chữ thành `int64`, hệ thập phân, vừa 64 bit.
 
-<GoThreeRsStructSlicePrealloc />
+Trước khi tăng tốc là phải có test. Mọi phiên bản phải cho đúng đáp án như con số được tính lúc ghi file đầu vào. `TestMain` (khoảng 15 dòng, không hiển thị) ghi 1.000.000 số nguyên ngẫu nhiên từ −1.000.000 đến 999.999, mỗi dòng một số, vào một file tạm 7.389.110 byte, và giữ tổng của chúng trong `want`. Một test nhỏ gọi từng phiên bản và so với `want`. Benchmark kiểm tra lại ở mỗi vòng lặp, nên một bản "nhanh hơn" mà sai thì không lọt được:
 
-<Concepts title="Mấy khái niệm ở mục này">
+```go
+func BenchmarkSum(b *testing.B) {
+	impls := []struct {
+		name string
+		fn   func(string) (int64, error)
+	}{
+		{"Sum1", Sum1}, {"Sum2", Sum2}, {"Sum3", Sum3},
+		{"Sum4", Sum4}, {"Sum5", Sum5}, {"Sum6", Sum6}, {"Sum6Pool", Sum6Pool},
+	}
+	for _, impl := range impls {
+		b.Run("impl="+impl.name, func(b *testing.B) {
+			for b.Loop() {
+				got, err := impl.fn(file)
+				if err != nil || got != want {
+					b.Fatal(got, err)
+				}
+			}
+		})
+	}
+}
+```
 
-- **Bộ ba Three Rs (Reduce → Reuse → Recycle)**: lộ trình kỷ luật từ giảm triệt để số lần xin heap (`Reduce`), tái sử dụng buffer cục bộ (`Reuse`), rồi cuối cùng mới chia sẻ kho pool giữa nhiều goroutine (`Recycle`).
-- **Bẫy giữ mảng phình to (over-sizing)**: một lần gặp input dị biệt đẩy `cap` lên 64 MB rồi bỏ lại vào pool/biến tái sử dụng sẽ giữ chết 64 MB đó dài hạn nếu không chặn kích thước tối đa trước khi `Put`.
+`b.Run` tạo một sub-benchmark cho mỗi phiên bản, tên `impl=Sum1` v.v. `b.Loop()` là vòng lặp trong [Go benchmarking](/blog/go-observability-metrics-microbenchmarks-benchstat/). Mình chạy các bản tuần tự với `-cpu 1`, đặt `GOMAXPROCS` bằng 1 để garbage collector không giấu chi phí sang các nhân khác, và `-count 10` để `benchstat` có mười mẫu cho mỗi phiên bản:
 
-</Concepts>
-
----
-
-## 2. Case Study thực chiến: dẹp `bytes.Split` và `string()` (`Sum1` → `Sum4`)
-
-Bài học lớn đầu tiên: **hàm thư viện chuẩn ưu tiên chạy đúng cho mọi trường hợp tổng quát chứ không viết riêng cho một bài toán hẹp**. Chạy đo kiểm trực tiếp toàn bộ chuỗi tiến hóa này ngay trên máy Apple M2 với Go 1.27 cho 200.000 dòng:
-
-<TerminalOutput command="go test -run '^$' -bench 'Benchmark(Sum|ConcurrentSum)' -benchmem -benchtime 500ms" label="Apple M2 · Go 1.27 (200k dòng)" caption="Số đo thực tế trên Apple M2: bỏ bytes.Split giảm 77% Heap, dùng buf trượt 8 KB còn 216 B/op, chạy worker qua channel chậm đi 14x còn chia khúc SectionReader tăng tốc gấp 4x.">
 ```text
-BenchmarkSum1_BytesSplit-8                      	      87	   6008315 ns/op	 6201759 B/op	       6 allocs/op
-BenchmarkSum2_InPlaceScan-8                     	     120	   5935550 ns/op	 1401261 B/op	       5 allocs/op
-BenchmarkSum3_UnsafeString-8                    	     148	   4756267 ns/op	 1401261 B/op	       5 allocs/op
-BenchmarkSum4_CustomParseInt-8                  	     170	   3041474 ns/op	 1401257 B/op	       5 allocs/op
-BenchmarkSum5_BufioScanner-8                    	     142	   3878293 ns/op	    4312 B/op	       4 allocs/op
-BenchmarkSum6_Sliding8KBuffer-8                 	     240	   2872970 ns/op	     216 B/op	       3 allocs/op
-BenchmarkConcurrentSum_ChannelWorkers-8         	      13	  41354625 ns/op	 1605777 B/op	  200018 allocs/op
-BenchmarkConcurrentSum_ShardedSectionReader-8   	    1004	    727865 ns/op	   33704 B/op	      21 allocs/op
+go test -run '^$' -bench 'BenchmarkSum$' -benchmem -count 10 -cpu 1 > seq.txt
 ```
-</TerminalOutput>
 
-Điểm đắt giá nhất nằm ở bước nhảy từ `Sum3` sang `Sum4`:
-- Bước 1 (`Sum1` → `Sum2`): `bytes.Split` quét qua mảng 2 lượt để đẻ mảng `[][]byte` 2 chiều (`78,6%` bộ nhớ trong bài test sách, và cắt sạch `-4,8 MB` ngay trên M2). Viết vòng `for` 6 dòng dò `b[i] == '\n'` triệt tiêu hết khoản này.
-- Bước 2 (`Sum2` → `Sum3`): `pprof` chỉ tiếp hàm `runtime.slicebytetostring` copy từng dòng thành `string` để gọi `strconv.ParseInt`. Ép `unsafe.String(unsafe.SliceData(b), len(b))` kéo thời gian từ `5,94 ms` xuống `4,76 ms` (tối ưu đánh đổi dùng `unsafe`).
-- Bước 3 (`Sum3` → `Sum4`): thấy `strconv.ParseInt` vẫn tốn hơn 70% CPU để check 36 hệ cơ số và chuỗi rỗng. Tự viết một hàm nhỏ `parseIntBytes(in []byte)` đọc thẳng số thập phân giúp **nhanh gấp đôi bản gốc (`3,04 ms`) VÀ vứt luôn được `unsafe`** — code vừa an toàn vừa sạch hơn hẳn!
+Sau lần chạy đầu, file nằm trong cache của hệ điều hành, nên các số này đo công việc của CPU và bộ nhớ, không đo ổ đĩa. Ổ đĩa lạnh sẽ thêm một chi phí mà không bước nào ở đây bỏ được.
+
+---
+
+## Từ Sum1 đến Sum4: bỏ việc, từng bước một
+
+Bắt đầu từ profile (cách lấy profile ở [Go profiling](/blog/go-profiling-pprof-flamegraphs-off-cpu-continuous/)). Một CPU profile 3 giây của `Sum1` cho biết thời gian đi đâu: `bytes.Split` chiếm 36%, `strconv.ParseInt` chiếm 32%, và write barrier mà garbage collector cần (`gcWriteBarrier`) chiếm 14%. `bytes.Split` là phần lớn nhất, nên chỉ đổi một thứ: việc cắt.
+
+**`Sum1` sang `Sum2`: thôi dựng danh sách các dòng.** `bytes.Split` xử lý mọi dấu ngăn cách và trả về 1.000.000 slice header (24 byte mỗi cái, khoảng 22,9 MiB) chỉ để ta duyệt qua một lần. Ta chỉ cắt ở `\n`, nên tự đi qua từng byte và parse mỗi dòng tại chỗ:
 
 ```go
-// Duyệt '\n' tại chỗ + tự parse trực tiếp []byte nhanh hơn bytes.Split & bỏ luôn unsafe (Sum4)
-func parseIntBytes(in []byte) (int64, error) {
-	var n int64
-	factor, k := int64(1), 0
-	if in[0] == '-' { factor, k = -1, 1 }
-	for i := len(in) - 1; i >= k; i-- {
-		if in[i] < '0' || in[i] > '9' { return 0, strconv.ErrSyntax }
-		n += factor * int64(in[i]-'0')
+func Sum2(fileName string) (ret int64, _ error) {
+	b, err := os.ReadFile(fileName)
+	if err != nil {
+		return 0, err
+	}
+	var last int // where the current line starts
+	for i := 0; i < len(b); i++ {
+		if b[i] != '\n' {
+			continue
+		}
+		num, err := strconv.ParseInt(string(b[last:i]), 10, 64)
+		if err != nil {
+			return 0, err
+		}
+		ret += num
+		last = i + 1
+	}
+	return ret, nil
+}
+```
+
+**`Sum2` sang `Sum3`: thôi chép mỗi dòng thành string.** `string(b[last:i])` chép các byte. Profile của `Sum2` cho thấy `runtime.slicebytetostring` chiếm 9,5%. Bảng bên dưới ghi 5 lần cấp phát mỗi lần gọi, không phải một triệu, nên bản chép không chạm tới heap: hỏi compiler bằng `-gcflags=-m` ra dòng `string(b[last:i]) does not escape`, nghĩa là bản chép nằm trên stack. Nhưng nó vẫn là một lần chép. Go 1.20 thêm `unsafe.String(ptr, len)`, tạo một string trỏ vào đúng các byte đó mà không chép:
+
+```go
+line := b[last:i]
+num, err := strconv.ParseInt(unsafe.String(unsafe.SliceData(line), len(line)), 10, 64)
+```
+
+`unsafe.SliceData(line)` là con trỏ tới byte đầu tiên. Đây là một đánh đổi có chủ ý: string và slice giờ dùng chung vùng nhớ, nên nếu sau này sửa `b` thì string cũng đổi theo. Ở đây an toàn vì `b` không bị đụng tới sau khi đọc. Đó cũng là loại code mà bạn phải biện minh được khi review.
+
+**`Sum3` sang `Sum4`: viết bộ parse đúng cái bạn cần.** Profile của `Sum3` đặt `strconv.ParseInt` ở mức 49%. Nó hỗ trợ hệ cơ số từ 2 đến 36, dấu, kiểm tra tràn số và nhiều trường hợp lỗi. Ta chỉ cần hệ thập phân và `int64`. Viết đúng cái đó, parse thẳng từ byte, và `unsafe` cũng biến mất:
+
+```go
+var errSyntax = errors.New("not a valid integer")
+
+// ParseInt parses a base-10 int64 straight from bytes.
+func ParseInt(input []byte) (n int64, _ error) {
+	factor := int64(1)
+	k := 0
+	if input[0] == '-' {
+		factor *= -1
+		k++
+	}
+	for i := len(input) - 1; i >= k; i-- {
+		if input[i] < '0' || input[i] > '9' {
+			return 0, errSyntax
+		}
+		n += factor * int64(input[i]-'0')
 		factor *= 10
 	}
 	return n, nil
 }
 ```
 
-<GoEffSumLatencyPipeline />
+`Sum4` là `Sum2` với dòng `num, err := ParseInt(b[last:i])` trong vòng lặp. Đây là bốn phiên bản cạnh nhau. `benchstat` in `~` khi không phân biệt được hai kết quả, và hiện độ dao động (`± 10%`) cạnh mỗi trung vị. Trong lệnh, `benchstat` là cách viết gọn của `go run golang.org/x/perf/cmd/benchstat@latest`:
 
-<Concepts title="Mấy khái niệm ở mục này">
+<TerminalOutput command="benchstat -col /impl -filter '/impl:Sum1 OR /impl:Sum2 OR /impl:Sum3 OR /impl:Sum4' seq.txt" label="Apple M2 · Go 1.27.1 · 1.000.000 dòng · -cpu 1" caption="Mỗi cột được so với Sum1. Trung vị của 10 lần chạy. Mỗi bước kế tiếp: Sum2 -54,77% so với Sum1, Sum3 nhanh hơn Sum2 khoảng 11%, Sum4 nhanh hơn Sum3 khoảng 32%.">
+```text
+goos: darwin
+goarch: arm64
+pkg: sumdemo
+cpu: Apple M2
+    │     Sum1     │                Sum2                 │                Sum3                 │                Sum4                 │
+    │    sec/op    │   sec/op     vs base                │   sec/op     vs base                │   sec/op     vs base                │
+Sum   52.07m ± 10%   23.55m ± 5%  -54.77% (p=0.000 n=10)   21.02m ± 7%  -59.63% (p=0.000 n=10)   14.36m ± 7%  -72.42% (p=0.000 n=10)
 
-- **Hàm chuyên dụng thay hàm đa năng**: hàm thư viện chuẩn phải gánh nhiều kiểm tra biên (chuỗi nhiều ký tự, 36 hệ cơ số, xóa ký tự `\r`); tự viết hàm hẹp cho đúng điểm nghẽn 70% trên profile đem lại cú tăng tốc sạch sẽ hơn mọi mẹo vặt.
-- **Đảo ngược đánh đổi**: `Sum3` phải dùng `unsafe`, nhưng chỉ một vòng tối ưu tiếp theo (`Sum4`) vừa nhanh hơn gần 2 lần vừa bỏ được hẳn `unsafe`.
+    │     Sum1      │                 Sum2                 │                 Sum3                 │                 Sum4                 │
+    │     B/op      │     B/op      vs base                │     B/op      vs base                │     B/op      vs base                │
+Sum   29.938Mi ± 0%   7.047Mi ± 0%  -76.46% (p=0.000 n=10)   7.047Mi ± 0%  -76.46% (p=0.000 n=10)   7.047Mi ± 0%  -76.46% (p=0.000 n=10)
+
+    │    Sum1    │                Sum2                │                Sum3                │                Sum4                │
+    │ allocs/op  │ allocs/op   vs base                │ allocs/op   vs base                │ allocs/op   vs base                │
+Sum   6.000 ± 0%   5.000 ± 0%  -16.67% (p=0.000 n=10)   5.000 ± 0%  -16.67% (p=0.000 n=10)   5.000 ± 0%  -16.67% (p=0.000 n=10)
+```
+</TerminalOutput>
+
+Đọc từ trái sang phải. Bỏ việc cắt giảm 55% thời gian và 76% bộ nhớ. Bỏ bản chép string thêm 11%, bộ nhớ không đổi. Bộ parse riêng thêm 32% nữa và xoá luôn lời gọi `unsafe`, nên code cuối vừa nhanh hơn vừa an toàn hơn `Sum3`. Trên máy của tác giả sách, các phiên bản tương tự chạy 101, 50, 25 và 14 ms cho 2.000.000 dòng. Số khác nhau nhưng hình dạng thì giống.
+
+Mục tiêu 1 đòi 20 ms. `Sum2` (23,55 ms) và `Sum3` (21,02 ms) chưa đạt, `Sum4` (14,36 ms) đạt. **Dừng ở đó.** Tinh chỉnh thêm sẽ đổi tính dễ đọc lấy một yêu cầu không ai đặt ra.
+
+Cũng cần thành thật về cái `Sum4` đã bỏ, như sách vẫn làm. `strconv.ParseInt` xử lý những trường hợp mà `ParseInt` của ta không xử lý. Một dòng trống làm bản của ta panic với `index out of range [0] with length 0`; `+5` bị từ chối như lỗi cú pháp, trong khi `strconv` chấp nhận; và `99999999999999999999` tràn số âm thầm thành `7766279631452241919`, trong khi `strconv` trả lỗi ngoài phạm vi (mình đã chạy cả ba). Điều đó ổn khi bạn kiểm soát được đầu vào và sai khi không. Đây là mẫu "đổi tính năng lấy tốc độ" trong *Efficient Go*: cách tăng tốc rẻ nhất thường là một tính năng bạn sống được khi thiếu nó.
+
+<Concepts>
+
+- **Tailored helper (hàm may đo)**: một hàm nhỏ chỉ làm đúng việc đầu vào của bạn cần. Hàm thư viện chuẩn được làm cho mọi trường hợp (mọi dấu ngăn cách, mọi cơ số), nên trên đường nóng đã được chứng minh, một bản hẹp hơn có thể thắng; ở chỗ khác hãy giữ bản chuẩn.
+- **`unsafe.String`**: tạo một `string` trỏ vào các byte có sẵn mà không chép. Nhanh, nhưng bạn hứa là các byte đó không đổi khi string còn sống.
+- **`-gcflags=-m`**: yêu cầu compiler in các quyết định escape analysis, ví dụ `does not escape` cho giá trị ở lại trên stack (xem bài 16).
 
 </Concepts>
 
 ---
 
-## 3. Streaming chỉ tốn O(1) RAM: vượt mặt `bufio.Scanner` với `Sum6Reader`
+## Streaming: bộ nhớ không lớn theo file
 
-Sang bài toán thứ hai: **chỉ được ăn tối đa `10 KB` Heap** ngay cả khi file phình tới 100 triệu dòng (`360 MB`+). `Sum4` vẫn tốn `O(N)` RAM vì đọc cả file bằng `os.ReadFile`.
+Mục tiêu 2 nói tối đa 10 KB trên heap, với mọi file. `Sum4` cấp phát 7,0 MiB vì `os.ReadFile` nạp cả file. Một lần chạy riêng ở 100.000, 1.000.000 và 10.000.000 dòng cho `Sum4` lần lượt 745.864, 7.389.576 và 73.892.232 byte mỗi lần gọi: bộ nhớ lớn theo file. Cách sửa là đọc một đoạn, dùng nó, rồi đọc đoạn kế vào cùng chỗ đó. Đó là **streaming**.
 
-Đổi sang `bufio.NewScanner` (`Sum5`) kéo ngay Heap rớt xuống ~`4,3 KB`, nhưng lại chậm hơn rõ rệt (`3,88 ms` so với `2,87 ms` trên M2) vì hàm `ScanLines` mặc định tốn công bóc `\r\n` và cấp phát phụ. Nhìn thẳng cách Bartłomiej xử lý gọn cả hai mặt tốc độ lẫn RAM `O(1)` trong **`Sum6Reader`** (`efficientgo/examples/pkg/sum/sum.go`):
+Cách của thư viện chuẩn là `bufio.Scanner`, đưa bạn từng dòng một. `Sum5` là cùng hàm đó, mở file và đọc qua nó:
 
-<GitHubCode repo="efficientgo/examples" path="pkg/sum/sum.go" lines="L252-L296" url="https://github.com/efficientgo/examples/blob/3b473a0075bdab7ce11c4d284a9031ef5fcf4341/pkg/sum/sum.go#L252-L296" caption="Hàm Sum6Reader đọc streaming trên buffer cố định 8 KB, tự dịch phần số cắt dở qua ranh giới Read().">
 ```go
-// Sum6 is like Sum4, but trying to use max 10 KB of mem without scanner and bulk read.
-// Assuming no integer is larger than 8 000 digits.
-// Read more in "Efficient Go"; Example 10-8.
+func Sum5(fileName string) (ret int64, err error) {
+	f, err := os.Open(fileName)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		num, err := ParseInt(scanner.Bytes())
+		if err != nil {
+			return 0, err
+		}
+		ret += num
+	}
+	return ret, scanner.Err()
+}
+```
+
+Bộ nhớ của nó chỉ 4,2 KiB nhưng chậm hơn. Tự viết vòng lặp thì được cả hai. `Sum6Reader` đọc vào một buffer do bên gọi cấp:
+
+```go
 func Sum6(fileName string) (ret int64, err error) {
 	f, err := os.Open(fileName)
 	if err != nil {
 		return 0, err
 	}
-	defer errcapture.Do(&err, f.Close, "close file")
-
+	defer f.Close()
 	buf := make([]byte, 8*1024)
 	return Sum6Reader(f, buf)
 }
 
-func Sum6Reader(r io.Reader, buf []byte) (ret int64, err error) { // Just inlining this function saves 7% on latency
+func Sum6Reader(r io.Reader, buf []byte) (ret int64, err error) {
 	var offset, n int
 	for err != io.EOF {
 		n, err = r.Read(buf[offset:])
@@ -497,7 +1063,6 @@ func Sum6Reader(r io.Reader, buf []byte) (ret int64, err error) { // Just inlini
 		n += offset
 
 		var last int
-		//for i := 0; i < n; i++ { // Funny enough this is 5% slower!
 		for i := range buf[:n] {
 			if buf[i] != '\n' {
 				continue
@@ -506,7 +1071,6 @@ func Sum6Reader(r io.Reader, buf []byte) (ret int64, err error) { // Just inlini
 			if err != nil {
 				return 0, err
 			}
-
 			ret += num
 			last = i + 1
 		}
@@ -519,136 +1083,486 @@ func Sum6Reader(r io.Reader, buf []byte) (ret int64, err error) { // Just inlini
 	return ret, nil
 }
 ```
-</GitHubCode>
 
-Hai chi tiết cực hay bên trong `Sum6Reader`:
-1. **`buf` rộng đúng `8 * 1024` byte (vừa 2 trang 4 KB của OS)**, nằm gọn trên cache CPU và giữ bộ nhớ gần như bằng 0 trên Heap (đo trên Go 1.27 mất chỉ `216 B` heap mỗi lượt!).
-2. Hễ `r.Read` cắt đôi một con số ngay ranh giới 8 KB (ví dụ phần `458` ở cuối chunk 1 và `902\n` ở đầu chunk 2), `copy(buf, buf[last:n])` đẩy gọn 3 byte `458` đó về đầu mảng và gán `offset = 3` để lần `r.Read(buf[offset:])` tiếp theo nối ghép liền mạch! Đừng quên đóng file chuẩn (`errcapture.Do`) và đọc cạn stream tới `io.EOF` trước khi đóng kết nối mạng.
+`io.Reader` là mọi giá trị có phương thức `Read(p []byte) (n int, err error)`; `*os.File` và `strings.Reader` đều có. `Read` điền vào `p` tối đa `len(p)` byte và cho biết đã ghi bao nhiêu. Hết đầu vào thì nó trả `io.EOF`, ở đây không phải lỗi, nên vòng lặp hiểu là "xử lý phần đang có rồi dừng".
 
-<GoEffStreamingBuffer />
+Phần khó là cuối buffer. Một lần đọc dừng ở chỗ buffer đầy, thường là giữa một con số. Code giữ lại phần đuôi chưa xong: `offset = n - last` là số byte nằm sau dấu xuống dòng cuối, và `copy(buf, buf[last:n])` dời chúng lên đầu. Lần `Read` kế ghi vào ngay sau chúng, nên con số đến đủ:
 
-<GoThreeRsReaderStreamCode />
+<GoP19StreamWindow />
 
-<Concepts title="Mấy khái niệm ở mục này">
+Bạn có thể xem điều này với một buffer nhỏ hơn 8 KiB nhiều. Cùng hàm đó, buffer 10 byte, và đầu vào có các con số không khớp với buffer. Đây là một test trong cùng package với `Sum6Reader`:
 
-- **Ghép ranh giới chunk trên `io.Reader`**: giữ phần byte lẻ cuối block bằng `offset = n - last` và `copy(buf, buf[last:n])` để streaming kích thước cố định cho kết quả khớp 100% với đọc cả file.
-- **Đọc cạn &amp; đóng tài nguyên (`errcapture`)**: bắt lỗi `f.Close()` trong `defer` cho file ghi, và đọc cạn `resp.Body` tới `io.EOF` để kết nối TCP quay lại pool `Keep-Alive`.
+```go
+func TestSmallBuffer(t *testing.T) {
+	sum, err := Sum6Reader(strings.NewReader("12\n345\n6789\n10\n"), make([]byte, 10))
+	fmt.Println(sum, err)
+}
+```
+
+```text
+7156 <nil>
+```
+
+12 + 345 + 6789 + 10 là 7156, cùng đáp án với việc đọc cả đầu vào một lượt. Việc so từng phiên bản `Sum` với `want` chính là thứ chứng minh phần nối đoạn đúng trên file thật.
+
+Giờ tới số đo. `Sum6` dùng lại một buffer mà ta chọn cỡ: 8 KiB đủ nhỏ để nằm trong cache của CPU và còn dư so với mục tiêu 10 KB.
+
+<TerminalOutput command="benchstat -col /impl -filter '/impl:Sum4 OR /impl:Sum5 OR /impl:Sum6' seq.txt" label="Apple M2 · Go 1.27.1 · 1.000.000 dòng · -cpu 1" caption="Sum5 (bufio.Scanner) tiết kiệm bộ nhớ nhưng chậm hơn Sum4 44%. Sum6 có tốc độ thống kê là bằng Sum4 (~, p=0,063) với 8,18 KiB thay vì 7,0 MiB.">
+```text
+goos: darwin
+goarch: arm64
+pkg: sumdemo
+cpu: Apple M2
+    │    Sum4     │                 Sum5                 │             Sum6              │
+    │   sec/op    │    sec/op     vs base                │   sec/op     vs base          │
+Sum   14.36m ± 7%   20.69m ± 20%  +44.12% (p=0.000 n=10)   13.99m ± 3%  ~ (p=0.063 n=10)
+
+    │      Sum4       │                 Sum5                 │                 Sum6                 │
+    │      B/op       │     B/op      vs base                │     B/op      vs base                │
+Sum   7216.383Ki ± 0%   4.180Ki ± 0%  -99.94% (p=0.000 n=10)   8.180Ki ± 0%  -99.89% (p=0.000 n=10)
+
+    │    Sum4    │                Sum5                │                Sum6                │
+    │ allocs/op  │ allocs/op   vs base                │ allocs/op   vs base                │
+Sum   5.000 ± 0%   4.000 ± 0%  -20.00% (p=0.000 n=10)   4.000 ± 0%  -20.00% (p=0.000 n=10)
+```
+</TerminalOutput>
+
+`Sum6` cấp phát 8.376 byte mỗi lần gọi ở cả 100.000, 1.000.000 lẫn 10.000.000 dòng, nên bộ nhớ không còn phụ thuộc file. Mục tiêu 2 đạt: 8,18 KiB, với tốc độ của `Sum4`. Đây là cả chặng đường trong một hình:
+
+<GoP19SumLadder />
+
+Streaming cũng có giá của nó. Buffer phải lớn hơn dòng dài nhất, nếu không vòng lặp không bao giờ kết thúc. Mình thử buffer 4 byte với đầu vào `123456` và lời gọi không bao giờ trả về (test chạm timeout 5 giây), vì `buf[offset:]` rỗng và `Read` cứ trả về 0 byte. `Sum6Reader` giả định không số nào dài hơn khoảng 8.000 chữ số. Hãy ghi một giả định như thế ở chỗ người đọc sau nhìn thấy.
+
+Truyền buffer vào còn quyết định ai sở hữu nó. `Sum6Reader(r, buf)` tự nó không cấp phát gì, nên bên gọi cộng nhiều file có thể dùng một buffer cho tất cả. Đó là bước **Reuse**.
+
+<Concepts>
+
+- **Streaming**: xử lý đầu vào theo từng mảnh cỡ cố định thay vì nạp hết. Bộ nhớ không đổi dù đầu vào lớn cỡ nào, miễn là mỗi mảnh xử lý được độc lập.
+- **`io.Reader`**: interface đứng sau file, kết nối mạng và văn bản trong bộ nhớ. `Read(p)` điền `p` và trả về số byte đã ghi; `io.EOF` nghĩa là đầu vào kết thúc bình thường.
+- **Chunk boundary (ranh giới mảnh)**: chỗ một lần đọc kết thúc và lần kế bắt đầu. Thứ gì có thể bị cắt ở đó, như một số hay một dòng, phải được mang sang lần đọc kế.
 
 </Concepts>
 
 ---
 
-## 4. Chia khúc không đụng khóa &amp; sự thật về `sync.Pool`
+## Bốn nhân: chia khúc thắng worker pool
 
-Bài toán cuối là dùng **4 nhân CPU để tăng tốc tối đa**. Kết quả đo thật ngay trên Apple M2 cho thấy hai thái cực hoàn toàn trái ngược nhau:
+Mục tiêu 3 đòi 6 ns mỗi dòng khi có bốn CPU. Phép cộng không quan tâm thứ tự: tổng nửa đầu cộng tổng nửa sau bằng tổng của tất cả. Nên việc này chia được. Câu hỏi là chia thế nào. Mình thử ba cách trên bốn nhân (`-cpu 4`), mỗi cách xuất phát từ code tuần tự `Sum4` hoặc `Sum6`.
 
-<Figure src={dockCranes} alt="Dãy cần cẩu giàn cỡ lớn đang bốc dỡ các container song song xuống khoang tàu tại cảng" caption="Bốc hàng nhanh nhất là giao mỗi cần cẩu tự xử lý dứt điểm một khoang tàu riêng — bắt cả đội đứng chờ chuyển từng thùng hàng qua một băng chuyền chung chỉ tạo cảnh kẹt xe." sourceTitle="Wikimedia Commons: Container Cranes, Ship Dock, Goole" sourceUrl="https://commons.wikimedia.org/wiki/File:Container_Cranes,_Ship_Dock_-_geograph.org.uk_-_456695.jpg" />
+**Một goroutine cho mỗi dòng.** Dễ viết, vì goroutine rẻ (bài 7):
 
-- **Cái bẫy Worker Pool qua Channel (`41,35 ms`, `200.018 allocs/op`!)**: 1 goroutine đọc từng dòng rồi bắn qua `chan []byte` sang 4 worker. Vì việc cộng một số chỉ mất ~10 ns trong khi khóa/mở `runtime.chansend` kèm copy slice mất ~100+ ns, chạy 4 luồng theo kiểu này **CHẬM HƠN 14 LẦN so với chạy 1 luồng ở `Sum6`**!
-- **Chia khúc không điều phối (`0,73 ms`, `33,7 KB`, `21 allocs/op`!)**: sau khi `fgprof` vạch ra 50% độ trễ nằm ở khâu 1 luồng `os.ReadFile`, mình chia trước file thành 4 khúc byte chẵn theo dấu `\n` (`shardedRangeAt`), giao mỗi worker một **`io.NewSectionReader(f, begin, end-begin)`** cùng buffer 8 KB riêng — mỗi goroutine chỉ gửi **đúng 1 kết quả tổng** về lúc xong, giúp **tăng tốc gấp 4 lần (`0,73 ms` vs `2,87 ms`)**!
-
-Và trước khi vội nhét `sync.Pool` vào mọi struct, nhớ kết quả macrobenchmark 5 phút bằng `k6` khi thử 4 cách cấp phát cho workload `Sum` (`no-buffering`, `sync.Pool`, `gobwas/pool`, `static-buffers`): đúng là `sync.Pool` cắt giảm lượng rác sinh ra (`0,5 GB` vs `3,3 GB` alloc_space), nhưng lại làm **đỉnh Heap sống (`HeapInuse`) cao hơn cả code không dùng pool** vì áp lực GC giảm khiến các block trong pool cứ nằm giữ chỗ lâu hơn! **Cứ bắt đầu bằng code đơn giản, đo macrobenchmark thật rồi mới cân nhắc `sync.Pool`.**
-
-Nhìn vào mã nguồn `src/sync/pool.go` sẽ thấy cấu trúc đằng sau sức mạnh lẫn giới hạn của `sync.Pool`: mỗi processor `P` có slot `poolLocal` riêng lót đệm **128 byte** chống tranh cache (false sharing) giữa các nhân CPU, kèm lớp **`victim` cache** giữ dự phòng qua một chu kỳ GC:
-
-<GitHubCode repo="golang/go" path="src/sync/pool.go" lines="L48-L78" url="https://github.com/golang/go/blob/master/src/sync/pool.go#L48-L78" caption="Cấu trúc bên trong sync.Pool của Go: khe private/shared riêng cho từng P được đệm tròn bội số 128 byte để tránh nhiễu cache giữa nhiều core CPU.">
 ```go
-type Pool struct {
-	noCopy     noCopy
-	local      unsafe.Pointer // mảng [P]poolLocal riêng từng P
-	localSize  uintptr
-	victim     unsafe.Pointer // sống sót thêm đúng 1 nhịp GC
-	victimSize uintptr
-	New        func() any
+var wg sync.WaitGroup
+var last int
+for i := 0; i < len(b); i++ {
+	if b[i] != '\n' {
+		continue
+	}
+	wg.Add(1)
+	go func(line []byte) {
+		defer wg.Done()
+		num, err := ParseInt(line)
+		if err != nil {
+			return
+		}
+		atomic.AddInt64(&ret, num) // add to the shared total without a lock
+	}(b[last:i])
+	last = i + 1
 }
+wg.Wait()
+```
 
-type poolLocalInternal struct {
-	private any       // khe riêng không cần lock cho P hiện tại
-	shared  poolChain // chủ đẩy/lấy đầu, P khác trộm ở đuôi
-}
+**Một pool cố định cấp việc qua một channel.** Pool từ [Go concurrency patterns](/blog/go-concurrency-patterns-worker-pools-pipelines/): 4 worker, một goroutine cấp việc gửi mọi dòng qua channel, và mỗi worker tự cộng tổng của nó:
 
-type poolLocal struct {
-	poolLocalInternal
-	pad [128 - unsafe.Sizeof(poolLocalInternal{})%128]byte // chặn false sharing!
+```go
+func ConcurrentSum2(fileName string, workers int) (ret int64, _ error) {
+	b, err := os.ReadFile(fileName)
+	if err != nil {
+		return 0, err
+	}
+	var wg sync.WaitGroup
+	workCh := make(chan []byte, 10)
+	wg.Add(workers + 1)
+	go func() { // the feeder
+		var last int
+		for i := 0; i < len(b); i++ {
+			if b[i] != '\n' {
+				continue
+			}
+			workCh <- b[last:i]
+			last = i + 1
+		}
+		close(workCh)
+		wg.Done()
+	}()
+	for i := 0; i < workers; i++ {
+		go func() {
+			var sum int64
+			for line := range workCh {
+				num, err := ParseInt(line)
+				if err != nil {
+					continue
+				}
+				sum += num
+			}
+			atomic.AddInt64(&ret, sum)
+			wg.Done()
+		}()
+	}
+	wg.Wait()
+	return ret, nil
 }
 ```
-</GitHubCode>
 
-<QuoteCard author="Bryan Boreham" role="Kỹ sư Trưởng tại Grafana Labs" sourceTitle="Go GC & sync.Pool Production Experiences" sourceUrl="https://www.grafana.com/">
-sync.Pool phát huy cực tốt khi hàng nghìn goroutine tái sử dụng các buffer tạm kích cỡ đều đặn trong cùng 1 chu kỳ GC — nhưng luôn phải Reset sạch sẽ, loại bỏ ngay các buffer đột biến quá lớn trước khi Put và theo dõi sát HeapInuse dưới tải thật.
-</QuoteCard>
+**Chia khúc (sharding).** Cắt file thành bốn đoạn byte, cho mỗi worker một đoạn, và để mỗi worker chạy cùng vòng lặp `Sum6Reader` trên đoạn của nó, với buffer 8 KiB riêng. Lúc chạy không có gì dùng chung, và mỗi worker chỉ gửi một con số ở cuối. Công cụ là `io.NewSectionReader(r, off, n)`: nó trả về một reader chỉ nhìn thấy `n` byte của `r` bắt đầu từ `off`. `r` phải là một `io.ReaderAt` (có `ReadAt(p, off)`, đọc tại một vị trí và không để lại "vị trí hiện tại" dùng chung), mà `*os.File` là một ReaderAt, nên bốn worker đọc được bốn chỗ khác nhau của cùng một file cùng lúc.
 
-<GoSyncPoolLifecycleDemo />
+Điểm tinh tế duy nhất là chỗ cắt. Cắt ở `size/4` sẽ chặt một dòng làm đôi, nên mỗi chỗ cắt dời tới đầu dòng kế tiếp:
 
 ```go
-var bufPool = sync.Pool{
-	New: func() any { return new(bytes.Buffer) },
+// boundary returns the first line start at or after pos.
+func boundary(r io.ReaderAt, pos, size int64) int64 {
+	if pos <= 0 {
+		return 0
+	}
+	if pos >= size {
+		return size
+	}
+	var one [1]byte
+	for p := pos - 1; p < size; p++ {
+		if _, err := r.ReadAt(one[:], p); err != nil {
+			return size
+		}
+		if one[0] == '\n' {
+			return p + 1
+		}
+	}
+	return size
 }
 
-func encodeSafe(w io.Writer, rec Record) error {
+func ConcurrentSum4(fileName string, workers int) (ret int64, err error) {
+	f, err := os.Open(fileName)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	s, err := f.Stat()
+	if err != nil {
+		return 0, err
+	}
+	size := s.Size()
+	per := size / int64(workers)
+	resultCh := make(chan int64)
+	for i := 0; i < workers; i++ {
+		go func(i int) {
+			begin := boundary(f, int64(i)*per, size)
+			end := size
+			if i != workers-1 {
+				end = boundary(f, int64(i+1)*per, size)
+			}
+			r := io.NewSectionReader(f, begin, end-begin)
+			sum, _ := Sum6Reader(r, make([]byte, 8*1024))
+			resultCh <- sum
+		}(i)
+	}
+	for i := 0; i < workers; i++ {
+		ret += <-resultCh
+	}
+	return ret, nil
+}
+```
+
+Code ở trên bỏ qua hai thứ để ý tưởng dễ thấy: lỗi từ `Sum6Reader` của worker bị bỏ (`sum, _ :=`), và file không kết thúc bằng xuống dòng sẽ mất dòng cuối. Code thật trả lỗi về qua channel.
+
+<GoP19Sharding />
+
+Kết quả, lấy `Sum6` chạy ở `-cpu 4` làm mốc:
+
+<TerminalOutput command="benchstat -col /impl -filter '/impl:Sum6 OR /impl:Goroutine-per-line OR /impl:Channel-workers OR /impl:Sharded-SectionReader' conc.txt" label="Apple M2 · Go 1.27.1 · 1.000.000 dòng · -cpu 4" caption="Một goroutine mỗi dòng chậm hơn Sum6 1686%, pool cấp việc qua channel chậm hơn 787%, còn chia khúc nhanh hơn khoảng 3 lần (ít hơn 69% thời gian). Bản chia khúc dao động nhiều hơn (± 29%): M2 có 4 nhân hiệu năng và 4 nhân tiết kiệm điện, và -cpu 4 không chọn nhân nào.">
+```text
+goos: darwin
+goarch: arm64
+pkg: sumdemo
+cpu: Apple M2
+             │     Sum6     │            Goroutine-per-line            │            Channel-workers             │        Sharded-SectionReader         │
+             │    sec/op    │     sec/op      vs base                  │    sec/op      vs base                 │    sec/op     vs base                │
+Concurrent-4   13.820m ± 3%   246.862m ± 24%  +1686.24% (p=0.000 n=10)   122.570m ± 5%  +786.89% (p=0.000 n=10)   4.292m ± 29%  -68.94% (p=0.000 n=10)
+
+             │     Sum6     │              Goroutine-per-line              │              Channel-workers               │         Sharded-SectionReader          │
+             │     B/op     │       B/op        vs base                    │      B/op        vs base                   │     B/op       vs base                 │
+Concurrent-4   8.180Ki ± 0%   77529.474Ki ± 1%  +947729.29% (p=0.000 n=10)   7216.991Ki ± 0%  +88130.64% (p=0.000 n=10)   32.967Ki ± 0%  +303.03% (p=0.000 n=10)
+
+             │    Sum6    │               Goroutine-per-line               │           Channel-workers            │        Sharded-SectionReader         │
+             │ allocs/op  │    allocs/op      vs base                      │  allocs/op   vs base                 │  allocs/op   vs base                 │
+Concurrent-4   4.000 ± 0%   2000008.000 ± 0%  +50000100.00% (p=0.000 n=10)   14.000 ± 0%  +250.00% (p=0.000 n=10)   27.000 ± 0%  +575.00% (p=0.000 n=10)
+```
+</TerminalOutput>
+
+Chia khúc thắng và đạt mục tiêu 3: 4,29 ms là 4,3 ns mỗi dòng. Một lần chạy thứ hai chỉ gồm `Sum6` và bản chia khúc (12 lượt, mỗi lượt 2 giây) cho 13,55 ms và 4,92 ms, nhanh hơn khoảng 2,8 lần; nên tóm tắt trung thực là "khoảng 3 lần". Bản chia khúc dùng 33 KiB, bốn buffer 8 KiB cộng thêm một ít.
+
+Hai cách kia thua nặng, và lý do giống nhau: **việc cho mỗi phần tử nhỏ hơn chi phí điều phối nó.** Parse một dòng mất khoảng 14 ns. Khởi động một goroutine, hoặc gửi một giá trị qua channel rồi đánh thức một worker để nhận, tốn nhiều hơn thế. CPU profile của bản channel cho thấy rõ: thời gian nằm ở `runtime.schedule`, `runtime.chanrecv` và `runtime.chansend`, còn `ParseInt` không nằm trong các mục đầu bảng. Bản một goroutine mỗi dòng cũng cấp phát khoảng hai object cho mỗi dòng (2.000.008 mỗi lần gọi).
+
+Điều này không có nghĩa worker pool là sai. Pool ở bài 9 là công cụ đúng khi mỗi job đắt, như một lời gọi HTTP hay một truy vấn database. Nó là công cụ sai khi một job chỉ tốn vài nano giây. Với việc rẻ, hãy chia **dữ liệu** từ trước và giao mỗi worker một mảnh lớn, độc lập. Đây là cái *Efficient Go* gọi là thuật toán không cần điều phối (coordination-free), và nó không cần lock, không cần channel cho từng phần tử, không có lưu lượng của scheduler trong lúc các worker chạy.
+
+Hai giới hạn trước khi bạn chép lại. Chia khúc chỉ có ích ở đây vì file đã nằm trong page cache và chi phí là parse; với ổ đĩa lạnh thì việc đọc chiếm phần lớn và bốn worker phần nhiều sẽ cùng chờ. Và nó chỉ dùng được cho việc mà các mảnh thực sự độc lập. Phép cộng không quan tâm thứ tự; một trung bình trượt cần dòng trước sẽ không chia khúc được.
+
+<Concepts>
+
+- **Sharding (chia khúc)**: chia đầu vào từ trước thành các đoạn độc lập, mỗi worker một đoạn, để các worker không nói chuyện với nhau cho tới khi báo kết quả cuối.
+- **`io.SectionReader`**: reader chỉ để lộ một cửa sổ `[off, off+n)` của một `io.ReaderAt`. Nhiều cái có thể đọc các phần khác nhau của cùng một file cùng lúc.
+- **`io.ReaderAt`**: interface có `ReadAt(p, off)`, đọc tại một vị trí chỉ định. Khác với `Read`, nó không dời vị trí dùng chung, nên gọi từ nhiều goroutine là an toàn.
+- **Coordination cost (chi phí điều phối)**: thời gian bỏ ra để giao việc cho goroutine (lập lịch, khoá, đánh thức), phải nhỏ hơn bản thân việc thì chạy đồng thời mới có lời.
+
+</Concepts>
+
+---
+
+## sync.Pool: khi nào tái chế có lợi và khi nào có hại
+
+Đến giờ tất cả mới là Reduce và Reuse. R cuối là cái người ta với tới đầu tiên, và đó chính là vấn đề. [Cơ chế cơ bản của `sync.Pool`](/blog/go-hardware-cpu-caches-virtual-memory-gc-allocator/#three-practical-ways-to-cut-allocations-96) nằm ở bài 16: một cache theo từng processor chứa các object tạm hoán đổi được, và bạn đưa vào pool bằng con trỏ. Phần này nói về cái giá của nó.
+
+### Một ca thật: pool giữ một buffer khổng lồ sống mãi
+
+Tháng 12 năm 2017, Joe Tsai mở [golang/go issue 23199](https://github.com/golang/go/issues/23199) với tựa "sync: Pool example suggests incorrect usage". Ý của anh là pool giả định mọi phần tử tốn cỡ như nhau, nhưng `bytes.Buffer` trong ví dụ của tài liệu có thể chứa từ vài byte đến hàng trăm megabyte. Một request lớn làm buffer phình ra; buffer được trả về pool; các request nhỏ cứ nhặt lại nó, và vùng cấp phát lớn đó bị ghim lại. Tính đến hôm nay issue vẫn còn mở.
+
+Thư viện chuẩn đã nhận ý đó. Trong Go 1.27.1, `fmt` dùng pool cho trạng thái printer, và `(*pp).free` trong `src/fmt/print.go` (dòng 155 đến 174) bỏ buffer quá lớn (quá 64 KiB) và chỉ trả lại printer, kèm chú thích nêu tên issue 23199. Đây là cùng ý đó thành một hàm của riêng bạn:
+
+```go
+var bufPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}
+
+func render(w io.Writer, name string) error {
 	buf := bufPool.Get().(*bytes.Buffer)
-	buf.Reset() // bắt buộc: không reset sẽ trộn lẫn dữ liệu nhạy cảm của request trước!
+	buf.Reset() // clear what the last user left behind
 	defer func() {
-		// Chặn 1 request phình 4 MB nằm lỳ trong victim cache suốt 2 vòng GC:
-		if buf.Cap() <= 64*1024 {
+		if buf.Cap() <= 64<<10 { // same idea: do not keep a huge buffer
 			bufPool.Put(buf)
 		}
 	}()
-	// ... ghi JSON vào buf rồi đẩy ra w ...
-	return nil
+	fmt.Fprintf(buf, "hello, %s\n", name)
+	_, err := w.Write(buf.Bytes())
+	return err
 }
 ```
 
-<QuoteCard author="Bartłomiej Płotka" role="Tác giả Efficient Go & Maintainer Prometheus" sourceTitle="Efficient Go — Quy trình Tối ưu Hiệu năng Thực dụng" sourceUrl="https://www.bwplotka.dev/">
-Tối ưu hiệu năng cần đi đúng thứ tự lợi nhuận: trước hết bỏ bớt việc thừa, giảm cấp phát mới, tái sử dụng lại chính buffer của người gọi qua streaming, và chỉ đưa sync.Pool vào sau cùng khi macrobenchmark chứng minh đáng giá.
-</QuoteCard>
+`buf.Reset()` làm rỗng buffer nhưng giữ lại vùng nhớ. Bỏ nó thì người dùng sau sẽ thấy các byte của người dùng trước. `buf.Cap()` là cỡ vùng nhớ phía sau. Gọi `render` hai lần với một `strings.Builder` làm writer thì in ra:
 
-| Chiến lược Tối ưu | Phát huy mạnh nhất khi | Rủi ro / Tác dụng ngược | Nguyên tắc bảo vệ bắt buộc |
-| :--- | :--- | :--- | :--- |
-| **Reduce (`make([]T, 0, n)`, tự parse)** | Biết sẵn độ dài hoặc thư viện chuẩn quá thừa | Gần như 0 rủi ro; nên làm đầu tiên | Đo bằng `pprof` chọn đúng điểm nóng |
-| **Reuse (`Sum6Reader`, slice từ caller)** | Đọc stream file/mạng trong RAM `O(1)` cố định | Dễ giữ nhầm mảng lỡ phình to sau spike | Giới hạn kích cỡ cố định (`8 KB`) |
-| **Recycle (`sync.Pool`)** | Nhiều goroutine đẻ buffer tạm dày đặc | Quên Reset -> lộ dữ liệu; có thể tăng `HeapInuse` | `Reset()` trước khi `Put` & bỏ qua `cap > 64 KiB` |
-| **Chia khúc (`io.SectionReader`)** | Tác vụ CPU nặng đa luồng (parse, giải nén) | Dễ chặt đôi bản ghi ngay ranh giới block | Căn lại biên cắt tới đúng ký tự `\n` kế tiếp |
-
-```go
-// Chia trước khúc byte theo ranh giới dòng để 4 worker đọc & cộng song song 0 tranh lock:
-begin, end := shardedRangeAt(workerID, workers, fileSize, file)
-sr := io.NewSectionReader(file, begin, end-begin) // đọc độc lập từng dải file
-localSum, _ := Sum6Reader(sr, make([]byte, 8*1024))
-results <- localSum // chỉ gửi đúng 1 kết quả cuối thay vì 200.000 dòng!
+```text
+hello, gopher
+hello, pool
 ```
 
-<GoEffShardedWorkersVsPool />
+### Ba cách pool làm bạn thất vọng
 
-Tự tay bấm chuyển từng phiên bản từ `Sum1` (`6,0 ms` / `6,2 MB`) tới `Sharded SectionReader` (`0,73 ms` / `33,7 KB`) trong mô phỏng tương tác dưới đây:
+**1. Bạn thêm nó vào mà chẳng có gì đổi.** Lỗi dễ mắc nhất là làm một slice lấy từ pool phình ra rồi quên cất slice lớn hơn trở lại, nên pool cứ đưa ra bản nhỏ ban đầu và mỗi lần gọi lại phải phình lại. Mình benchmark một hàm append 1.000.000 byte: không dùng lại gì, dùng một buffer tĩnh, dùng pool đúng, và dùng pool mà slice đã phình không được cất lại:
 
-<GoEffSumEvolutionDemo />
+```go
+var pool = sync.Pool{New: func() any { b := make([]byte, 0, 1<<20); return &b }}
 
-<Concepts title="Mấy khái niệm ở mục này">
+// forgetful: grows the slice but never stores it back in the pool entry.
+var poolSmall = sync.Pool{New: func() any { b := make([]byte, 0, 64); return &b }}
 
-- **Coordination-free sharding (`io.SectionReader`)**: chia sẵn phạm vi dữ liệu ngay từ đầu theo ranh giới dòng `\n` để các worker tự đọc và xử lý độc lập, triệt tiêu hoàn toàn mutex hay channel lock trong vòng lặp.
-- **Amortized channel batching**: thay vì đẩy từng item nhỏ xíu qua channel, chỉ gửi theo lô lớn (batch) hoặc gửi 1 lần tổng hợp kết quả cuối cùng.
+func fill(buf []byte) []byte {
+	buf = buf[:0]
+	for i := 0; i < 1_000_000; i++ {
+		buf = append(buf, 'a')
+	}
+	return buf
+}
+
+func BenchmarkFill(b *testing.B) {
+	b.Run("impl=alloc", func(b *testing.B) {
+		for b.Loop() {
+			sink = len(fill(nil))
+		}
+	})
+	b.Run("impl=static", func(b *testing.B) {
+		buf := make([]byte, 0, 1<<20)
+		for b.Loop() {
+			sink = len(fill(buf))
+		}
+	})
+	b.Run("impl=pool", func(b *testing.B) {
+		for b.Loop() {
+			bp := pool.Get().(*[]byte)
+			*bp = fill(*bp) // store the grown slice back
+			sink = len(*bp)
+			pool.Put(bp)
+		}
+	})
+	b.Run("impl=pool-forgot-store", func(b *testing.B) {
+		for b.Loop() {
+			bp := poolSmall.Get().(*[]byte)
+			buf := fill(*bp) // grows, but *bp still points at the small array
+			sink = len(buf)
+			poolSmall.Put(bp)
+		}
+	})
+}
+```
+
+(`sink` là một biến `int` cấp package để compiler không xoá mất phần việc, như ở bài 17.)
+
+<TerminalOutput command="benchstat -col /impl fill.txt" label="Apple M2 · Go 1.27.1 · -cpu 1" caption="Pool đúng nhanh hơn cấp phát thường 44% và không dùng bộ nhớ nào. Pool quên cất chậm hơn việc không dùng pool 3,3% (p=0,005): nó làm mọi việc của một pool mà không được lợi gì.">
+```text
+goos: darwin
+goarch: arm64
+pkg: sumdemo
+cpu: Apple M2
+     │    alloc    │               static                │                pool                 │         pool-forgot-store          │
+     │   sec/op    │   sec/op     vs base                │   sec/op     vs base                │   sec/op     vs base               │
+Fill   789.5µ ± 3%   459.9µ ± 2%  -41.75% (p=0.000 n=10)   438.4µ ± 2%  -44.47% (p=0.000 n=10)   815.2µ ± 7%  +3.26% (p=0.005 n=10)
+
+     │    alloc     │                static                 │                 pool                  │          pool-forgot-store          │
+     │     B/op     │     B/op      vs base                 │     B/op      vs base                 │     B/op      vs base               │
+Fill   4.999Mi ± 0%   0.000Mi ± 0%  -100.00% (p=0.000 n=10)   0.000Mi ± 0%  -100.00% (p=0.000 n=10)   4.999Mi ± 0%  +0.00% (p=0.000 n=10)
+
+     │   alloc    │               static               │                pool                │         pool-forgot-store         │
+     │ allocs/op  │ allocs/op  vs base                 │ allocs/op  vs base                 │ allocs/op   vs base               │
+Fill   30.00 ± 0%   0.00 ± 0%  -100.00% (p=0.000 n=10)   0.00 ± 0%  -100.00% (p=0.000 n=10)   31.00 ± 0%  +3.33% (p=0.000 n=10)
+```
+</TerminalOutput>
+
+Để ý rằng buffer tĩnh chỉ kém pool đúng chưa tới 5% (459,9 µs so với 438,4 µs). Khi số người dùng cố định, một buffer bạn sở hữu đơn giản hơn và không bị làm rỗng sau lưng bạn.
+
+**2. Pool tự rỗng.** Pool có thể bỏ bất cứ thứ gì, bất cứ lúc nào. Sau một lần garbage collection, các phần tử chuyển sang tầng thứ hai ("victim" cache); sau lần kế tiếp thì mất. Một processor làm điều này xác định được, nên chương trình đặt `GOMAXPROCS(1)` và đếm số lần pool phải tạo buffer mới:
+
+```go
+package main
+
+import (
+	"fmt"
+	"runtime"
+	"sync"
+)
+
+func main() {
+	runtime.GOMAXPROCS(1) // one P, so Get always looks in the same place
+
+	created := 0
+	pool := sync.Pool{New: func() any {
+		created++
+		return new([64]byte)
+	}}
+
+	a := pool.Get() // pool is empty: New runs
+	pool.Put(a)
+	b := pool.Get()
+	fmt.Println("no GC:        same buffer:", a == b, " New calls:", created)
+
+	pool.Put(b)
+	runtime.GC()
+	c := pool.Get()
+	fmt.Println("after 1 GC:   same buffer:", b == c, " New calls:", created)
+
+	pool.Put(c)
+	runtime.GC()
+	runtime.GC()
+	d := pool.Get()
+	fmt.Println("after 2 GCs:  same buffer:", c == d, " New calls:", created)
+}
+```
+
+```text
+no GC:        same buffer: true  New calls: 1
+after 1 GC:   same buffer: true  New calls: 1
+after 2 GCs:  same buffer: false  New calls: 2
+```
+
+Mình chạy năm lần và lần nào cũng ra ba dòng này. Khi có nhiều hơn một processor, một goroutine có thể chuyển sang processor khác giữa `Put` và `Get`, và buffer có thể bị lỡ ngay cả sau một lần GC, nên đừng xây gì trên việc object trong pool còn sống: cũng chương trình đó nhưng bỏ dòng `GOMAXPROCS(1)` in `false` sau một lần GC ở phần lớn các lần chạy. Microbenchmark không bao giờ thấy điều này, vì nó không để GC xảy ra giữa hai lần dùng. Một service thật thì có. Hãy bấm qua ba trường hợp bên dưới: trúng ô private của processor, tầng victim qua hai lần GC, và một buffer được trả về mà không `Reset`.
+
+<GoSyncPoolLifecycleDemo />
+
+**3. Nó tiết kiệm cấp phát, không phải thời gian hay bộ nhớ đỉnh.** Áp pool vào phép cộng streaming. `Sum6Pool` là `Sum6` với buffer 8 KiB mượn từ một `sync.Pool` các `*[]byte` thay vì tạo ở mỗi lần gọi:
+
+```go
+var sumBufPool = sync.Pool{New: func() any { b := make([]byte, 8*1024); return &b }}
+
+func Sum6Pool(fileName string) (ret int64, err error) {
+	f, err := os.Open(fileName)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	bp := sumBufPool.Get().(*[]byte)
+	defer sumBufPool.Put(bp)
+	return Sum6Reader(f, *bp)
+}
+```
+
+<TerminalOutput command="benchstat -col /impl -filter '/impl:Sum6 OR /impl:Sum6Pool' seq.txt" label="Apple M2 · Go 1.27.1 · 1.000.000 dòng · -cpu 1" caption="Pool giảm 97,8% số byte cấp phát và 1 trong 4 lần cấp phát, và làm lời gọi nhanh hơn 2,4%. Giá trị p (0,043) chỉ vừa lọt dưới 0,05.">
+```text
+goos: darwin
+goarch: arm64
+pkg: sumdemo
+cpu: Apple M2
+    │    Sum6     │              Sum6Pool              │
+    │   sec/op    │   sec/op     vs base               │
+Sum   13.99m ± 3%   13.65m ± 2%  -2.39% (p=0.043 n=10)
+
+    │    Sum6     │              Sum6Pool              │
+    │    B/op     │    B/op     vs base                │
+Sum   8376.0 ± 0%   185.0 ± 0%  -97.79% (p=0.000 n=10)
+
+    │   Sum6    │             Sum6Pool             │
+    │ allocs/op │ allocs/op   vs base              │
+Sum   4.000 ± 0%   3.000 ± 0%  -25.00% (p=0.000 n=10)
+```
+</TerminalOutput>
+
+Số byte cấp phát giảm gần 98%, còn thời gian hầu như không nhúc nhích. Buffer 8 KiB chưa bao giờ là thứ làm `Sum6` chậm: các lần đọc và việc parse mới là thứ đó. Dùng pool còn thêm một `Get`, một `Put` và một kiểu con trỏ phải giữ cho đúng. *Efficient Go* chạy cùng thí nghiệm ở quy mô lớn hơn: một service cộng các file 10 và 100 triệu dòng, thử năm phút dưới tải với bốn cách làm buffer. Bản dùng `sync.Pool` cấp phát tổng cộng ít hơn nhiều (khoảng 0,5 GB so với 3,3 GB của bản không buffer), nhưng bản không buffer lại có heap đỉnh thấp nhất, vì garbage collector chạy thường hơn. Mình không tái hiện bài kiểm tra tải đó; mình trích kết quả của nó. Bài học giống bài học của ca này: pool giảm công cấp phát, chưa chắc giảm bộ nhớ, và chỉ macrobenchmark mới cho biết service của bạn có lời không.
+
+Theo lời sách, pool đáng giá khi cả bốn điều sau cùng đúng:
+
+- Bạn dùng lại object lớn hoặc rất nhiều object, nên bản thân việc cấp phát là chi phí.
+- Bạn không quan tâm nội dung, chỉ quan tâm khối nhớ.
+- Nhiều goroutine dùng lại chúng, với số lượng thay đổi.
+- Việc dùng lại xảy ra giữa các phép tính nhanh, cách nhau tối đa một chu kỳ GC.
+
+Thư viện chuẩn thoả cả bốn: `fmt` định dạng chữ trong nhiều goroutine, mỗi lời gọi ngắn, mọi buffer cùng một loại. Trong HTTP service ở [bài 10](/blog/go-http-service-net-http-json-middleware/), `writeJSON` không nên có pool cho tới khi profile cho thấy cấp phát của nó là chi phí.
+
+<Concepts>
+
+- **Victim cache**: tầng thứ hai bên trong `sync.Pool`. Mỗi lần garbage collection, các phần tử của pool chuyển vào đó, và lần collection kế tiếp bỏ chúng đi. Nhờ vậy buffer nhàn rỗi có thêm một chu kỳ để được dùng lại trước khi bị giải phóng.
+- **Pooling và caching**: pool chứa các khối hoán đổi được, bạn không quan tâm lấy cái nào. Cache ánh xạ khoá tới giá trị cụ thể và giữ chúng. Đừng bao giờ dùng `sync.Pool` cho thứ phải sống sót, như một connection hay một phiên đăng nhập.
+- **Static buffer (buffer tĩnh)**: buffer do code của bạn sở hữu cho một số người dùng cố định. Khi biết số người dùng, nó đơn giản hơn pool và không biến mất.
 
 </Concepts>
+
+---
+
+## Bạn đã leo hết cái thang
+
+Đây là bài cuối của cấp hiệu năng, và là cuối cái thang. Đây là cả chặng leo, kèm bài để mở khi bạn quên một quy tắc:
+
+<GoP19Ladder />
+
+- **Cấp 1, Write Go (bài 1 đến 6):** [Go basics](/blog/go-first-program-modules-packages/), [types và functions](/blog/go-variables-types-pointers-functions/), [collections](/blog/go-slices-maps-strings/), [structs và interfaces](/blog/go-structs-methods-interfaces/), [errors](/blog/go-errors-defer-panic/), [testing](/blog/go-testing-table-tests/).
+- **Cấp 2, Run things at once (bài 7 đến 10):** [goroutine và channel](/blog/go-goroutines-channels-select/), [context và lock](/blog/go-context-timeouts-mutexes/), [concurrency patterns](/blog/go-concurrency-patterns-worker-pools-pipelines/), [xây một HTTP service](/blog/go-http-service-net-http-json-middleware/).
+- **Cấp 3, Under the hood and traps (bài 11 đến 14):** [memory](/blog/go-memory-data-types-slices-maps-strings/), [interfaces deep dive](/blog/go-abstractions-interfaces-generics-errors/), [concurrency deep dive](/blog/go-concurrency-scheduler-channels-context-mutexes/), [Go in production](/blog/go-production-stdlib-cpu-cache-gc-kubernetes/).
+- **Cấp 4, Measure, then optimize (bài 15 đến 19):** [when to optimize](/blog/go-efficiency-workflow-raer-tfbo-hardware-memory/), [hardware và GC](/blog/go-hardware-cpu-caches-virtual-memory-gc-allocator/), [benchmarking](/blog/go-observability-metrics-microbenchmarks-benchstat/), [profiling](/blog/go-profiling-pprof-flamegraphs-off-cpu-continuous/), và bài này.
+
+Một thói quen đáng mang theo từ cấp 4 là vòng lặp mà bài này đã chạy sáu lần: viết mục tiêu, benchmark, profile, đổi một thứ, so bằng `benchstat`, và dừng khi đã đạt mục tiêu.
+
+Bước cuối là tự kiểm tra. [Go interview prep](/blog/go-interview-questions-output-live-coding/) hỏi các câu kinh điển đúng dạng chúng hay xuất hiện (chương trình này in ra gì, viết cái này ngay tại chỗ), và mỗi câu trả lời trỏ về bài dạy nó.
 
 ---
 
 ## Điểm rút ra (Key takeaways)
 
-- **Giữ đúng thứ tự ưu tiên tối ưu**: **Bớt việc thừa (Do Less Work)** → **Reduce** cấp phát → **Reuse** slice từ caller → cuối cùng mới **Recycle (`sync.Pool`)** nếu macrobenchmark chứng minh hiệu quả.
-- **Sẵn sàng viết hàm chuyên dụng cho điểm nghẽn**: bỏ `bytes.Split` đa năng và thay `strconv.ParseInt` ở `Sum4` không chỉ nhanh hơn hẳn mà còn bỏ được luôn `unsafe`.
-- **Dùng buffer cố định 8 KB để streaming O(1) RAM**: dịch `offset` cho số bị cắt ngang ở `Sum6Reader` giữ heap gần bằng không (chỉ `216 B/op` trên Go 1.27) mà vẫn nhanh hơn `bufio.Scanner`.
-- **Tránh bẫy truyền việc siêu nhỏ qua Go channel**: gửi từng dòng qua channel chậm hơn cả bản 1 luồng tới 14 lần; chia khúc `io.NewSectionReader` để worker tự chạy độc lập cho mức tăng 4x sạch sẽ.
-- **Đừng lạm dụng `sync.Pool` như cache**: chỉ dùng khi nhiều goroutine luân chuyển lượng object lớn cực nhanh giữa 1 chu kỳ GC, và luôn `Reset` sạch trước khi `Put`.
+- **Làm ít việc trước mọi thứ khác.** Bỏ danh sách các dòng (`Sum2`) và bộ parse tổng quát (`Sum4`) đưa việc từ 52,07 ms xuống 14,36 ms mà không cần chạy đồng thời hay pool.
+- **Profile, đổi một thứ, so sánh.** Mỗi bước ở trên đến từ mục lớn nhất trong profile và một bảng `benchstat`; bước unsafe cho 11% và bị bước sau xoá đi.
+- **Code may đo có giá.** `Sum4` panic với dòng trống và `Sum6Reader` lặp mãi với dòng dài hơn buffer. Hãy ghi những giả định đó ra.
+- **Streaming để bộ nhớ không đổi.** Một buffer 8 KiB do bên gọi sở hữu giữ tốc độ của `Sum4` và dùng 8.376 byte mỗi lần gọi ở 100.000 lẫn 10.000.000 dòng.
+- **Chia khúc việc rẻ; đừng xếp hàng nó.** Một goroutine mỗi dòng chậm hơn 1686% và pool qua channel chậm hơn 787% so với một nhân, vì việc cho mỗi dòng (khoảng 14 ns) nhỏ hơn chi phí điều phối. Bốn đoạn byte độc lập nhanh hơn khoảng 3 lần.
+- **Pool tiết kiệm cấp phát, không phải lúc nào cũng thời gian hay bộ nhớ đỉnh.** `Sum6Pool` giảm 97,8% byte cấp phát và 2,4% thời gian. Hãy Reset thứ bạn mượn, giới hạn thứ bạn trả, và đừng bao giờ tin object sống qua một lần GC.
 
 ---
 
-## Câu hỏi tự kiểm tra
+## Câu hỏi ôn tập (Review questions)
 
-1. Kể đúng thứ tự ba chữ R (**Reduce, Reuse, Recycle**) và nêu một thay đổi cụ thể trong bài toán `Sum` minh họa cho **Reduce** so với **Reuse**. *(Xem Mục 1 &amp; 2)*
-2. Giữa lộ trình tối ưu, `Sum3` từng phải dùng mẹo `unsafe` zero-copy `[]byte -> string` để vượt qua nút thắt `runtime.slicebytetostring`. Vì sao tới `Sum4` tối ưu hàm `parseIntBytes` lại giúp bỏ luôn được `unsafe` mà code còn chạy nhanh hơn? *(Xem Mục 2)*
-3. Giải thích cách `Sum6Reader` ghép chính xác số `458902` nếu `458` nằm ở cuối lần đọc chunk thứ nhất và `902\n` nằm ở đầu lần đọc chunk thứ hai. *(Xem Mục 3)*
-4. Trên Apple M2, tại sao chia việc qua `chan []byte` cho 4 worker lại chạy chậm hơn bản 1 luồng `Sum6` tới **14 lần** (`41,35 ms` vs `2,87 ms`), còn chia khúc bằng `io.NewSectionReader` lại vọt lên nhanh gấp **4 lần** (`0,73 ms`)? *(Xem Mục 4)*
-5. Vì sao thí nghiệm tải `k6` 5 phút với `sync.Pool` lại cho đỉnh RAM sống (`HeapInuse`) cao hơn cách cấp phát không dùng pool, và bốn điều kiện hẹp nào mới nên dùng `sync.Pool`? *(Xem Mục 4)*
+1. Xếp do-less-work, Reduce, Reuse và Recycle theo thứ tự bạn sẽ thử, và nêu thay đổi trong ca `Sum` thuộc về mỗi bước. *(Xem hai phần đầu)*
+2. `Sum3` bỏ bản chép string bằng `unsafe.String`, và `Sum4` làm cho nó không cần thiết. `Sum4` đã đổi gì, và nó lỗi với đầu vào nào mà `strconv.ParseInt` xử lý được? *(Xem "Từ Sum1 đến Sum4")*
+3. Trong `Sum6Reader`, một lần đọc kết thúc sau `678` của số `6789`. Hai dòng nào giữ cho số đó không bị mất, và vòng lặp làm gì nếu một dòng dài hơn cả buffer? *(Xem "Streaming")*
+4. Một pool 4 worker cấp việc qua channel chậm hơn nhiều so với một nhân, nhưng bốn khúc `io.NewSectionReader` nhanh hơn khoảng 3 lần. Parse một dòng tốn bao nhiêu, một lần chuyển giao qua channel tốn bao nhiêu, và vì sao chia khúc tránh được cái thứ hai? *(Xem "Bốn nhân")*
+5. Một đồng đội thêm `sync.Pool` và benchmark cho thấy ít hơn 98% byte cấp phát và ít hơn 2% thời gian. Bạn kiểm tra gì trước khi merge, và tiêu chí nào trong bốn tiêu chí của pool có thể không đúng? *(Xem "sync.Pool")*
 
 </Vi>
