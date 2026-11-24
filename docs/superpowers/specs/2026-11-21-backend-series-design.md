@@ -1,14 +1,16 @@
-# Backend series (Python demos) — design (short)
+# Backend series (Backend with Python FastAPI) — design (short)
 
-Date: 2026-11-21. Status: **proposed v2** — Khang redirected v1 on 2026-11-21: *"the book is only a reference and Python is only a demo language — focus on backend knowledge."* Awaiting approval of the 12-post map below.
+Date: 2026-11-21. Status: **proposed v2** — Khang redirected v1 on 2026-11-21: *"the book is only a reference and Python is only a demo language — focus on backend knowledge."* Map approved; post 1 published 2026-11-23.
+
+**Revision v3 (Khang, 2026-11-23):** *"the series title should be Backend with Python FastAPI; the lessons combine FastAPI knowledge and backend foundations."* FastAPI is no longer only the demo: each post teaches the backend idea **and** how FastAPI does it. Sections below are updated to v3; the v2 quote above is kept as history.
 
 ## Intent
 
-New bilingual series `backend` — **backend engineering knowledge first, Python + FastAPI as the running demo**. Mirrors the site's series pattern (`src/data/series.ts`, `/blog/series/backend/` cover page, SeriesBar/Pager, `draft: true` until Khang flips). Lubanovic's *FastAPI* (O'Reilly 2023, `books/fastapi/FastAPI.pdf`, gitignored) is **a reference**, not the skeleton; posts cite it alongside primary sources (MDN, OWASP, 12factor, FastAPI/SQLAlchemy/Redis docs) and cross-link the DDIA series where concepts overlap.
+New bilingual series `backend` — **backend foundations and FastAPI, taught together**: FastAPI is woven into the body, never as a separate section: **every idea that touches code gets a runnable FastAPI example** (committed in `demo/`, with a real capture), and the prose around it explains that code — what each FastAPI piece does for the idea. No prose-only treatment of a code-level idea. Mirrors the site's series pattern (`src/data/series.ts`, `/blog/series/backend/` cover page, SeriesBar/Pager, `draft: true` until Khang flips). Lubanovic's *FastAPI* (O'Reilly 2023, `books/fastapi/FastAPI.pdf`, gitignored) is **a reference**, not the skeleton; posts cite it alongside primary sources (MDN, OWASP, 12factor, FastAPI/SQLAlchemy/Redis docs) and cross-link the DDIA series where concepts overlap.
 
-**The angle:** *AI writes your endpoints in seconds; backend judgment is still yours.* Each post teaches one backend competence, demonstrates it in a small running Python service, and shows what AI-generated code typically gets wrong there. Complements DDIA (data systems concepts) by covering the **service** side: HTTP, API design, layering, auth, testing, observability, deploys.
+**The angle:** *AI writes your endpoints in seconds; backend judgment is still yours.* Each post teaches one backend competence, explains the FastAPI features that implement it **inline, inside the same paragraphs** (no separate "In FastAPI" section), runs it in a small Python service, and shows what AI-generated code typically gets wrong there. Complements DDIA (data systems concepts) by covering the **service** side: HTTP, API design, layering, auth, testing, observability, deploys.
 
-## Post map (12, knowledge-first)
+## Post map (12, backend idea + FastAPI feature)
 
 | # | Slug | Knowledge topic | Demo (Python) | Book ref |
 |---|---|---|---|---|
@@ -42,9 +44,9 @@ Everything else (HTTP lifecycle, REST design, layering, async/workers, auth, tes
 
 ## Series identity
 
-- Title: EN **"How backend actually works"** / VI **"Hiểu đúng bản chất Backend"** (family identity with "How Go actually works").
+- Title: EN **"Backend with Python FastAPI"** / VI **"Backend với Python FastAPI"** (v3; was "How backend actually works" / "Hiểu đúng bản chất Backend").
 - Kicker: "A 12-part series" / "Series 12 bài". Category `backend`; tags per post (`python`, `fastapi`, + topic).
-- Credit: "Demonstrated in Python with FastAPI; *FastAPI: Modern Python Web Development* (Bill Lubanovic, O'Reilly 2023) among the references." Per-post `sources` cite the exact book chapters used **plus** primary docs.
+- Credit: "Backend foundations and FastAPI, taught side by side; *FastAPI: Modern Python Web Development* (Bill Lubanovic, O'Reilly 2023) among the references." Per-post `sources` cite the exact book chapters used **plus** primary docs.
 - Series cover plate: a real screenshot of the demo service's Swagger `/docs` page (captured locally), same "real artifact" convention as the golang series.
 
 ## Cover art convention (per the Go-Series Cover Convention)
@@ -53,7 +55,7 @@ Each post's frontmatter `cover` = a genuine screenshot of the running stack on t
 
 ## Non-goals (v1)
 
-- Python language deep-dives (asyncio internals, typing theory) — Python serves the topic, not the reverse.
+- Python language deep-dives (asyncio internals, typing theory) — Python serves the topic, not the reverse. FastAPI features are in scope only where they implement the post's backend idea (no API-reference tours).
 - Book Part IV (gallery: games, forms, dataviz) unused unless a topic needs it.
 - Quiz sets — follow the DDIA pattern later, once posts exist.
 - No changes to existing series/posts/components.

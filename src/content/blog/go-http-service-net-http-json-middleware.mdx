@@ -1,0 +1,1485 @@
+---
+title: "Build a Go HTTP service"
+title_vi: "Xây dựng HTTP service bằng Go"
+description: "One small JSON API with only the Go standard library: routing, validation, middleware, slog, timeouts, graceful shutdown, tests and a FROM scratch image."
+description_vi: "Một JSON API nhỏ chỉ dùng thư viện chuẩn Go: routing, kiểm tra dữ liệu, middleware, slog, timeout, tắt êm, test và image FROM scratch."
+date: 2026-11-23
+category: "backend"
+tags: ["golang", "http", "net/http", "json", "middleware", "slog", "docker", "efficient-go"]
+cover: "../../assets/series/golang/go-gopher-biplane.jpg"
+cover_alt: "Drawing of the Go gopher flying a biplane, drawn by Renee French"
+draft: false
+sources:
+  - { title: "Efficient Go", author: "Bartłomiej Płotka", chapters: "Ch. 2 (standard library first, minimal HTTP server example, avoiding global state such as the default mux)", url: "https://www.oreilly.com/library/view/efficient-go/9781098105709/" }
+  - { title: "The complete guide to Go net/http timeouts", author: "Filippo Valsorda (Cloudflare Blog, 2016)", url: "https://blog.cloudflare.com/the-complete-guide-to-golang-net-http-timeouts/" }
+  - { title: "Routing Enhancements for Go 1.22", author: "Jonathan Amsterdam (The Go Blog)", url: "https://go.dev/blog/routing-enhancements" }
+  - { title: "Structured Logging with slog", author: "Jonathan Amsterdam (The Go Blog)", url: "https://go.dev/blog/slog" }
+  - { title: "net/http package documentation (Server, ServeMux, Server.Shutdown)", author: "The Go Authors", url: "https://pkg.go.dev/net/http" }
+  - { title: "net/http/httptest package documentation", author: "The Go Authors", url: "https://pkg.go.dev/net/http/httptest" }
+  - { title: "os/signal: NotifyContext", author: "The Go Authors", url: "https://pkg.go.dev/os/signal#NotifyContext" }
+  - { title: "Go gopher biplane (CC BY 3.0), used as the cover", author: "Renee French", url: "https://commons.wikimedia.org/wiki/File:Go_gopher_biplane.jpg" }
+  - { title: "BLW High Speed Sorting Machine (CC BY-SA 2.0 UK), The Postal Museum collection", author: "Mike Peel", url: "https://commons.wikimedia.org/wiki/File:BLW_High_Speed_Sorting_Machine..jpg" }
+---
+
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import DemoFrame from '../../components/mdx/DemoFrame.astro';
+import En from '../../components/mdx/En.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import GoP10Decode from '../../components/mdx/GoP10Decode.astro';
+import GoP10Mux from '../../components/mdx/GoP10Mux.astro';
+import GoP10Recorder from '../../components/mdx/GoP10Recorder.astro';
+import GoP10Shutdown from '../../components/mdx/GoP10Shutdown.astro';
+import GoP10Timeouts from '../../components/mdx/GoP10Timeouts.astro';
+import GoHttpRequestPathDemo from '../../components/mdx/GoHttpRequestPathDemo.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import heroSorter from '../../assets/blog/go-http-service-net-http-json-middleware/hero-sorting-machine.jpg';
+
+<En>
+
+<Figure src={heroSorter} alt="A British Post Office high-speed letter sorting machine on display at The Postal Museum" caption="Every letter goes through the same machine in the same order, and the machine never needs to know what the letter says. A middleware chain gives every HTTP request the same treatment before your handler sees it. This is a Post Office high-speed letter sorting machine (153-box version)." sourceTitle="Wikimedia Commons: BLW High Speed Sorting Machine (Mike Peel, CC BY-SA 2.0 UK), from The Postal Museum collection" sourceUrl="https://commons.wikimedia.org/wiki/File:BLW_High_Speed_Sorting_Machine..jpg" />
+
+> "It's critical for an HTTP server exposed to the Internet to enforce timeouts on client connections."
+> &mdash; *Filippo Valsorda*, *The complete guide to Go net/http timeouts* (Cloudflare, 2016)
+
+### The default server waits for ever
+
+Cloudflare's guide to Go's `net/http` timeouts explains why that quote matters. A server with no timeouts waits for a slow or vanished client as long as the client likes. The guide warns that "very slow or disappearing clients might leak file descriptors", and the packaged shortcut `http.ListenAndServe` leaves every timeout off with no way to set them.
+
+So the first rule of this post is to build the `http.Server` yourself and set its timeouts on day one. The rest of the service works the same way: the standard library gives you small parts, and you put them together yourself.
+
+Here are the four clocks on a single connection, with the values this post sets.
+
+<GoP10Timeouts />
+
+By the end you will have one JSON API in one `main.go`, its tests, and a container image built from nothing. It uses only the standard library, and it pulls together the series so far: structs and methods ([post 4](/blog/go-structs-methods-interfaces/)), errors and `recover` ([post 5](/blog/go-errors-defer-panic/)), table tests ([post 6](/blog/go-testing-table-tests/)), goroutines and channels ([post 7](/blog/go-goroutines-channels-select/)), and context and mutexes ([post 8](/blog/go-context-timeouts-mutexes/)). Every output below was captured on Go 1.27.1.
+
+<Callout type="note" title="TL;DR">
+Build the `http.Server` yourself and set its timeouts. Route with `mux.HandleFunc("GET /todos/{id}", h)`. A middleware is a function that takes a handler and returns a handler. Decode JSON with limits and validate it. Log with `log/slog`. On SIGTERM call `Server.Shutdown` so in-flight requests finish. Ship the binary in a `FROM scratch` image.
+</Callout>
+
+<Concepts>
+
+- **Handler**: anything with a `ServeHTTP(w, r)` method. It reads the request `r` and writes the response to `w`.
+- **ServeMux**: the router. It picks the handler by method and path pattern.
+- **Middleware**: a function that wraps a handler to run code before and after it, such as logging.
+- **Graceful shutdown**: stop taking new requests, let the running ones finish, then exit.
+- **`FROM scratch`**: an empty container image. Your static binary is the only file in it.
+
+</Concepts>
+
+---
+
+## What we are building
+
+A tiny todo list API. It keeps todos in memory, so restarting the server empties the list; a database comes later in the series.
+
+| Request | Does | Success status |
+|---|---|---|
+| `GET /healthz` | says the server is up | 200 |
+| `GET /todos` | lists all todos | 200 |
+| `POST /todos` with `{"title":"..."}` | adds a todo | 201 |
+| `GET /todos/{id}` | returns one todo | 200 (404 if unknown) |
+
+The project is one module with four files. A service this small does not need the `cmd/` and `internal/` folders from [post 1](/blog/go-first-program-modules-packages/#project-layout); add them when a second package appears.
+
+```text
+todo/
+├── go.mod          module example.com/todo
+├── main.go         the whole service
+├── main_test.go    handler tests
+└── Dockerfile      two stages, ends in FROM scratch
+```
+
+The snippets below are `main.go` from top to bottom, cut into parts. Put them back to back and you have the complete file.
+
+## The data and the store
+
+Start with the data. A request handler runs in its own goroutine, so two requests can touch the list at the same moment. The store guards its slice with a mutex, exactly as [post 8](/blog/go-context-timeouts-mutexes/) shows.
+
+```go
+package main
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"strconv"
+	"sync"
+	"syscall"
+	"time"
+)
+```
+
+```go
+// Todo is one item. The tags tell encoding/json which key names to use.
+type Todo struct {
+	ID    int    `json:"id"`
+	Title string `json:"title"`
+	Done  bool   `json:"done"`
+}
+
+// store keeps todos in memory. The mutex protects the slice because every
+// request runs in its own goroutine.
+type store struct {
+	mu    sync.Mutex
+	todos []Todo
+}
+
+func (s *store) add(title string) Todo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t := Todo{ID: len(s.todos) + 1, Title: title}
+	s.todos = append(s.todos, t)
+	return t
+}
+
+func (s *store) get(id int) (Todo, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if id < 1 || id > len(s.todos) {
+		return Todo{}, false
+	}
+	return s.todos[id-1], true
+}
+
+func (s *store) list() []Todo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]Todo, len(s.todos)) // a copy, and [] (not null) when empty
+	copy(out, s.todos)
+	return out
+}
+```
+
+The backquoted text after each field, `` `json:"id"` ``, is a *struct tag*. It is a note attached to the field, and `encoding/json` reads it to choose the key name, so `ID` is written as `"id"`. Two details are easy to miss. `list` returns a copy, so a caller can never change the store's slice behind its back. It also uses `make`, so an empty store gives the JSON `[]` and not `null`, which many clients choke on.
+
+## Routing with method and path patterns
+
+A `ServeMux` is a table from patterns to handlers. Before Go 1.22 it only matched paths, and people reached for a router library to match methods and capture `{id}`. Since Go 1.22 the standard one does both: a pattern can start with a method and contain named wildcards, and the handler reads a wildcard with `r.PathValue`.
+
+```go
+type server struct {
+	store *store
+	log   *slog.Logger
+}
+
+// routes wires patterns to handlers and wraps them in middleware.
+func (s *server) routes() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", s.health)
+	mux.HandleFunc("GET /todos", s.listTodos)
+	mux.HandleFunc("POST /todos", s.createTodo)
+	mux.HandleFunc("GET /todos/{id}", s.getTodo)
+	// The first middleware listed is the outermost one.
+	return chain(mux, s.requestID, s.logging, s.recoverPanic)
+}
+
+func (s *server) health(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *server) listTodos(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.store.list())
+}
+
+func (s *server) getTodo(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "id must be a number")
+		return
+	}
+	t, ok := s.store.get(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, "todo not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, t)
+}
+```
+
+Three things happen here.
+
+- `"GET /todos/{id}"` matches only GET (and HEAD) on `/todos/` plus one segment. `r.PathValue("id")` returns that segment as a string, and `strconv.Atoi` turns it into a number or an error.
+- When a path matches but the method does not, the mux answers `405 Method Not Allowed` and fills in the `Allow` header itself. You will see that in the run below.
+- When two patterns could both match, the more specific one wins, so `GET /todos/{id}` and `GET /todos/latest` can live side by side.
+
+Three requests make the matching rules concrete.
+
+<GoP10Mux />
+
+We create our own mux with `http.NewServeMux()`. The package also has a global `http.DefaultServeMux`, and any imported package can register routes on it, as *Efficient Go* warns when it discusses `net/http/pprof`. A mux you own has only the routes you wrote.
+
+## JSON in, JSON out
+
+The pattern for every endpoint is the same: decode the body, check it, do the work, write a JSON answer. The rest of `main.go` that deals with JSON is two small writers and one handler that decodes.
+
+```go
+type createRequest struct {
+	Title string `json:"title"`
+}
+
+func (s *server) createTodo(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1<<20 is 2^20 bytes: refuse bodies over 1 MiB
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	var in createRequest
+	if err := dec.Decode(&in); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if in.Title == "" || len(in.Title) > 100 {
+		writeError(w, http.StatusUnprocessableEntity, "title must be 1 to 100 bytes")
+		return
+	}
+	writeJSON(w, http.StatusCreated, s.store.add(in.Title))
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		slog.Error("write response", "err", err)
+	}
+}
+
+func writeError(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg})
+}
+```
+
+The decoding side is where services get hurt, so it has three guards.
+
+1. `http.MaxBytesReader` caps the body at 1 MiB. Without it, a client can send a body as large as it likes and your server reads all of it.
+2. `DisallowUnknownFields` turns a misspelled or extra key into an error instead of silently ignoring it.
+3. The title check runs after decoding. JSON that parses can still be wrong.
+
+Each guard has its own exit, so the status codes differ.
+
+<GoP10Decode />
+
+The status codes carry meaning. A body that is not valid JSON, or has a key we do not know, is a `400 Bad Request`: the client sent something we cannot read. A body that is valid JSON but breaks a rule (an empty title) is a `422 Unprocessable Entity`: we read it and refuse it. Some teams use 400 for both; pick one rule and keep it. Errors always come back as `{"error": "..."}`, so a client has one shape to parse.
+
+The order inside `writeJSON` matters: set headers, then `WriteHeader`, then the body. After `WriteHeader` the status line has gone to the client, so a failure while encoding can only be logged. That is why the error is logged and not returned.
+
+## Middleware: a function from handler to handler
+
+Some work belongs to every request: tag it with an ID, log it, survive a panic. Copying that into each handler would be noise, so Go uses *middleware*. A middleware takes the next `http.Handler` and returns a new one that does something, calls the next, and maybe does something after. It is a closure, from [post 5](/blog/go-errors-defer-panic/), that remembers `next`.
+
+```go
+// A middleware takes a handler and returns a handler that does extra work around it.
+type middleware func(http.Handler) http.Handler
+
+func chain(h http.Handler, mws ...middleware) http.Handler {
+	for i := len(mws) - 1; i >= 0; i-- {
+		h = mws[i](h)
+	}
+	return h
+}
+```
+
+Two bits of syntax. `mws ...middleware` means `chain` accepts any number of middlewares. And `http.HandlerFunc` is a *function type* that has a `ServeHTTP` method ([post 4](/blog/go-structs-methods-interfaces/) covers methods on types), so `http.HandlerFunc(f)` turns a plain function into a `Handler`. That is why every middleware below can return a function literal.
+
+How `chain` nests them: it walks the list from the last middleware to the first, wrapping `h` each time. Take `chain(mux, a, b, c)`. The loop does `h = c(mux)`, then `h = b(h)`, then `h = a(h)`. The result is `a(b(c(mux)))`, so the **first one listed is the outermost**. Back in `routes()`, `chain(mux, s.requestID, s.logging, s.recoverPanic)` means a request meets `requestID`, then `logging`, then `recoverPanic`, then the mux. The response goes back out the same way. The demo below shows it.
+
+<DemoFrame title="One request through the chain, and one that panics" titleVi="Một request đi qua chuỗi middleware, và một request bị panic">
+<GoHttpRequestPathDemo />
+</DemoFrame>
+
+The first layer gives each request an ID. It keeps an ID the caller sent in `X-Request-ID` (useful when a gateway already made one) and otherwise makes 8 random bytes. It stores the ID in the request's context, the same context from [post 8](/blog/go-context-timeouts-mutexes/), and echoes it in the response header. One line to read before the code: `_, _ = rand.Read(b)` fills `b` with random bytes. `rand.Read` returns two values, a count and an error, and the `_, _ =` throws both away because in current Go it cannot fail.
+
+```go
+type ctxKey string
+
+const requestIDKey ctxKey = "requestID"
+
+func (s *server) requestID(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := r.Header.Get("X-Request-ID")
+		if id == "" {
+			b := make([]byte, 8)
+			_, _ = rand.Read(b)
+			id = hex.EncodeToString(b)
+		}
+		w.Header().Set("X-Request-ID", id)
+		ctx := context.WithValue(r.Context(), requestIDKey, id)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+```
+
+The key has its own type, `ctxKey`, so no other package can collide with it by accident. `r.WithContext` returns a copy of the request that carries the new context; requests are never edited in place.
+
+The logging layer has a puzzle: the status code is chosen inside the handler, after `logging` has already handed over control. The fix is a small wrapper. `statusRecorder` embeds the real `http.ResponseWriter` (embedding is from [post 4](/blog/go-structs-methods-interfaces/)), so it gets all of its methods for free, and overrides only `WriteHeader` to remember the code.
+
+Here is how the wrapper gets between the handler and the real writer.
+
+<GoP10Recorder />
+
+`logging` also reads the ID back out of the context with `Value(requestIDKey).(string)`. The context stores values as `any`, so `.(string)` is a *type assertion* that asks for the string inside (see [type switches and assertions in post 4](/blog/go-structs-methods-interfaces/#type-switches-and-assertions)). The `, _` ignores the yes/no flag, so a missing ID becomes an empty string.
+
+```go
+// statusRecorder remembers the status code a handler wrote.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (sr *statusRecorder) WriteHeader(code int) {
+	sr.status = code
+	sr.ResponseWriter.WriteHeader(code)
+}
+
+func (s *server) logging(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		id, _ := r.Context().Value(requestIDKey).(string)
+		s.log.Info("request",
+			"id", id, "method", r.Method, "path", r.URL.Path,
+			"status", rec.status, "duration_us", time.Since(start).Microseconds())
+	})
+}
+```
+
+`log/slog` writes structured logs: a message plus key-value pairs. Because this program builds a JSON handler in `main`, every line is a JSON object a log system can search by `status` or `id`. The Go blog's `slog` post covers levels, groups and custom handlers; this service needs only `Info` and `Error`.
+
+The last layer is the safety net. If a handler panics, `net/http` already catches it, logs a stack trace and closes the connection, which the client sees as an empty reply. I checked with a handler that panics under `httptest.NewServer`: the client got `EOF`. The middleware gives a better answer: it uses `defer` and `recover` ([post 5](/blog/go-errors-defer-panic/)) to log the panic and send a clean `500` JSON error.
+
+```go
+func (s *server) recoverPanic(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if v := recover(); v != nil {
+				s.log.Error("panic in handler", "panic", fmt.Sprint(v))
+				writeError(w, http.StatusInternalServerError, "internal error")
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+```
+
+`recoverPanic` is the innermost layer, so `logging` still sees the `500` it writes. It only covers the handler's own goroutine. A panic inside a goroutine your handler starts is not caught here, and it ends the whole program.
+
+## main: config, timeouts, graceful shutdown
+
+Now the part that turns handlers into a server. Configuration comes from the environment, with a default, which is how containers are configured.
+
+```go
+func getenv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func main() {
+	if err := run(); err != nil {
+		slog.Error("server stopped", "err", err)
+		os.Exit(1)
+	}
+}
+```
+
+`run` holds the real work so that `main` can print one error and exit with code 1. A `main` that calls `os.Exit` directly would skip every `defer` below it.
+
+```go
+func run() error {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	s := &server{store: &store{}, log: logger}
+
+	srv := &http.Server{
+		Addr:              getenv("ADDR", ":8080"),
+		Handler:           s.routes(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+
+	// ctx is cancelled when the process gets Ctrl+C or SIGTERM.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	errc := make(chan error, 1)
+	go func() {
+		logger.Info("listening", "addr", srv.Addr)
+		errc <- srv.ListenAndServe()
+	}()
+
+	select {
+	case err := <-errc:
+		return err // the server failed to start, e.g. the port is taken
+	case <-ctx.Done():
+	}
+
+	logger.Info("shutting down")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return srv.Shutdown(shutdownCtx)
+}
+```
+
+Read `run` in four steps.
+
+1. **Build the server by hand.** `http.Server` is a struct, so the timeouts are plain fields. They are the guard from the opening quote.
+2. **Start it in a goroutine.** `ListenAndServe` blocks until the server stops, so it runs in a goroutine and reports its error on a channel ([post 7](/blog/go-goroutines-channels-select/)). `make(chan error, 1)` makes a channel with room for one value, so the goroutine can always hand over its error and finish even if nobody is listening any more.
+3. **Wait for the first of two events.** `signal.NotifyContext` gives a context that is cancelled on Ctrl+C or SIGTERM, the signal Docker and Kubernetes send to stop a container. `select` waits for whichever happens first. The first case returns the error if the server fails to start. The second case, `case <-ctx.Done():`, has no code on purpose: when a signal arrives, `select` simply ends and the function falls through to the shutdown lines below.
+4. **Shut down with a deadline.** `Server.Shutdown` closes the listener so no new connections arrive, then waits for running requests to finish. The 10-second context is the cap: if they take longer, `Shutdown` returns an error instead of hanging for ever.
+
+Step 4 looks like this over time, from the signal to the exit.
+
+<GoP10Shutdown />
+
+The four timeouts are not interchangeable.
+
+| Field | Limits | Value here |
+|---|---|---|
+| `ReadHeaderTimeout` | time to read the request headers | 5 s |
+| `ReadTimeout` | time to read the whole request, body included | 10 s |
+| `WriteTimeout` | from the end of reading the request headers to the end of writing the response | 10 s |
+| `IdleTimeout` | how long an idle keep-alive connection may wait | 60 s |
+
+These numbers suit a small JSON API. A server that streams large downloads needs a bigger `WriteTimeout`. [Go in production](/blog/go-production-stdlib-cpu-cache-gc-kubernetes/) explains why they matter once real traffic arrives.
+
+## Run it
+
+In an empty folder, put `main.go` and run `go mod init example.com/todo` once, which creates `go.mod`. Then build and start the server on port 8085, and call it from a second terminal. `curl -i` prints the response headers too. I removed the `Date` and `Content-Length` headers from the output to keep it short.
+
+<TerminalOutput command="go mod init example.com/todo && go build -o todo ." label="Go 1.27.1 · macOS arm64">
+```text
+go: creating new go.mod: module example.com/todo
+go: to add module requirements and sums:
+	go mod tidy
+```
+</TerminalOutput>
+
+<TerminalOutput command="ADDR=:8085 ./todo   (in a second terminal: curl -i localhost:8085/healthz)" label="Go 1.27.1 · macOS arm64">
+```text
+HTTP/1.1 200 OK
+Content-Type: application/json
+X-Request-Id: 532e4446a16a53e2
+
+{"status":"ok"}
+```
+</TerminalOutput>
+
+<TerminalOutput command="curl -i -X POST localhost:8085/todos -d '{&quot;title&quot;:&quot;learn Go&quot;}'" label="Go 1.27.1 · macOS arm64">
+```text
+HTTP/1.1 201 Created
+Content-Type: application/json
+X-Request-Id: b945efb3c85c0560
+
+{"id":1,"title":"learn Go","done":false}
+```
+</TerminalOutput>
+
+Now the failures. Each one is a rule from the code above:
+
+<TerminalOutput command="curl -i -X POST localhost:8085/todos -d '{&quot;title&quot;:&quot;&quot;}'" label="Go 1.27.1 · macOS arm64">
+```text
+HTTP/1.1 422 Unprocessable Entity
+Content-Type: application/json
+X-Request-Id: 2a825af6345685b1
+
+{"error":"title must be 1 to 100 bytes"}
+```
+</TerminalOutput>
+
+<TerminalOutput command="curl -i -X POST localhost:8085/todos -d '{&quot;title&quot;:&quot;x&quot;,&quot;owner&quot;:&quot;me&quot;}'" label="Go 1.27.1 · macOS arm64">
+```text
+HTTP/1.1 400 Bad Request
+Content-Type: application/json
+X-Request-Id: ddb1b4dbbebd2908
+
+{"error":"invalid JSON: json: unknown field \"owner\""}
+```
+</TerminalOutput>
+
+<TerminalOutput command="curl -i -X DELETE localhost:8085/todos" label="Go 1.27.1 · macOS arm64">
+```text
+HTTP/1.1 405 Method Not Allowed
+Allow: GET, HEAD, POST
+Content-Type: text/plain; charset=utf-8
+X-Content-Type-Options: nosniff
+X-Request-Id: 1046bba392728e4c
+
+Method Not Allowed
+```
+</TerminalOutput>
+
+The mux wrote the 405 and the `Allow` header on its own. Its body is plain text, not our JSON shape; if you need JSON there, wrap the mux with a middleware that rewrites it. Also look at `X-Request-Id` on every response: it came from our first middleware, and the mux's own 405 passed through it too. Sending your own ID in is just as easy:
+
+<TerminalOutput command="curl -i -H 'X-Request-ID: demo-123' localhost:8085/todos" label="Go 1.27.1 · macOS arm64">
+```text
+HTTP/1.1 200 OK
+Content-Type: application/json
+X-Request-Id: demo-123
+
+[{"id":1,"title":"learn Go","done":false}]
+```
+</TerminalOutput>
+
+The server's own stdout is one JSON line per request. The same `id` goes into the log line and the response header, so a user's complaint can be traced to a log line. Here is a short run: start, one call to `/healthz`, then SIGTERM.
+
+<TerminalOutput command="ADDR=:8085 ./todo   (then curl /healthz, then Ctrl+C or kill -TERM)" label="Go 1.27.1 · macOS arm64">
+```text
+{"time":"2026-11-23T11:13:30.985303+07:00","level":"INFO","msg":"listening","addr":":8085"}
+{"time":"2026-11-23T11:13:31.446646+07:00","level":"INFO","msg":"request","id":"986cf4dc9143cf66","method":"GET","path":"/healthz","status":200,"duration_us":180}
+{"time":"2026-11-23T11:13:31.44972+07:00","level":"INFO","msg":"shutting down"}
+```
+</TerminalOutput>
+
+The last line is the shutdown path: the signal arrived, the context ended, `Shutdown` ran, and the process exited with code 0. When the port is already taken, `ListenAndServe` fails at once and `run` returns that error. I started a second copy on the same port and it printed this, exiting with code 1:
+
+<TerminalOutput command="ADDR=:8085 ./todo   (second copy, port already in use)" label="Go 1.27.1 · macOS arm64">
+```text
+2026/11/23 11:13:19 ERROR server stopped err="listen tcp :8085: bind: address already in use"
+```
+</TerminalOutput>
+
+Graceful shutdown lets requests that already started finish, but it cannot make a client wait for a request that takes longer than the 10-second cap. Keep handlers shorter than that, or pass `r.Context()` into slow work as shown in [post 8](/blog/go-context-timeouts-mutexes/) so it stops when the client leaves.
+
+## Testing handlers with httptest
+
+You do not need a running server to test handlers. A `Handler` is just a value with `ServeHTTP`, so a test builds a fake request with `httptest.NewRequest`, hands it a `httptest.NewRecorder` to write into, and inspects what was written. This is [post 6](/blog/go-testing-table-tests/)'s table test applied to HTTP.
+
+```go
+package main
+
+import (
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+func newTestServer() *server {
+	return &server{store: &store{}, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+}
+
+func TestCreateTodo(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		wantStatus int
+	}{
+		{"valid", `{"title":"learn Go"}`, http.StatusCreated},
+		{"empty title", `{"title":""}`, http.StatusUnprocessableEntity},
+		{"unknown field", `{"title":"x","owner":"me"}`, http.StatusBadRequest},
+		{"not json", `hello`, http.StatusBadRequest},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newTestServer().routes()
+			req := httptest.NewRequest("POST", "/todos", strings.NewReader(tt.body))
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != tt.wantStatus {
+				t.Errorf("status = %d, want %d (body %s)", rec.Code, tt.wantStatus, rec.Body)
+			}
+		})
+	}
+}
+
+func TestGetTodo(t *testing.T) {
+	s := newTestServer()
+	s.store.add("learn Go")
+	h := s.routes()
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/todos/1", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /todos/1 = %d, want 200", rec.Code)
+	}
+	if got := rec.Body.String(); got != `{"id":1,"title":"learn Go","done":false}`+"\n" {
+		t.Errorf("body = %q", got)
+	}
+
+	for path, want := range map[string]int{"/todos/9": 404, "/todos/abc": 400} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		if rec.Code != want {
+			t.Errorf("GET %s = %d, want %d", path, rec.Code, want)
+		}
+	}
+}
+
+func TestMethodNotAllowed(t *testing.T) {
+	rec := httptest.NewRecorder()
+	newTestServer().routes().ServeHTTP(rec, httptest.NewRequest("DELETE", "/todos", nil))
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("DELETE /todos = %d, want 405", rec.Code)
+	}
+}
+
+func TestRecoverPanic(t *testing.T) {
+	s := newTestServer()
+	boom := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { panic("boom") })
+	rec := httptest.NewRecorder()
+	chain(boom, s.requestID, s.logging, s.recoverPanic).ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rec.Code)
+	}
+	if rec.Header().Get("X-Request-ID") == "" {
+		t.Error("missing X-Request-ID header")
+	}
+}
+```
+
+`TestCreateTodo` is a table test: four bodies, four expected statuses, one loop. Each test builds its own server, so tests never share state. `TestRecoverPanic` builds the chain by hand around a handler that panics, because no real route should panic on purpose. The tests run through `routes()`, so the middleware and patterns are tested too, not only the handler functions.
+
+<TerminalOutput command="go test -v -race ./..." label="Go 1.27.1 · macOS arm64">
+```text
+=== RUN   TestCreateTodo
+=== RUN   TestCreateTodo/valid
+=== RUN   TestCreateTodo/empty_title
+=== RUN   TestCreateTodo/unknown_field
+=== RUN   TestCreateTodo/not_json
+--- PASS: TestCreateTodo (0.00s)
+    --- PASS: TestCreateTodo/valid (0.00s)
+    --- PASS: TestCreateTodo/empty_title (0.00s)
+    --- PASS: TestCreateTodo/unknown_field (0.00s)
+    --- PASS: TestCreateTodo/not_json (0.00s)
+=== RUN   TestGetTodo
+--- PASS: TestGetTodo (0.00s)
+=== RUN   TestMethodNotAllowed
+--- PASS: TestMethodNotAllowed (0.00s)
+=== RUN   TestRecoverPanic
+--- PASS: TestRecoverPanic (0.00s)
+PASS
+ok  	example.com/todo	1.529s
+```
+</TerminalOutput>
+
+`-race` turns on the race detector, which watches for goroutines touching the same memory without a lock, as the store's mutex prevents.
+
+## Ship it: one file, an empty image
+
+Post 1 said a Go build gives you one file. Two build settings make that file safe to drop anywhere:
+
+- `CGO_ENABLED=0` links no C library, so the file has no dependency on the machine's libc. This is what lets it run in an image with nothing in it.
+- `GOOS` and `GOARCH` choose the target operating system and CPU, so you can build for Linux on a Mac without any other tools.
+
+```sh
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o todo-linux-amd64 .
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o todo-linux-arm64 .
+```
+
+`-trimpath` removes your local folder names from the binary, and `-s -w` drops symbol and debug tables to make it smaller. Here are the sizes from my Mac:
+
+| Target | `GOOS/GOARCH` | Size |
+|---|---|---|
+| Linux, Intel/AMD servers | `linux/amd64` | 6,729,888 bytes |
+| Linux, ARM servers and Apple-silicon Docker | `linux/arm64` | 6,226,080 bytes |
+| Windows | `windows/amd64` | 6,929,920 bytes (`.exe`) |
+
+`go tool dist list` prints every `GOOS/GOARCH` pair your toolchain can target.
+
+Now the container. A normal image carries an operating system. A `FROM scratch` image is empty, and the Dockerfile copies one file into it. The first stage builds with the Go image; the second stage keeps only the binary.
+
+```dockerfile
+FROM golang:1.27 AS build
+WORKDIR /src
+COPY go.mod ./
+COPY *.go ./
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /todo .
+
+FROM scratch
+COPY --from=build /todo /todo
+EXPOSE 8080
+ENTRYPOINT ["/todo"]
+```
+
+I built it with Docker 29.8.2 (OrbStack, arm64) and ran it:
+
+<TerminalOutput command="docker build -t todo-scratch . && docker image ls todo-scratch" label="Docker 29.8.2 client · arm64">
+```text
+IMAGE                 ID             DISK USAGE   CONTENT SIZE   EXTRA
+todo-scratch:latest   102d65c87f5d       8.86MB         2.63MB
+```
+</TerminalOutput>
+
+<TerminalOutput command="docker run -d --rm --name todo-t -p 8086:8080 -e ADDR=:8080 todo-scratch" label="Docker 29.8.2 client · arm64">
+```text
+94569797615e056e779057ef5c58feb7bcfe56b2f2b404f524c7a03747156ce3
+```
+</TerminalOutput>
+
+<TerminalOutput command="curl -s -X POST localhost:8086/todos -d '{&quot;title&quot;:&quot;ship it&quot;}'" label="macOS, talking to the container">
+```text
+{"id":1,"title":"ship it","done":false}
+```
+</TerminalOutput>
+
+The whole image is 8.86 MB on disk, and the binary inside is most of that. There is no shell, no package manager, and no libc in it, which also means nothing extra for an attacker to use. Two cautions:
+
+- With no shell you cannot `docker exec` into it to look around. Debug with logs, or temporarily build from a base image like `gcr.io/distroless/static` that adds a minimal root filesystem.
+- If your service calls HTTPS endpoints, it needs root CA certificates, which `scratch` does not have. Copy them in from the build stage, or use the distroless base instead.
+
+Finally, `docker stop` sends SIGTERM to our process, the same signal `run` waits for. Docker's default wait is 10 seconds before it sends SIGKILL, so the 10-second shutdown cap in `run` is the same size as Docker's. The stop on my run returned in 0.17 s: the process was idle, so `Shutdown` had nothing to wait for. On Kubernetes, set the pod's termination grace period longer than your shutdown timeout.
+
+## Key takeaways
+
+- **Build the `http.Server` yourself and set timeouts from the start.** `http.ListenAndServe` leaves them all off, and a slow or vanished client can hold a connection for ever.
+- **Go 1.22 patterns do method and path routing.** `"GET /todos/{id}"` plus `r.PathValue("id")` replaces most router libraries. The mux sends 405 with an `Allow` header for free.
+- **Guard every JSON body.** Cap its size, reject unknown fields, validate after decoding, and answer errors in one JSON shape.
+- **A middleware is `func(http.Handler) http.Handler`.** The first one in the chain is the outermost. Keep `recover` innermost so logging still sees the 500.
+- **Shut down on purpose.** `signal.NotifyContext` plus `Server.Shutdown` with a deadline lets running requests finish before exit.
+- **Test through `routes()` with `httptest`.** You exercise patterns and middleware without opening a port.
+- **`CGO_ENABLED=0` plus `GOOS`/`GOARCH` gives one file for any Linux box,** and that file can be the only thing in a `FROM scratch` image.
+
+---
+
+## Review questions
+
+1. What does `http.ListenAndServe(":8080", nil)` leave out that `&http.Server{...}` lets you set, and what can go wrong? *(See "The default server waits for ever")*
+2. In `chain(mux, a, b, c)`, which middleware sees the request first, and which sees the response last? *(See "Middleware")*
+3. A handler panics. What does the client see with no middleware, and what does it see with `recoverPanic`? Why does a panic in a goroutine the handler started escape both? *(See "Middleware")*
+4. The body is `{"title": ""}`. Another body is `{"titel": "x"}`. Which gets 422 and which 400 in this service, and why? *(See "JSON in, JSON out")*
+5. What happens, step by step, between SIGTERM arriving and the process exiting? What does the 10-second context do? *(See "main")*
+6. Why does `statusRecorder` embed `http.ResponseWriter`, and what does it override? *(See "Middleware")*
+7. Why does a `FROM scratch` image need `CGO_ENABLED=0`, and what would you add if the service called an HTTPS API? *(See "Ship it")*
+
+### Coming later in the series
+
+- Storing todos in a database, and `context` deadlines on queries: later in the series.
+- Metrics and tracing for this service: [observability](/blog/go-observability-metrics-microbenchmarks-benchstat/). Profiling it: [pprof and flame graphs](/blog/go-profiling-pprof-flamegraphs-off-cpu-continuous/).
+- Server timeouts and the other standard-library traps: [Go in production](/blog/go-production-stdlib-cpu-cache-gc-kubernetes/).
+
+</En>
+
+<Vi>
+
+<Figure src={heroSorter} alt="Một máy phân loại thư tốc độ cao của Bưu điện Anh, trưng bày tại The Postal Museum" caption="Lá thư nào cũng qua cùng một cỗ máy, theo cùng một thứ tự, và cỗ máy không cần biết nội dung thư. Chuỗi middleware làm điều tương tự: mọi HTTP request được xử lý giống nhau trước khi tới handler của bạn. Đây là máy phân loại thư tốc độ cao của Bưu điện Anh (bản 153 ngăn)." sourceTitle="Wikimedia Commons: BLW High Speed Sorting Machine (Mike Peel, CC BY-SA 2.0 UK), from The Postal Museum collection" sourceUrl="https://commons.wikimedia.org/wiki/File:BLW_High_Speed_Sorting_Machine..jpg" />
+
+> "It's critical for an HTTP server exposed to the Internet to enforce timeouts on client connections."
+> &mdash; *Filippo Valsorda*, *The complete guide to Go net/http timeouts* (Cloudflare, 2016)
+
+### Server mặc định chờ mãi mãi
+
+Bài hướng dẫn timeout `net/http` của Cloudflare giải thích vì sao câu trích trên quan trọng. Server không đặt timeout sẽ chờ một client chậm hoặc đã biến mất bao lâu tùy client. Bài viết cảnh báo rằng "very slow or disappearing clients might leak file descriptors" (client quá chậm hoặc biến mất có thể làm rò rỉ file descriptor), và hàm tiện tay `http.ListenAndServe` để tắt mọi timeout mà không cho cách bật.
+
+Vì vậy quy tắc đầu tiên của bài này là tự dựng `http.Server` và đặt timeout ngay từ ngày đầu. Phần còn lại của service cũng làm theo cách đó: thư viện chuẩn cho bạn những mảnh nhỏ, và bạn tự ghép chúng lại.
+
+Đây là bốn chiếc đồng hồ trên một connection, với các giá trị bài này đặt.
+
+<GoP10Timeouts />
+
+Cuối bài bạn sẽ có một JSON API nằm trong một file `main.go`, bộ test của nó, và một container image dựng từ con số không. Chỉ dùng thư viện chuẩn, và bài gom lại những gì series đã dạy: struct và method ([bài 4](/blog/go-structs-methods-interfaces/)), error và `recover` ([bài 5](/blog/go-errors-defer-panic/)), table test ([bài 6](/blog/go-testing-table-tests/)), goroutine và channel ([bài 7](/blog/go-goroutines-channels-select/)), context và mutex ([bài 8](/blog/go-context-timeouts-mutexes/)). Mọi output bên dưới được chụp trên Go 1.27.1.
+
+<Callout type="note" title="TL;DR">
+Tự dựng `http.Server` và đặt timeout cho nó. Định tuyến bằng `mux.HandleFunc("GET /todos/{id}", h)`. Middleware là hàm nhận một handler và trả về một handler. Giải mã JSON có giới hạn rồi kiểm tra dữ liệu. Ghi log bằng `log/slog`. Khi nhận SIGTERM, gọi `Server.Shutdown` để các request đang chạy được làm xong. Đóng gói binary trong image `FROM scratch`.
+</Callout>
+
+<Concepts>
+
+- **Handler**: bất cứ thứ gì có method `ServeHTTP(w, r)`. Nó đọc request `r` và ghi response vào `w`.
+- **ServeMux**: bộ định tuyến. Nó chọn handler theo method và mẫu đường dẫn.
+- **Middleware**: hàm bọc quanh một handler để chạy thêm code trước và sau nó, ví dụ ghi log.
+- **Graceful shutdown (tắt êm)**: ngừng nhận request mới, để request đang chạy làm xong, rồi mới thoát.
+- **`FROM scratch`**: image container rỗng. Binary tĩnh của bạn là file duy nhất trong đó.
+
+</Concepts>
+
+---
+
+## Ta sẽ xây gì
+
+Một API danh sách todo nhỏ. Todo lưu trong bộ nhớ, nên khởi động lại server là danh sách trống; database sẽ đến sau trong series.
+
+| Request | Làm gì | Status khi thành công |
+|---|---|---|
+| `GET /healthz` | báo server còn sống | 200 |
+| `GET /todos` | liệt kê mọi todo | 200 |
+| `POST /todos` kèm `{"title":"..."}` | thêm một todo | 201 |
+| `GET /todos/{id}` | trả về một todo | 200 (404 nếu không có) |
+
+Dự án là một module với bốn file. Service nhỏ thế này chưa cần thư mục `cmd/` và `internal/` ở [bài 1](/blog/go-first-program-modules-packages/#project-layout); thêm chúng khi có package thứ hai.
+
+```text
+todo/
+├── go.mod          module example.com/todo
+├── main.go         toàn bộ service
+├── main_test.go    test cho handler
+└── Dockerfile      hai giai đoạn, kết thúc bằng FROM scratch
+```
+
+Các đoạn code dưới đây là `main.go` từ trên xuống dưới, chia thành từng phần. Ghép chúng nối tiếp là ra file hoàn chỉnh.
+
+## Dữ liệu và store
+
+Bắt đầu từ dữ liệu. Mỗi handler chạy trong goroutine riêng, nên hai request có thể đụng vào danh sách cùng lúc. Store bảo vệ slice bằng mutex, đúng như [bài 8](/blog/go-context-timeouts-mutexes/) trình bày.
+
+```go
+package main
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"strconv"
+	"sync"
+	"syscall"
+	"time"
+)
+```
+
+```go
+// Todo is one item. The tags tell encoding/json which key names to use.
+type Todo struct {
+	ID    int    `json:"id"`
+	Title string `json:"title"`
+	Done  bool   `json:"done"`
+}
+
+// store keeps todos in memory. The mutex protects the slice because every
+// request runs in its own goroutine.
+type store struct {
+	mu    sync.Mutex
+	todos []Todo
+}
+
+func (s *store) add(title string) Todo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t := Todo{ID: len(s.todos) + 1, Title: title}
+	s.todos = append(s.todos, t)
+	return t
+}
+
+func (s *store) get(id int) (Todo, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if id < 1 || id > len(s.todos) {
+		return Todo{}, false
+	}
+	return s.todos[id-1], true
+}
+
+func (s *store) list() []Todo {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make([]Todo, len(s.todos)) // a copy, and [] (not null) when empty
+	copy(out, s.todos)
+	return out
+}
+```
+
+Đoạn chữ trong dấu backquote sau mỗi field, `` `json:"id"` ``, gọi là *struct tag*. Nó là ghi chú gắn vào field, và `encoding/json` đọc nó để chọn tên key, nên `ID` được viết thành `"id"`. Có hai chi tiết dễ bỏ sót. `list` trả về một bản sao, nên bên gọi không bao giờ sửa được slice của store từ phía sau. Nó cũng dùng `make`, nên store trống cho ra JSON `[]` chứ không phải `null`, thứ mà nhiều client xử lý không nổi.
+
+## Định tuyến theo method và đường dẫn
+
+`ServeMux` là một bảng ánh xạ từ mẫu (pattern) sang handler. Trước Go 1.22 nó chỉ khớp đường dẫn, và người ta phải dùng thư viện router để khớp method và lấy `{id}`. Từ Go 1.22 bản chuẩn làm được cả hai: pattern có thể bắt đầu bằng method và chứa wildcard có tên, và handler đọc wildcard bằng `r.PathValue`.
+
+```go
+type server struct {
+	store *store
+	log   *slog.Logger
+}
+
+// routes wires patterns to handlers and wraps them in middleware.
+func (s *server) routes() http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /healthz", s.health)
+	mux.HandleFunc("GET /todos", s.listTodos)
+	mux.HandleFunc("POST /todos", s.createTodo)
+	mux.HandleFunc("GET /todos/{id}", s.getTodo)
+	// The first middleware listed is the outermost one.
+	return chain(mux, s.requestID, s.logging, s.recoverPanic)
+}
+
+func (s *server) health(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (s *server) listTodos(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.store.list())
+}
+
+func (s *server) getTodo(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(r.PathValue("id"))
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "id must be a number")
+		return
+	}
+	t, ok := s.store.get(id)
+	if !ok {
+		writeError(w, http.StatusNotFound, "todo not found")
+		return
+	}
+	writeJSON(w, http.StatusOK, t)
+}
+```
+
+Ở đây có ba điều xảy ra.
+
+- `"GET /todos/{id}"` chỉ khớp GET (và HEAD) trên `/todos/` cộng thêm đúng một đoạn. `r.PathValue("id")` trả đoạn đó dưới dạng string, và `strconv.Atoi` đổi nó thành số hoặc lỗi.
+- Khi đường dẫn khớp mà method không khớp, mux tự trả `405 Method Not Allowed` và tự điền header `Allow`. Bạn sẽ thấy điều đó ở phần chạy thử bên dưới.
+- Khi hai pattern cùng có thể khớp, pattern cụ thể hơn thắng, nên `GET /todos/{id}` và `GET /todos/latest` sống chung được.
+
+Ba request giúp các quy tắc khớp route trở nên cụ thể.
+
+<GoP10Mux />
+
+Ta tạo mux riêng bằng `http.NewServeMux()`. Package còn có `http.DefaultServeMux` toàn cục, và package nào được import cũng có thể đăng ký route lên đó, như *Efficient Go* cảnh báo khi nói về `net/http/pprof`. Mux do bạn sở hữu chỉ có những route bạn tự viết.
+
+## JSON vào, JSON ra
+
+Endpoint nào cũng theo một khuôn: giải mã body, kiểm tra, làm việc, ghi câu trả lời JSON. Phần còn lại của `main.go` liên quan đến JSON gồm hai hàm ghi nhỏ và một handler có giải mã.
+
+```go
+type createRequest struct {
+	Title string `json:"title"`
+}
+
+func (s *server) createTodo(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1<<20 is 2^20 bytes: refuse bodies over 1 MiB
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	var in createRequest
+	if err := dec.Decode(&in); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+		return
+	}
+	if in.Title == "" || len(in.Title) > 100 {
+		writeError(w, http.StatusUnprocessableEntity, "title must be 1 to 100 bytes")
+		return
+	}
+	writeJSON(w, http.StatusCreated, s.store.add(in.Title))
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		slog.Error("write response", "err", err)
+	}
+}
+
+func writeError(w http.ResponseWriter, status int, msg string) {
+	writeJSON(w, status, map[string]string{"error": msg})
+}
+```
+
+Phía giải mã là nơi service hay bị thương, nên có ba lớp bảo vệ.
+
+1. `http.MaxBytesReader` giới hạn body ở 1 MiB. Thiếu nó, client gửi body to bao nhiêu server cũng đọc hết.
+2. `DisallowUnknownFields` biến key gõ sai hoặc thừa thành lỗi thay vì lặng lẽ bỏ qua.
+3. Việc kiểm tra title chạy sau khi giải mã. JSON parse được vẫn có thể sai.
+
+Mỗi lớp có lối thoát riêng nên mã status khác nhau.
+
+<GoP10Decode />
+
+Status code mang ý nghĩa. Body không phải JSON hợp lệ, hoặc có key ta không biết, là `400 Bad Request`: client gửi thứ ta không đọc được. Body là JSON hợp lệ nhưng vi phạm một quy tắc (title rỗng) là `422 Unprocessable Entity`: ta đọc được và từ chối. Có đội dùng 400 cho cả hai; chọn một quy tắc và giữ nhất quán. Lỗi luôn trả về dạng `{"error": "..."}`, để client chỉ phải parse một hình dạng.
+
+Thứ tự trong `writeJSON` quan trọng: đặt header, rồi `WriteHeader`, rồi body. Sau `WriteHeader` dòng status đã đi tới client, nên nếu lỗi xảy ra lúc encode thì chỉ còn cách ghi log. Vì thế lỗi được ghi log chứ không được trả về.
+
+## Middleware: hàm nhận handler, trả handler
+
+Có việc thuộc về mọi request: gắn ID, ghi log, sống sót khi panic. Chép chúng vào từng handler chỉ thêm rối, nên Go dùng *middleware*. Middleware nhận `http.Handler` kế tiếp và trả về một handler mới: làm gì đó, gọi handler kế tiếp, và có thể làm thêm gì đó sau. Nó là một closure, từ [bài 5](/blog/go-errors-defer-panic/), nhớ lấy `next`.
+
+```go
+// A middleware takes a handler and returns a handler that does extra work around it.
+type middleware func(http.Handler) http.Handler
+
+func chain(h http.Handler, mws ...middleware) http.Handler {
+	for i := len(mws) - 1; i >= 0; i-- {
+		h = mws[i](h)
+	}
+	return h
+}
+```
+
+Hai chỗ cú pháp. `mws ...middleware` nghĩa là `chain` nhận số middleware tùy ý. Còn `http.HandlerFunc` là một *kiểu hàm* có method `ServeHTTP` ([bài 4](/blog/go-structs-methods-interfaces/) nói về method trên kiểu), nên `http.HandlerFunc(f)` biến một hàm thường thành `Handler`. Vì vậy mọi middleware bên dưới có thể trả về một function literal.
+
+Cách `chain` lồng chúng: nó đi từ middleware cuối về đầu, mỗi lần bọc `h` thêm một lớp. Với `chain(mux, a, b, c)`, vòng lặp làm `h = c(mux)`, rồi `h = b(h)`, rồi `h = a(h)`. Kết quả là `a(b(c(mux)))`, nên **middleware đứng đầu danh sách là lớp ngoài cùng**. Quay lại `routes()`, `chain(mux, s.requestID, s.logging, s.recoverPanic)` nghĩa là request gặp `requestID`, rồi `logging`, rồi `recoverPanic`, rồi mới tới mux. Response đi ngược ra theo đúng đường đó. Demo bên dưới cho thấy điều này.
+
+<DemoFrame title="One request through the chain, and one that panics" titleVi="Một request đi qua chuỗi middleware, và một request bị panic">
+<GoHttpRequestPathDemo />
+</DemoFrame>
+
+Lớp đầu tiên gắn ID cho mỗi request. Nó giữ ID mà bên gọi gửi trong `X-Request-ID` (hữu ích khi gateway đã tạo sẵn) và nếu không có thì tạo 8 byte ngẫu nhiên. Nó để ID vào context của request, chính context ở [bài 8](/blog/go-context-timeouts-mutexes/), và lặp lại ID trong header response. Một dòng cần đọc trước khi xem code: `_, _ = rand.Read(b)` điền byte ngẫu nhiên vào `b`. `rand.Read` trả về hai giá trị, số byte và lỗi, và `_, _ =` bỏ cả hai vì ở Go hiện tại nó không thể lỗi.
+
+```go
+type ctxKey string
+
+const requestIDKey ctxKey = "requestID"
+
+func (s *server) requestID(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := r.Header.Get("X-Request-ID")
+		if id == "" {
+			b := make([]byte, 8)
+			_, _ = rand.Read(b)
+			id = hex.EncodeToString(b)
+		}
+		w.Header().Set("X-Request-ID", id)
+		ctx := context.WithValue(r.Context(), requestIDKey, id)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+```
+
+Key có kiểu riêng `ctxKey`, nên không package nào khác va chạm được với nó do tình cờ. `r.WithContext` trả về một bản sao của request mang context mới; request không bao giờ bị sửa tại chỗ.
+
+Lớp logging có một câu đố: status code được chọn bên trong handler, sau khi `logging` đã trao quyền điều khiển đi. Cách giải là một wrapper nhỏ. `statusRecorder` nhúng (embed) `http.ResponseWriter` thật (embedding có ở [bài 4](/blog/go-structs-methods-interfaces/)), nên có sẵn mọi method của nó, và chỉ ghi đè `WriteHeader` để nhớ mã status.
+
+Đây là cách wrapper chen vào giữa handler và writer thật.
+
+<GoP10Recorder />
+
+`logging` còn đọc lại ID từ context bằng `Value(requestIDKey).(string)`. Context lưu giá trị dưới dạng `any`, nên `.(string)` là một *type assertion* (ép kiểu có kiểm tra) đòi lấy string bên trong (xem [type switch và assertion ở bài 4](/blog/go-structs-methods-interfaces/#type-switches-and-assertions)). Phần `, _` bỏ qua cờ có/không, nên thiếu ID thì ra chuỗi rỗng.
+
+```go
+// statusRecorder remembers the status code a handler wrote.
+type statusRecorder struct {
+	http.ResponseWriter
+	status int
+}
+
+func (sr *statusRecorder) WriteHeader(code int) {
+	sr.status = code
+	sr.ResponseWriter.WriteHeader(code)
+}
+
+func (s *server) logging(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		rec := &statusRecorder{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(rec, r)
+		id, _ := r.Context().Value(requestIDKey).(string)
+		s.log.Info("request",
+			"id", id, "method", r.Method, "path", r.URL.Path,
+			"status", rec.status, "duration_us", time.Since(start).Microseconds())
+	})
+}
+```
+
+`log/slog` ghi log có cấu trúc: một thông điệp kèm các cặp key-value. Vì chương trình này tạo JSON handler trong `main`, mỗi dòng là một object JSON mà hệ thống log tìm được theo `status` hay `id`. Bài về `slog` trên blog của Go nói về level, group và handler tùy biến; service này chỉ cần `Info` và `Error`.
+
+Lớp cuối là lưới an toàn. Nếu handler panic, `net/http` vốn đã bắt được, ghi stack trace và đóng connection, và client thấy một phản hồi rỗng. Tôi đã kiểm tra bằng một handler panic chạy dưới `httptest.NewServer`: client nhận `EOF`. Middleware cho câu trả lời tốt hơn: nó dùng `defer` và `recover` ([bài 5](/blog/go-errors-defer-panic/)) để ghi log panic và gửi một lỗi `500` JSON gọn gàng.
+
+```go
+func (s *server) recoverPanic(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if v := recover(); v != nil {
+				s.log.Error("panic in handler", "panic", fmt.Sprint(v))
+				writeError(w, http.StatusInternalServerError, "internal error")
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+```
+
+`recoverPanic` là lớp trong cùng, nên `logging` vẫn thấy `500` mà nó ghi ra. Nó chỉ bao phủ goroutine của chính handler. Panic trong một goroutine do handler tự khởi chạy sẽ không bị bắt ở đây, và làm sập cả chương trình.
+
+## main: cấu hình, timeout, tắt êm
+
+Giờ là phần biến các handler thành một server. Cấu hình lấy từ biến môi trường, có giá trị mặc định, đó là cách container được cấu hình.
+
+```go
+func getenv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func main() {
+	if err := run(); err != nil {
+		slog.Error("server stopped", "err", err)
+		os.Exit(1)
+	}
+}
+```
+
+`run` giữ phần việc thật để `main` in ra một lỗi rồi thoát với mã 1. Nếu `main` gọi thẳng `os.Exit`, mọi `defer` bên dưới sẽ bị bỏ qua.
+
+```go
+func run() error {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	s := &server{store: &store{}, log: logger}
+
+	srv := &http.Server{
+		Addr:              getenv("ADDR", ":8080"),
+		Handler:           s.routes(),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       10 * time.Second,
+		WriteTimeout:      10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+
+	// ctx is cancelled when the process gets Ctrl+C or SIGTERM.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	errc := make(chan error, 1)
+	go func() {
+		logger.Info("listening", "addr", srv.Addr)
+		errc <- srv.ListenAndServe()
+	}()
+
+	select {
+	case err := <-errc:
+		return err // the server failed to start, e.g. the port is taken
+	case <-ctx.Done():
+	}
+
+	logger.Info("shutting down")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return srv.Shutdown(shutdownCtx)
+}
+```
+
+Đọc `run` theo bốn bước.
+
+1. **Tự dựng server.** `http.Server` là một struct, nên timeout chỉ là các field bình thường. Đó là lớp bảo vệ từ câu trích ở đầu bài.
+2. **Chạy nó trong goroutine.** `ListenAndServe` chặn cho tới khi server dừng, nên nó chạy trong goroutine và báo lỗi qua một channel ([bài 7](/blog/go-goroutines-channels-select/)). `make(chan error, 1)` tạo channel chứa được một giá trị, nên goroutine luôn gửi được lỗi của nó rồi kết thúc, kể cả khi không còn ai lắng nghe.
+3. **Chờ sự kiện nào đến trước trong hai.** `signal.NotifyContext` cho ra một context bị hủy khi nhấn Ctrl+C hoặc nhận SIGTERM, tín hiệu mà Docker và Kubernetes gửi để dừng container. `select` chờ cái nào đến trước. Case đầu trả về lỗi nếu server không khởi động được. Case thứ hai, `case <-ctx.Done():`, cố ý để trống: khi có tín hiệu, `select` chỉ việc kết thúc và hàm chạy tiếp xuống các dòng tắt server bên dưới.
+4. **Tắt với hạn chót.** `Server.Shutdown` đóng listener để không connection mới nào vào, rồi chờ các request đang chạy làm xong. Context 10 giây là mức trần: nếu chúng lâu hơn, `Shutdown` trả về lỗi thay vì treo mãi.
+
+Bước 4 trông như thế này theo thời gian, từ tín hiệu đến lúc thoát.
+
+<GoP10Shutdown />
+
+Bốn timeout không thay thế nhau được.
+
+| Field | Giới hạn | Giá trị ở đây |
+|---|---|---|
+| `ReadHeaderTimeout` | thời gian đọc header của request | 5 s |
+| `ReadTimeout` | thời gian đọc cả request, gồm body | 10 s |
+| `WriteTimeout` | từ khi đọc xong header của request đến khi ghi xong response | 10 s |
+| `IdleTimeout` | một connection keep-alive rảnh được chờ bao lâu | 60 s |
+
+Những con số này hợp với một JSON API nhỏ. Server stream file tải lớn cần `WriteTimeout` lớn hơn. [Go trên production](/blog/go-production-stdlib-cpu-cache-gc-kubernetes/) giải thích vì sao chúng quan trọng khi có traffic thật.
+
+## Chạy thử
+
+Trong một thư mục trống, đặt `main.go` vào và chạy `go mod init example.com/todo` một lần để tạo `go.mod`. Rồi build và khởi động server ở cổng 8085, và gọi nó từ một terminal thứ hai. `curl -i` in cả header của response. Tôi đã bỏ header `Date` và `Content-Length` khỏi output cho gọn.
+
+<TerminalOutput command="go mod init example.com/todo && go build -o todo ." label="Go 1.27.1 · macOS arm64">
+```text
+go: creating new go.mod: module example.com/todo
+go: to add module requirements and sums:
+	go mod tidy
+```
+</TerminalOutput>
+
+<TerminalOutput command="ADDR=:8085 ./todo   (in a second terminal: curl -i localhost:8085/healthz)" label="Go 1.27.1 · macOS arm64">
+```text
+HTTP/1.1 200 OK
+Content-Type: application/json
+X-Request-Id: 532e4446a16a53e2
+
+{"status":"ok"}
+```
+</TerminalOutput>
+
+<TerminalOutput command="curl -i -X POST localhost:8085/todos -d '{&quot;title&quot;:&quot;learn Go&quot;}'" label="Go 1.27.1 · macOS arm64">
+```text
+HTTP/1.1 201 Created
+Content-Type: application/json
+X-Request-Id: b945efb3c85c0560
+
+{"id":1,"title":"learn Go","done":false}
+```
+</TerminalOutput>
+
+Giờ là các trường hợp lỗi. Mỗi trường hợp là một quy tắc trong code ở trên:
+
+<TerminalOutput command="curl -i -X POST localhost:8085/todos -d '{&quot;title&quot;:&quot;&quot;}'" label="Go 1.27.1 · macOS arm64">
+```text
+HTTP/1.1 422 Unprocessable Entity
+Content-Type: application/json
+X-Request-Id: 2a825af6345685b1
+
+{"error":"title must be 1 to 100 bytes"}
+```
+</TerminalOutput>
+
+<TerminalOutput command="curl -i -X POST localhost:8085/todos -d '{&quot;title&quot;:&quot;x&quot;,&quot;owner&quot;:&quot;me&quot;}'" label="Go 1.27.1 · macOS arm64">
+```text
+HTTP/1.1 400 Bad Request
+Content-Type: application/json
+X-Request-Id: ddb1b4dbbebd2908
+
+{"error":"invalid JSON: json: unknown field \"owner\""}
+```
+</TerminalOutput>
+
+<TerminalOutput command="curl -i -X DELETE localhost:8085/todos" label="Go 1.27.1 · macOS arm64">
+```text
+HTTP/1.1 405 Method Not Allowed
+Allow: GET, HEAD, POST
+Content-Type: text/plain; charset=utf-8
+X-Content-Type-Options: nosniff
+X-Request-Id: 1046bba392728e4c
+
+Method Not Allowed
+```
+</TerminalOutput>
+
+Mux tự viết 405 và header `Allow`. Body của nó là văn bản thường, không phải dạng JSON của ta; nếu cần JSON ở đó, hãy bọc mux bằng một middleware viết lại nó. Hãy nhìn thêm `X-Request-Id` trên mọi response: nó đến từ middleware đầu tiên của ta, và cả câu 405 của mux cũng đi qua nó. Gửi ID của riêng bạn vào cũng dễ như vậy:
+
+<TerminalOutput command="curl -i -H 'X-Request-ID: demo-123' localhost:8085/todos" label="Go 1.27.1 · macOS arm64">
+```text
+HTTP/1.1 200 OK
+Content-Type: application/json
+X-Request-Id: demo-123
+
+[{"id":1,"title":"learn Go","done":false}]
+```
+</TerminalOutput>
+
+Stdout của server là một dòng JSON cho mỗi request. Cùng một `id` được ghi vào dòng log và header response, nên khiếu nại của người dùng truy ngược được tới một dòng log. Đây là một lần chạy ngắn: khởi động, một lần gọi `/healthz`, rồi SIGTERM.
+
+<TerminalOutput command="ADDR=:8085 ./todo   (then curl /healthz, then Ctrl+C or kill -TERM)" label="Go 1.27.1 · macOS arm64">
+```text
+{"time":"2026-11-23T11:13:30.985303+07:00","level":"INFO","msg":"listening","addr":":8085"}
+{"time":"2026-11-23T11:13:31.446646+07:00","level":"INFO","msg":"request","id":"986cf4dc9143cf66","method":"GET","path":"/healthz","status":200,"duration_us":180}
+{"time":"2026-11-23T11:13:31.44972+07:00","level":"INFO","msg":"shutting down"}
+```
+</TerminalOutput>
+
+Dòng cuối là đường tắt êm: tín hiệu đến, context kết thúc, `Shutdown` chạy, và tiến trình thoát với mã 0. Khi cổng đã bị chiếm, `ListenAndServe` lỗi ngay và `run` trả lỗi đó. Tôi chạy bản thứ hai trên cùng cổng và nó in ra dòng sau, thoát với mã 1:
+
+<TerminalOutput command="ADDR=:8085 ./todo   (second copy, port already in use)" label="Go 1.27.1 · macOS arm64">
+```text
+2026/11/23 11:13:19 ERROR server stopped err="listen tcp :8085: bind: address already in use"
+```
+</TerminalOutput>
+
+Tắt êm cho phép các request đã bắt đầu được làm xong, nhưng không bắt được client chờ một request lâu hơn mức trần 10 giây. Giữ handler ngắn hơn mức đó, hoặc truyền `r.Context()` vào phần việc chậm như [bài 8](/blog/go-context-timeouts-mutexes/) chỉ, để nó dừng khi client bỏ đi.
+
+## Test handler với httptest
+
+Bạn không cần server đang chạy để test handler. `Handler` chỉ là một giá trị có `ServeHTTP`, nên test tạo một request giả bằng `httptest.NewRequest`, đưa cho nó một `httptest.NewRecorder` để ghi vào, rồi kiểm tra thứ đã được ghi. Đây là table test của [bài 6](/blog/go-testing-table-tests/) áp dụng cho HTTP.
+
+```go
+package main
+
+import (
+	"io"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+)
+
+func newTestServer() *server {
+	return &server{store: &store{}, log: slog.New(slog.NewTextHandler(io.Discard, nil))}
+}
+
+func TestCreateTodo(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		wantStatus int
+	}{
+		{"valid", `{"title":"learn Go"}`, http.StatusCreated},
+		{"empty title", `{"title":""}`, http.StatusUnprocessableEntity},
+		{"unknown field", `{"title":"x","owner":"me"}`, http.StatusBadRequest},
+		{"not json", `hello`, http.StatusBadRequest},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := newTestServer().routes()
+			req := httptest.NewRequest("POST", "/todos", strings.NewReader(tt.body))
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, req)
+			if rec.Code != tt.wantStatus {
+				t.Errorf("status = %d, want %d (body %s)", rec.Code, tt.wantStatus, rec.Body)
+			}
+		})
+	}
+}
+
+func TestGetTodo(t *testing.T) {
+	s := newTestServer()
+	s.store.add("learn Go")
+	h := s.routes()
+
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, httptest.NewRequest("GET", "/todos/1", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /todos/1 = %d, want 200", rec.Code)
+	}
+	if got := rec.Body.String(); got != `{"id":1,"title":"learn Go","done":false}`+"\n" {
+		t.Errorf("body = %q", got)
+	}
+
+	for path, want := range map[string]int{"/todos/9": 404, "/todos/abc": 400} {
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", path, nil))
+		if rec.Code != want {
+			t.Errorf("GET %s = %d, want %d", path, rec.Code, want)
+		}
+	}
+}
+
+func TestMethodNotAllowed(t *testing.T) {
+	rec := httptest.NewRecorder()
+	newTestServer().routes().ServeHTTP(rec, httptest.NewRequest("DELETE", "/todos", nil))
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Errorf("DELETE /todos = %d, want 405", rec.Code)
+	}
+}
+
+func TestRecoverPanic(t *testing.T) {
+	s := newTestServer()
+	boom := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { panic("boom") })
+	rec := httptest.NewRecorder()
+	chain(boom, s.requestID, s.logging, s.recoverPanic).ServeHTTP(rec, httptest.NewRequest("GET", "/", nil))
+	if rec.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", rec.Code)
+	}
+	if rec.Header().Get("X-Request-ID") == "" {
+		t.Error("missing X-Request-ID header")
+	}
+}
+```
+
+`TestCreateTodo` là table test: bốn body, bốn status mong đợi, một vòng lặp. Mỗi test tạo server riêng, nên các test không bao giờ dùng chung trạng thái. `TestRecoverPanic` dựng chuỗi bằng tay quanh một handler panic, vì không route thật nào nên panic có chủ đích. Các test chạy qua `routes()`, nên middleware và pattern cũng được test, không chỉ các hàm handler.
+
+<TerminalOutput command="go test -v -race ./..." label="Go 1.27.1 · macOS arm64">
+```text
+=== RUN   TestCreateTodo
+=== RUN   TestCreateTodo/valid
+=== RUN   TestCreateTodo/empty_title
+=== RUN   TestCreateTodo/unknown_field
+=== RUN   TestCreateTodo/not_json
+--- PASS: TestCreateTodo (0.00s)
+    --- PASS: TestCreateTodo/valid (0.00s)
+    --- PASS: TestCreateTodo/empty_title (0.00s)
+    --- PASS: TestCreateTodo/unknown_field (0.00s)
+    --- PASS: TestCreateTodo/not_json (0.00s)
+=== RUN   TestGetTodo
+--- PASS: TestGetTodo (0.00s)
+=== RUN   TestMethodNotAllowed
+--- PASS: TestMethodNotAllowed (0.00s)
+=== RUN   TestRecoverPanic
+--- PASS: TestRecoverPanic (0.00s)
+PASS
+ok  	example.com/todo	1.529s
+```
+</TerminalOutput>
+
+`-race` bật race detector, công cụ phát hiện các goroutine cùng chạm vào một vùng nhớ mà không có lock, đúng thứ mutex của store ngăn chặn.
+
+## Đóng gói: một file, một image rỗng
+
+Bài 1 đã nói build Go cho ra một file. Hai thiết lập build làm file đó thả đâu cũng chạy:
+
+- `CGO_ENABLED=0` không liên kết thư viện C nào, nên file không phụ thuộc libc của máy. Chính điều này cho phép nó chạy trong image không có gì.
+- `GOOS` và `GOARCH` chọn hệ điều hành và CPU đích, nên bạn build cho Linux ngay trên Mac mà không cần công cụ nào khác.
+
+```sh
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o todo-linux-amd64 .
+CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -ldflags="-s -w" -o todo-linux-arm64 .
+```
+
+`-trimpath` xóa tên thư mục trên máy bạn khỏi binary, và `-s -w` bỏ bảng symbol và bảng debug để file nhỏ hơn. Đây là kích thước trên máy Mac của tôi:
+
+| Đích | `GOOS/GOARCH` | Kích thước |
+|---|---|---|
+| Linux, server Intel/AMD | `linux/amd64` | 6.729.888 byte |
+| Linux, server ARM và Docker trên Apple silicon | `linux/arm64` | 6.226.080 byte |
+| Windows | `windows/amd64` | 6.929.920 byte (`.exe`) |
+
+`go tool dist list` in ra mọi cặp `GOOS/GOARCH` mà toolchain của bạn nhắm tới được.
+
+Giờ là container. Image thường chứa cả một hệ điều hành. Image `FROM scratch` thì rỗng, và Dockerfile chép đúng một file vào đó. Giai đoạn đầu build bằng image Go; giai đoạn hai chỉ giữ lại binary.
+
+```dockerfile
+FROM golang:1.27 AS build
+WORKDIR /src
+COPY go.mod ./
+COPY *.go ./
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /todo .
+
+FROM scratch
+COPY --from=build /todo /todo
+EXPOSE 8080
+ENTRYPOINT ["/todo"]
+```
+
+Tôi build bằng Docker 29.8.2 (OrbStack, arm64) và chạy thử:
+
+<TerminalOutput command="docker build -t todo-scratch . && docker image ls todo-scratch" label="Docker 29.8.2 client · arm64">
+```text
+IMAGE                 ID             DISK USAGE   CONTENT SIZE   EXTRA
+todo-scratch:latest   102d65c87f5d       8.86MB         2.63MB
+```
+</TerminalOutput>
+
+<TerminalOutput command="docker run -d --rm --name todo-t -p 8086:8080 -e ADDR=:8080 todo-scratch" label="Docker 29.8.2 client · arm64">
+```text
+94569797615e056e779057ef5c58feb7bcfe56b2f2b404f524c7a03747156ce3
+```
+</TerminalOutput>
+
+<TerminalOutput command="curl -s -X POST localhost:8086/todos -d '{&quot;title&quot;:&quot;ship it&quot;}'" label="macOS, talking to the container">
+```text
+{"id":1,"title":"ship it","done":false}
+```
+</TerminalOutput>
+
+Cả image nặng 8,86 MB trên đĩa, và binary bên trong chiếm phần lớn. Trong đó không có shell, không có package manager, không có libc, nghĩa là kẻ tấn công cũng chẳng có gì để dùng thêm. Hai lưu ý:
+
+- Không có shell thì không `docker exec` vào xem được. Hãy debug bằng log, hoặc tạm build từ image nền như `gcr.io/distroless/static` có thêm một root filesystem tối thiểu.
+- Nếu service gọi endpoint HTTPS, nó cần chứng chỉ root CA, thứ mà `scratch` không có. Hãy chép chúng từ giai đoạn build sang, hoặc dùng nền distroless.
+
+Cuối cùng, `docker stop` gửi SIGTERM tới tiến trình của ta, đúng tín hiệu mà `run` đang chờ. Docker mặc định chờ 10 giây rồi mới gửi SIGKILL, nên mức trần tắt êm 10 giây trong `run` bằng đúng thời gian đó của Docker. Lệnh stop trong lần chạy của tôi trả về sau 0,17 giây: tiến trình đang rảnh nên `Shutdown` không có gì để chờ. Trên Kubernetes, hãy đặt thời gian termination grace period của pod dài hơn timeout tắt của bạn.
+
+## Key takeaways
+
+- **Tự dựng `http.Server` và đặt timeout ngay từ đầu.** `http.ListenAndServe` tắt hết các timeout, và một client chậm hoặc biến mất có thể giữ connection mãi mãi.
+- **Pattern của Go 1.22 lo việc định tuyến theo method và đường dẫn.** `"GET /todos/{id}"` cùng `r.PathValue("id")` thay được phần lớn thư viện router. Mux gửi 405 kèm header `Allow` miễn phí.
+- **Bảo vệ mọi body JSON.** Giới hạn kích thước, từ chối key lạ, kiểm tra sau khi giải mã, và trả lỗi theo một dạng JSON.
+- **Middleware là `func(http.Handler) http.Handler`.** Cái đứng đầu chuỗi là lớp ngoài cùng. Để `recover` ở trong cùng để logging vẫn thấy mã 500.
+- **Tắt có chủ đích.** `signal.NotifyContext` cùng `Server.Shutdown` có hạn chót để request đang chạy xong trước khi thoát.
+- **Test qua `routes()` bằng `httptest`.** Bạn thử cả pattern và middleware mà không mở cổng nào.
+- **`CGO_ENABLED=0` cùng `GOOS`/`GOARCH` cho ra một file chạy trên máy Linux bất kỳ,** và file đó có thể là thứ duy nhất trong image `FROM scratch`.
+
+---
+
+## Review questions
+
+1. `http.ListenAndServe(":8080", nil)` bỏ qua điều gì mà `&http.Server{...}` cho bạn đặt, và có thể hỏng chuyện gì? *(Xem "Server mặc định chờ mãi mãi")*
+2. Trong `chain(mux, a, b, c)`, middleware nào thấy request đầu tiên, và middleware nào thấy response sau cùng? *(Xem "Middleware")*
+3. Một handler panic. Không có middleware thì client thấy gì, và có `recoverPanic` thì thấy gì? Vì sao panic trong goroutine do handler khởi chạy thoát khỏi cả hai? *(Xem "Middleware")*
+4. Body là `{"title": ""}`. Một body khác là `{"titel": "x"}`. Cái nào nhận 422 và cái nào nhận 400 trong service này, và vì sao? *(Xem "JSON vào, JSON ra")*
+5. Từng bước, chuyện gì xảy ra giữa lúc SIGTERM đến và lúc tiến trình thoát? Context 10 giây làm gì? *(Xem "main")*
+6. Vì sao `statusRecorder` nhúng `http.ResponseWriter`, và nó ghi đè cái gì? *(Xem "Middleware")*
+7. Vì sao image `FROM scratch` cần `CGO_ENABLED=0`, và bạn sẽ thêm gì nếu service gọi một API HTTPS? *(Xem "Đóng gói")*
+
+### Sắp tới trong series
+
+- Lưu todo vào database, và deadline `context` cho truy vấn: sẽ có ở phần sau của series.
+- Metrics và tracing cho service này: [observability](/blog/go-observability-metrics-microbenchmarks-benchstat/). Profiling: [pprof và flame graph](/blog/go-profiling-pprof-flamegraphs-off-cpu-continuous/).
+- Timeout của server và những bẫy khác trong thư viện chuẩn: [Go trên production](/blog/go-production-stdlib-cpu-cache-gc-kubernetes/).
+
+</Vi>

@@ -30,3 +30,18 @@ Used by `src/components/demos/AnimatedFlow.tsx` (node `icon` key -> file). Extra
 | `merge.svg` | fluent-emoji-flat | shuffle-tracks-button |
 | `ec2.svg` | logos | aws-ec2 |
 | `mysql.svg` | logos | mysql-icon |
+| `python.svg` | logos | python |
+| `fastapi.svg` | logos | fastapi |
+| `curl.svg` | logos | curl |
+| `dns.svg` | fluent-emoji-flat | globe-with-meridians |
+| `lock.svg` | fluent-emoji-flat | locked |
+| `envelope.svg` | fluent-emoji-flat | envelope |
+| `envelope-arrow.svg` | fluent-emoji-flat | envelope-with-arrow |
+| `plug.svg` | fluent-emoji-flat | electric-plug |
+| `cache.svg` | fluent-emoji-flat | card-index-dividers |
+| `detective.svg` | fluent-emoji-flat | detective |
+| `satellite.svg` | fluent-emoji-flat | satellite |
+| `profiler.svg` | fluent-emoji-flat | magnifying-glass-tilted-right |
+| `robot.svg` | fluent-emoji-flat | robot |
+| `swagger.svg` | logos | swagger |
+>>>>>>> feat/backend-post-03-schemas

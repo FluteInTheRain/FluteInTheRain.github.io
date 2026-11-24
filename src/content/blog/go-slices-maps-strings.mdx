@@ -1,0 +1,962 @@
+---
+title: "Go collections"
+title_vi: "Collection trong Go"
+description: "Slices, maps and strings for a developer new to Go: how len and cap work, nil vs empty, random map order, and why len(\"Phở\") is 5."
+description_vi: "Slice, map và string trong Go cho người mới: len/cap, nil và rỗng khác nhau thế nào, map duyệt ngẫu nhiên, và vì sao len(\"Phở\") bằng 5."
+date: 2026-11-23
+category: "backend"
+tags: ["golang", "slices", "maps", "strings", "100-go-mistakes"]
+cover: "../../assets/series/golang/go-gopher-pencil-swim.jpg"
+cover_alt: "Pencil drawing of the Go gopher swimming, drawn by Renee French"
+draft: false
+sources:
+  - { title: "100 Go Mistakes and How to Avoid Them", author: "Teiva Harsanyi", chapters: "Mistakes #20, #21, #22, #23, #24, #36, #37", url: "https://100go.co/" }
+  - { title: "Strings, bytes, runes and characters in Go", author: "Rob Pike & Andrew Gerrand (The Go Blog)", url: "https://go.dev/blog/strings" }
+  - { title: "Go maps in action", author: "Andrew Gerrand (The Go Blog)", url: "https://go.dev/blog/maps" }
+  - { title: "Go 1.18 Release Notes", author: "The Go Authors", url: "https://go.dev/doc/go1.18" }
+  - { title: "encoding/json package documentation", author: "The Go Authors", url: "https://pkg.go.dev/encoding/json" }
+  - { title: "Go gopher pencil swim (CC BY 3.0), used as the cover", author: "Renee French", url: "https://commons.wikimedia.org/wiki/File:Go_gopher_pencil_swim.jpg" }
+  - { title: "6-Pack-Chicken-Eggs.jpg (public domain)", author: "Evan-Amos", url: "https://commons.wikimedia.org/wiki/File:6-Pack-Chicken-Eggs.jpg" }
+---
+
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import En from '../../components/mdx/En.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import GoSliceGrowthDemo from '../../components/mdx/GoSliceGrowthDemo.astro';
+import GoP03ArraySliceCopy from '../../components/mdx/GoP03ArraySliceCopy.astro';
+import GoP03LenCap from '../../components/mdx/GoP03LenCap.astro';
+import GoP03MapLookup from '../../components/mdx/GoP03MapLookup.astro';
+import GoP03NilEmptyJson from '../../components/mdx/GoP03NilEmptyJson.astro';
+import GoP03SubSlice from '../../components/mdx/GoP03SubSlice.astro';
+import GoStringBytes from '../../components/mdx/GoStringBytes.astro';
+import QuoteCard from '../../components/mdx/QuoteCard.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import heroCarton from '../../assets/blog/go-slices-maps-strings/egg-carton-six.jpg';
+
+<En>
+
+<Figure src={heroCarton} alt="A carton of six chicken eggs, white and brown, in a standard egg crate" caption="A carton has six slots whether or not every slot holds an egg. Slice length is the eggs in the carton; capacity is the slots." sourceTitle="Wikimedia Commons: 6-Pack-Chicken-Eggs.jpg (public domain, Evan-Amos)" sourceUrl="https://commons.wikimedia.org/wiki/File:6-Pack-Chicken-Eggs.jpg" />
+
+> "In Go, a string is in effect a read-only slice of bytes."
+> &mdash; *Rob Pike and Andrew Gerrand*, The Go Blog
+
+### len("Phở") is 5, and an API returns null instead of []
+
+Two small surprises catch almost every newcomer. A Vietnamese dish name that looks like three letters reports a length of 5. And a Go service that returns "no items" sends `null` to the browser instead of `[]`, because the list was never created.
+
+Both come from the same place. Go has three built-in collections, and each one is simpler and stricter than the list, dictionary and string you know. This post shows how to use them: the slice (Go's growable list), the map (its dictionary), and the string. You do not need to know how they are built inside. If you want that later, the memory post linked below covers it.
+
+<Callout type="note" title="TL;DR">
+Use slices for lists: `make`, `append`, `len` and `cap` cover most needs, and a nil slice is a perfectly good empty list. Use maps for lookups: read with the `value, ok` form, never rely on the order of iteration. A string is a read-only run of bytes, so `len` counts bytes, and `range` is how you walk its characters (runes). The internals live in the memory post linked below.
+</Callout>
+
+<Concepts>
+
+- **Slice**: Go's everyday list type, written `[]int`. It grows when you `append`.
+- **Array**: a list whose size is part of its type, like `[3]int`. You will see it rarely; slices do the daily work.
+- **Map**: Go's dictionary type, written `map[string]int` (keys are strings, values are ints).
+
+</Concepts>
+
+---
+
+## Arrays and slices
+
+A Go array has a fixed size that is part of its type: `[3]int` and `[4]int` are different types. Assigning an array copies every element. A slice, written `[]int`, is the list type you will use. Assigning a slice does not copy the elements: both names look at the same data.
+
+<GoP03ArraySliceCopy />
+
+```go
+arr := [3]int{1, 2, 3}
+arr2 := arr          // copies all three numbers
+arr2[0] = 99
+fmt.Println("arrays:", arr, arr2)
+
+s := []int{1, 2, 3}
+s2 := s              // both names see the same elements
+s2[0] = 99
+fmt.Println("slices:", s, s2)
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Changing the copy of an array leaves the original alone. Changing a slice through a second name changes it for both.">
+```text
+arrays: [1 2 3] [99 2 3]
+slices: [99 2 3] [99 2 3]
+```
+</TerminalOutput>
+
+A slice has two sizes. `len` is how many items you are using now. `cap` (capacity) is how many items fit before Go has to find more room. You create a slice with `make([]int, length, capacity)`. The capacity is optional.
+
+<GoP03LenCap />
+
+```go
+t := make([]int, 3, 6)
+fmt.Println(t, len(t), cap(t))
+t = append(t, 7)
+fmt.Println(t, len(t), cap(t))
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="make gives three zero values and room for six. append uses the spare room.">
+```text
+[0 0 0] 3 6
+[0 0 0 7] 4 6
+```
+</TerminalOutput>
+
+You can only index up to `len`, not `cap`. The spare room is only reachable through `append`. Reading past `len` stops the program with a panic (Go's loud crash for a bug at run time), even though there is room:
+
+```go
+fmt.Println(t[10])   // t has len 4, so index 10 is out of range
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="The program stops on the spot. The first line says what went wrong. The lines after it show where; the file path is shortened here.">
+```text
+panic: runtime error: index out of range [10] with length 4
+
+goroutine 1 [running]:
+main.main()
+	.../main.go:8 +0x1c
+exit status 2
+```
+</TerminalOutput>
+
+You can take a piece of a slice with `a[low:high]`. It starts at index `low` and stops just before index `high`, so `a[1:3]` is the items at index 1 and 2. Leave `low` out to start at the beginning (`a[:n]`), or leave `high` out to go to the end (`a[n:]`):
+
+```go
+n := []int{10, 20, 30, 40, 50}
+fmt.Println(n[1:3], n[:2], n[3:])
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="n[1:3] is the items at index 1 and 2. n[:2] is the first two. n[3:] is everything from index 3 on.">
+```text
+[20 30] [10 20] [40 50]
+```
+</TerminalOutput>
+
+Taking a piece does not copy either. The piece looks at the same items as the original, so changing one changes the other:
+
+<GoP03SubSlice />
+
+```go
+a := []int{1, 2, 3, 4}
+b := a[1:3]          // a piece of a: the items 2 and 3
+b[0] = 99
+fmt.Println(a, b)
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="b is a window onto a. Setting b[0] changed a[1].">
+```text
+[1 99 3 4] [99 3]
+```
+</TerminalOutput>
+
+Why this happens, and what it does when you append to the piece, is the main trap of the type. It is covered in the memory post: [Go memory: slices, maps and strings underneath](/blog/go-memory-data-types-slices-maps-strings/).
+
+If you have not met variables, types or the `:=` shorthand yet, they are in [Go variables, types, pointers and functions](/blog/go-variables-types-pointers-functions/). Setting up the project is in [Go first program, modules and packages](/blog/go-first-program-modules-packages/).
+
+<Concepts>
+
+- **Length (`len`)**: how many items the slice holds right now.
+- **Capacity (`cap`)**: how many items fit in the space Go has reserved, before it must reserve more.
+- **`make`**: the built-in that creates a slice (or a map) with a size you choose.
+- **Panic**: Go's loud crash for a bug at run time, such as reading past the end of a slice.
+
+</Concepts>
+
+---
+
+## How append grows a slice
+
+When a slice is full and you `append`, Go reserves a bigger block, copies the items over and carries on. You never ask for this, but it explains why `cap` jumps around. Start with an empty slice and append one item at a time, and the capacity changes in steps, not on every append.
+
+The demo below shows that capacity grows ahead of length: Go reserves extra room so most appends cost nothing. For small slices the capacity roughly doubles. Once a slice passes about 256 elements (since Go 1.18) it grows by a smaller factor each time. The Go 1.18 release notes say `append` "now uses a slightly different formula" that is "less prone to sudden transitions in allocation behavior". The exact numbers vary, so do not memorize them. The demo uses numbers from a real Go 1.27.1 run.
+
+<GoSliceGrowthDemo />
+
+<Callout type="note" title="Your own numbers may differ">
+The steps depend on the element type, the Go version and what the rest of your program does with the slice. Read `cap` when you need it. Do not hard-code it.
+</Callout>
+
+If you know the final size, tell Go. Making room once is cheaper than growing many times, so preallocate with `make` when you know the size. `make([]int, 0, n)` reserves room and keeps `len` at zero, so you still use `append`. `make([]int, n)` creates `n` zero values, and you fill them by index. Here the size comes from another slice:
+
+```go
+import (
+    "fmt"
+    "strings"
+)
+
+names := []string{"go", "vet", "fmt"}
+upper := make([]string, 0, len(names)) // room for every name
+for _, n := range names {
+    upper = append(upper, strings.ToUpper(n))
+}
+fmt.Println(upper, len(upper), cap(upper))
+```
+
+The `for _, n := range names` line walks the slice: `range` hands the loop each position and each item in turn, and the blank `_` throws the position away because only the item is needed.
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="The slice starts with len 0 and room for three, so append never has to move anything. len and cap end up equal.">
+```text
+[GO VET FMT] 3 3
+```
+</TerminalOutput>
+
+Reserving room is not always worth the extra line. If you do not know the size, or the loop is not hot, a plain `append` is fine. When the code that fills the slice reads more clearly with `append`, keep `append`.
+
+<Concepts>
+
+- **Reserve capacity**: create the slice with room for the items you expect, so `append` never has to move them.
+
+</Concepts>
+
+---
+
+## nil, empty, and copy
+
+A slice you declare but never create, `var s []string`, is nil. It has `len` 0, you can `append` to it, and you can loop over it. A nil slice is a normal, working empty list. An empty slice made with `[]string{}` or `make([]string, 0)` also has `len` 0, but it is not nil.
+
+The `show` helper below prints with format verbs: `%d` is a whole number, `%t` is true or false, and `\n` ends the line. The table in [Go variables, types, pointers and functions](/blog/go-variables-types-pointers-functions/) lists every verb this series uses.
+
+```go
+import "fmt"
+
+func show(i int, s []string) {
+    fmt.Printf("%d: len=%d nil=%t\n", i, len(s), s == nil)
+}
+
+var s []string               // nil
+show(1, s)
+s = []string{}               // empty, not nil
+show(2, s)
+s = make([]string, 0)        // also empty, not nil
+show(3, s)
+var n []string
+n = append(n, "foo")         // works on nil
+fmt.Println(n)
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Both are empty. Only the first is nil. append works on either.">
+```text
+1: len=0 nil=true
+2: len=0 nil=false
+3: len=0 nil=false
+[foo]
+```
+</TerminalOutput>
+
+For your own code this rarely matters, so check emptiness with `len(s) == 0`, which is true for both. It matters at one boundary, JSON. The standard library's `encoding/json` says "a nil slice encodes as the null JSON value". A handler that returns a list it never filled sends `null`, and a front end that loops over the response breaks.
+
+```go
+import (
+    "encoding/json"
+    "fmt"
+)
+
+type Reply struct {
+    Items []string `json:"items"`
+}
+
+b1, _ := json.Marshal(Reply{Items: nil})          // a nil slice
+b2, _ := json.Marshal(Reply{Items: []string{}})   // an empty slice
+fmt.Println(string(b1), string(b2))
+```
+
+`json.Marshal` turns a value into JSON text, and the `` `json:"items"` `` tag names the field `items` in that text. The `_` discards the error to keep the example short.
+
+<GoP03NilEmptyJson />
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Same field, two zero-length slices, two different JSON documents.">
+```text
+{"items":null} {"items":[]}
+```
+</TerminalOutput>
+
+If an API promises an array, create the slice with `make` or `[]T{}`, so the JSON says `[]`. Otherwise prefer the plain `var s []T`.
+
+To duplicate a slice, use `copy(dst, src)`. It copies as many items as fit in the shorter of the two, so `dst` must already have room. This is the usual mistake: `dst` starts empty, `copy` copies nothing, and no error is raised.
+
+```go
+src := []int{0, 1, 2}
+var dst []int
+n := copy(dst, src)                // dst has no room
+fmt.Println(n, dst)
+dst = make([]int, len(src))
+n = copy(dst, src)
+fmt.Println(n, dst)
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="copy returns how many items it copied. Zero means the destination had no length.">
+```text
+0 []
+3 [0 1 2]
+```
+</TerminalOutput>
+
+<Concepts>
+
+- **nil slice**: a slice with no memory behind it yet. `len` is 0 and `append` works.
+- **Empty slice**: a slice that exists but holds zero items. Not nil.
+- **JSON**: the text format most web APIs send. `null` and `[]` look different to a client.
+
+</Concepts>
+
+---
+
+## Maps
+
+A map is Go's dictionary. Under the hood it is a hash table (a structure that finds a key fast by turning it into a number), but you only see the four operations: set, get, delete and loop. Create one with a literal or with `make`.
+
+```go
+m := map[string]int{"go": 1, "vet": 2, "fmt": 3}
+v, ok := m["lint"]
+fmt.Println(v, ok)     // 0 false
+v, ok = m["go"]
+fmt.Println(v, ok)     // 1 true
+delete(m, "vet")
+delete(m, "nothing")   // fine, no error
+fmt.Println(len(m))
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="A missing key gives the zero value, not an error. The second value, ok, tells you whether the key was really there.">
+```text
+0 false
+1 true
+2
+```
+</TerminalOutput>
+
+Reading a missing key returns the zero value of the value type (0 for an int). So `m["lint"]` gives 0, which is also a legal stored value. To tell the two cases apart, use the two-value form, written `v, ok := m[key]`. The Go blog calls this a "two-value assignment" that tests for the existence of a key. `delete` on a key that is not there does nothing.
+
+<GoP03MapLookup />
+
+A map you declare but never create (`var m map[string]int`) is nil. Reading from it is fine, but writing panics. Create it with `make` or a literal before the first write.
+
+```go
+var m map[string]int
+fmt.Println(m["x"], len(m))
+m["x"] = 1                    // panic
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="This is the one place where a nil collection bites: a nil map reads fine and refuses writes. The program stops at the write, and `exit status 2` is `go run` reporting the crash.">
+```text
+0 0
+panic: assignment to entry in nil map
+
+goroutine 1 [running]:
+main.main()
+	.../main.go:8 +0xa4
+exit status 2
+```
+</TerminalOutput>
+
+The loop order is not stable. The Go blog says the iteration order "is not specified and is not guaranteed to be the same from one iteration to the next". It really does change. This program loops over the same eight-key map three times, then sorts the keys. The output of one real run (yours will differ, that is the point):
+
+```go
+import (
+    "fmt"
+    "sort"
+)
+
+big := map[int]bool{}
+for i := 0; i < 8; i++ {
+    big[i] = true
+}
+for run := 0; run < 3; run++ {   // loop over the same map three times
+    for k := range big {
+        fmt.Print(k, " ")
+    }
+    fmt.Println()
+}
+keys := make([]int, 0, len(big))   // room for every key
+for k := range big {
+    keys = append(keys, k)
+}
+sort.Ints(keys)
+fmt.Println(keys)
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Same map, same program, three different orders. Sorted keys are the fix.">
+```text
+3 4 5 6 7 0 1 2 
+2 3 4 5 6 7 0 1 
+1 2 3 4 5 6 7 0 
+[0 1 2 3 4 5 6 7]
+```
+</TerminalOutput>
+
+If you need order, copy the keys into a slice and sort them, as the code does. The last line of the output is that result. Never write a test that depends on the order of a map loop.
+
+
+Like slices, a map grows as you add keys. If you know roughly how many entries to expect, `make` takes a size hint.
+
+Maps are also not safe to use from several goroutines (functions running at the same time) at once. The fix is in [Go goroutines, channels and select](/blog/go-goroutines-channels-select/).
+
+<Concepts>
+
+- **Hash table**: a structure that finds a value by turning its key into a position, so lookup stays quick as it grows.
+- **Zero value**: what Go gives a variable or missing key that was never set: 0, an empty string, false, or nil.
+- **Comma-ok**: reading with `v, ok := m[key]`, where `ok` says whether the key existed.
+
+</Concepts>
+
+---
+
+## Strings and runes
+
+A string in Go is a read-only sequence of bytes. Go source code is UTF-8, so a literal such as `"Phở"` is stored as UTF-8 bytes. UTF-8 spends one byte on plain English letters and up to four on other characters. That is why the length of "Phở" is not 3.
+
+A rune is Go's name for a single Unicode character (a code point). It is an alias of `int32`. `len(s)` counts bytes. To count characters, use `utf8.RuneCountInString(s)`. To see the bytes themselves, `[]byte(s)` turns the string into a list of its raw bytes, and the verb `% x` prints each byte as two hex digits (hex is base 16) with a space between them.
+
+```go
+import (
+    "fmt"
+    "unicode/utf8"
+)
+
+s := "Phở"
+fmt.Println(len(s), utf8.RuneCountInString(s))   // 5 3
+fmt.Printf("% x\n", []byte(s))                    // 50 68 e1 bb 9f
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Five bytes, three runes. The hex values are the raw bytes of the string.">
+```text
+5 3
+50 68 e1 bb 9f
+```
+</TerminalOutput>
+
+<GoStringBytes />
+
+Indexing gives a byte, not a character. `s[0]` is `P` stored as the byte `0x50`, and `s[2]` is only the first byte of the `ở`. The `range` loop is different: it decodes the string one rune at a time. It gives you the position where each rune starts, and the rune itself. In the `Printf` below, `%c` prints a rune as the character, and `U+%04X` prints its Unicode number in hex, padded to four digits.
+
+```go
+for i, r := range s {
+    fmt.Printf("%d: %c (U+%04X)\n", i, r, r)
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="The loop gives start positions 0, 1, 2, not 0, 1, 2, 3, 4. Counting bytes and counting runes give different answers.">
+```text
+0: P (U+0050)
+1: h (U+0068)
+2: ở (U+1EDF)
+```
+</TerminalOutput>
+
+The Go blog says that "a for range loop, by contrast, decodes one UTF-8-encoded rune on each iteration". The common mistake is to loop with `for i := range s` and then print `s[i]`. That prints single bytes, so a character such as `ê` turns into garbage. Use the second value from `range`.
+
+To pick the n-th character, convert the string to a list of characters with `[]rune(s)`, slice that, and convert back: `string([]rune(s)[:2])` gives `Ph`. The conversion copies the whole string, so use it for random access, and use `range` to walk once. Cutting a string directly with `s[:3]` cuts bytes, and can slice a character in half. In the output, `%q` prints the text in quotes and shows bytes that are not a plain character as `\x` escapes:
+
+```go
+import (
+    "fmt"
+    "unicode/utf8"
+)
+
+fmt.Println(string([]rune(s)[:2]))   // first two characters
+fmt.Printf("%q\n", s[:3])             // first three bytes
+fmt.Println(utf8.ValidString(s[:3])) // is that still valid text?
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="s[:3] is three bytes, not three characters. The third byte is the first third of ở, so the result is no longer valid text.">
+```text
+Ph
+"Ph\xe1"
+false
+```
+</TerminalOutput>
+
+How strings are laid out in memory, how substrings keep big buffers alive and why `strings.Builder` exists are for the memory post: [Go memory: slices, maps and strings underneath](/blog/go-memory-data-types-slices-maps-strings/).
+
+<Concepts>
+
+- **Rune**: Go's type for one Unicode character (code point). It is an alias of `int32`.
+- **UTF-8**: a way to store text as bytes, using one to four bytes per character.
+- **Code point**: the number Unicode assigns to a character, written like `U+1EDF`.
+
+</Concepts>
+
+---
+
+## Key takeaways
+
+- A slice is Go's growable list: create it with `make` or `var`, grow it with `s = append(s, x)`, and always assign the result back.
+- `len` is what you use, `cap` is what is reserved; if you know the size, reserve it with `make([]T, 0, n)`.
+- A nil slice is a normal empty list, so test with `len(s) == 0`. Only JSON output makes `nil` and `[]` look different.
+- Read a map with `v, ok := m[key]`, never depend on loop order, and create a map before writing to it.
+- A string is bytes: `len` counts bytes, `s[i]` is a byte, and `for i, r := range s` walks runes.
+
+## Review questions
+
+1. Why does `copy(dst, src)` copy nothing when `dst` is declared as `var dst []int`? (See "nil, empty, and copy".)
+2. Your handler returns a list that is sometimes empty, and the browser receives `null`. What changed in the code, and why? (See "nil, empty, and copy".)
+3. `m["lint"]` returns 0. How do you tell "the key is missing" from "the stored value is 0"? (See "Maps".)
+4. What does `len("Phở")` return, and why is `s[:3]` a bug here? (See "Strings and runes".)
+5. A loop appends 1,000 items to an empty slice. How would you cut the number of reallocations, and when would you skip it? (See "How append grows a slice".)
+
+</En>
+
+<Vi>
+
+<Figure src={heroCarton} alt="Một vỉ sáu quả trứng gà, trắng và nâu, trong khay trứng tiêu chuẩn" caption="Vỉ trứng có sáu ô dù ô nào có trứng hay không. Độ dài (len) của slice là số trứng đang có; sức chứa (cap) là số ô." sourceTitle="Wikimedia Commons: 6-Pack-Chicken-Eggs.jpg (phạm vi công cộng, Evan-Amos)" sourceUrl="https://commons.wikimedia.org/wiki/File:6-Pack-Chicken-Eggs.jpg" />
+
+> "Trong Go, string thực chất là một slice chỉ đọc gồm các byte."
+> &mdash; *Rob Pike và Andrew Gerrand*, The Go Blog
+
+### len("Phở") bằng 5, và API trả về null thay vì []
+
+Có hai bất ngờ nhỏ mà gần như người mới nào cũng dính. Tên món "Phở" nhìn như ba chữ cái mà độ dài báo 5. Và service Go trả về "không có item nào" nhưng trình duyệt nhận `null` chứ không phải `[]`, vì danh sách chưa bao giờ được tạo.
+
+Cả hai đều có chung một gốc. Go có ba collection dựng sẵn, và mỗi cái đơn giản hơn, khắt khe hơn list, dictionary và string mà bạn đã quen. Bài này chỉ cách dùng: slice (list co giãn của Go), map (dictionary) và string. Bạn không cần biết bên trong chúng được xây ra sao. Nếu muốn đào sâu sau, bài về bộ nhớ ở link bên dưới sẽ nói.
+
+<Callout type="note" title="TL;DR">
+Dùng slice làm list: `make`, `append`, `len`, `cap` đủ cho hầu hết nhu cầu, và slice nil là một list rỗng dùng bình thường. Dùng map để tra cứu: đọc bằng dạng `value, ok`, đừng bao giờ dựa vào thứ tự duyệt. String là dãy byte chỉ đọc, nên `len` đếm byte, còn `range` là cách đi qua từng ký tự (rune). Phần bên trong nằm ở bài về bộ nhớ, link ở dưới.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Slice**: kiểu list hằng ngày của Go, viết là `[]int`. Nó tự lớn khi bạn `append`.
+- **Array (mảng)**: list có kích thước nằm ngay trong kiểu, như `[3]int`. Ít khi gặp; việc hằng ngày do slice làm.
+- **Map**: kiểu dictionary của Go, viết là `map[string]int` (key là string, value là int).
+
+</Concepts>
+
+---
+
+## Array và slice
+
+Array của Go có kích thước cố định và kích thước đó là một phần của kiểu: `[3]int` và `[4]int` là hai kiểu khác nhau. Gán array là copy toàn bộ phần tử. Slice, viết là `[]int`, mới là kiểu list bạn sẽ dùng. Gán slice không copy phần tử: hai tên cùng nhìn vào một dữ liệu.
+
+<GoP03ArraySliceCopy />
+
+```go
+arr := [3]int{1, 2, 3}
+arr2 := arr          // copies all three numbers
+arr2[0] = 99
+fmt.Println("arrays:", arr, arr2)
+
+s := []int{1, 2, 3}
+s2 := s              // both names see the same elements
+s2[0] = 99
+fmt.Println("slices:", s, s2)
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Sửa bản copy của array thì bản gốc không đổi. Sửa slice qua tên thứ hai thì cả hai cùng đổi.">
+```text
+arrays: [1 2 3] [99 2 3]
+slices: [99 2 3] [99 2 3]
+```
+</TerminalOutput>
+
+Slice có hai con số kích thước. `len` là số phần tử đang dùng. `cap` (capacity, sức chứa) là số phần tử còn nằm vừa trước khi Go phải tìm chỗ rộng hơn. Bạn tạo slice bằng `make([]int, length, capacity)`; capacity là tùy chọn.
+
+<GoP03LenCap />
+
+```go
+t := make([]int, 3, 6)
+fmt.Println(t, len(t), cap(t))
+t = append(t, 7)
+fmt.Println(t, len(t), cap(t))
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="make cho ba giá trị 0 và chỗ cho sáu. append dùng chỗ trống.">
+```text
+[0 0 0] 3 6
+[0 0 0 7] 4 6
+```
+</TerminalOutput>
+
+Bạn chỉ index được tới `len`, không tới `cap`. Chỗ dư chỉ đi tới được qua `append`. Đọc quá `len` làm chương trình dừng bằng panic (cách Go dừng ầm ĩ khi có lỗi lúc chạy), dù chỗ còn dư:
+
+```go
+fmt.Println(t[10])   // t has len 4, so index 10 is out of range
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Chương trình dừng ngay. Dòng đầu cho biết lỗi gì. Các dòng sau cho biết ở đâu; đường dẫn file được rút gọn ở đây.">
+```text
+panic: runtime error: index out of range [10] with length 4
+
+goroutine 1 [running]:
+main.main()
+	.../main.go:8 +0x1c
+exit status 2
+```
+</TerminalOutput>
+
+Bạn có thể lấy một đoạn của slice bằng `a[low:high]`. Đoạn bắt đầu ở index `low` và dừng ngay trước index `high`, nên `a[1:3]` là các phần tử ở index 1 và 2. Bỏ `low` thì bắt đầu từ đầu (`a[:n]`), bỏ `high` thì đi tới cuối (`a[n:]`):
+
+```go
+n := []int{10, 20, 30, 40, 50}
+fmt.Println(n[1:3], n[:2], n[3:])
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="n[1:3] là các phần tử ở index 1 và 2. n[:2] là hai phần tử đầu. n[3:] là mọi thứ từ index 3 trở đi.">
+```text
+[20 30] [10 20] [40 50]
+```
+</TerminalOutput>
+
+Lấy một đoạn cũng không copy. Đoạn đó nhìn vào đúng các phần tử của bản gốc, nên sửa bên này là bên kia đổi theo:
+
+<GoP03SubSlice />
+
+```go
+a := []int{1, 2, 3, 4}
+b := a[1:3]          // a piece of a: the items 2 and 3
+b[0] = 99
+fmt.Println(a, b)
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="b là một ô cửa nhìn vào a. Gán b[0] làm a[1] đổi theo.">
+```text
+[1 99 3 4] [99 3]
+```
+</TerminalOutput>
+
+Vì sao như vậy, và chuyện gì xảy ra khi append vào đoạn đó, là cái bẫy lớn nhất của kiểu này. Nó nằm trong bài về bộ nhớ: [Go memory: slices, maps and strings underneath](/blog/go-memory-data-types-slices-maps-strings/).
+
+Nếu bạn chưa gặp biến, kiểu hay cú pháp `:=`, chúng nằm trong [Go variables, types, pointers and functions](/blog/go-variables-types-pointers-functions/). Cách dựng project nằm trong [Go first program, modules and packages](/blog/go-first-program-modules-packages/).
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Độ dài (`len`)**: số phần tử slice đang giữ.
+- **Sức chứa (`cap`)**: số phần tử nằm vừa trong chỗ Go đã dành sẵn, trước khi phải dành thêm.
+- **`make`**: hàm dựng sẵn để tạo slice (hoặc map) với kích thước bạn chọn.
+- **Panic**: cách Go dừng chương trình ầm ĩ khi có lỗi lúc chạy, như đọc quá cuối slice.
+
+</Concepts>
+
+---
+
+## append làm slice lớn lên thế nào
+
+Khi slice đầy mà bạn `append`, Go dành một khối lớn hơn, chép phần tử sang rồi chạy tiếp. Bạn không yêu cầu điều đó, nhưng nó giải thích vì sao `cap` nhảy loạn. Bắt đầu từ slice rỗng và append từng phần tử, sức chứa đổi theo từng bậc, không phải mỗi lần append.
+
+Demo dưới cho thấy capacity lớn lên trước length: Go dành thêm chỗ để phần lớn lần append không tốn gì. Với slice nhỏ, capacity gần như gấp đôi. Khi slice vượt khoảng 256 phần tử (từ Go 1.18), mỗi lần nó lớn theo hệ số nhỏ hơn. Ghi chú phát hành Go 1.18 nói `append` "now uses a slightly different formula" và công thức mới "less prone to sudden transitions in allocation behavior". Số cụ thể thay đổi, nên đừng học thuộc. Demo dùng số lấy từ một lần chạy thật trên Go 1.27.1.
+
+<GoSliceGrowthDemo />
+
+<Callout type="note" title="Số của bạn có thể khác">
+Các bậc phụ thuộc kiểu phần tử, phiên bản Go và phần còn lại của chương trình làm gì với slice. Cần thì đọc `cap`, đừng gõ cứng.
+</Callout>
+
+Nếu biết trước kích thước cuối, hãy báo cho Go. Dành chỗ một lần rẻ hơn lớn dần nhiều lần, nên hãy dành sẵn bằng `make` khi biết kích thước. `make([]int, 0, n)` dành chỗ và giữ `len` bằng 0, nên bạn vẫn dùng `append`. `make([]int, n)` tạo sẵn `n` giá trị 0, rồi bạn điền theo index. Ở đây kích thước lấy từ một slice khác:
+
+```go
+import (
+    "fmt"
+    "strings"
+)
+
+names := []string{"go", "vet", "fmt"}
+upper := make([]string, 0, len(names)) // room for every name
+for _, n := range names {
+    upper = append(upper, strings.ToUpper(n))
+}
+fmt.Println(upper, len(upper), cap(upper))
+```
+
+Dòng `for _, n := range names` đi qua slice: `range` đưa cho vòng lặp lần lượt từng vị trí và từng phần tử, còn `_` bỏ vị trí đi vì chỉ cần phần tử.
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Slice bắt đầu với len 0 và chỗ cho ba phần tử, nên append không phải dời gì. Cuối cùng len và cap bằng nhau.">
+```text
+[GO VET FMT] 3 3
+```
+</TerminalOutput>
+
+Không phải lúc nào dành chỗ trước cũng đáng thêm một dòng. Nếu không biết kích thước, hoặc vòng lặp không nóng, `append` thuần là đủ. Khi code điền slice đọc rõ hơn với `append`, cứ giữ `append`.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Dành sẵn sức chứa (reserve capacity)**: tạo slice với chỗ cho số phần tử bạn dự kiến, để `append` không phải dời chúng.
+
+</Concepts>
+
+---
+
+## nil, rỗng và copy
+
+Slice bạn khai báo mà chưa tạo, `var s []string`, là nil. Nó có `len` 0, bạn `append` được, và lặp qua được. Slice nil là một list rỗng dùng bình thường. Slice rỗng tạo bằng `[]string{}` hoặc `make([]string, 0)` cũng có `len` 0, nhưng không phải nil.
+
+Hàm `show` dưới đây in bằng format verb: `%d` là số nguyên, `%t` là true hoặc false, và `\n` xuống dòng. Bảng trong [Go variables, types, pointers and functions](/blog/go-variables-types-pointers-functions/) liệt kê mọi verb mà series này dùng.
+
+```go
+import "fmt"
+
+func show(i int, s []string) {
+    fmt.Printf("%d: len=%d nil=%t\n", i, len(s), s == nil)
+}
+
+var s []string               // nil
+show(1, s)
+s = []string{}               // empty, not nil
+show(2, s)
+s = make([]string, 0)        // also empty, not nil
+show(3, s)
+var n []string
+n = append(n, "foo")         // works on nil
+fmt.Println(n)
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Cả hai đều rỗng. Chỉ cái đầu là nil. append chạy được với cả hai.">
+```text
+1: len=0 nil=true
+2: len=0 nil=false
+3: len=0 nil=false
+[foo]
+```
+</TerminalOutput>
+
+Trong code của bạn, điều này hiếm khi quan trọng, nên kiểm tra rỗng bằng `len(s) == 0`, đúng cho cả hai. Nó chỉ quan trọng ở một ranh giới: JSON. Tài liệu `encoding/json` ghi "a nil slice encodes as the null JSON value". Handler trả về danh sách chưa được điền sẽ gửi `null`, và front end lặp qua response sẽ vỡ.
+
+```go
+import (
+    "encoding/json"
+    "fmt"
+)
+
+type Reply struct {
+    Items []string `json:"items"`
+}
+
+b1, _ := json.Marshal(Reply{Items: nil})          // slice nil
+b2, _ := json.Marshal(Reply{Items: []string{}})   // slice rỗng
+fmt.Println(string(b1), string(b2))
+```
+
+`json.Marshal` biến một giá trị thành chuỗi JSON, và tag `` `json:"items"` `` đặt tên field là `items` trong chuỗi đó. Dấu `_` bỏ qua error cho ví dụ gọn.
+
+<GoP03NilEmptyJson />
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Cùng một field, hai slice độ dài 0, hai JSON khác nhau.">
+```text
+{"items":null} {"items":[]}
+```
+</TerminalOutput>
+
+Nếu API hứa trả mảng, hãy tạo slice bằng `make` hoặc `[]T{}` để JSON ra `[]`. Còn lại thì cứ dùng `var s []T` cho gọn.
+
+Để nhân đôi một slice, dùng `copy(dst, src)`. Nó chép số phần tử vừa với slice ngắn hơn trong hai cái, nên `dst` phải có sẵn chỗ. Đây là lỗi hay gặp: `dst` bắt đầu rỗng, `copy` chép được 0 phần tử, và không có lỗi nào được báo.
+
+```go
+src := []int{0, 1, 2}
+var dst []int
+n := copy(dst, src)                // dst has no room
+fmt.Println(n, dst)
+dst = make([]int, len(src))
+n = copy(dst, src)
+fmt.Println(n, dst)
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="copy trả về số phần tử đã chép. Bằng 0 nghĩa là slice đích không có độ dài.">
+```text
+0 []
+3 [0 1 2]
+```
+</TerminalOutput>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Slice nil**: slice chưa có bộ nhớ nào phía sau. `len` bằng 0 và `append` vẫn chạy.
+- **Slice rỗng (empty)**: slice có tồn tại nhưng chứa 0 phần tử. Không phải nil.
+- **JSON**: định dạng văn bản mà hầu hết web API gửi. `null` và `[]` khác nhau với client.
+
+</Concepts>
+
+---
+
+## Map
+
+Map là dictionary của Go. Bên dưới nó là bảng băm (hash table, cấu trúc tìm key nhanh bằng cách biến key thành một con số), nhưng bạn chỉ thấy bốn thao tác: gán, đọc, xóa và lặp. Tạo bằng literal hoặc `make`.
+
+```go
+m := map[string]int{"go": 1, "vet": 2, "fmt": 3}
+v, ok := m["lint"]
+fmt.Println(v, ok)     // 0 false
+v, ok = m["go"]
+fmt.Println(v, ok)     // 1 true
+delete(m, "vet")
+delete(m, "nothing")   // fine, no error
+fmt.Println(len(m))
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Key không có thì ra zero value, không phải lỗi. Giá trị thứ hai, ok, cho biết key có thật sự tồn tại hay không.">
+```text
+0 false
+1 true
+2
+```
+</TerminalOutput>
+
+Đọc key không tồn tại trả về zero value của kiểu value (0 với int). Nên `m["lint"]` ra 0, mà 0 cũng là một giá trị hợp lệ có thể đã lưu. Muốn phân biệt, dùng dạng hai giá trị `v, ok := m[key]`. Go blog gọi đây là phép gán hai giá trị để kiểm tra key có tồn tại không. `delete` một key không có thì không làm gì.
+
+<GoP03MapLookup />
+
+Map khai báo mà chưa tạo (`var m map[string]int`) là nil. Đọc thì được, nhưng ghi sẽ panic. Hãy tạo bằng `make` hoặc literal trước lần ghi đầu tiên.
+
+```go
+var m map[string]int
+fmt.Println(m["x"], len(m))
+m["x"] = 1                    // panic
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Đây là chỗ duy nhất collection nil cắn bạn: map nil đọc được nhưng từ chối ghi. Chương trình dừng ngay ở lệnh ghi, còn `exit status 2` là `go run` báo chương trình đã crash.">
+```text
+0 0
+panic: assignment to entry in nil map
+
+goroutine 1 [running]:
+main.main()
+	.../main.go:8 +0xa4
+exit status 2
+```
+</TerminalOutput>
+
+Thứ tự khi lặp không ổn định. Go blog nói thứ tự duyệt "is not specified and is not guaranteed to be the same from one iteration to the next". Thứ tự này còn đổi thật. Chương trình này lặp ba lần trên cùng một map tám key, rồi sort key. Output của một lần chạy thật (của bạn sẽ khác, đó chính là ý chính):
+
+```go
+import (
+    "fmt"
+    "sort"
+)
+
+big := map[int]bool{}
+for i := 0; i < 8; i++ {
+    big[i] = true
+}
+for run := 0; run < 3; run++ {   // loop over the same map three times
+    for k := range big {
+        fmt.Print(k, " ")
+    }
+    fmt.Println()
+}
+keys := make([]int, 0, len(big))   // room for every key
+for k := range big {
+    keys = append(keys, k)
+}
+sort.Ints(keys)
+fmt.Println(keys)
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Cùng map, cùng chương trình, ba thứ tự khác nhau. Sắp xếp key là cách sửa.">
+```text
+3 4 5 6 7 0 1 2 
+2 3 4 5 6 7 0 1 
+1 2 3 4 5 6 7 0 
+[0 1 2 3 4 5 6 7]
+```
+</TerminalOutput>
+
+Cần thứ tự thì chép key ra một slice rồi sort. Dòng cuối của output chính là kết quả đó. Đừng bao giờ viết test phụ thuộc vào thứ tự của vòng lặp map.
+
+
+Giống slice, map lớn dần khi bạn thêm key. Nếu đã biết khoảng bao nhiêu phần tử, `make` nhận một gợi ý kích thước.
+
+Map cũng không an toàn khi nhiều goroutine (hàm chạy đồng thời) dùng cùng lúc. Cách xử lý nằm ở [Go goroutines, channels and select](/blog/go-goroutines-channels-select/).
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Bảng băm (hash table)**: cấu trúc tìm value bằng cách biến key thành một vị trí, nên tra cứu vẫn nhanh khi bảng lớn lên.
+- **Zero value**: thứ Go gán cho biến hoặc key chưa từng được đặt: 0, chuỗi rỗng, false hoặc nil.
+- **Comma-ok**: đọc bằng `v, ok := m[key]`, trong đó `ok` cho biết key có tồn tại không.
+
+</Concepts>
+
+---
+
+## String và rune
+
+String trong Go là dãy byte chỉ đọc. Source code Go là UTF-8, nên literal như `"Phở"` được lưu bằng byte UTF-8. UTF-8 dùng một byte cho chữ cái tiếng Anh thường và tới bốn byte cho ký tự khác. Vì vậy độ dài của "Phở" không phải 3.
+
+Rune là tên Go đặt cho một ký tự Unicode (code point). Nó là alias của `int32`. `len(s)` đếm byte. Muốn đếm ký tự, dùng `utf8.RuneCountInString(s)`. Muốn xem chính các byte, `[]byte(s)` đổi string thành danh sách byte thô, và verb `% x` in mỗi byte thành hai chữ số hex (hex là hệ cơ số 16), cách nhau bằng dấu cách.
+
+```go
+import (
+    "fmt"
+    "unicode/utf8"
+)
+
+s := "Phở"
+fmt.Println(len(s), utf8.RuneCountInString(s))   // 5 3
+fmt.Printf("% x\n", []byte(s))                    // 50 68 e1 bb 9f
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Năm byte, ba rune. Các giá trị hex là byte thô của string.">
+```text
+5 3
+50 68 e1 bb 9f
+```
+</TerminalOutput>
+
+<GoStringBytes />
+
+Index cho ra một byte, không phải ký tự. `s[0]` là `P` lưu bằng byte `0x50`, còn `s[2]` chỉ là byte đầu của chữ `ở`. Vòng `range` thì khác: nó giải mã string theo từng rune. Nó đưa bạn vị trí nơi mỗi rune bắt đầu, và chính rune đó. Trong `Printf` dưới đây, `%c` in rune thành ký tự, còn `U+%04X` in số Unicode của nó dạng hex, đệm đủ bốn chữ số.
+
+```go
+for i, r := range s {
+    fmt.Printf("%d: %c (U+%04X)\n", i, r, r)
+}
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="Vòng lặp cho vị trí bắt đầu 0, 1, 2 chứ không phải 0, 1, 2, 3, 4. Đếm byte và đếm rune cho kết quả khác nhau.">
+```text
+0: P (U+0050)
+1: h (U+0068)
+2: ở (U+1EDF)
+```
+</TerminalOutput>
+
+Go blog nói "a for range loop, by contrast, decodes one UTF-8-encoded rune on each iteration". Lỗi hay gặp là lặp bằng `for i := range s` rồi in `s[i]`. Cách đó in từng byte rời, nên ký tự như `ê` thành rác. Hãy dùng giá trị thứ hai của `range`.
+
+Để lấy ký tự thứ n, đổi string thành danh sách ký tự bằng `[]rune(s)`, cắt danh sách đó rồi đổi ngược lại: `string([]rune(s)[:2])` cho ra `Ph`. Phép đổi copy cả string, nên dùng cho truy cập ngẫu nhiên, còn đi qua một lượt thì dùng `range`. Cắt thẳng string bằng `s[:3]` là cắt byte, và có thể cắt đôi một ký tự. Trong output, `%q` in văn bản trong dấu nháy kép và hiện byte không phải ký tự thường dưới dạng `\x`:
+
+```go
+import (
+    "fmt"
+    "unicode/utf8"
+)
+
+fmt.Println(string([]rune(s)[:2]))   // first two characters
+fmt.Printf("%q\n", s[:3])             // first three bytes
+fmt.Println(utf8.ValidString(s[:3])) // is that still valid text?
+```
+
+<TerminalOutput command="go run main.go" label="Go 1.27.1 · darwin/arm64" caption="s[:3] là ba byte, không phải ba ký tự. Byte thứ ba là một phần ba đầu của ở, nên kết quả không còn là văn bản hợp lệ.">
+```text
+Ph
+"Ph\xe1"
+false
+```
+</TerminalOutput>
+
+String nằm trong bộ nhớ ra sao, vì sao substring giữ cả buffer lớn sống mãi và `strings.Builder` sinh ra để làm gì đều thuộc bài về bộ nhớ: [Go memory: slices, maps and strings underneath](/blog/go-memory-data-types-slices-maps-strings/).
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Rune**: kiểu của Go cho một ký tự Unicode (code point). Là alias của `int32`.
+- **UTF-8**: cách lưu văn bản bằng byte, dùng từ một tới bốn byte cho mỗi ký tự.
+- **Code point**: con số Unicode gán cho một ký tự, viết như `U+1EDF`.
+
+</Concepts>
+
+---
+
+## Điểm rút ra (Key takeaways)
+
+- Slice là list co giãn của Go: tạo bằng `make` hoặc `var`, lớn lên bằng `s = append(s, x)`, và luôn gán kết quả ngược lại.
+- `len` là phần đang dùng, `cap` là phần đã dành; biết trước kích thước thì dành chỗ bằng `make([]T, 0, n)`.
+- Slice nil là list rỗng dùng bình thường, nên kiểm tra bằng `len(s) == 0`. Chỉ khi xuất JSON thì `nil` và `[]` mới khác nhau.
+- Đọc map bằng `v, ok := m[key]`, đừng dựa vào thứ tự lặp, và tạo map trước khi ghi.
+- String là byte: `len` đếm byte, `s[i]` là một byte, và `for i, r := range s` đi qua từng rune.
+
+## Câu hỏi ôn tập (Review questions)
+
+1. Vì sao `copy(dst, src)` không chép gì khi `dst` khai báo là `var dst []int`? (Xem "nil, rỗng và copy".)
+2. Handler của bạn trả về danh sách đôi khi rỗng, và trình duyệt nhận `null`. Code đã đổi thế nào và vì sao? (Xem "nil, rỗng và copy".)
+3. `m["lint"]` trả về 0. Làm sao phân biệt "key không có" với "giá trị lưu là 0"? (Xem "Map".)
+4. `len("Phở")` trả về bao nhiêu, và vì sao `s[:3]` là lỗi ở đây? (Xem "String và rune".)
+5. Vòng lặp append 1.000 phần tử vào slice rỗng. Làm sao giảm số lần cấp phát lại, và khi nào bỏ qua? (Xem "append làm slice lớn lên thế nào".)
+
+</Vi>
