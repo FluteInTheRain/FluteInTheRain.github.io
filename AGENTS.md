@@ -17,6 +17,7 @@ Trạng thái công việc đang chạy: xem `CHANGELOG.md` (authoritative) và 
 - Progressive enhancement: trang phải dùng được không cần JavaScript (ví dụ quiz không JS vẫn hiện đủ câu hỏi + đáp án).
 - Không sửa component mdx dùng chung (`AnimatedFlow`, `DemoFrame`, `DiagramIcon`...). Icon chỉ lấy từ `src/data/diagram-icons.ts` qua `DiagramIcon`.
 - Không stage file không liên quan tới việc đang làm (hạn chế của một số branch cũ).
+- **Quiz ôn tập:** câu hỏi đánh giá kết quả AI (`track: ai`, type `ai-review` / `ai-advice`) chỉ dành cho bài về code / hệ thống. Bài về kỹ năng của con người (cổ phiếu, UX/UI...) không có câu nào về AI; thay bằng 20 câu `track: case` (tình huống thật, tự đánh giá bằng kỹ năng đó). Mỗi bài có quiz phải khai báo `code` hoặc `human` trong `src/data/quiz/domains.ts`; `node --test` kiểm tra. Chi tiết: `docs/superpowers/specs/2026-11-24-quiz-ai-track-by-domain.md`.
 
 ## Flow làm việc mặc định (chuẩn Superpowers)
 

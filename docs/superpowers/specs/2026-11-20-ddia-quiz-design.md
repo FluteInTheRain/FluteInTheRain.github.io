@@ -23,6 +23,8 @@ with a focus on situations that come up when AI writes or suggests the code.
 
 ## Focus (Khang, 2026-11-20, second message)
 
+> **Amended 2026-11-24:** the AI track below applies to code posts only. Human-skill posts (stocks, UX/UI) use a `case` track instead. See `2026-11-24-quiz-ai-track-by-domain.md`.
+
 Every question serves one of two tracks. Each item carries `track: interview | ai`. **The two tracks
 are mixed freely in the 1 to 40 order (Khang, 2026-11-20); the only ordering rule is that difficulty
 never goes down.** The track is a small tag, not a section.
