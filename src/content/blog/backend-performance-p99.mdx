@@ -1,8 +1,8 @@
 ---
 title: "Where the slow 1% hides"
 title_vi: "1% request chậm nằm ở đâu"
-description: "One regular expression took Cloudflare down in 2019. Measure p99 on a FastAPI service, profile before rewriting, set timeouts, shed load, then load-test it with locust."
-description_vi: "Một regular expression làm Cloudflare sập năm 2019. Đo p99 trên service FastAPI, profile trước khi viết lại, đặt timeout, từ chối bớt tải, rồi load test bằng locust."
+description: "One log line on a hot path held a Python service at p99 48 ms. Measure p99 on FastAPI, profile before rewriting, set timeouts, shed load, then load-test with locust."
+description_vi: "Một dòng log trên đường nóng giữ p99 của service Python ở 48 ms. Đo p99 trên FastAPI, profile trước khi sửa, đặt timeout, từ chối bớt tải, rồi load test bằng locust."
 date: 2026-11-25
 category: "backend"
 tags: ["backend", "python", "fastapi", "performance", "latency", "locust"]
@@ -11,7 +11,7 @@ cover_alt: "The locust web UI charts tab: requests per second climbing to about 
 draft: true
 sources:
   - { title: "FastAPI: Modern Python Web Development", author: "Bill Lubanovic", chapters: "Ch. 13", url: "https://www.oreilly.com/library/view/fastapi/9781098135091/" }
-  - { title: "Details of the Cloudflare outage on July 2, 2019", author: "Cloudflare", url: "https://blog.cloudflare.com/details-of-the-cloudflare-outage-on-july-2-2019/" }
+  - { title: "One line of Python and a 3x drop in p99", author: "Filcho Dragunchev, SoundCloud", url: "https://developers.soundcloud.com/blog/one-line-of-python-and-a-3x-drop-in-p99" }
   - { title: "Timeouts", author: "HTTPX docs", url: "https://www.python-httpx.org/advanced/timeouts/" }
   - { title: "Concurrency and async / await", author: "FastAPI docs", url: "https://fastapi.tiangolo.com/async/" }
   - { title: "pyinstrument: a Python profiler", author: "pyinstrument docs", url: "https://pyinstrument.readthedocs.io/en/latest/" }
@@ -28,7 +28,7 @@ import Callout from '../../components/mdx/Callout.astro';
 import Concepts from '../../components/mdx/Concepts.astro';
 import Figure from '../../components/mdx/Figure.astro';
 import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
-import BeP11Incident from '../../components/mdx/BeP11Incident.astro';
+import BeP11LogLine from '../../components/mdx/BeP11LogLine.astro';
 import BeP11Percentiles from '../../components/mdx/BeP11Percentiles.astro';
 import BeP11OneInForty from '../../components/mdx/BeP11OneInForty.astro';
 import BeP11Blocked from '../../components/mdx/BeP11Blocked.astro';
@@ -46,15 +46,15 @@ import locustUi from '../../assets/blog/backend-performance-p99/locust-ui-cover.
 
 <Figure src={heroRamp} alt="A freeway on-ramp in Las Vegas under a clear blue sky. A gantry over the ramp carries three traffic lights, two red and one green, and a few cars drive toward the highway." caption="A ramp meter lets one car onto the freeway per green, so the road keeps moving instead of jamming for everybody. It is load shedding for traffic, and a service needs the same gate before the night it gets more requests than it can answer." sourceTitle="Wikimedia Commons: Ramp meter on the ramp from Sahara Avenue to northbound Interstate 15, Las Vegas (CC BY-SA 4.0, Famartin)" sourceUrl="https://commons.wikimedia.org/wiki/File:2015-01-15_08_49_41_Ramp_meter_on_the_ramp_from_Sahara_Avenue_to_northbound_Interstate_15_in_Las_Vegas,_Nevada.JPG" />
 
-### The hook: 27 minutes of 100% CPU
+### The hook: one log line, 30 ms
 
-On 2 July 2019 Cloudflare deployed a new rule for its web application firewall at 13:42 UTC. One regular expression in it backtracked so badly that every CPU core serving HTTP and HTTPS traffic, on every machine, climbed to nearly 100%. Customers saw 502 pages. In Cloudflare's own telling, an engineer told them they had "lost 80% of our traffic".
+In August 2026 SoundCloud engineers wrote up a small Python service on their ad-serving path. For each listening session it answers one question: play an ad pod, or not. Its p99 sat at about 48 ms, and "it never dipped below 40ms at any point, at any volume". A validation check logged a structured warning and bumped four metrics on every request from callers that send no "posteriors" by design. For those fixed-policy callers, that was nearly all the traffic.
 
-The rule had passed its tests. The post-mortem says why that was not enough: a protection against runaway regex CPU had been removed by mistake weeks earlier, and nothing in the pipeline measured CPU. The fix was a global switch that turned the whole firewall off at 14:07. Traffic was back at 14:09, so the outage lasted about 27 minutes.
+The fix was one line: the guard went from `if missing_actions:` to `if missing_actions and request.posteriors:`. The p99 fell to about 18 ms. What I like is the honesty about the road there. The team's first hypothesis was string formatting, and they write "We never isolated it with a benchmark, and we should be honest about that". The cost was the synchronous write of the log line, inside the request. Their summary: "the best hour of the old service was worse than the worst hour of the new one".
 
-<BeP11Incident />
+<BeP11LogLine />
 
-Your FastAPI service is smaller, but it has the same two weaknesses. One piece of code can spend unbounded time on the request path, and nothing says "no" when work arrives faster than it can be done. This post is about the single-service half of latency: measure the tail, profile before you rewrite, bound what you wait for, and refuse early. Why a whole *fleet* of services turns timeouts and retries into outages is a different problem, and the [distributed systems post](/blog/trouble-with-distributed-systems-networks-clocks-fencing/) owns it. Why averages hide the tail is explained in the [first post on reliability](/blog/reliable-scalable-maintainable-data-systems/); here I only use p50, p95 and p99 as numbers we read off real runs.
+Your FastAPI service probably has a line like that, and nothing in code review will say which one. It has a second weakness too: nothing says "no" when work arrives faster than it can be done. This post is about the single-service half of latency: measure the tail, profile before you rewrite, bound what you wait for, and refuse early. Why a whole *fleet* of services turns timeouts and retries into outages is a different problem, and the [distributed systems post](/blog/trouble-with-distributed-systems-networks-clocks-fencing/) owns it. Why averages hide the tail is explained in the [first post on reliability](/blog/reliable-scalable-maintainable-data-systems/); here I only use p50, p95 and p99 as numbers we read off real runs.
 
 All numbers below come from one laptop (Apple M2, macOS 26.4.1, Python 3.13) that was also running other things. Run them again and yours will differ. Where a number is noisy, I say so.
 
@@ -158,7 +158,7 @@ Run four `/score` requests at once and probe `/health` while they are in flight.
 
 ## 3. Profile before you rewrite
 
-Now that `/score` is slow, where do you look? The instinct is to read the code and guess: maybe the list comprehension, maybe the JSON. Do not guess, and do not start with a rewrite. One question decides which tool to use.
+Now that `/score` is slow, where do you look? The instinct is to read the code and guess: maybe the list comprehension, maybe the JSON. Do not guess, and do not start with a rewrite: SoundCloud's team guessed string formatting first, and by their own account never confirmed it. One question decides which tool to use.
 
 <BeP11WhereFirst />
 
@@ -467,15 +467,15 @@ A checklist for the next AI-written service, one line each:
 
 <Figure src={heroRamp} alt="Một đường dẫn lên cao tốc ở Las Vegas dưới bầu trời xanh trong. Giàn đèn phía trên đường dẫn có ba đèn giao thông, hai đỏ một xanh, và vài chiếc xe đang chạy về phía cao tốc." caption="Đèn ramp meter chỉ cho một xe lên cao tốc mỗi lần đèn xanh, để đường vẫn chạy thay vì kẹt cứng với tất cả mọi người. Đây là việc từ chối bớt tải của giao thông, và service cũng cần một cái cổng như vậy trước cái đêm nhận nhiều request hơn khả năng trả lời." sourceTitle="Wikimedia Commons: Ramp meter on the ramp from Sahara Avenue to northbound Interstate 15, Las Vegas (CC BY-SA 4.0, Famartin)" sourceUrl="https://commons.wikimedia.org/wiki/File:2015-01-15_08_49_41_Ramp_meter_on_the_ramp_from_Sahara_Avenue_to_northbound_Interstate_15_in_Las_Vegas,_Nevada.JPG" />
 
-### Mở đầu: 27 phút CPU 100%
+### Mở đầu: một dòng log, 30 ms
 
-Ngày 2/7/2019, lúc 13:42 UTC, Cloudflare triển khai một rule mới cho web application firewall (WAF). Một regular expression trong đó backtrack nặng đến mức mọi lõi CPU phục vụ HTTP và HTTPS, trên mọi máy, vọt lên gần 100%. Khách hàng thấy trang 502. Theo lời kể của chính Cloudflare, có người báo họ vừa "lost 80% of our traffic" (mất 80% traffic).
+Tháng 8/2026, các kỹ sư SoundCloud viết lại chuyện về một service Python nhỏ nằm trên đường phục vụ quảng cáo. Với mỗi phiên nghe, nó trả lời một câu hỏi: phát một cụm quảng cáo hay không. P99 của nó nằm ở khoảng 48 ms, và "it never dipped below 40ms at any point, at any volume" (chưa bao giờ xuống dưới 40 ms, ở bất kỳ lưu lượng nào). Một đoạn kiểm tra ghi một warning có cấu trúc và tăng bốn metric cho mọi request từ những caller vốn không gửi "posteriors" theo thiết kế. Với các caller chính sách cố định, đó là gần như toàn bộ traffic.
 
-Rule đó đã qua test. Bài post-mortem giải thích vì sao vậy vẫn chưa đủ: lớp bảo vệ chống regex ngốn CPU đã bị gỡ nhầm từ mấy tuần trước, và không bước nào trong pipeline đo CPU. Cách xử lý là một công tắc toàn cầu tắt cả WAF lúc 14:07. Đến 14:09 traffic về lại, nên sự cố kéo dài khoảng 27 phút.
+Cách sửa chỉ một dòng: điều kiện đi từ `if missing_actions:` thành `if missing_actions and request.posteriors:`. P99 rơi xuống còn khoảng 18 ms. Điều mình thích là họ kể thật về đoạn đường đi tới đó. Giả thuyết đầu của đội là format chuỗi, và họ viết "We never isolated it with a benchmark, and we should be honest about that" (chúng tôi chưa bao giờ cô lập nó bằng benchmark, và nên thành thật về điều đó). Cái tốn thật là việc ghi dòng log đồng bộ, ngay trong request. Họ tóm tắt: "the best hour of the old service was worse than the worst hour of the new one" (giờ tốt nhất của service cũ còn tệ hơn giờ tệ nhất của service mới).
 
-<BeP11Incident />
+<BeP11LogLine />
 
-Service FastAPI của bạn nhỏ hơn, nhưng có đúng hai điểm yếu đó. Một đoạn code có thể tốn thời gian không giới hạn trên đường đi của request, và không có gì nói "không" khi việc đến nhanh hơn khả năng làm. Bài này nói về nửa "một service" của độ trễ: đo cái đuôi, profile trước khi viết lại, giới hạn thứ mình chờ, và từ chối sớm. Vì sao cả một *đội* service khiến timeout và retry thành sự cố là bài toán khác, do [bài hệ thống phân tán](/blog/trouble-with-distributed-systems-networks-clocks-fencing/) nắm. Vì sao trung bình che mất cái đuôi đã giải thích trong [bài đầu về độ tin cậy](/blog/reliable-scalable-maintainable-data-systems/); ở đây mình chỉ dùng p50, p95, p99 như những con số đọc ra từ các lần chạy thật.
+Service FastAPI của bạn rất có thể có một dòng như vậy, và code review sẽ không chỉ ra dòng nào. Nó còn một điểm yếu nữa: không có gì nói "không" khi việc đến nhanh hơn khả năng làm. Bài này nói về nửa "một service" của độ trễ: đo cái đuôi, profile trước khi viết lại, giới hạn thứ mình chờ, và từ chối sớm. Vì sao cả một *đội* service khiến timeout và retry thành sự cố là bài toán khác, do [bài hệ thống phân tán](/blog/trouble-with-distributed-systems-networks-clocks-fencing/) nắm. Vì sao trung bình che mất cái đuôi đã giải thích trong [bài đầu về độ tin cậy](/blog/reliable-scalable-maintainable-data-systems/); ở đây mình chỉ dùng p50, p95, p99 như những con số đọc ra từ các lần chạy thật.
 
 Mọi con số bên dưới đến từ một laptop (Apple M2, macOS 26.4.1, Python 3.13) vừa chạy thêm việc khác. Bạn chạy lại sẽ ra số khác. Chỗ nào số nhiễu, mình nói rõ.
 
@@ -579,7 +579,7 @@ Bản thân `/score` đi từ median 65 ms khi chạy một mình lên 267 ms kh
 
 ## 3. Profile trước khi viết lại
 
-Giờ `/score` đang chậm, nhìn vào đâu? Bản năng là đọc code rồi đoán: có thể là list comprehension, có thể là JSON. Đừng đoán, và đừng bắt đầu bằng việc viết lại. Một câu hỏi quyết định dùng công cụ nào.
+Giờ `/score` đang chậm, nhìn vào đâu? Bản năng là đọc code rồi đoán: có thể là list comprehension, có thể là JSON. Đừng đoán, và đừng bắt đầu bằng việc viết lại: đội SoundCloud đã đoán là format chuỗi trước, và tự nhận chưa bao giờ xác nhận nó. Một câu hỏi quyết định dùng công cụ nào.
 
 <BeP11WhereFirst />
 
