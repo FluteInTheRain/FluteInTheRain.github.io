@@ -100,7 +100,7 @@ Batch jobs assume a bounded input with a clean finish line; real applications em
 - **Event**: a small, immutable record describing one thing that happened at a point in time, usually carrying a timestamp.
 - **Dual write**: application code writing the same change separately to two or more stores (such as PostgreSQL and Elasticsearch) without a distributed transaction.
 - **Change Data Capture (CDC)**: reading a database's own commit log (such as PostgreSQL WAL or MySQL binlog) to stream committed changes to other systems in order.
-- **Watermark**: a marker in a stream saying "no more events with an older timestamp are expected", used to decide when an event-time window can close.
+- **Watermark**: a marker in a stream saying "no more events with a timestamp at or before this one are expected", used to decide when an event-time window can close.
 
 </Concepts>
 
@@ -123,7 +123,7 @@ Instead, producers push notifications through a **messaging system**. Two engine
 
 Direct network channels skip the broker entirely. Financial market feeds use **UDP multicast** for minimal latency (relying on application-level retransmission if packets drop), **StatsD** sends counter metrics over unreliable UDP, and **webhooks** fire direct HTTP callbacks to a consumer URL. Direct channels break down whenever a consumer goes offline or a producer crashes while holding retry buffers.
 
-Traditional message brokers—standardized in **AMQP** and **JMS** and implemented by RabbitMQ, ActiveMQ, and Google Cloud Pub/Sub—centralize buffering on a server. They support two consumer patterns:
+Traditional message brokers—standardized in **AMQP** and **JMS** and implemented by RabbitMQ and ActiveMQ (managed services like Google Cloud Pub/Sub offer similar queue-style delivery over their own API)—centralize buffering on a server. They support two consumer patterns:
 
 - **Load balancing (shared queue)**: each message goes to one consumer in a pool so workers share expensive work.
 - **Fan-out (topic broadcast)**: each message goes to every subscribed consumer independently, like multiple batch jobs reading the same input file.
@@ -195,7 +195,7 @@ Batch job mặc định dữ liệu có kích thước hữu hạn và điểm k
 - **Event (sự kiện)**: một bản ghi nhỏ, bất biến (immutable) mô tả một chuyện vừa xảy ra tại một thời điểm, thường mang theo mốc giờ (timestamp).
 - **Dual write (ghi hai nơi)**: code ứng dụng tự ghi cùng một thay đổi lần lượt vào hai hệ thống trở lên (như PostgreSQL và Elasticsearch) mà không có transaction phân tán bọc ngoài.
 - **Change Data Capture (CDC — bắt thay đổi dữ liệu)**: đọc thẳng nhật ký commit nội bộ của database (như WAL của PostgreSQL hay binlog của MySQL) để phát các thay đổi sang hệ thống khác theo đúng thứ tự.
-- **Watermark (dấu mực nước)**: một mốc đánh dấu trong luồng sự kiện báo rằng "từ giờ không còn sự kiện nào có giờ cũ hơn mốc này nữa", dùng để quyết định lúc nào được đóng một cửa sổ thời gian.
+- **Watermark (dấu mực nước)**: một mốc đánh dấu trong luồng sự kiện báo rằng "từ giờ không còn sự kiện nào có giờ nhỏ hơn hoặc bằng mốc này nữa", dùng để quyết định lúc nào được đóng một cửa sổ thời gian.
 
 </Concepts>
 
@@ -218,7 +218,7 @@ Thay vào đó, producer đẩy thông báo qua một **hệ thống nhắn tin 
 
 Kênh mạng trực tiếp bỏ qua hoàn toàn máy chủ trung gian. Bảng giá chứng khoán dùng **UDP multicast** để ép độ trễ xuống cực thấp (và tự xử lý gửi bù ở tầng ứng dụng nếu rơi gói), **StatsD** bắn số đếm metric qua UDP chấp nhận sai số nhẹ, còn **webhook** gọi thẳng HTTP callback tới URL của bên nhận. Điểm yếu chung là chỉ cần bên nhận tắt máy lâu hoặc bên gửi sập khi đang giữ bộ đệm thử lại là mất tin.
 
-Broker truyền thống — chuẩn hoá qua **AMQP** và **JMS**, tiêu biểu là RabbitMQ, ActiveMQ và Google Cloud Pub/Sub — gom việc đệm tin về một server trung tâm. Chúng hỗ trợ hai kiểu đọc:
+Broker truyền thống — chuẩn hoá qua **AMQP** và **JMS**, tiêu biểu là RabbitMQ và ActiveMQ (dịch vụ managed như Google Cloud Pub/Sub cũng giao tin kiểu hàng đợi, nhưng qua API riêng) — gom việc đệm tin về một server trung tâm. Chúng hỗ trợ hai kiểu đọc:
 
 - **Load balancing (chia tải trên cùng hàng đợi)**: mỗi tin nhắn chỉ giao cho một consumer trong nhóm để chia sẻ chi phí CPU.
 - **Fan-out (phát tán theo chủ đề)**: mỗi tin nhắn được giao cho tất cả các consumer đăng ký, giống nhiều batch job độc lập cùng đọc một file đầu vào.
@@ -405,7 +405,7 @@ The **transactional Outbox pattern** avoids that coupling:
 Two operational mechanics make CDC practical long-term:
 
 - **Initial snapshots without table locks.** If old logs were trimmed, a brand-new search index needs a baseline snapshot tied to a known log offset. Netflix's **DBLog** algorithm (adopted inside Debezium's incremental snapshots) brackets primary-key chunk queries with low and high watermark markers in the change log so any row updated mid-snapshot is superseded by the live stream without locking the table.
-- **Log compaction.** If you retain a CDC topic forever, disk grows with every update. Enabling **log compaction** in Kafka periodically collapses older events with the same key, keeping only the latest value—and dropping keys once a special **`null` payload (tombstone)** has propagated. Rebuilding a brand-new cache or search index simply reads offset 0 to the end.
+- **Log compaction.** If you retain a CDC topic forever, disk grows with every update. Enabling **log compaction** in Kafka periodically collapses older events with the same key, keeping only the latest value—and keeping a special **`null` payload (tombstone)** for deletes, which Kafka removes only after `delete.retention.ms` has passed (consumers reading from offset 0 must finish within that window to see the delete). Rebuilding a brand-new cache or search index simply reads offset 0 to the end.
 
 <StreamACompaction lang="en" />
 
@@ -461,7 +461,7 @@ Tuy nhiên, vì CDC đọc thẳng cấu trúc bảng nội bộ nên nó đẻ 
 Hai cơ chế vận hành giúp CDC chạy bền dài hạn:
 
 - **Snapshot khởi đầu không cần khoá bảng.** Nếu log cũ đã bị cắt bớt, một search index mới tinh cần một bản chụp (snapshot) ban đầu khớp chính xác với một offset trên log. Thuật toán **DBLog** của Netflix (được tích hợp làm incremental snapshot trong Debezium) kẹp các truy vấn đọc từng khúc khoá chính giữa hai mốc watermark thấp–cao trong log thay đổi, để bất kỳ dòng nào bị sửa ngay lúc đang đọc chunk đều tự bị bản ghi stream mới hơn ghi đè, hoàn toàn không phải lock bảng.
-- **Log compaction (nén gọn log theo khoá).** Nếu giữ nguyên mọi bản cập nhật mãi mãi, đĩa sẽ phình theo tổng số lần ghi từ trước tới nay. Bật **log compaction** trong Kafka giúp broker chạy ngầm loại bỏ các bản ghi cũ trùng khoá và chỉ giữ giá trị mới nhất — đồng thời xoá hẳn khoá đó sau khi một bản ghi **`null` (tombstone)** đã đi qua các consumer. Khi cần dựng lại cache hay index mới, bạn chỉ việc đọc từ offset 0 tới cuối log.
+- **Log compaction (nén gọn log theo khoá).** Nếu giữ nguyên mọi bản cập nhật mãi mãi, đĩa sẽ phình theo tổng số lần ghi từ trước tới nay. Bật **log compaction** trong Kafka giúp broker chạy ngầm loại bỏ các bản ghi cũ trùng khoá và chỉ giữ giá trị mới nhất — đồng thời giữ lại bản ghi **`null` (tombstone)** cho lệnh xoá, và chỉ dọn nó sau khi hết `delete.retention.ms` (consumer đọc từ offset 0 phải đọc xong trong khoảng này mới thấy lệnh xoá). Khi cần dựng lại cache hay index mới, bạn chỉ việc đọc từ offset 0 tới cuối log.
 
 <StreamACompaction lang="vi" />
 
@@ -613,9 +613,9 @@ Có một phép so sánh dễ nhớ: loạt phim *Star Wars*. Các tập IV, V, 
 
 Switching to **event time** raises a harder question: since late events can still be sitting in a queue or offline phone buffer, how do you ever know a 1-minute window is "complete"?
 
-Engines like Apache Flink and Google Cloud Dataflow solve this using **watermarks** (introduced in MillWheel and formalized in Akidau's *Dataflow Model*). A watermark `W(t)` flowing inline through the stream is an assertion: *"From here on, no more events with an event timestamp earlier than `t` are expected."* Once `W(t)` crosses the end of a window, the engine closes and emits that window.
+Engines like Apache Flink and Google Cloud Dataflow solve this using **watermarks** (introduced in MillWheel and formalized in Akidau's *Dataflow Model*). A watermark `W(t)` flowing inline through the stream is an assertion: *"From here on, no more events with an event timestamp at or before `t` are expected."* Once `W(t)` crosses the end of a window, the engine closes and emits that window.
 
-<Figure src={flinkWatermarks} alt="An out-of-order stream of numbered event timestamps passing through watermarks W(11) and W(17)" caption="In Apache Flink, watermarks travel inside the stream alongside out-of-order records. Notice event 12 arriving behind W(11) and event 17 behind W(17): late stragglers force an explicit trade-off between completeness and latency." sourceTitle="Apache Flink Documentation — Timely Stream Processing" sourceUrl="https://nightlies.apache.org/flink/flink-docs-stable/docs/concepts/time/" />
+<Figure src={flinkWatermarks} alt="An out-of-order stream of numbered event timestamps passing through watermarks W(11) and W(17)" caption="In Apache Flink, watermarks travel inside the stream alongside out-of-order records. Here W(11) arrives after the events up to 11 and W(17) after the events up to 17, and no later record carries a timestamp at or below the watermark before it, so nothing is late. A record that did would be a straggler, which forces a trade-off between completeness and latency." sourceTitle="Apache Flink Documentation — Timely Stream Processing" sourceUrl="https://nightlies.apache.org/flink/flink-docs-stable/docs/concepts/time/" />
 
 Whenever an event arrives *after* its window's watermark has already passed—a **straggler**—you choose one of two options:
 
@@ -651,9 +651,9 @@ Play with the simulator below. Notice how turning on the 60-second consumer rest
 
 Chuyển sang **thời gian sự kiện (event time)** lại mở ra một câu hỏi hóc búa hơn: vì tin nhắn có thể đang kẹt đâu đó trên mạng hoặc nằm trong máy điện thoại mất sóng, làm sao biết chắc một cửa sổ 1 phút đã gom *đủ hết* sự kiện để chốt sổ?
 
-Các engine như Apache Flink và Google Cloud Dataflow giải quyết bằng **watermark** (từ hệ thống MillWheel và được chuẩn hoá trong bài báo *The Dataflow Model* của Akidau). Một watermark `W(t)` trôi lẫn trong dòng dữ liệu mang thông điệp: *"Kể từ điểm này trở đi, dự kiến sẽ không còn sự kiện nào có mốc giờ nhỏ hơn `t` nữa."* Ngay khi `W(t)` vượt qua mốc đóng cửa sổ, engine chốt và xuất kết quả cửa sổ đó.
+Các engine như Apache Flink và Google Cloud Dataflow giải quyết bằng **watermark** (từ hệ thống MillWheel và được chuẩn hoá trong bài báo *The Dataflow Model* của Akidau). Một watermark `W(t)` trôi lẫn trong dòng dữ liệu mang thông điệp: *"Kể từ điểm này trở đi, dự kiến sẽ không còn sự kiện nào có mốc giờ nhỏ hơn hoặc bằng `t` nữa."* Ngay khi `W(t)` vượt qua mốc đóng cửa sổ, engine chốt và xuất kết quả cửa sổ đó.
 
-<Figure src={flinkWatermarks} alt="Luồng sự kiện mang các mốc thời gian lộn xộn đi xen kẽ cùng hai dấu watermark W(11) và W(17)" caption="Trong Apache Flink, watermark chạy trực tiếp trong luồng cùng các bản ghi đến lộn xộn. Để ý sự kiện 12 tới sau W(11) và sự kiện 17 tới sau W(17): những kẻ đến muộn này buộc bạn phải chọn giữa độ trễ xuất số và độ đầy đủ dữ liệu." sourceTitle="Apache Flink Documentation — Timely Stream Processing" sourceUrl="https://nightlies.apache.org/flink/flink-docs-stable/docs/concepts/time/" />
+<Figure src={flinkWatermarks} alt="Luồng sự kiện mang các mốc thời gian lộn xộn đi xen kẽ cùng hai dấu watermark W(11) và W(17)" caption="Trong Apache Flink, watermark chạy trực tiếp trong luồng cùng các bản ghi đến lộn xộn. Ở đây W(11) đến sau các sự kiện tới mốc 11 và W(17) đến sau các sự kiện tới mốc 17, và không bản ghi nào đến sau lại mang mốc giờ nhỏ hơn hoặc bằng watermark đứng trước nó, nên chưa có sự kiện nào bị muộn. Bản ghi nào như vậy sẽ là straggler, buộc bạn chọn giữa độ trễ xuất số và độ đầy đủ dữ liệu." sourceTitle="Apache Flink Documentation — Timely Stream Processing" sourceUrl="https://nightlies.apache.org/flink/flink-docs-stable/docs/concepts/time/" />
 
 Mỗi khi có sự kiện tới *sau* lúc watermark của cửa sổ đó đã đi qua — gọi là **straggler (sự kiện lạc đến muộn)** — bạn chỉ có hai cách xử lý:
 
