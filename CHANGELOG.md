@@ -3,6 +3,15 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-25 — Sửa ý lỏng ở 6 bài DDIA + nút menu bị đẩy khỏi màn hình trên điện thoại
+
+- **Ai quyết:** user ("làm cái 1 và 2").
+- **Sửa bài DDIA (2 agent Sonnet, mỗi agent 3 bài, mở nguồn kiểm từng ý; EN + VI):** đóng 2 danh sách "chưa sửa bài" ở entry quiz đợt 1 và đợt 3. Commit `385c69c` (trade-offs, sharding, transactions) và `fb4a292` (stream, unbundling, ethics + hình `EthicsIncidents` + quiz ethics set-04). Ý nào kiểm ra đúng thì giữ (Hex 7/11 và 2h40 đúng nguồn — "11th" là lỗi gõ của chính Hex; Photoroom có set `max_slot_wal_keep_size`; nghiên cứu giá xăng có bản JPE 2024).
+- **Còn hở:** GDPR Art. 22 viết lại theo bản diễn giải + hiểu biết chung (EUR-Lex không tải được); mốc kết thúc 2019 của mô hình Hà Lan chưa xác nhận; caption "Python 3.15" ở bài transactions không kiểm được (script benchmark không có trong repo).
+- **Nút Next che kết quả (ghi chú cũ):** đã được sửa từ `601e1b7`, chụp 360px xác nhận.
+- **360px:** quét 24 trang backend (bài + quiz), EN/VI: không trang nào cuộn ngang. Tìm ra lỗi chung: ở màn < ~440px nút hamburger bị `overflow-x: clip` cắt khỏi màn hình (không mở được menu). Sửa `d495c09`: ≤480px thu nhỏ tên/nút, tên tự "…" nếu quá hẹp; kiểm 320/360/390px, menu mở được.
+- **Chưa làm:** chữ trong hình quiz thu ~50% ở 360px (mọi quiz) — chưa sửa.
+
 ## 2026-11-25 — Quiz series backend: 12 bài × 8 bộ × 5 câu (480 câu)
 
 - **Đã làm (nhánh `feat/backend-quiz`):** user chọn tiết kiệm: **6 agent Sonnet, mỗi agent 2 bài** (không agent brief riêng, không agent theo bộ); giữ 8 × 5 nhưng **hình chỉ khi cần** (40 hình `Bq*`, 2–4/bài). Brief chung `docs/superpowers/specs/2026-11-25-backend-quiz-authoring-brief.md`; 12 bài khai báo `code` trong `domains.ts`. Mọi câu `code-output`/tính toán có `verifiedBy` chạy thật (FastAPI 0.165, uvicorn, pyinstrument...); bài 8 dùng mô hình Python thay Redis (máy không có redis-server); bài 12 không chạy kubectl.

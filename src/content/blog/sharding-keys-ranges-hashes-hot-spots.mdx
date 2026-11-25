@@ -15,6 +15,7 @@ sources:
   - { title: "The Great Re-shard: adding Postgres capacity (again) with zero downtime", author: "Notion Engineering", url: "https://www.notion.com/blog/the-great-re-shard" }
   - { title: "Scaling Datastores at Slack with Vitess", author: "Arka Ganguli, Guido Iaquinti, Maggie Zhou, and Rafael Chacón (Slack)", url: "https://slack.engineering/scaling-datastores-at-slack-with-vitess/" }
   - { title: "How Discord Stores Trillions of Messages", author: "Bo Ingram (Discord)", url: "https://discord.com/blog/how-discord-stores-trillions-of-messages" }
+  - { title: "Scaling services with Shard Manager", author: "Gerald Guo & Thawan Kooburat (Meta)", url: "https://engineering.fb.com/2020/08/24/production-engineering/scaling-services-with-shard-manager/" }
   - { title: "Reducing the Scope of Impact with Cell-Based Architecture", author: "Robisson Oliveira (AWS Well-Architected)", url: "https://docs.aws.amazon.com/wellarchitected/latest/reducing-scope-of-impact-with-cell-based-architecture/welcome.html" }
   - { title: "Amazon DynamoDB: A Scalable, Predictably Performant, and Fully Managed NoSQL Database Service", author: "Mostafa Elhemali et al. (AWS / USENIX ATC '22)", url: "https://www.usenix.org/conference/atc22/presentation/elhemali" }
   - { title: "Distribution Layer — CockroachDB Architecture Docs", author: "Cockroach Labs", url: "https://docs.cockroachlabs.com/docs/stable/architecture/distribution-layer" }
@@ -70,9 +71,9 @@ A single server can hold far more data than most teams expect. When it finally r
 
 Three real production stories show where teams get burned once they split:
 
-- **Notion, 2021 & 2023.** Their single giant Postgres database stalled on `VACUUM`, raising the threat of transaction ID wraparound—a safety stop where Postgres refuses all writes. They split into 480 logical shards across 32 physical databases, and after peak CPU crossed 90% in late 2022, shifted those same 480 shards onto 96 hosts in 2023 with zero downtime.
-- **Discord, 2022–2023.** Even across 177 Cassandra nodes holding trillions of messages, one `@everyone` ping in a huge server slammed a single chat partition. Quorum latency jumped across the cluster until Discord added request coalescing in Rust and moved to 72 ScyllaDB nodes.
-- **Slack, 2017–2020.** Giant enterprise workspaces ran individual MySQL hosts red-hot while smaller hosts sat nearly idle. Moving 99% of query traffic onto Vitess let Slack split busy keyspaces dynamically and absorb a 50% one-week traffic surge in March 2020.
+- **Notion, 2021 & 2023.** Their single giant Postgres database stalled on `VACUUM`, raising the threat of transaction ID wraparound—a safety stop where Postgres refuses all writes. They split into 480 logical shards across 32 physical databases, and after peak CPU crossed 90% in late 2022, shifted those same 480 shards onto 96 hosts in 2023 without taking downtime (at worst, users saw about a second of a "saving" spinner).
+- **Discord, 2022–2023.** Even across 177 Cassandra nodes holding trillions of messages, hot partitions kept hitting latency across the cluster, and Discord's own example is a big announcement that notifies `@everyone`, which can slam a single chat partition. Quorum latency suffered until Discord added request coalescing in Rust and moved to 72 ScyllaDB nodes.
+- **Slack, 2017–2020.** Slack hit major hotspots on some MySQL hosts while most of the fleet was underutilized. Moving 99% of query traffic onto Vitess let Slack split busy keyspaces dynamically and absorb a 50% one-week traffic surge in March 2020.
 
 Six questions sit behind every choice those teams made:
 
@@ -135,9 +136,9 @@ Một máy chủ đơn lẻ chịu được tải lớn hơn nhiều so với su
 
 Ba câu chuyện thực tế cho thấy những cái bẫy chờ sẵn ngay khi bạn bắt đầu chia shard:
 
-- **Notion, 2021 & 2023.** Database Postgres khổng lồ duy nhất của họ bị kẹt tiến trình `VACUUM`, dẫn tới nguy cơ tràn mã giao dịch (TXID wraparound)—cơ chế tự vệ khiến Postgres ngừng nhận mọi lệnh ghi. Họ phải chia thành 480 shard logic trên 32 máy Postgres vật lý, rồi sau khi CPU chạm 90% vào cuối năm 2022, sang năm 2023 họ dời nguyên 480 shard đó lên 96 máy mà không hề downtime.
-- **Discord, 2022–2023.** Dù đã chạy 177 node Cassandra chứa hàng nghìn tỉ tin nhắn, chỉ một cú tag `@everyone` trong server lớn cũng đủ dồn bão truy vấn vào đúng một partition kênh chat. Độ trễ quorum kéo chậm cả cụm cho tới khi Discord thêm tầng gộp request viết bằng Rust và chuyển sang 72 node ScyllaDB.
-- **Slack, 2017–2020.** Các công ty khách hàng lớn khiến vài máy MySQL nóng rực trong khi hàng nghìn máy khác nhàn rỗi. Đưa 99% lưu lượng truy vấn sang Vitess giúp Slack tách linh hoạt các keyspace quá tải và chịu được cú nhảy vọt 50% lưu lượng chỉ trong một tuần hồi tháng 3/2020.
+- **Notion, 2021 & 2023.** Database Postgres khổng lồ duy nhất của họ bị kẹt tiến trình `VACUUM`, dẫn tới nguy cơ tràn mã giao dịch (TXID wraparound)—cơ chế tự vệ khiến Postgres ngừng nhận mọi lệnh ghi. Họ phải chia thành 480 shard logic trên 32 máy Postgres vật lý, rồi sau khi CPU chạm 90% vào cuối năm 2022, sang năm 2023 họ dời nguyên 480 shard đó lên 96 máy mà không phải dừng hệ thống (tệ nhất người dùng thấy vòng xoay "saving" khoảng một giây).
+- **Discord, 2022–2023.** Dù đã chạy 177 node Cassandra chứa hàng nghìn tỉ tin nhắn, các partition nóng liên tục kéo độ trễ của cả cụm, và ví dụ Discord tự nêu là một thông báo lớn gọi `@everyone`, có thể dồn bão truy vấn vào đúng một partition kênh chat. Độ trễ quorum bị kéo chậm cho tới khi Discord thêm tầng gộp request viết bằng Rust và chuyển sang 72 node ScyllaDB.
+- **Slack, 2017–2020.** Các công ty khách hàng lớn khiến một số máy MySQL nóng rực trong khi phần lớn đội máy dùng chưa hết công suất. Đưa 99% lưu lượng truy vấn sang Vitess giúp Slack tách linh hoạt các keyspace quá tải và chịu được cú nhảy vọt 50% lưu lượng chỉ trong một tuần hồi tháng 3/2020.
 
 Sáu câu hỏi nằm sau từng quyết định của các đội đó:
 
@@ -227,7 +228,7 @@ Key-range sharding gives each shard a continuous slice of sorted keys, from a mi
 
 <ShardingARangeVolumes />
 
-Notice that ranges do not share equal alphabet widths: `T–Z` needs its own volume even though it spans seven letters. Boundaries must adapt to real data skew, whether set manually (Vitess) or split automatically (HBase, CockroachDB, FoundationDB, YugabyteDB).
+Notice that ranges do not share equal alphabet widths: `T–Z` packs seven letters into one volume, as thin as `A–B` with two, because few keys start with those letters. Boundaries must adapt to real data skew, whether set manually (Vitess) or split automatically (HBase, CockroachDB, FoundationDB, YugabyteDB).
 
 The classic trap is using a timestamp—or any monotonically increasing ID—as the partition key. Every incoming sensor reading or new order carries *today's* timestamp, so 100% of writes hammer the single newest shard while every older shard sits idle.
 
@@ -246,7 +247,7 @@ Hashing sacrifices cross-key range scans, because neighboring keys now land on d
 
 <ShardingACompoundKey />
 
-Discord used this exact pattern—`PRIMARY KEY ((channel_id, bucket), message_id)`—bucketing messages by channel and static 10-day windows so recent chat history stays sorted on disk without jamming the whole cluster into one chronological shard. Data warehouses like BigQuery, Snowflake, and Delta Lake offer a sibling split between partition keys (which group files) and cluster columns (which sort inside them).
+Discord used this exact pattern, with the partition key `(channel_id, bucket)` and messages sorted by `message_id`, bucketing messages by channel and a static time window (the `bucket`; Discord's post gives no length) so recent chat history stays sorted on disk without jamming the whole cluster into one chronological shard. Data warehouses like BigQuery, Snowflake, and Delta Lake offer a sibling split between partition keys (which group files) and cluster columns (which sort inside them).
 
 </En>
 
@@ -280,7 +281,7 @@ Chia theo dải khoá (**key-range sharding**) giao cho mỗi shard một dải 
 
 <ShardingARangeVolumes />
 
-Các dải chữ cái không cần rộng bằng nhau: tập `T–Z` gộp bảy chữ cái vẫn dày ngang tập `A–B`. Ranh giới giữa các shard phải co giãn theo mật độ dữ liệu thực tế, có thể chỉnh tay (Vitess) hoặc tự động tách dải (HBase, CockroachDB, FoundationDB, YugabyteDB).
+Các dải chữ cái không cần rộng bằng nhau: tập `T–Z` gộp bảy chữ cái vẫn mỏng như tập `A–B` chỉ có hai, vì ít khoá bắt đầu bằng các chữ đó. Ranh giới giữa các shard phải co giãn theo mật độ dữ liệu thực tế, có thể chỉnh tay (Vitess) hoặc tự động tách dải (HBase, CockroachDB, FoundationDB, YugabyteDB).
 
 Cái bẫy kinh điển ở đây là lấy mốc thời gian—hoặc ID tăng dần theo thời gian—làm partition key. Mọi dữ liệu cảm biến hay đơn hàng mới phát sinh lúc này đều mang thời gian *hôm nay*, thế là 100% lệnh ghi dội thẳng vào đúng một shard cuối cùng trong khi các shard tháng trước nằm chơi.
 
@@ -299,7 +300,7 @@ Tuyệt đối tránh dùng hàm băm nội bộ của ngôn ngữ như `Object.
 
 <ShardingACompoundKey />
 
-Discord dùng đúng công thức này—`PRIMARY KEY ((channel_id, bucket), message_id)`—gom tin nhắn theo từng kênh và từng khung cửa sổ 10 ngày để lịch sử chat luôn xếp theo thứ tự trên đĩa mà không dồn toàn bộ lưu lượng chat toàn cầu vào một shard duy nhất. Các hệ thống phân tích như BigQuery, Snowflake hay Delta Lake cũng tách đôi tương tự giữa partition key (gom nhóm file) và cluster column (sắp xếp bên trong file).
+Discord dùng đúng công thức này, với khoá partition `(channel_id, bucket)` và tin nhắn sắp theo `message_id`, gom tin nhắn theo từng kênh và một khung thời gian cố định (`bucket`; bài của Discord không nói độ dài) để lịch sử chat luôn xếp theo thứ tự trên đĩa mà không dồn toàn bộ lưu lượng chat toàn cầu vào một shard duy nhất. Các hệ thống phân tích như BigQuery, Snowflake hay Delta Lake cũng tách đôi tương tự giữa partition key (gom nhóm file) và cluster column (sắp xếp bên trong file).
 
 </Vi>
 
@@ -329,11 +330,11 @@ A good hash function spreads distinct keys evenly, yet it cannot prevent traffic
 
 <ShardingAHotKeySkew />
 
-On social networks, sports streams, or flash sales, a single celebrity account or viral item draws millions of reads and writes per minute to *one* partition key. Early Twitter famously spent roughly 3% of its server fleet serving traffic generated by Justin Bieber alone; Discord hit the same wall whenever a mega-server sent an `@everyone` ping, jamming a single `(channel_id, bucket)` partition and dragging down quorum latency across every node holding that partition's replicas.
+On social networks, sports streams, or flash sales, a single celebrity account or viral item draws millions of reads and writes per minute to *one* partition key. Celebrity accounts are the classic hot key. Discord describes the same wall: a big announcement that notifies `@everyone` can jam a single `(channel_id, bucket)` partition and drag down quorum latency across every node holding that partition's replicas.
 
 ### Four tools for cooling a hot key
 
-1. **Dedicated shard or host.** In range- or directory-based policies (like Meta's Shard Manager), the control plane isolates a single hot key on its own shard and dedicates a machine to it so normal neighbors do not starve.
+1. **Dedicated shard or host.** In range- or directory-based policies, a control plane can move a hot shard to a lightly loaded machine, or give a hot key its own shard and machine, so normal neighbors do not starve. Meta's Shard Manager does this kind of load balancing and adds replicas for hot shards.
 2. **Application-level key salting.** Append a random two-digit suffix (`key#00` through `key#99`) before hashing. Writes to one celebrity key now spread 100 ways across the cluster.
 3. **Request coalescing and hot caching.** For read-heavy hot keys, a thin service layer collapses simultaneous identical queries into one database fetch. Discord's Rust data services use consistent hashing so all requests for the same channel hit the same Rust worker, turning thousands of `@everyone` database hits into a single ScyllaDB query and helping slash historical read p99 from 40–125 ms on 177 Cassandra nodes down to ~15 ms on 72 ScyllaDB nodes.
 4. **Cloud heat management.** DynamoDB's adaptive capacity and S3's heat management automatically split hot key ranges or borrow burst capacity without manual intervention.
@@ -355,7 +356,7 @@ Splitting `celebrity_key` into `#00` through `#99` divides **write** load by 100
 
 **Setup.** Discord keeps each channel's recent messages in one Cassandra partition, keyed `(channel_id, bucket)`. That is a good key for ordinary chat: history stays sorted and the load spreads across channels.
 
-**What broke.** One `@everyone` in a huge server sends a crowd to read the same channel at the same moment. All of those reads land on the replicas of one partition, and because a quorum read waits for several replicas, the slowdown spread to every node holding that partition. Salting would not have helped much here: this is a read storm on one key, and salting would make every read fan out.
+**What broke.** Discord's own example is hypothetical: imagine a big announcement on a large server that notifies `@everyone`. A crowd reads the same channel at the same moment. All of those reads land on the replicas of one partition, and because a quorum read waits for several replicas, the slowdown spread to every node holding that partition. Salting would not have helped much here: this is a read storm on one key, and salting would make every read fan out.
 
 **Which idea resolves it.** Request coalescing in front of the database. Discord put Rust data services between the API and the database, routed by channel with consistent hashing, so one worker sees all reads for a channel and turns the crowd into a single query. Together with the move from 177 Cassandra nodes to 72 ScyllaDB nodes, Discord reports historical-read p99 dropping from 40 to 125 ms down to about 15 ms.
 
@@ -407,11 +408,11 @@ Một hàm băm tốt rải đều các khoá khác nhau, nhưng hoàn toàn b�
 
 <ShardingAHotKeySkew />
 
-Trên mạng xã hội, livestream hay sàn thương mại dịp flash sale, chỉ một tài khoản người nổi tiếng hoặc một bài đăng viral có thể dội hàng triệu lượt đọc ghi mỗi phút vào đúng *một* partition key. Thời kỳ đầu, Twitter từng tốn tới khoảng 3% tổng số máy chủ chỉ để phục vụ lưu lượng liên quan tới Justin Bieber; Discord cũng vướng y hệt mỗi lần một server khổng lồ gửi thông báo `@everyone`, khiến một cặp `(channel_id, bucket)` làm nghẽn toàn bộ các node giữ bản sao của nó.
+Trên mạng xã hội, livestream hay sàn thương mại dịp flash sale, chỉ một tài khoản người nổi tiếng hoặc một bài đăng viral có thể dội hàng triệu lượt đọc ghi mỗi phút vào đúng *một* partition key. Tài khoản người nổi tiếng là ví dụ kinh điển của hot key. Discord mô tả đúng bức tường đó: một thông báo lớn gọi `@everyone` có thể làm nghẽn một cặp `(channel_id, bucket)` và kéo chậm độ trễ quorum trên mọi node giữ bản sao của partition đó.
 
 ### Bốn cách hạ nhiệt một hot key
 
-1. **Tách shard hoặc dành riêng một máy.** Ở các hệ thống chia theo dải hoặc bảng danh mục (như Shard Manager của Meta), tầng điều phối nhấc riêng hot key đó ra một shard độc lập để không vạ lây tới người dùng bình thường.
+1. **Tách shard hoặc dành riêng một máy.** Ở các hệ thống chia theo dải hoặc bảng danh mục, tầng điều phối có thể chuyển shard nóng sang máy đang rảnh, hoặc cho hot key một shard và một máy riêng, để không vạ lây tới người dùng bình thường. Shard Manager của Meta làm kiểu cân bằng tải này và thêm replica cho shard nóng.
 2. **Thêm muối ở tầng ứng dụng (key salting).** Gắn thêm hai chữ số ngẫu nhiên (`key#00` tới `key#99`) vào khoá trước khi băm. Lệnh ghi cho khoá nổi tiếng đó lập tức được chia đều ra 100 shard khác nhau.
 3. **Gộp request và cache phía trước (request coalescing).** Với hot key nặng về đọc, lớp dịch vụ trung gian gộp hàng nghìn truy vấn giống hệt nhau thành một truy vấn xuống DB. Lớp data service bằng Rust của Discord dùng consistent hashing để mọi request vào cùng một kênh chat đổ về đúng một worker Rust, biến cơn bão `@everyone` thành đúng một lệnh đọc ScyllaDB—góp phần hạ độ trễ p99 đọc tin cũ từ 40–125 ms trên 177 node Cassandra xuống còn ~15 ms trên 72 node ScyllaDB.
 4. **Cơ chế tự điều tiết của cloud.** Adaptive capacity của DynamoDB hay heat management của S3 tự động tách nhỏ dải khoá nóng hoặc cấp thêm băng thông bùng nổ mà không cần người trực can thiệp.
@@ -433,7 +434,7 @@ Tách `celebrity_key` thành `#00` tới `#99` giúp tải **ghi** giảm 100 l�
 
 **Bối cảnh.** Discord lưu tin nhắn gần đây của mỗi kênh trong một partition Cassandra, khoá `(channel_id, bucket)`. Khoá này hợp với chat bình thường: lịch sử giữ đúng thứ tự và tải được rải qua nhiều kênh.
 
-**Chuyện gì hỏng.** Một ping `@everyone` trong server khổng lồ khiến cả đám đông cùng lúc đọc một kênh. Toàn bộ lệnh đọc dội vào các replica của đúng một partition, và vì đọc quorum phải chờ nhiều replica nên độ trễ lan sang mọi node giữ partition đó. Thêm muối ở đây cũng không giúp mấy: đây là bão đọc trên một khoá, và thêm muối chỉ làm mỗi lệnh đọc phải hỏi nhiều khoá.
+**Chuyện gì hỏng.** Ví dụ của chính Discord chỉ là giả định: hãy tưởng tượng một thông báo lớn gọi `@everyone` trong server đông người. Cả đám đông cùng lúc đọc một kênh. Toàn bộ lệnh đọc dội vào các replica của đúng một partition, và vì đọc quorum phải chờ nhiều replica nên độ trễ lan sang mọi node giữ partition đó. Thêm muối ở đây cũng không giúp mấy: đây là bão đọc trên một khoá, và thêm muối chỉ làm mỗi lệnh đọc phải hỏi nhiều khoá.
 
 **Ý tưởng nào giải quyết.** Gộp request (request coalescing) ngay trước database. Discord đặt các data service viết bằng Rust giữa API và database, định tuyến theo kênh bằng consistent hashing, nên một worker thấy toàn bộ lệnh đọc của một kênh và biến đám đông thành đúng một truy vấn. Cùng với việc chuyển từ 177 node Cassandra sang 72 node ScyllaDB, Discord cho biết p99 đọc tin cũ giảm từ 40 đến 125 ms xuống còn khoảng 15 ms.
 
@@ -477,7 +478,7 @@ resize 31 -> 32 nodes  mod N moved 9710/10000 ( 97.1%)  jump hash moved  332/100
 
 1. **Fixed number of shards.** Pre-create far more logical shards than physical nodes (`hash(key) % 480`), then map whole logical shards onto machines in a table. Riak, Elasticsearch, Couchbase, and Citus work this way. Notion chose **480** logical shards across 32 Postgres hosts (15 schemas per host) specifically because 480 divides cleanly by 32, 40, and 48—unlike 512, which forces a 2× hardware jump. In 2023, they tripled capacity from 32 to 96 physical hosts with zero downtime by moving whole schemas (15 down to 5 per host) without ever touching `hash(workspace_id) % 480`. The catch: if data grows 100× beyond your original estimate, shards grow huge and slow to recover, and changing that fixed count later requires a full rewrite.
 2. **Dynamic range splitting and merging.** Key-range and hash-range systems (HBase at a 10 GB default, CockroachDB at 512 MiB `range_max_bytes`, TiDB, MongoDB) split an overgrown or over-busy shard in two and hand one half to a quieter node—and merge tiny adjacent ranges back together after heavy deletes. Pre-splitting empty tables avoids starting life on one hot shard, though splitting is expensive (like LSM compaction) right when a shard is already under heavy load.
-3. **Consistent hashing.** Place both keys and nodes (via multiple **virtual nodes**—16 per node by default in Cassandra, 256 in ScyllaDB) onto a hash ring, or use algorithmic variants like Rendezvous hashing or Jump Consistent Hash. Adding a 4th node moves only ~25% of keys—straight from existing nodes to the newcomer, never bouncing keys between older hosts.
+3. **Consistent hashing.** Place both keys and nodes (via multiple **virtual nodes**—16 per node by default in Cassandra, 256 in ScyllaDB) onto a hash ring, or use algorithmic variants like Rendezvous hashing or Jump Consistent Hash. Adding a 4th node moves only about 1/N of keys, roughly 25% in expectation (a small simulation gave 21%)—straight from existing nodes to the newcomer, never bouncing keys between older hosts.
 
 Try switching strategies, adding nodes, and flipping on a celebrity burst below:
 
@@ -499,7 +500,7 @@ resize 31 -> 32 nodes  mod N moved 9710/10000 ( 97.1%)  jump hash moved  332/100
 
 1. **Số shard cố định (fixed number of shards).** Chia sẵn số shard logic nhiều gấp bội số máy vật lý (`hash(key) % 480`), rồi dùng một bảng ánh xạ để gán nguyên từng shard lên các máy. Riak, Elasticsearch, Couchbase và Citus dùng cách này. Notion chọn **480** shard logic trên 32 máy Postgres (mỗi máy 15 schema) chính vì 480 chia hết cho 32, 40 lẫn 48—không bị ép nhân đôi phần cứng đột ngột như con số 512. Tới năm 2023, họ tăng cụm từ 32 lên 96 máy mà không hề downtime chỉ bằng cách chuyển nguyên các cụm 5 schema sang máy mới mà không đụng gì tới công thức `hash(workspace_id) % 480`. Điểm yếu: nếu dữ liệu phình gấp trăm lần dự kiến ban đầu, từng shard trở nên khổng lồ và khôi phục rất chậm, còn muốn đổi tổng số shard cố định thì gần như phải viết lại toàn bộ bảng.
 2. **Tách và gộp dải động (dynamic splitting & merging).** Các hệ thống chia theo dải khoá hoặc dải băm (HBase mặc định 10 GB, CockroachDB mặc định `range_max_bytes` 512 MiB, TiDB, MongoDB) tự tách đôi một shard khi nó phình quá ngưỡng hoặc nhận quá nhiều ghi, chuyển một nửa sang máy rảnh—và gộp lại hai dải liền kề nếu dữ liệu bị xoá đi nhiều. Chia trước (pre-splitting) giúp bảng mới tạo không bị dồn vào một shard đầu, nhưng bản thân thao tác tách lại rất tốn I/O (như compaction) ngay đúng lúc shard đó đang chịu tải cao nhất.
-3. **Consistent hashing.** Đặt cả khoá lẫn máy (thông qua nhiều **virtual node**—Cassandra mặc định 16 vnode mỗi máy, ScyllaDB dùng 256) lên cùng một vòng tròn băm, hoặc dùng biến thể toán học như Rendezvous hay Jump Consistent Hash. Khi thêm máy thứ 4, chỉ khoảng 25% khoá chuyển thẳng sang máy mới, tuyệt đối không làm các máy cũ đá dữ liệu qua lại với nhau.
+3. **Consistent hashing.** Đặt cả khoá lẫn máy (thông qua nhiều **virtual node**—Cassandra mặc định 16 vnode mỗi máy, ScyllaDB dùng 256) lên cùng một vòng tròn băm, hoặc dùng biến thể toán học như Rendezvous hay Jump Consistent Hash. Khi thêm máy thứ 4, chỉ khoảng 1/N khoá, tức xấp xỉ 25% theo kỳ vọng (một mô phỏng nhỏ cho ra 21%), chuyển thẳng sang máy mới, tuyệt đối không làm các máy cũ đá dữ liệu qua lại với nhau.
 
 Bạn thử chuyển qua lại các chiến lược, thêm bớt node và bật thử hot key ngay dưới đây:
 
@@ -521,7 +522,7 @@ Cloud services such as DynamoDB automatically split and migrate shards within mi
 2. Peers falsely assume the slow node is dead and start rebalancing its shards onto other nodes.
 3. Copying gigabytes across the network pushes the remaining nodes over their limit too, triggering a **cascading failure**.
 
-That is why engines like Couchbase and Riak compute a rebalance plan automatically but wait for a human operator to commit it—and why teams still pre-split or pre-scale ahead of predictable surges like Cyber Monday or World Cup ticket drops.
+That is why engines like Couchbase and Riak compute a rebalance plan automatically but wait for a human operator to commit it—and why teams still pre-split or pre-scale ahead of predictable surges like Black Friday or World Cup ticket drops.
 
 <ShardingBCascade />
 
