@@ -16,11 +16,11 @@
 
 - [x] **Wave 1** `feat/ddia-quiz-wave-1`: `trade-offs-in-data-systems-architecture`, `sharding-keys-ranges-hashes-hot-spots`, `transactions-acid-isolation-anomalies-serializability`
 - [x] **Wave 2** `feat/ddia-quiz-wave-2`: `trouble-with-distributed-systems-networks-clocks-fencing`, `consistency-consensus-linearizability-logical-clocks-raft`, `batch-processing-unix-pipes-shuffle-dataflow-lakehouse`
-- [ ] **Wave 3**: `stream-processing-event-logs-cdc-windows-joins`, `philosophy-of-streaming-systems-unbundling-end-to-end-correctness`, `doing-the-right-thing-ethics-privacy-algorithmic-bias`
+- [x] **Wave 3** `feat/ddia-quiz-wave-3`: `stream-processing-event-logs-cdc-windows-joins`, `philosophy-of-streaming-systems-unbundling-end-to-end-correctness`, `doing-the-right-thing-ethics-privacy-algorithmic-bias`
 
 ## Steps per wave
 
-- [ ] Brief agents (1 per post, read-only on code) write `specs/2026-11-24-ddia-quiz-authoring-brief-<post>.md`: 8 scenarios with a real incident or concrete case, figure names, slot table, allowed `reread.anchor` list. Lead reads them for overlap and invented facts.
+- [ ] Brief agents (1 per post, read-only on code) write `specs/2026-11-24-ddia-quiz-authoring-brief-<post>.md`: 8 scenarios with a real incident or concrete case, figure names, slot table, allowed `reread.anchor` list. Calculations are optional per set: the "Calculations" column may say "none" (Khang, 2026-11-25). Lead reads them for overlap and invented facts.
 - [ ] Author agents (1 per set, parallel) write set + figure, run validator + screenshots, report.
 - [ ] Lead: full `node --test`, `npm run build`, read screenshots (light EN, dark VI), fact-check risky claims, fix.
 - [ ] One commit per post (`content: review quiz for the <post> post (8 cases, 40 questions)`), CHANGELOG entry, push, PR, wait for merge.
