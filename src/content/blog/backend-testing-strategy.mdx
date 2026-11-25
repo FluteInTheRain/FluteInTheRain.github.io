@@ -1,0 +1,1271 @@
+---
+title: "Tests that can fail"
+title_vi: "Test phải biết fail"
+description: "A Mars orbiter was lost between two correct halves. The test pyramid of a real FastAPI service in numbers, fakes that catch what mocks let through, plus contract and load checks."
+description_vi: "Một tàu sao Hỏa mất ở chỗ nối giữa hai nửa đều đúng. Kim tự tháp test của service FastAPI thật bằng số liệu, fake bắt được lỗi mà mock cho qua, cùng contract và load check chạy được trong CI."
+date: 2026-11-23
+category: "backend"
+tags: ["backend", "python", "fastapi", "testing", "pytest"]
+cover: "../../assets/blog/backend-testing-strategy/openapi-contract-cover.png"
+cover_alt: "Swagger UI of the running clue.api: the title clue.api 0.4.0, the four case endpoints, and the generated schemas AssignBody, CaseOut, CloseBody and HTTPValidationError, the document the contract test pins"
+draft: true
+sources:
+  - { title: "FastAPI: Modern Python Web Development", author: "Bill Lubanovic", chapters: "Ch. 12", url: "https://www.oreilly.com/library/view/fastapi/9781098135091/" }
+  - { title: "Mars Climate Orbiter Mishap Investigation Board, Phase I Report", author: "NASA, 10 November 1999", url: "https://llis.nasa.gov/llis_lib/pdf/1009464main1_0641-mr.pdf" }
+  - { title: "Testing", author: "FastAPI docs", url: "https://fastapi.tiangolo.com/tutorial/testing/" }
+  - { title: "Testing Dependencies with Overrides", author: "FastAPI docs", url: "https://fastapi.tiangolo.com/advanced/testing-dependencies/" }
+  - { title: "Async Tests", author: "FastAPI docs", url: "https://fastapi.tiangolo.com/advanced/async-tests/" }
+  - { title: "How to use fixtures", author: "pytest docs", url: "https://docs.pytest.org/en/stable/how-to/fixtures.html" }
+  - { title: "unittest.mock: mock object library", author: "Python docs", url: "https://docs.python.org/3/library/unittest.mock.html" }
+  - { title: "The Practical Test Pyramid", author: "Ham Vocke, martinfowler.com", url: "https://martinfowler.com/articles/practical-test-pyramid.html" }
+  - { title: "Mocks Aren't Stubs", author: "Martin Fowler", url: "https://martinfowler.com/articles/mocksArentStubs.html" }
+  - { title: "Controlled Impact Demonstration instrumented test dummies (NASA photo ECN-28307, public domain)", author: "NASA", url: "https://commons.wikimedia.org/wiki/File:Controlled_impact_demonstration_dummies.jpg" }
+---
+
+import En from '../../components/mdx/En.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
+import BeP09Pyramid from '../../components/mdx/BeP09Pyramid.astro';
+import BeP09Seam from '../../components/mdx/BeP09Seam.astro';
+import BeP09MockLie from '../../components/mdx/BeP09MockLie.astro';
+import BeP09OverrideGap from '../../components/mdx/BeP09OverrideGap.astro';
+import BeP09Contract from '../../components/mdx/BeP09Contract.astro';
+import BeP09P95 from '../../components/mdx/BeP09P95.astro';
+import heroDummies from '../../assets/blog/backend-testing-strategy/crash-test-dummies-1984.jpg';
+
+<En>
+
+<Figure src={heroDummies} alt="Instrumented crash test dummies installed in a plane for NASA's Controlled Impact Demonstration" caption="A crash-test dummy is a fake with the right joints. It has no opinion about the crash, but it bends where a person bends, so what happens to it tells you what would happen to someone. A good fake repository works the same way: dull, and shaped like the real thing exactly where it counts." sourceTitle="Wikimedia Commons: Controlled impact demonstration dummies (NASA, public domain)" sourceUrl="https://commons.wikimedia.org/wiki/File:Controlled_impact_demonstration_dummies.jpg" />
+
+### The hook: two correct halves
+
+On 23 September 1999, NASA's Mars Climate Orbiter reached Mars and was lost. The Mishap Investigation Board's report names the root cause in one sentence: "the failure to use metric units in the coding of a ground software file." The thruster data that the ground software produced was in pound-force seconds. The navigation software read the same file as newton-seconds. The software on the spacecraft itself used metric units and was correct, and the trajectory modelers "assumed the data was provided in metric units per the requirements." By the time of Mars insertion the spacecraft was about 170 kilometers lower than planned.
+
+Each half was consistent with its own assumption. The mistake lived in the join between them, and the board says what was missing there: "End-to-end testing to validate the small forces ground software performance and its applicability to the specification did not appear to be accomplished."
+
+Your backend has the same joins: service and database, handler and caller, your code and the token library. A test suite is how you check them cheaply and often. It has to be able to fail when a join is wrong, and AI-written suites are good at the opposite. They go green in seconds, because they were written to match the code beside them. Two habits do most of the damage: **mocking the very thing under test**, and **asserting only that the status was 200**.
+
+This post builds a real suite for the series' clue.api and counts what it costs. Four questions:
+
+1. **What does the pyramid look like in a real suite?** Counts and seconds, not a diagram from a textbook.
+2. **Why a fake beats a mock** for the thing you own, and how to write the fake.
+3. **How do you test the real app in-process?** Overrides, a database per test, a real token.
+4. **Which two checks sit beside the pyramid?** A contract snapshot and a tiny load check.
+
+---
+
+## 1. The pyramid, counted
+
+First the vocabulary, since the words get used loosely. A **unit test** runs a small piece of your code by calling it directly: no web server, no database. An **API test** (many people say "integration test") runs the real application, routes and handlers and dependency wiring included, but inside the test process and usually against a stand-in for the slow parts. An **end-to-end test** starts the thing the way production does and talks to it over a real socket. The **test pyramid** is the advice to have many of the first, fewer of the second and very few of the third, because each step up is slower and breaks for more reasons.
+
+Here is the suite for this post, measured. It lives in `demo/tests_p09/`, and `demo/pytest.ini` tells pytest where to look and registers four markers. `conftest.py` tags every test with its layer from its file name, so `pytest -m unit` runs one layer at a time.
+
+<TerminalOutput command="pytest -m unit -q / -m api -q / -m e2e -q / -m contract -q / (all) — in demo/" label="Python 3.13.16 · pytest 9.2.0 · FastAPI 0.165.0 · httpx 0.28.1 · SQLAlchemy 2.0.58 · captured Nov 2026" caption="Counts and times are pytest's own. Each time is the whole run, start-up included: the one-test contract run took 0.22 s, so that is roughly the floor. The two end-to-end tests are the only layer you can feel.">
+```text
+$ pytest -m unit -q
+...x...............                                                      [100%]
+18 passed, 18 deselected, 1 xfailed in 0.27s
+$ pytest -m api -q
+...............                                                          [100%]
+15 passed, 22 deselected in 0.26s
+$ pytest -m e2e -q
+..                                                                       [100%]
+2 passed, 35 deselected in 0.80s
+$ pytest -m contract -q
+.                                                                        [100%]
+1 passed, 36 deselected in 0.22s
+$ pytest -q
+.....................x...............                                    [100%]
+36 passed, 1 xfailed in 0.89s
+```
+</TerminalOutput>
+
+<BeP09Pyramid />
+
+The base has 19 tests and the whole thing, 37 tests, runs in under a second. The middle layer is wide because the layering from post 4 let us put real routes in front of cheap stand-ins. The top is two tests and they cost about three times what the base does, mostly for starting a real uvicorn process. That is the argument for the shape in one capture: put every rule where it is cheap to check, and keep the expensive tests for the things only they can see.
+
+<Concepts>
+- **Unit test**: calls your code directly. Here, the service rules with a fake repository. It tells you which rule broke.
+- **API test**: the real FastAPI app, in-process, through `TestClient` or an async client. It tells you the wiring still works.
+- **End-to-end test**: a real server process, a real socket, a real login. It tells you the whole thing starts and holds together.
+- **Fake**: a working implementation that is not durable, such as a repository backed by a dict. **Mock**: an object that records calls and answers what you told it to.
+</Concepts>
+
+---
+
+## 2. Unit tests: the rules, a fake, no framework
+
+Post 4 split clue.api so that `layered_service.py` imports no FastAPI and talks to storage through the `CaseRepository` protocol. That seam is the reason the base of the pyramid is cheap: any object with `add`, `get` and `save` can stand in for the database.
+
+<BeP09Seam />
+
+The stand-in is `demo/tests_p09/fakes.py`. It is a real implementation, just not a durable one:
+
+```python
+class FakeCaseRepository:
+    def __init__(self) -> None:
+        self.rows: dict[str, CaseRecord] = {}
+
+    def add(self, record: CaseRecord) -> None:
+        self.rows[record.case_id] = replace(record)
+
+    def get(self, case_id: str) -> CaseRecord | None:
+        row = self.rows.get(case_id)
+        return replace(row) if row else None
+
+    def save(self, record: CaseRecord) -> None:
+        self.rows[record.case_id] = replace(record)
+```
+
+The `replace(...)` calls are the point of the file. A dict that stores the very object you pass in would hide a class of bugs, because the caller and the "database" would share one object. A real database does not do that: it copies on write and hands you a fresh object on read. The fake copies in both directions, so a change you forget to save stays forgotten, exactly as it would in production. (Post 4's `p04_override.py` used a simpler fake that stored the objects themselves; that is fine for showing the seam, and it is the fake that the next section's bug would sail through.)
+
+Two fixtures in `conftest.py` hand it out: `fake_repo`, and `service`, a `CaseService` built on it. A test then reads like the rule it protects:
+
+```python
+def test_close_is_persisted(service, fake_repo):
+    service.open_case("gnome")
+    service.assign("C-1", "wren")
+    service.close("C-1", "found in the pond")
+    stored = fake_repo.rows["C-1"]
+    assert (stored.status, stored.resolution) == ("closed", "found in the pond")
+
+
+def test_cannot_close_without_a_detective(service, fake_repo):
+    service.open_case("gnome")
+    with pytest.raises(CaseRuleError, match="unassigned"):
+        service.close("C-1", "x")
+    assert fake_repo.rows["C-1"].status == "open"  # and nothing was half-written
+```
+
+Note what the first test asserts. It does not check that `save` was called, it checks what ended up stored: status `closed`, resolution recorded. And the second test checks two things on purpose: the rule fired, and nothing was half-written when it did. That is the habit that makes a test able to fail for the right reason.
+
+Rules with many combinations want a table. The whole rulebook for `assign` and `close` fits in six rows, and `pytest.mark.parametrize` turns each row into its own test:
+
+```python
+# The whole rulebook as a table: (status, detective, move) -> what the rules say.
+MOVES = {
+    "assign": lambda s: s.assign("C-1", "kite"),
+    "close": lambda s: s.close("C-1", "done"),
+}
+
+
+@pytest.mark.parametrize(
+    "status, detective, move, refused",
+    [
+        ("open", None, "assign", False),
+        ("open", "wren", "assign", False),
+        ("closed", "wren", "assign", True),
+        ("open", None, "close", True),
+        ("open", "wren", "close", False),
+        ("closed", "wren", "close", False),
+    ],
+)
+def test_rulebook(service, fake_repo, status, detective, move, refused):
+    fake_repo.add(CaseRecord("C-1", "gnome", status, detective))
+    if refused:
+        with pytest.raises(CaseRuleError):
+            MOVES[move](service)
+    else:
+        MOVES[move](service)
+```
+
+<TerminalOutput command="pytest tests_p09/test_unit_service.py -v" label="Python 3.13.16 · pytest 9.2.0 · captured Nov 2026" caption="Fifteen tests, 0.01 s. Each row of the table shows up by name, so a failure says which combination broke. No server, no port, no database: this is the layer you can run on every save.">
+```text
+
+tests_p09/test_unit_service.py::test_open_case_sets_id_and_status PASSED [  6%]
+tests_p09/test_unit_service.py::test_ids_count_up PASSED                 [ 13%]
+tests_p09/test_unit_service.py::test_assign_is_persisted PASSED          [ 20%]
+tests_p09/test_unit_service.py::test_close_is_persisted PASSED           [ 26%]
+tests_p09/test_unit_service.py::test_cannot_close_without_a_detective PASSED [ 33%]
+tests_p09/test_unit_service.py::test_cannot_assign_a_closed_case PASSED  [ 40%]
+tests_p09/test_unit_service.py::test_unknown_case_is_not_found[get_case] PASSED [ 46%]
+tests_p09/test_unit_service.py::test_unknown_case_is_not_found[assign] PASSED [ 53%]
+tests_p09/test_unit_service.py::test_unknown_case_is_not_found[close] PASSED [ 60%]
+tests_p09/test_unit_service.py::test_rulebook[open-None-assign-False] PASSED [ 66%]
+tests_p09/test_unit_service.py::test_rulebook[open-wren-assign-False] PASSED [ 73%]
+tests_p09/test_unit_service.py::test_rulebook[closed-wren-assign-True] PASSED [ 80%]
+tests_p09/test_unit_service.py::test_rulebook[open-None-close-True] PASSED [ 86%]
+tests_p09/test_unit_service.py::test_rulebook[open-wren-close-False] PASSED [ 93%]
+tests_p09/test_unit_service.py::test_rulebook[closed-wren-close-False] PASSED [100%]
+
+============================== 15 passed in 0.01s ==============================
+```
+</TerminalOutput>
+
+Look at the last row of the table: `("closed", "wren", "close", False)`. Closing a closed case is allowed, and nobody decided that. Writing the rulebook as a table made the gap visible, which a pile of hand-written tests rarely does. Whether it is a bug is a product decision, and the table is where you ask it.
+
+---
+
+## 3. A mock agrees with you; a fake can disagree
+
+Now the trap. Suppose AI "refactors" `close` and the diff looks harmless. `demo/p09_buggy_service.py`:
+
+```python
+class BuggyCaseService(CaseService):
+    def close(self, case_id: str, resolution: str) -> CaseRecord:
+        case = self._require(case_id)
+        if case.detective is None:
+            raise CaseRuleError("an unassigned case cannot be closed")
+        self._repo.save(case)  # saved too early: status is still "open" here
+        case.status = "closed"
+        case.resolution = resolution
+        return case
+```
+
+It saves first and sets the status afterwards. Against the in-memory repository from post 4 this works, because the repository holds the very same object and the late assignments show up anyway. Against a database row it silently loses the close: `save` copied the fields while the status was still `open`. This is Mars Climate Orbiter in miniature, two parts that each look right.
+
+Here is the test an AI assistant writes for it, with `unittest.mock`, and the same check written against the fake. Both run against the correct service and the buggy one:
+
+```python
+@pytest.mark.parametrize("service_cls", ALL)
+def test_close_with_a_mock(service_cls):
+    repo = MagicMock()
+    repo.get.return_value = CaseRecord("C-1", "gnome", "open", detective="wren")
+
+    service_cls(repo).close("C-1", "found")
+
+    repo.save.assert_called_once()  # "save was called": true for both classes
+
+
+@pytest.mark.parametrize("service_cls", SERVICES)
+def test_close_with_a_fake(service_cls, fake_repo):
+    fake_repo.add(CaseRecord("C-1", "gnome", "open", detective="wren"))
+
+    service_cls(fake_repo).close("C-1", "found")
+
+    assert fake_repo.get("C-1").status == "closed"  # what storage really holds
+```
+
+A `MagicMock` accepts any call and answers what you configured, so it has no way to disagree with the code. The mock test can only assert *what the code did* (`save` was called once), never *what storage now holds*. The fake test asks the question that matters.
+
+<TerminalOutput command="pytest tests_p09/test_unit_mock_vs_fake.py -v --runxfail" label="Python 3.13.16 · pytest 9.2.0 · captured Nov 2026" caption="Three tests pass, including the mock test against the buggy service. The fourth is the fake catching it: the stored status is still open. In the committed suite that last case is marked xfail(strict=True), so the bug is on record and the suite stays green; --runxfail lifts the mark for this capture.">
+```text
+tests_p09/test_unit_mock_vs_fake.py::test_close_with_a_mock[CaseService] PASSED [ 25%]
+tests_p09/test_unit_mock_vs_fake.py::test_close_with_a_mock[BuggyCaseService] PASSED [ 50%]
+tests_p09/test_unit_mock_vs_fake.py::test_close_with_a_fake[CaseService] PASSED [ 75%]
+tests_p09/test_unit_mock_vs_fake.py::test_close_with_a_fake[BuggyCaseService] FAILED [100%]
+
+=================================== FAILURES ===================================
+___________________ test_close_with_a_fake[BuggyCaseService] ___________________
+tests_p09/test_unit_mock_vs_fake.py:37: in test_close_with_a_fake
+    assert fake_repo.get("C-1").status == "closed"  # what storage really holds
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: assert 'open' == 'closed'
+E     
+E     - closed
+E     + open
+=========================== short test summary info ============================
+FAILED tests_p09/test_unit_mock_vs_fake.py::test_close_with_a_fake[BuggyCaseService]
+========================= 1 failed, 3 passed in 0.02s ==========================
+```
+</TerminalOutput>
+
+<BeP09MockLie />
+
+<Callout type="warning" title="The AI habit to break">
+Ask an assistant for tests and it will often reach for `MagicMock` first, because a mock needs no setup and always goes green. A mock is the right tool at a boundary you do not own and cannot run: a payment provider, an email API. For your own repository, write the fake once, put it in `fakes.py`, and let every test share it. The rule of thumb: **never mock the thing under test, and be suspicious of mocking anything you can write a fake for in twenty lines.**
+</Callout>
+
+---
+
+## 4. API tests: the real app, in-process
+
+Unit tests cover the rules. They say nothing about whether the route parses `?resolution=`, whether the exception handler turns `CaseRuleError` into a 409, or whether `Depends` wires what you think. For that you call the app itself.
+
+FastAPI's `TestClient` calls the ASGI app in-process, so there is no port and no server to start, and `app.dependency_overrides` swaps one dependency for another. This is post 4's idea, grown into fixtures. The fake goes in through `get_repo`, and the real routes, handlers and `CaseService` run on top of it:
+
+```python
+@pytest.fixture
+def client(fake_repo):
+    app.dependency_overrides[get_repo] = lambda: fake_repo
+    yield TestClient(app)
+    app.dependency_overrides.clear()  # the app object is module-global: always clean up
+
+
+def test_open_returns_201_and_the_case(client, fake_repo):
+    response = client.post("/cases", params={"title": "The missing gnome"})
+    assert response.status_code == 201
+    assert response.json() == {
+        "case_id": "C-1",
+        "title": "The missing gnome",
+        "status": "open",
+        "detective": None,
+        "resolution": None,
+    }
+    assert fake_repo.rows["C-1"].title == "The missing gnome"
+```
+
+The cleanup line is not optional. `app` is a module-level object that every test in the process shares, so an override that is never cleared leaks into the next test, and you get a failure that depends on test order. Put the cleanup after the `yield` of a fixture and it runs even when the test fails.
+
+`TestClient` is synchronous and drives the app from its own thread. When a test itself needs to be `async`, or needs to share an event loop with something else, use `httpx.AsyncClient` with `ASGITransport` instead. It reaches the same app, still without a network:
+
+```python
+@pytest.mark.anyio
+async def test_same_app_through_an_async_client(fake_repo):
+    app.dependency_overrides[get_repo] = lambda: fake_repo
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            response = await ac.post("/cases", params={"title": "async"})
+    finally:
+        app.dependency_overrides.clear()
+    assert response.status_code == 201
+```
+
+`@pytest.mark.anyio` comes from the `anyio` plugin that ships with Starlette's dependencies, and the `anyio_backend` fixture in `conftest.py` picks asyncio. Reach for it when the test body itself needs `await`, for instance to call async code of your own next to the request.
+
+### A database per test
+
+A fake cannot tell you whether your SQL, your session handling or your commit really work. For that you want a real database, and SQLite makes it cheap: **one fresh file per test.** Post 5 gave the app a `get_session` dependency with a commit-on-success, rollback-on-error rule, and that rule is exactly what we want to test, so we must not override `get_session`. We change only the thing it builds sessions from:
+
+```python
+@pytest.fixture
+def sql_sessions(tmp_path, monkeypatch):
+    """A brand-new SQLite file per test, wired in where p05_db builds sessions."""
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'test.db'}", connect_args={"check_same_thread": False}
+    )
+    p05_db.Base.metadata.create_all(engine)
+    factory = sessionmaker(engine, expire_on_commit=False)
+    # get_session() stays the real one (its commit/rollback is under test);
+    # only the factory it opens sessions from is swapped.
+    monkeypatch.setattr(p05_db, "SessionLocal", factory)
+    yield factory
+    engine.dispose()
+```
+
+`tmp_path` is pytest's own per-test temporary folder, so the file is new for every test, and pytest cleans up old ones. `monkeypatch.setattr` swaps `p05_db.SessionLocal` and puts it back when the test ends. A second, quieter trap sits at the top of `conftest.py`: `p05_db` reads `DATABASE_URL` the moment it is imported, so the environment variable is set *before* any demo module is imported. Without it, merely importing `p05_app` would create a `clue.db` in whatever folder you ran pytest from.
+
+```python
+@pytest.fixture
+def client(sql_sessions):
+    # raise_server_exceptions=False: a crash in the app is a 500 we can assert on.
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def test_ids_are_unique_across_requests(client):
+    # The post-5 bug (a counter reset per request) lives only in the database:
+    # a dict-backed fake would never have produced the duplicate key.
+    first = client.post("/cases", params={"title": "one"})
+    second = client.post("/cases", params={"title": "two"})
+    assert (first.status_code, second.status_code) == (201, 201)
+    assert second.json()["case_id"] == "C-2"
+
+
+def test_each_test_starts_empty(client):
+    assert client.get("/stats").json() == {"cases": 0}  # no leftovers from other tests
+
+
+def test_batch_with_a_blank_title_opens_nothing(client):
+    response = client.post("/cases/batch", json=["one", "two", "  "])
+    assert response.status_code == 500
+    assert client.get("/stats").json() == {"cases": 0}  # rolled back, all or nothing
+```
+
+Each test here is one the fake cannot write. The first pins post 5's bug, a counter that reset on every request: a dict would simply overwrite `C-1`, while the database refuses the duplicate key. The third checks the all-or-nothing batch: the blank title raises, the session rolls back, and `/stats` still counts zero. That is a transaction guarantee, and only a real database has transactions. `raise_server_exceptions=False` tells `TestClient` to give us the 500 response instead of re-raising the exception into the test.
+
+<TerminalOutput command="pytest tests_p09/test_api_sql.py -v" label="Python 3.13.16 · pytest 9.2.0 · FastAPI 0.165.0 · SQLAlchemy 2.0.58 · SQLite · captured Nov 2026" caption="Four tests, a fresh database file each, 0.14 s in total. The second test passes because the first test's rows are in another file. The fourth is the real repository catching the save-before-mutate bug from section 3.">
+```text
+
+tests_p09/test_api_sql.py::test_ids_are_unique_across_requests PASSED    [ 25%]
+tests_p09/test_api_sql.py::test_each_test_starts_empty PASSED            [ 50%]
+tests_p09/test_api_sql.py::test_batch_with_a_blank_title_opens_nothing PASSED [ 75%]
+tests_p09/test_api_sql.py::test_the_real_repository_catches_the_save_before_mutate_bug PASSED [100%]
+
+============================== 4 passed in 0.14s ===============================
+```
+</TerminalOutput>
+
+---
+
+## 5. Auth in tests: the override that removes the guard
+
+Post 7 put a guard in front of the routes: `get_current_user` decodes the token, checks the signature and expiry, and checks the scopes. Testing a route behind it tempts you to override it, and for one purpose that is right: to test the *owner rule* ("is this your case?") without minting tokens. For another purpose it is wrong, and the test below shows the difference.
+
+```python
+def bearer(user: str, scopes: list[str]) -> dict:
+    return {"Authorization": f"Bearer {sec.make_token(user, scopes)}"}
+```
+
+`bearer` builds a real token with post 7's own `make_token`, which is cheap because it only signs a few claims. With real tokens you can test what the guard does:
+
+```python
+def test_missing_scope_is_403_with_the_scope_named():
+    response = client.post("/purge", headers=bearer("bob", ["cases:read"]))
+    assert response.status_code == 403
+    assert "cases:write" in response.json()["detail"]
+
+
+@pytest.fixture
+def as_bob():
+    p07_bola.app.dependency_overrides[sec.get_current_user] = lambda: "bob"
+    yield
+    p07_bola.app.dependency_overrides.clear()
+
+
+def test_override_is_fine_for_testing_the_owner_rule(as_bob):
+    assert client.get("/cases/C-2").status_code == 200  # no token built at all
+    assert client.get("/cases/C-1").status_code == 404
+
+
+def test_override_also_switches_the_scope_check_off(as_bob):
+    # Bob holds no cases:write, yet /purge answers 200: the override replaced
+    # the very function that enforces scopes. Keep a real-token test (above).
+    assert client.post("/purge").status_code == 200
+```
+
+The last two tests are the trap on purpose. `as_bob` replaces `get_current_user` with `lambda: "bob"`, which is perfect for the owner rule: no token to build, and the 404 for someone else's case still fires. But the last test sends `POST /purge` as bob, who holds no `cases:write` scope, and gets a 200. The override replaced the very function that enforces scopes.
+
+<BeP09OverrideGap />
+
+<TerminalOutput command="pytest tests_p09/test_api_auth.py -v" label="Python 3.13.16 · pytest 9.2.0 · FastAPI 0.165.0 · PyJWT 2.15.1 · captured Nov 2026" caption="Six passing tests that together say: the guard rejects what it should (401, 403, and a 404 for someone else's case), and an override turns the guard off. Keep at least one real-token test for every rule the guard enforces.">
+```text
+
+tests_p09/test_api_auth.py::test_owner_reads_own_case PASSED             [ 16%]
+tests_p09/test_api_auth.py::test_other_users_case_looks_like_it_does_not_exist PASSED [ 33%]
+tests_p09/test_api_auth.py::test_no_token_is_401 PASSED                  [ 50%]
+tests_p09/test_api_auth.py::test_missing_scope_is_403_with_the_scope_named PASSED [ 66%]
+tests_p09/test_api_auth.py::test_override_is_fine_for_testing_the_owner_rule PASSED [ 83%]
+tests_p09/test_api_auth.py::test_override_also_switches_the_scope_check_off PASSED [100%]
+
+============================== 6 passed in 0.26s ===============================
+```
+</TerminalOutput>
+
+### One level up: end to end
+
+The suite has two end-to-end tests, and they exist for one reason: the in-process tests never start a server, never do a real login and never go through uvicorn. `demo/tests_p09/test_e2e_live.py` starts `uvicorn p07_bola:app` as a subprocess on port 4339, waits for the port to accept connections, logs in through `POST /token` with a form, and reads a case:
+
+```python
+@pytest.fixture(scope="module")
+def base_url():
+    server = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "p07_bola:app", "--port", str(PORT), "--log-level", "warning"],
+        cwd=DEMO,
+    )
+    try:
+        for _ in range(100):  # wait until the port accepts connections
+            with socket.socket() as probe:
+                if probe.connect_ex(("127.0.0.1", PORT)) == 0:
+                    break
+            time.sleep(0.1)
+        else:
+            pytest.fail("uvicorn did not start")
+        yield f"http://127.0.0.1:{PORT}"
+    finally:
+        server.terminate()
+        server.wait(timeout=10)
+
+
+def login(base_url: str, user: str, password: str) -> dict:
+    form = {"username": user, "password": password, "scope": "cases:read"}
+    token = httpx.post(f"{base_url}/token", data=form).json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
+def test_login_then_read_own_case(base_url):
+    headers = login(base_url, "alice", "alice-demo-pw")
+    response = httpx.get(f"{base_url}/cases/C-1", headers=headers)
+    assert response.status_code == 200
+
+
+def test_a_valid_login_still_cannot_read_someone_elses_case(base_url):
+    headers = login(base_url, "bob", "bob-demo-pw")
+    assert httpx.get(f"{base_url}/cases/C-1", headers=headers).status_code == 404
+```
+
+`scope="module"` starts the server once for the file, and the `finally` guarantees it is stopped even when a test fails. The second test is the one worth having: a *valid* login for bob still gets a 404 on alice's case. Two tests is the right number. Each extra end-to-end test pays that start-up again or shares state with the others.
+
+---
+
+## 6. Contract: pin what callers see
+
+Some changes break no rule and no route, and still break a caller. Rename `title` to `name` in the request body and every unit and API test that goes through your own code passes, because your code agrees with itself. The client sending `title` is the one that gets a 422. FastAPI already writes down what the API promises: the OpenAPI document at `/openapi.json`, the same one Swagger UI renders on this post's cover. A **contract check** commits a copy of that document and fails when the generated one differs.
+
+```python
+SNAPSHOT = Path(__file__).with_name("openapi.snapshot.json")
+
+
+def as_lines(document: dict) -> list[str]:
+    return json.dumps(document, indent=2, sort_keys=True).splitlines()
+
+
+def test_openapi_matches_the_committed_snapshot():
+    committed = as_lines(json.loads(SNAPSHOT.read_text()))
+    generated = as_lines(app.openapi())
+    diff = list(difflib.unified_diff(committed, generated, "committed", "generated", lineterm="", n=1))
+    if diff:
+        pytest.fail("the API contract changed:\n" + "\n".join(diff), pytrace=False)
+```
+
+`demo/p09_snapshot.py` writes `openapi.snapshot.json` from `app.openapi()`. The test compares the two as sorted, indented lines and fails with a unified diff, so the failure message is the change itself. To prove it works we ran it against a copy of the demo where `OpenBody.title` was renamed to `name`:
+
+<TerminalOutput command="pytest -m contract  (in a copy of demo/ where OpenBody.title is renamed to name)" label="Python 3.13.16 · pytest 9.2.0 · FastAPI 0.165.0 · captured Nov 2026" caption="The failure is the diff: the committed contract says title, the app now says name. The snapshot was not touched. In the real repo this test passes.">
+```text
+
+tests_p09/test_contract.py F                                             [100%]
+
+=================================== FAILURES ===================================
+_________________ test_openapi_matches_the_committed_snapshot __________________
+the API contract changed:
+--- committed
++++ generated
+@@ -91,9 +91,9 @@
+         "properties": {
+-          "title": {
+-            "title": "Title",
+-            "type": "string"
+-          }
+-        },
+-        "required": [
+-          "title"
++          "name": {
++            "title": "Name",
++            "type": "string"
++          }
++        },
++        "required": [
++          "name"
+         ],
+=========================== short test summary info ============================
+FAILED tests_p09/test_contract.py::test_openapi_matches_the_committed_snapshot
+======================= 1 failed, 36 deselected in 0.32s =======================
+```
+</TerminalOutput>
+
+<BeP09Contract />
+
+When the change is on purpose, you re-run `p09_snapshot.py` and review the diff of the snapshot file in the pull request. That review is the point. The AI habit here is to regenerate the snapshot whenever the test goes red, which turns the check into a rubber stamp: read the diff before you accept it, because it is the list of things your callers will notice.
+
+This is the lightweight version of contract testing, one direction only: what the provider promises. Tools that also record what each consumer actually uses exist, and are worth it once you have several consumers. For one service and a few clients, a committed snapshot is most of the benefit for twenty lines.
+
+---
+
+## 7. Load as a check
+
+A load test is a measurement, but a very small one can also be a check: send a few hundred requests, compute p95 (the time that 95 percent of requests beat), and fail the build when it crosses a bound. It will not tell you your capacity. It will tell you that a change made an endpoint several times slower. `demo/p09_burst.py` does it with httpx:
+
+```python
+async def one(client: httpx.AsyncClient, path: str, gate: asyncio.Semaphore) -> float:
+    async with gate:  # at most `concurrency` requests in flight
+        started = time.perf_counter()
+        response = await client.get(path)
+        response.raise_for_status()
+        return (time.perf_counter() - started) * 1000
+
+
+async def main(base: str, path: str, n: int, concurrency: int, bound_ms: float) -> int:
+    gate = asyncio.Semaphore(concurrency)
+    async with httpx.AsyncClient(base_url=base, timeout=60) as client:
+        await client.get(path)  # warm-up: first request pays connection and import costs
+        started = time.perf_counter()
+        times = sorted(await asyncio.gather(*(one(client, path, gate) for _ in range(n))))
+        wall = time.perf_counter() - started
+    p50 = statistics.median(times)
+    p95 = times[int(len(times) * 0.95) - 1]
+    verdict = "ok" if p95 <= bound_ms else "FAIL"
+    print(
+        f"GET {path} x{n} at {concurrency}: {n / wall:.0f} req/s | "
+        f"p50 {p50:.1f} ms | p95 {p95:.1f} ms | max {times[-1]:.1f} ms | "
+        f"bound {bound_ms:.0f} ms -> {verdict}"
+    )
+    return 0 if p95 <= bound_ms else 1
+```
+
+`asyncio.Semaphore` caps how many requests are in flight at once, which is what "5 at a time" means. The first request is a warm-up that pays for connection setup and first-call costs, and `sys.exit(1)` when the bound breaks lets any CI step treat it as a plain command. We pointed it at post 5's two endpoints: `/lazy`, which runs 101 queries for 100 cases (the N+1 problem), and `/eager`, the one-line fix that runs 2.
+
+<TerminalOutput command="uvicorn p05_nplus1:app --port 4339 — curl both endpoints, then python p09_burst.py http://127.0.0.1:4339 '<path>' 200 5 70, three times each" label="Python 3.13.16 · FastAPI 0.165.0 · SQLAlchemy 2.0.58 · uvicorn 0.54.0 · httpx 0.28.1 · captured Nov 2026" caption="Same data, same machine. /eager answers at p95 of 32 to 38 ms and passes the 70 ms bound every time; /lazy sits at 85 to 88 ms and fails it every time (exit 1). The laptop was busy with other jobs, which is why the figures are not pretty and why the check still works.">
+```text
+{"cases":100,"queries":2,"ms":9.1}
+{"cases":100,"queries":101,"ms":14.4}
+GET /eager?limit=100 x200 at 5: 197 req/s | p50 24.6 ms | p95 37.6 ms | max 43.8 ms | bound 70 ms -> ok
+exit 0
+GET /lazy?limit=100 x200 at 5: 66 req/s | p50 75.5 ms | p95 84.6 ms | max 95.7 ms | bound 70 ms -> FAIL
+exit 1
+GET /eager?limit=100 x200 at 5: 198 req/s | p50 24.3 ms | p95 36.7 ms | max 58.9 ms | bound 70 ms -> ok
+exit 0
+GET /lazy?limit=100 x200 at 5: 65 req/s | p50 75.2 ms | p95 88.3 ms | max 95.6 ms | bound 70 ms -> FAIL
+exit 1
+GET /eager?limit=100 x200 at 5: 197 req/s | p50 24.6 ms | p95 32.5 ms | max 63.7 ms | bound 70 ms -> ok
+exit 0
+GET /lazy?limit=100 x200 at 5: 65 req/s | p50 75.9 ms | p95 86.8 ms | max 95.1 ms | bound 70 ms -> FAIL
+exit 1
+17:26  up  8:43, 1 user, load averages: 11.87 16.80 18.39
+```
+</TerminalOutput>
+
+<BeP09P95 />
+
+Be honest about what this proves. Client, server and several other jobs share one laptop, so the numbers vary: an earlier run while the machine was busier gave `/lazy` p95 values of 109, 134 and 128 ms against 85 to 88 here. Absolute numbers from this setup say nothing about production. What survives is the *ratio* and the *side of the bound*: `/lazy` is between two and three times slower than `/eager` at p95, and a bound of 70 ms sits clearly between them. A bound too close to one side flips on noise. When we first tried 100 ms, `/lazy` passed on a quiet run, which is the lesson in one data point. Proper load testing, percentiles under a realistic mix and profiling come later in the series.
+
+---
+
+## 8. Who tests the tests?
+
+You now have a suite that goes green. The question that matters is whether it can go red. When AI writes the tests, ask it by breaking the code on purpose: delete one rule and see which tests notice. `demo/p09_weak_tests.py` holds two tests of the kind assistants write by default:
+
+```python
+def test_close_returns_ok():
+    service = MagicMock()  # replaces the very thing the endpoint exists to call
+    service.close.return_value = CaseRecord("C-1", "gnome", "closed", "wren", "found")
+    app.dependency_overrides[get_service] = lambda: service
+    try:
+        response = client.post("/cases/C-1/close", params={"resolution": "found"})
+    finally:
+        app.dependency_overrides.clear()
+    assert response.status_code == 200
+    service.close.assert_called_once()
+
+
+def test_open_returns_201():
+    response = client.post("/cases", params={"title": "The missing gnome"})
+    assert response.status_code == 201  # the body, the id, the status: never looked at
+```
+
+The first mocks the service, the very thing the endpoint exists to call, and asserts a 200 and that the mock was called. The second asserts the 201 and never looks at the body. Now delete the rule "an unassigned case cannot be closed" from a copy of `layered_service.py` and run both suites:
+
+<TerminalOutput command="in a copy of demo/ with the unassigned-case rule deleted from layered_service.py: pytest p09_weak_tests.py -q, then pytest tests_p09 -q --tb=no" label="Python 3.13.16 · pytest 9.2.0 · FastAPI 0.165.0 · captured Nov 2026" caption="The rule is gone from the service and the two weak tests are still green. The suite from this post fails in three places, at the unit layer and at the API layer, each naming the broken rule. (The xfail is the buggy service from section 3, as before.)">
+```text
+$ pytest p09_weak_tests.py -q
+..                                                                       [100%]
+2 passed in 0.17s
+
+$ pytest tests_p09 -q --tb=no
+.......F.............x....F.......F..                                    [100%]
+=========================== short test summary info ============================
+FAILED tests_p09/test_api_overrides.py::test_rule_error_becomes_409_with_the_reason
+FAILED tests_p09/test_unit_service.py::test_cannot_close_without_a_detective
+FAILED tests_p09/test_unit_service.py::test_rulebook[open-None-close-True] - ...
+3 failed, 33 passed, 1 xfailed in 0.94s
+```
+</TerminalOutput>
+
+That is the whole review technique, and it is cheap: *mutate, then watch.* Delete a rule, flip a comparison, rename a field, and check that something goes red. A test that cannot fail on a deleted rule is a comment with extra steps.
+
+<Callout type="note" title="Do not chase the pyramid for its own sake">
+Seven layers of tests on a weekend project is as much ceremony as seven layers of code. Start with the unit tests of your rules and one or two end-to-end tests of the paths that earn money or hold data. Add API tests where wiring bites you, a contract snapshot when you have a caller you do not control, and a load check when you have a performance promise. The shape follows what has actually broken.
+</Callout>
+
+The review habit, one line: **for every AI-written test, ask what change to the code would make it fail, and if the answer is "nothing realistic", delete it or rewrite it.** Is the repository a fake that copies, or a mock that nods? Does the assertion read what is stored, or only what was called? Did an override remove the very thing the test claims to cover? Those three questions catch most of what goes green and means nothing.
+
+</En>
+
+<Vi>
+
+<Figure src={heroDummies} alt="Các hình nộm thử va chạm gắn cảm biến được lắp trong máy bay cho cuộc thử Controlled Impact Demonstration của NASA" caption="Hình nộm thử va chạm là một bản fake có đủ khớp xương. Nó không có ý kiến gì về vụ va chạm, nhưng nó gập đúng chỗ người gập, nên chuyện xảy ra với nó cho bạn biết chuyện sẽ xảy ra với người thật. Một fake repository tốt cũng vậy: nhàm chán, và giống đồ thật đúng ở chỗ quan trọng." sourceTitle="Wikimedia Commons: Controlled impact demonstration dummies (NASA, public domain)" sourceUrl="https://commons.wikimedia.org/wiki/File:Controlled_impact_demonstration_dummies.jpg" />
+
+### Mở đầu: hai nửa đều đúng
+
+Ngày 23/09/1999, tàu Mars Climate Orbiter của NASA tới sao Hỏa rồi mất. Báo cáo của hội đồng điều tra nêu nguyên nhân gốc trong một câu: "the failure to use metric units in the coding of a ground software file" (không dùng đơn vị hệ mét khi viết một file phần mềm mặt đất). Dữ liệu lực đẩy do phần mềm mặt đất tạo ra tính bằng pound-force giây. Phần mềm dẫn đường đọc đúng file đó như newton-giây. Phần mềm trên tàu dùng hệ mét và chạy đúng, còn nhóm dựng mô hình quỹ đạo thì "assumed the data was provided in metric units per the requirements" (cứ tin dữ liệu đã theo hệ mét như yêu cầu). Tới lúc vào quỹ đạo sao Hỏa, tàu thấp hơn kế hoạch khoảng 170 km.
+
+Mỗi nửa đều nhất quán với giả định của riêng nó. Lỗi nằm ở chỗ nối giữa hai nửa, và hội đồng nói rõ chỗ đó thiếu gì: "End-to-end testing to validate the small forces ground software performance and its applicability to the specification did not appear to be accomplished." (Có vẻ đã không có end-to-end test để kiểm phần mềm mặt đất khớp với đặc tả.)
+
+Backend của bạn cũng đầy những chỗ nối như vậy: service với database, handler với bên gọi, code của bạn với thư viện token. Bộ test là cách rẻ và thường xuyên để kiểm các chỗ nối đó. Nó phải có khả năng fail khi chỗ nối sai, còn bộ test do AI viết lại giỏi chiều ngược lại: xanh trong vài giây vì được viết để khớp với đoạn code ngay bên cạnh. Hai thói quen gây hại nhiều nhất: **mock chính thứ đang được test**, và **chỉ assert status là 200**.
+
+Bài này dựng một bộ test thật cho clue.api của series và đếm xem nó tốn bao nhiêu. Bốn câu hỏi:
+
+1. **Kim tự tháp test trong một bộ test thật trông thế nào?** Số test và số giây, không phải hình minh họa trong sách giáo khoa.
+2. **Vì sao fake thắng mock** với thứ do chính bạn viết, và viết fake ra sao.
+3. **Test app thật trong cùng process thế nào?** Override, một database cho mỗi test, một token thật.
+4. **Hai check nào nằm cạnh kim tự tháp?** Contract snapshot và một load check nhỏ xíu.
+
+---
+
+## 1. Kim tự tháp, tính bằng số
+
+Trước hết là từ vựng, vì mấy từ này hay bị dùng lỏng. **Unit test** gọi thẳng một đoạn code nhỏ của bạn: không web server, không database. **API test** (nhiều người gọi là "integration test") chạy app thật, gồm route, handler và cách nối dependency, nhưng ngay trong process của test và thường thay phần chậm bằng đồ giả. **End-to-end test** khởi động hệ thống như production rồi nói chuyện với nó qua socket thật. **Kim tự tháp test** là lời khuyên: nhiều loại đầu, ít loại giữa, rất ít loại cuối, vì lên mỗi bậc là chậm hơn và gãy vì nhiều lý do hơn.
+
+Đây là bộ test của bài này, đã đo. Nó nằm trong `demo/tests_p09/`; `demo/pytest.ini` chỉ cho pytest chỗ cần tìm và đăng ký bốn marker. `conftest.py` gắn cho mỗi test nhãn tầng của nó theo tên file, nên `pytest -m unit` chạy được từng tầng một.
+
+<TerminalOutput command="pytest -m unit -q / -m api -q / -m e2e -q / -m contract -q / (tất cả) — trong demo/" label="Python 3.13.16 · pytest 9.2.0 · FastAPI 0.165.0 · httpx 0.28.1 · SQLAlchemy 2.0.58 · captured Nov 2026" caption="Số test và thời gian là của chính pytest. Mỗi con số là cả lượt chạy, đã gồm phần khởi động: lượt contract chỉ một test mà mất 0.22 s, nên đó gần như là mức sàn. Hai test end-to-end là tầng duy nhất bạn cảm nhận được.">
+```text
+$ pytest -m unit -q
+...x...............                                                      [100%]
+18 passed, 18 deselected, 1 xfailed in 0.27s
+$ pytest -m api -q
+...............                                                          [100%]
+15 passed, 22 deselected in 0.26s
+$ pytest -m e2e -q
+..                                                                       [100%]
+2 passed, 35 deselected in 0.80s
+$ pytest -m contract -q
+.                                                                        [100%]
+1 passed, 36 deselected in 0.22s
+$ pytest -q
+.....................x...............                                    [100%]
+36 passed, 1 xfailed in 0.89s
+```
+</TerminalOutput>
+
+<BeP09Pyramid />
+
+Đáy có 19 test, và cả bộ 37 test chạy chưa tới một giây. Tầng giữa rộng vì cách chia tầng ở bài 4 cho phép đặt route thật trước những đồ giả rẻ. Đỉnh chỉ có hai test mà tốn gấp khoảng ba lần cả đáy, phần lớn vì phải bật một process uvicorn thật. Một lần capture nói được trọn lý lẽ của hình dạng này: đặt mọi luật vào chỗ kiểm rẻ nhất, và để dành test đắt tiền cho những thứ chỉ chúng mới thấy.
+
+<Concepts>
+- **Unit test**: gọi thẳng code của bạn. Ở đây là luật của service chạy trên một fake repository. Nó cho biết luật nào gãy.
+- **API test**: app FastAPI thật, trong cùng process, qua `TestClient` hoặc async client. Nó cho biết việc nối dây vẫn chạy.
+- **End-to-end test**: process server thật, socket thật, đăng nhập thật. Nó cho biết cả hệ thống khởi động được và ăn khớp.
+- **Fake**: bản cài đặt chạy được nhưng không bền, ví dụ repository dùng dict. **Mock**: đối tượng ghi lại các lần gọi và trả lời đúng điều bạn dặn.
+</Concepts>
+
+---
+
+## 2. Unit test: luật, một fake, không framework
+
+Bài 4 tách clue.api sao cho `layered_service.py` không import FastAPI và nói chuyện với kho lưu trữ qua protocol `CaseRepository`. Chỗ nối đó là lý do đáy kim tự tháp rẻ: bất kỳ đối tượng nào có `add`, `get`, `save` đều thế được chỗ database.
+
+<BeP09Seam />
+
+Đồ thế chỗ là `demo/tests_p09/fakes.py`. Nó là bản cài đặt thật, chỉ không bền:
+
+```python
+class FakeCaseRepository:
+    def __init__(self) -> None:
+        self.rows: dict[str, CaseRecord] = {}
+
+    def add(self, record: CaseRecord) -> None:
+        self.rows[record.case_id] = replace(record)
+
+    def get(self, case_id: str) -> CaseRecord | None:
+        row = self.rows.get(case_id)
+        return replace(row) if row else None
+
+    def save(self, record: CaseRecord) -> None:
+        self.rows[record.case_id] = replace(record)
+```
+
+Mấy lời gọi `replace(...)` là điểm mấu chốt của file. Một cái dict lưu đúng đối tượng bạn đưa vào sẽ che mất cả một loại bug, vì bên gọi và "database" dùng chung một đối tượng. Database thật không làm vậy: nó copy khi ghi và trả đối tượng mới khi đọc. Fake copy cả hai chiều, nên thay đổi bạn quên save sẽ mất, y như trên production. (Fake trong `p04_override.py` của bài 4 đơn giản hơn, lưu thẳng đối tượng; thế là đủ để chỉ ra chỗ nối, và đó chính là loại fake mà bug ở mục sau sẽ lọt qua.)
+
+Hai fixture trong `conftest.py` phát nó ra: `fake_repo` và `service`, một `CaseService` dựng trên fake đó. Test đọc lên giống chính cái luật nó bảo vệ:
+
+```python
+def test_close_is_persisted(service, fake_repo):
+    service.open_case("gnome")
+    service.assign("C-1", "wren")
+    service.close("C-1", "found in the pond")
+    stored = fake_repo.rows["C-1"]
+    assert (stored.status, stored.resolution) == ("closed", "found in the pond")
+
+
+def test_cannot_close_without_a_detective(service, fake_repo):
+    service.open_case("gnome")
+    with pytest.raises(CaseRuleError, match="unassigned"):
+        service.close("C-1", "x")
+    assert fake_repo.rows["C-1"].status == "open"  # and nothing was half-written
+```
+
+Để ý test đầu assert cái gì. Nó không kiểm `save` có được gọi không, nó kiểm cái đã được lưu: status `closed`, resolution đã ghi. Còn test thứ hai kiểm hai thứ có chủ ý: luật đã bắn, và khi nó bắn thì không có gì bị ghi dở. Đó là thói quen khiến một test fail được vì đúng lý do.
+
+Luật có nhiều tổ hợp thì nên viết thành bảng. Toàn bộ luật của `assign` và `close` gói trong sáu dòng, và `pytest.mark.parametrize` biến mỗi dòng thành một test riêng:
+
+```python
+# The whole rulebook as a table: (status, detective, move) -> what the rules say.
+MOVES = {
+    "assign": lambda s: s.assign("C-1", "kite"),
+    "close": lambda s: s.close("C-1", "done"),
+}
+
+
+@pytest.mark.parametrize(
+    "status, detective, move, refused",
+    [
+        ("open", None, "assign", False),
+        ("open", "wren", "assign", False),
+        ("closed", "wren", "assign", True),
+        ("open", None, "close", True),
+        ("open", "wren", "close", False),
+        ("closed", "wren", "close", False),
+    ],
+)
+def test_rulebook(service, fake_repo, status, detective, move, refused):
+    fake_repo.add(CaseRecord("C-1", "gnome", status, detective))
+    if refused:
+        with pytest.raises(CaseRuleError):
+            MOVES[move](service)
+    else:
+        MOVES[move](service)
+```
+
+<TerminalOutput command="pytest tests_p09/test_unit_service.py -v" label="Python 3.13.16 · pytest 9.2.0 · captured Nov 2026" caption="Mười lăm test, 0.01 s. Mỗi dòng của bảng hiện ra theo tên, nên khi fail là biết tổ hợp nào gãy. Không server, không port, không database: tầng này chạy được mỗi lần lưu file.">
+```text
+
+tests_p09/test_unit_service.py::test_open_case_sets_id_and_status PASSED [  6%]
+tests_p09/test_unit_service.py::test_ids_count_up PASSED                 [ 13%]
+tests_p09/test_unit_service.py::test_assign_is_persisted PASSED          [ 20%]
+tests_p09/test_unit_service.py::test_close_is_persisted PASSED           [ 26%]
+tests_p09/test_unit_service.py::test_cannot_close_without_a_detective PASSED [ 33%]
+tests_p09/test_unit_service.py::test_cannot_assign_a_closed_case PASSED  [ 40%]
+tests_p09/test_unit_service.py::test_unknown_case_is_not_found[get_case] PASSED [ 46%]
+tests_p09/test_unit_service.py::test_unknown_case_is_not_found[assign] PASSED [ 53%]
+tests_p09/test_unit_service.py::test_unknown_case_is_not_found[close] PASSED [ 60%]
+tests_p09/test_unit_service.py::test_rulebook[open-None-assign-False] PASSED [ 66%]
+tests_p09/test_unit_service.py::test_rulebook[open-wren-assign-False] PASSED [ 73%]
+tests_p09/test_unit_service.py::test_rulebook[closed-wren-assign-True] PASSED [ 80%]
+tests_p09/test_unit_service.py::test_rulebook[open-None-close-True] PASSED [ 86%]
+tests_p09/test_unit_service.py::test_rulebook[open-wren-close-False] PASSED [ 93%]
+tests_p09/test_unit_service.py::test_rulebook[closed-wren-close-False] PASSED [100%]
+
+============================== 15 passed in 0.01s ==============================
+```
+</TerminalOutput>
+
+Nhìn dòng cuối của bảng: `("closed", "wren", "close", False)`. Đóng một case đã đóng thì được phép, và không ai quyết định chuyện đó. Viết luật thành bảng làm lỗ hổng lộ ra, điều mà một đống test viết tay hiếm khi làm được. Đây có phải bug không là quyết định sản phẩm, và cái bảng là chỗ để hỏi.
+
+---
+
+## 3. Mock gật đầu, fake thì có thể cãi
+
+Giờ tới cái bẫy. Giả sử AI "refactor" hàm `close` và diff trông vô hại. `demo/p09_buggy_service.py`:
+
+```python
+class BuggyCaseService(CaseService):
+    def close(self, case_id: str, resolution: str) -> CaseRecord:
+        case = self._require(case_id)
+        if case.detective is None:
+            raise CaseRuleError("an unassigned case cannot be closed")
+        self._repo.save(case)  # saved too early: status is still "open" here
+        case.status = "closed"
+        case.resolution = resolution
+        return case
+```
+
+Nó save trước rồi mới đặt status. Với repository in-memory của bài 4 thì vẫn chạy, vì repository giữ đúng đối tượng đó nên các phép gán muộn vẫn hiện ra. Với một dòng trong database thì việc đóng case biến mất trong im lặng: `save` đã copy các trường lúc status còn là `open`. Đây là Mars Climate Orbiter thu nhỏ, hai phần mà phần nào trông cũng đúng.
+
+Đây là test mà trợ lý AI viết cho nó bằng `unittest.mock`, và cùng phép kiểm đó viết với fake. Cả hai chạy trên service đúng lẫn service bị lỗi:
+
+```python
+@pytest.mark.parametrize("service_cls", ALL)
+def test_close_with_a_mock(service_cls):
+    repo = MagicMock()
+    repo.get.return_value = CaseRecord("C-1", "gnome", "open", detective="wren")
+
+    service_cls(repo).close("C-1", "found")
+
+    repo.save.assert_called_once()  # "save was called": true for both classes
+
+
+@pytest.mark.parametrize("service_cls", SERVICES)
+def test_close_with_a_fake(service_cls, fake_repo):
+    fake_repo.add(CaseRecord("C-1", "gnome", "open", detective="wren"))
+
+    service_cls(fake_repo).close("C-1", "found")
+
+    assert fake_repo.get("C-1").status == "closed"  # what storage really holds
+```
+
+`MagicMock` nhận mọi lời gọi và trả đúng điều bạn cấu hình, nên nó không có cách nào cãi lại code. Test dùng mock chỉ assert được *code đã làm gì* (`save` được gọi một lần), không bao giờ assert được *kho lưu trữ giờ đang giữ gì*. Test dùng fake hỏi đúng câu cần hỏi.
+
+<TerminalOutput command="pytest tests_p09/test_unit_mock_vs_fake.py -v --runxfail" label="Python 3.13.16 · pytest 9.2.0 · captured Nov 2026" caption="Ba test pass, kể cả test dùng mock trên service bị lỗi. Test thứ tư là fake bắt được nó: status đã lưu vẫn là open. Trong bộ test đã commit, ca cuối được đánh xfail(strict=True) để bug có ghi nhận mà bộ test vẫn xanh; --runxfail bỏ dấu đó đi chỉ cho lần capture này.">
+```text
+tests_p09/test_unit_mock_vs_fake.py::test_close_with_a_mock[CaseService] PASSED [ 25%]
+tests_p09/test_unit_mock_vs_fake.py::test_close_with_a_mock[BuggyCaseService] PASSED [ 50%]
+tests_p09/test_unit_mock_vs_fake.py::test_close_with_a_fake[CaseService] PASSED [ 75%]
+tests_p09/test_unit_mock_vs_fake.py::test_close_with_a_fake[BuggyCaseService] FAILED [100%]
+
+=================================== FAILURES ===================================
+___________________ test_close_with_a_fake[BuggyCaseService] ___________________
+tests_p09/test_unit_mock_vs_fake.py:37: in test_close_with_a_fake
+    assert fake_repo.get("C-1").status == "closed"  # what storage really holds
+    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   AssertionError: assert 'open' == 'closed'
+E     
+E     - closed
+E     + open
+=========================== short test summary info ============================
+FAILED tests_p09/test_unit_mock_vs_fake.py::test_close_with_a_fake[BuggyCaseService]
+========================= 1 failed, 3 passed in 0.02s ==========================
+```
+</TerminalOutput>
+
+<BeP09MockLie />
+
+<Callout type="warning" title="Thói quen AI cần bỏ">
+Nhờ trợ lý viết test, nó hay với tay lấy `MagicMock` trước, vì mock không cần dựng gì và luôn xanh. Mock đúng chỗ ở ranh giới bạn không sở hữu và không chạy được: cổng thanh toán, API gửi email. Với repository của chính mình, hãy viết fake một lần, để trong `fakes.py`, cho mọi test dùng chung. Quy tắc ngón tay cái: **đừng bao giờ mock thứ đang được test, và hãy nghi ngờ mọi thứ bạn viết được fake trong hai chục dòng mà vẫn đi mock.**
+</Callout>
+
+---
+
+## 4. API test: app thật, trong cùng process
+
+Unit test lo phần luật. Chúng không nói gì về việc route có parse được `?resolution=` không, exception handler có đổi `CaseRuleError` thành 409 không, hay `Depends` có nối đúng thứ bạn nghĩ không. Muốn biết thì phải gọi chính app.
+
+`TestClient` của FastAPI gọi app ASGI ngay trong process, nên không port, không server nào phải bật, còn `app.dependency_overrides` đổi dependency này lấy dependency khác. Đây là ý tưởng của bài 4, lớn thêm thành fixture. Fake đi vào qua `get_repo`, còn route, handler và `CaseService` thật chạy trên nó:
+
+```python
+@pytest.fixture
+def client(fake_repo):
+    app.dependency_overrides[get_repo] = lambda: fake_repo
+    yield TestClient(app)
+    app.dependency_overrides.clear()  # the app object is module-global: always clean up
+
+
+def test_open_returns_201_and_the_case(client, fake_repo):
+    response = client.post("/cases", params={"title": "The missing gnome"})
+    assert response.status_code == 201
+    assert response.json() == {
+        "case_id": "C-1",
+        "title": "The missing gnome",
+        "status": "open",
+        "detective": None,
+        "resolution": None,
+    }
+    assert fake_repo.rows["C-1"].title == "The missing gnome"
+```
+
+Dòng dọn dẹp không phải tùy chọn. `app` là object cấp module mà mọi test trong process dùng chung, nên một override không được xóa sẽ rò sang test kế tiếp, và bạn gặp kiểu fail phụ thuộc thứ tự chạy. Đặt dọn dẹp sau `yield` của fixture thì nó chạy kể cả khi test fail.
+
+`TestClient` là đồng bộ và chạy app từ một thread riêng. Khi chính test cần là `async`, hoặc cần dùng chung event loop với thứ khác, hãy dùng `httpx.AsyncClient` với `ASGITransport`. Nó tới cùng app đó, vẫn không qua mạng:
+
+```python
+@pytest.mark.anyio
+async def test_same_app_through_an_async_client(fake_repo):
+    app.dependency_overrides[get_repo] = lambda: fake_repo
+    try:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
+            response = await ac.post("/cases", params={"title": "async"})
+    finally:
+        app.dependency_overrides.clear()
+    assert response.status_code == 201
+```
+
+`@pytest.mark.anyio` đến từ plugin `anyio` đi kèm các dependency của Starlette, và fixture `anyio_backend` trong `conftest.py` chọn asyncio. Dùng nó khi chính thân test cần `await`, ví dụ để gọi code async của bạn ngay cạnh request.
+
+### Một database cho mỗi test
+
+Fake không cho bạn biết SQL, cách xử lý session hay commit của bạn có chạy thật không. Muốn vậy cần database thật, và SQLite làm chuyện này rẻ: **một file mới cho mỗi test.** Bài 5 cho app dependency `get_session` với luật commit khi thành công, rollback khi lỗi, và đó chính là luật ta muốn test, nên không được override `get_session`. Ta chỉ đổi thứ nó dùng để tạo session:
+
+```python
+@pytest.fixture
+def sql_sessions(tmp_path, monkeypatch):
+    """A brand-new SQLite file per test, wired in where p05_db builds sessions."""
+    engine = create_engine(
+        f"sqlite:///{tmp_path / 'test.db'}", connect_args={"check_same_thread": False}
+    )
+    p05_db.Base.metadata.create_all(engine)
+    factory = sessionmaker(engine, expire_on_commit=False)
+    # get_session() stays the real one (its commit/rollback is under test);
+    # only the factory it opens sessions from is swapped.
+    monkeypatch.setattr(p05_db, "SessionLocal", factory)
+    yield factory
+    engine.dispose()
+```
+
+`tmp_path` là thư mục tạm riêng cho từng test của pytest, nên file mới tinh cho mỗi test, và pytest tự dọn những thư mục cũ. `monkeypatch.setattr` đổi `p05_db.SessionLocal` rồi trả lại khi test kết thúc. Còn một cái bẫy âm thầm hơn ở đầu `conftest.py`: `p05_db` đọc `DATABASE_URL` ngay lúc được import, nên biến môi trường phải đặt *trước* mọi lần import module demo. Không có nó, chỉ riêng việc import `p05_app` cũng đẻ ra một `clue.db` trong thư mục bạn chạy pytest.
+
+```python
+@pytest.fixture
+def client(sql_sessions):
+    # raise_server_exceptions=False: a crash in the app is a 500 we can assert on.
+    return TestClient(app, raise_server_exceptions=False)
+
+
+def test_ids_are_unique_across_requests(client):
+    # The post-5 bug (a counter reset per request) lives only in the database:
+    # a dict-backed fake would never have produced the duplicate key.
+    first = client.post("/cases", params={"title": "one"})
+    second = client.post("/cases", params={"title": "two"})
+    assert (first.status_code, second.status_code) == (201, 201)
+    assert second.json()["case_id"] == "C-2"
+
+
+def test_each_test_starts_empty(client):
+    assert client.get("/stats").json() == {"cases": 0}  # no leftovers from other tests
+
+
+def test_batch_with_a_blank_title_opens_nothing(client):
+    response = client.post("/cases/batch", json=["one", "two", "  "])
+    assert response.status_code == 500
+    assert client.get("/stats").json() == {"cases": 0}  # rolled back, all or nothing
+```
+
+Mỗi test ở đây là loại fake không viết được. Test đầu ghim lại bug của bài 5, bộ đếm bị reset ở mỗi request: dict sẽ cứ ghi đè `C-1`, còn database từ chối khóa trùng. Test thứ ba kiểm batch tất cả-hoặc-không-gì: title trống làm raise, session rollback, và `/stats` vẫn đếm ra không. Đó là bảo đảm của transaction, mà chỉ database thật mới có transaction. `raise_server_exceptions=False` bảo `TestClient` trả cho ta response 500 thay vì ném exception ngược vào test.
+
+<TerminalOutput command="pytest tests_p09/test_api_sql.py -v" label="Python 3.13.16 · pytest 9.2.0 · FastAPI 0.165.0 · SQLAlchemy 2.0.58 · SQLite · captured Nov 2026" caption="Bốn test, mỗi test một file database mới, tổng cộng 0.14 s. Test thứ hai pass vì dữ liệu của test đầu nằm ở file khác. Test thứ tư là repository thật bắt được bug save-trước-khi-đổi ở mục 3.">
+```text
+
+tests_p09/test_api_sql.py::test_ids_are_unique_across_requests PASSED    [ 25%]
+tests_p09/test_api_sql.py::test_each_test_starts_empty PASSED            [ 50%]
+tests_p09/test_api_sql.py::test_batch_with_a_blank_title_opens_nothing PASSED [ 75%]
+tests_p09/test_api_sql.py::test_the_real_repository_catches_the_save_before_mutate_bug PASSED [100%]
+
+============================== 4 passed in 0.14s ===============================
+```
+</TerminalOutput>
+
+---
+
+## 5. Auth trong test: override gỡ mất lớp bảo vệ
+
+Bài 7 đặt một lớp bảo vệ trước các route: `get_current_user` giải mã token, kiểm chữ ký và hạn, rồi kiểm scope. Test route nằm sau nó, bạn dễ muốn override. Với một mục đích thì làm vậy đúng: test *luật chủ sở hữu* ("đây có phải case của bạn không?") mà không phải đúc token. Với mục đích khác thì sai, và test dưới đây cho thấy khác nhau ở đâu.
+
+```python
+def bearer(user: str, scopes: list[str]) -> dict:
+    return {"Authorization": f"Bearer {sec.make_token(user, scopes)}"}
+```
+
+`bearer` dựng token thật bằng `make_token` của bài 7, rẻ vì nó chỉ ký vài claim. Có token thật là test được việc lớp bảo vệ làm:
+
+```python
+def test_missing_scope_is_403_with_the_scope_named():
+    response = client.post("/purge", headers=bearer("bob", ["cases:read"]))
+    assert response.status_code == 403
+    assert "cases:write" in response.json()["detail"]
+
+
+@pytest.fixture
+def as_bob():
+    p07_bola.app.dependency_overrides[sec.get_current_user] = lambda: "bob"
+    yield
+    p07_bola.app.dependency_overrides.clear()
+
+
+def test_override_is_fine_for_testing_the_owner_rule(as_bob):
+    assert client.get("/cases/C-2").status_code == 200  # no token built at all
+    assert client.get("/cases/C-1").status_code == 404
+
+
+def test_override_also_switches_the_scope_check_off(as_bob):
+    # Bob holds no cases:write, yet /purge answers 200: the override replaced
+    # the very function that enforces scopes. Keep a real-token test (above).
+    assert client.post("/purge").status_code == 200
+```
+
+Hai test cuối là cái bẫy có chủ ý. `as_bob` thay `get_current_user` bằng `lambda: "bob"`, rất hợp cho luật chủ sở hữu: không phải dựng token, và mã 404 cho case của người khác vẫn bắn. Nhưng test cuối gửi `POST /purge` với tư cách bob, người không có scope `cases:write`, và nhận về 200. Override đã thay mất chính hàm đang thực thi scope.
+
+<BeP09OverrideGap />
+
+<TerminalOutput command="pytest tests_p09/test_api_auth.py -v" label="Python 3.13.16 · pytest 9.2.0 · FastAPI 0.165.0 · PyJWT 2.15.1 · captured Nov 2026" caption="Sáu test pass, và gộp lại chúng nói rằng: lớp bảo vệ từ chối đúng thứ cần từ chối (401, 403, và 404 cho case của người khác), còn override thì tắt lớp bảo vệ đi. Mỗi luật mà lớp bảo vệ thực thi cần giữ ít nhất một test dùng token thật.">
+```text
+
+tests_p09/test_api_auth.py::test_owner_reads_own_case PASSED             [ 16%]
+tests_p09/test_api_auth.py::test_other_users_case_looks_like_it_does_not_exist PASSED [ 33%]
+tests_p09/test_api_auth.py::test_no_token_is_401 PASSED                  [ 50%]
+tests_p09/test_api_auth.py::test_missing_scope_is_403_with_the_scope_named PASSED [ 66%]
+tests_p09/test_api_auth.py::test_override_is_fine_for_testing_the_owner_rule PASSED [ 83%]
+tests_p09/test_api_auth.py::test_override_also_switches_the_scope_check_off PASSED [100%]
+
+============================== 6 passed in 0.26s ===============================
+```
+</TerminalOutput>
+
+### Lên một bậc: end to end
+
+Bộ test có hai test end-to-end, và chúng tồn tại vì một lý do: các test trong process không bao giờ bật server, không bao giờ đăng nhập thật và không đi qua uvicorn. `demo/tests_p09/test_e2e_live.py` bật `uvicorn p07_bola:app` như một subprocess ở port 4339, chờ port nhận kết nối, đăng nhập qua `POST /token` bằng form rồi đọc một case:
+
+```python
+@pytest.fixture(scope="module")
+def base_url():
+    server = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "p07_bola:app", "--port", str(PORT), "--log-level", "warning"],
+        cwd=DEMO,
+    )
+    try:
+        for _ in range(100):  # wait until the port accepts connections
+            with socket.socket() as probe:
+                if probe.connect_ex(("127.0.0.1", PORT)) == 0:
+                    break
+            time.sleep(0.1)
+        else:
+            pytest.fail("uvicorn did not start")
+        yield f"http://127.0.0.1:{PORT}"
+    finally:
+        server.terminate()
+        server.wait(timeout=10)
+
+
+def login(base_url: str, user: str, password: str) -> dict:
+    form = {"username": user, "password": password, "scope": "cases:read"}
+    token = httpx.post(f"{base_url}/token", data=form).json()["access_token"]
+    return {"Authorization": f"Bearer {token}"}
+
+
+def test_login_then_read_own_case(base_url):
+    headers = login(base_url, "alice", "alice-demo-pw")
+    response = httpx.get(f"{base_url}/cases/C-1", headers=headers)
+    assert response.status_code == 200
+
+
+def test_a_valid_login_still_cannot_read_someone_elses_case(base_url):
+    headers = login(base_url, "bob", "bob-demo-pw")
+    assert httpx.get(f"{base_url}/cases/C-1", headers=headers).status_code == 404
+```
+
+`scope="module"` bật server một lần cho cả file, và `finally` bảo đảm nó được tắt kể cả khi test fail. Test thứ hai là cái đáng có: một lần đăng nhập *hợp lệ* của bob vẫn nhận 404 với case của alice. Hai test là con số hợp lý. Mỗi test end-to-end thêm vào lại phải trả phí khởi động, hoặc chia sẻ trạng thái với các test khác.
+
+---
+
+## 6. Contract: ghim lại thứ bên gọi nhìn thấy
+
+Có những thay đổi không phá luật nào, không phá route nào, mà vẫn phá bên gọi. Đổi `title` thành `name` trong body request, và mọi unit test lẫn API test đi qua code của bạn vẫn pass, vì code của bạn thống nhất với chính nó. Client đang gửi `title` mới là bên nhận 422. FastAPI đã tự viết ra điều API hứa: tài liệu OpenAPI ở `/openapi.json`, chính cái mà Swagger UI vẽ ra trên ảnh bìa bài này. **Contract check** commit một bản copy tài liệu đó và fail khi bản sinh ra khác đi.
+
+```python
+SNAPSHOT = Path(__file__).with_name("openapi.snapshot.json")
+
+
+def as_lines(document: dict) -> list[str]:
+    return json.dumps(document, indent=2, sort_keys=True).splitlines()
+
+
+def test_openapi_matches_the_committed_snapshot():
+    committed = as_lines(json.loads(SNAPSHOT.read_text()))
+    generated = as_lines(app.openapi())
+    diff = list(difflib.unified_diff(committed, generated, "committed", "generated", lineterm="", n=1))
+    if diff:
+        pytest.fail("the API contract changed:\n" + "\n".join(diff), pytrace=False)
+```
+
+`demo/p09_snapshot.py` ghi `openapi.snapshot.json` từ `app.openapi()`. Test so hai bản dưới dạng các dòng đã sắp xếp, thụt lề, và fail kèm unified diff, nên thông báo lỗi chính là thay đổi. Để chứng minh nó chạy, mình cho nó chạy trên một bản copy của demo, trong đó `OpenBody.title` được đổi tên thành `name`:
+
+<TerminalOutput command="pytest -m contract  (trong một bản copy của demo/ nơi OpenBody.title được đổi thành name)" label="Python 3.13.16 · pytest 9.2.0 · FastAPI 0.165.0 · captured Nov 2026" caption="Thông báo fail chính là cái diff: contract đã commit nói title, app giờ nói name. Snapshot không bị đụng tới. Trong repo thật, test này pass.">
+```text
+
+tests_p09/test_contract.py F                                             [100%]
+
+=================================== FAILURES ===================================
+_________________ test_openapi_matches_the_committed_snapshot __________________
+the API contract changed:
+--- committed
++++ generated
+@@ -91,9 +91,9 @@
+         "properties": {
+-          "title": {
+-            "title": "Title",
+-            "type": "string"
+-          }
+-        },
+-        "required": [
+-          "title"
++          "name": {
++            "title": "Name",
++            "type": "string"
++          }
++        },
++        "required": [
++          "name"
+         ],
+=========================== short test summary info ============================
+FAILED tests_p09/test_contract.py::test_openapi_matches_the_committed_snapshot
+======================= 1 failed, 36 deselected in 0.32s =======================
+```
+</TerminalOutput>
+
+<BeP09Contract />
+
+Khi thay đổi là cố ý, bạn chạy lại `p09_snapshot.py` và duyệt diff của file snapshot trong pull request. Việc duyệt đó mới là mấu chốt. Thói quen của AI ở đây là cứ test đỏ thì sinh lại snapshot, biến check thành con dấu đóng cho có: hãy đọc diff trước khi chấp nhận, vì nó là danh sách những điều bên gọi sẽ nhận ra.
+
+Đây là bản nhẹ của contract testing, chỉ một chiều: điều provider hứa. Có những công cụ ghi lại thêm điều mỗi consumer thực sự dùng, và đáng dùng khi bạn có nhiều consumer. Với một service và vài client, một snapshot đã commit cho gần hết lợi ích với hai chục dòng code.
+
+---
+
+## 7. Load như một lần kiểm tra
+
+Load test là một phép đo, nhưng một phiên bản rất nhỏ cũng làm được vai trò check: gửi vài trăm request, tính p95 (mốc thời gian mà 95 phần trăm request nhanh hơn), và fail build khi vượt ngưỡng. Nó không cho bạn biết sức chịu tải. Nó cho bạn biết một thay đổi vừa làm endpoint chậm đi nhiều lần. `demo/p09_burst.py` làm việc đó bằng httpx:
+
+```python
+async def one(client: httpx.AsyncClient, path: str, gate: asyncio.Semaphore) -> float:
+    async with gate:  # at most `concurrency` requests in flight
+        started = time.perf_counter()
+        response = await client.get(path)
+        response.raise_for_status()
+        return (time.perf_counter() - started) * 1000
+
+
+async def main(base: str, path: str, n: int, concurrency: int, bound_ms: float) -> int:
+    gate = asyncio.Semaphore(concurrency)
+    async with httpx.AsyncClient(base_url=base, timeout=60) as client:
+        await client.get(path)  # warm-up: first request pays connection and import costs
+        started = time.perf_counter()
+        times = sorted(await asyncio.gather(*(one(client, path, gate) for _ in range(n))))
+        wall = time.perf_counter() - started
+    p50 = statistics.median(times)
+    p95 = times[int(len(times) * 0.95) - 1]
+    verdict = "ok" if p95 <= bound_ms else "FAIL"
+    print(
+        f"GET {path} x{n} at {concurrency}: {n / wall:.0f} req/s | "
+        f"p50 {p50:.1f} ms | p95 {p95:.1f} ms | max {times[-1]:.1f} ms | "
+        f"bound {bound_ms:.0f} ms -> {verdict}"
+    )
+    return 0 if p95 <= bound_ms else 1
+```
+
+`asyncio.Semaphore` giới hạn số request bay cùng lúc, chính là nghĩa của "5 cái một lúc". Request đầu là lượt khởi động, trả giá cho việc dựng kết nối và chi phí lần gọi đầu, còn `sys.exit(1)` khi vượt ngưỡng cho phép bất kỳ bước CI nào coi nó như một lệnh thường. Mình trỏ nó vào hai endpoint của bài 5: `/lazy`, chạy 101 query cho 100 case (bài toán N+1), và `/eager`, bản sửa một dòng chạy 2 query.
+
+<TerminalOutput command="uvicorn p05_nplus1:app --port 4339 — curl cả hai endpoint, rồi python p09_burst.py http://127.0.0.1:4339 '<path>' 200 5 70, mỗi endpoint ba lần" label="Python 3.13.16 · FastAPI 0.165.0 · SQLAlchemy 2.0.58 · uvicorn 0.54.0 · httpx 0.28.1 · captured Nov 2026" caption="Cùng dữ liệu, cùng máy. /eager có p95 từ 32 đến 38 ms và lần nào cũng qua ngưỡng 70 ms; /lazy nằm ở 85 đến 88 ms và lần nào cũng trượt (exit 1). Laptop lúc đó đang bận việc khác, nên số không đẹp, và check vẫn chạy được.">
+```text
+{"cases":100,"queries":2,"ms":9.1}
+{"cases":100,"queries":101,"ms":14.4}
+GET /eager?limit=100 x200 at 5: 197 req/s | p50 24.6 ms | p95 37.6 ms | max 43.8 ms | bound 70 ms -> ok
+exit 0
+GET /lazy?limit=100 x200 at 5: 66 req/s | p50 75.5 ms | p95 84.6 ms | max 95.7 ms | bound 70 ms -> FAIL
+exit 1
+GET /eager?limit=100 x200 at 5: 198 req/s | p50 24.3 ms | p95 36.7 ms | max 58.9 ms | bound 70 ms -> ok
+exit 0
+GET /lazy?limit=100 x200 at 5: 65 req/s | p50 75.2 ms | p95 88.3 ms | max 95.6 ms | bound 70 ms -> FAIL
+exit 1
+GET /eager?limit=100 x200 at 5: 197 req/s | p50 24.6 ms | p95 32.5 ms | max 63.7 ms | bound 70 ms -> ok
+exit 0
+GET /lazy?limit=100 x200 at 5: 65 req/s | p50 75.9 ms | p95 86.8 ms | max 95.1 ms | bound 70 ms -> FAIL
+exit 1
+17:26  up  8:43, 1 user, load averages: 11.87 16.80 18.39
+```
+</TerminalOutput>
+
+<BeP09P95 />
+
+Cần thành thật về những gì phép đo này chứng minh. Client, server và vài việc khác dùng chung một laptop, nên số dao động: một lần chạy trước đó, lúc máy bận hơn, cho p95 của `/lazy` là 109, 134 và 128 ms, so với 85 đến 88 ms ở đây. Con số tuyệt đối từ cách đo này không nói gì về production. Cái còn lại là *tỷ lệ* và *bên nào của ngưỡng*: `/lazy` chậm hơn `/eager` từ hai đến ba lần ở p95, và ngưỡng 70 ms nằm rõ ràng giữa hai bên. Ngưỡng đặt sát một bên thì lật theo nhiễu. Lần đầu mình thử 100 ms, `/lazy` đã pass trong một lượt chạy lúc máy rảnh, đó là bài học gói trong một điểm dữ liệu. Load test đúng nghĩa, percentile dưới tải thực tế và profiling sẽ đến sau trong series.
+
+---
+
+## 8. Ai test cái test?
+
+Giờ bạn có một bộ test xanh. Câu hỏi quan trọng là nó có đỏ được không. Khi AI viết test, hãy hỏi bằng cách phá code có chủ ý: xóa một luật và xem test nào nhận ra. `demo/p09_weak_tests.py` chứa hai test kiểu trợ lý hay viết mặc định:
+
+```python
+def test_close_returns_ok():
+    service = MagicMock()  # replaces the very thing the endpoint exists to call
+    service.close.return_value = CaseRecord("C-1", "gnome", "closed", "wren", "found")
+    app.dependency_overrides[get_service] = lambda: service
+    try:
+        response = client.post("/cases/C-1/close", params={"resolution": "found"})
+    finally:
+        app.dependency_overrides.clear()
+    assert response.status_code == 200
+    service.close.assert_called_once()
+
+
+def test_open_returns_201():
+    response = client.post("/cases", params={"title": "The missing gnome"})
+    assert response.status_code == 201  # the body, the id, the status: never looked at
+```
+
+Test đầu mock service, đúng thứ mà endpoint sinh ra để gọi, rồi assert 200 và assert mock đã được gọi. Test thứ hai assert 201 và không bao giờ nhìn vào body. Giờ xóa luật "an unassigned case cannot be closed" khỏi một bản copy của `layered_service.py` và chạy cả hai bộ:
+
+<TerminalOutput command="trong một bản copy của demo/ đã xóa luật unassigned-case khỏi layered_service.py: pytest p09_weak_tests.py -q, rồi pytest tests_p09 -q --tb=no" label="Python 3.13.16 · pytest 9.2.0 · FastAPI 0.165.0 · captured Nov 2026" caption="Luật đã biến mất khỏi service mà hai test yếu vẫn xanh. Bộ test của bài này fail ở ba chỗ, ở tầng unit và tầng API, mỗi chỗ gọi tên luật đã gãy. (Dấu x là service lỗi của mục 3, như trước.)">
+```text
+$ pytest p09_weak_tests.py -q
+..                                                                       [100%]
+2 passed in 0.17s
+
+$ pytest tests_p09 -q --tb=no
+.......F.............x....F.......F..                                    [100%]
+=========================== short test summary info ============================
+FAILED tests_p09/test_api_overrides.py::test_rule_error_becomes_409_with_the_reason
+FAILED tests_p09/test_unit_service.py::test_cannot_close_without_a_detective
+FAILED tests_p09/test_unit_service.py::test_rulebook[open-None-close-True] - ...
+3 failed, 33 passed, 1 xfailed in 0.94s
+```
+</TerminalOutput>
+
+Đó là toàn bộ kỹ thuật duyệt, và nó rẻ: *phá rồi nhìn.* Xóa một luật, lật một phép so sánh, đổi tên một trường, rồi xem có thứ gì đỏ không. Một test không fail nổi khi luật bị xóa thì chỉ là một dòng comment tốn thêm công chạy.
+
+<Callout type="note" title="Đừng đuổi theo kim tự tháp vì chính nó">
+Bảy tầng test cho một dự án cuối tuần cũng là nghi thức như bảy tầng code. Bắt đầu bằng unit test cho các luật và một hai test end-to-end cho những đường đi sinh ra tiền hoặc giữ dữ liệu. Thêm API test ở chỗ việc nối dây hay cắn bạn, contract snapshot khi có bên gọi bạn không kiểm soát, và load check khi có lời hứa về hiệu năng. Hình dạng đi theo những gì thực sự đã hỏng.
+</Callout>
+
+Thói quen duyệt code, gói trong một dòng: **với mỗi test AI viết, hỏi xem đổi code thế nào thì nó fail, và nếu câu trả lời là "không có thay đổi nào thực tế" thì xóa hoặc viết lại.** Repository ở đây là fake biết copy hay mock chỉ biết gật? Assertion đọc thứ đã lưu hay chỉ đọc thứ đã gọi? Có override nào gỡ mất chính thứ test tuyên bố bao phủ không? Ba câu hỏi đó bắt được phần lớn những test xanh mà vô nghĩa.
+
+</Vi>

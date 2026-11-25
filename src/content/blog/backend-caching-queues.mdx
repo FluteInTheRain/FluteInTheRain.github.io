@@ -1,0 +1,852 @@
+---
+title: "Caches and queues"
+title_vi: "Cache và hàng đợi chạy nền"
+description: "Cache-aside cut reads from 98.5 ms to 4.2 ms; forgetting one delete left stale data behind. Redis caching, thundering herds, reliable queues, backoff, and idempotency, measured."
+description_vi: "Cache-aside giảm thời gian đọc từ 98,5 ms xuống 4,2 ms; quên một dòng xoá key là trả dữ liệu cũ tới hết TTL. Redis cache, thundering herd, reliable queue, retry và idempotency, đo thật."
+date: 2026-11-23
+category: "backend"
+tags: ["backend", "python", "fastapi", "redis", "caching", "queues"]
+cover: "../../assets/blog/backend-caching-queues/cache-swagger-cover.png"
+cover_alt: "Swagger UI of clue.api: a cache in front of the database, listing six endpoints — POST /seed, GET /cases/{case_id}, POST /cases/{case_id}/assign-stale, POST /cases/{case_id}/assign, GET /cases/{case_id}/guarded, and GET /stats/db-reads"
+draft: true
+sources:
+  - { title: "FastAPI: Modern Python Web Development", author: "Bill Lubanovic", chapters: "Ch. 9, Ch. 13", url: "https://www.oreilly.com/library/view/fastapi/9781098135091/" }
+  - { title: "Scaling Memcache at Facebook (NSDI 2013)", author: "Rajesh Nishtala et al.", url: "https://www.usenix.org/conference/nsdi13/technical-sessions/presentation/nishtala" }
+  - { title: "Redis SET command (NX, EX)", author: "Redis docs", url: "https://redis.io/docs/latest/commands/set/" }
+  - { title: "Redis BLMOVE command", author: "Redis docs", url: "https://redis.io/docs/latest/commands/blmove/" }
+  - { title: "Redis LREM command", author: "Redis docs", url: "https://redis.io/docs/latest/commands/lrem/" }
+  - { title: "Redis data types: Lists (reliable queue pattern)", author: "Redis docs", url: "https://redis.io/docs/latest/develop/data-types/lists/" }
+  - { title: "Dependencies (shared connection pools)", author: "FastAPI docs", url: "https://fastapi.tiangolo.com/tutorial/dependencies/" }
+  - { title: "Response Headers", author: "FastAPI docs", url: "https://fastapi.tiangolo.com/advanced/response-headers/" }
+  - { title: "Sorting Airmail (U.S. Airmail Service, c. 1920)", author: "Smithsonian National Postal Museum, via Wikimedia Commons", url: "https://commons.wikimedia.org/wiki/File:Sorting_airmail_(2551172370).jpg" }
+---
+
+import En from '../../components/mdx/En.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
+import BeP08CacheAside from '../../components/mdx/BeP08CacheAside.astro';
+import BeP08StaleRead from '../../components/mdx/BeP08StaleRead.astro';
+import BeP08Stampede from '../../components/mdx/BeP08Stampede.astro';
+import BeP08QueueLists from '../../components/mdx/BeP08QueueLists.astro';
+import BeP08Backoff from '../../components/mdx/BeP08Backoff.astro';
+import BeP08Redelivery from '../../components/mdx/BeP08Redelivery.astro';
+import heroAirmail from '../../assets/blog/backend-caching-queues/airmail-sorting-1920.jpg';
+
+<En>
+
+<Figure src={heroAirmail} alt="A postal clerk in a white shirt sorting envelopes into wooden pigeonhole slots labeled with stops on the 1920 U.S. transcontinental airmail route from Hazelton and Cleveland to Omaha, Salt Lake and Elko, with stacks of mail below and a platform scale on the floor" caption="Sorting mail into pigeonholes keeps the counter moving: letters wait in named slots while separate crews carry each bag down the route. A background queue works the same way — the web process hands the job off to a slot and goes back to answering requests, while a worker picks it up out of band." sourceTitle="Wikimedia Commons: Sorting Airmail (Smithsonian National Postal Museum, c. 1920)" sourceUrl="https://commons.wikimedia.org/wiki/File:Sorting_airmail_(2551172370).jpg" />
+
+### The hook: the fast path that melted the database
+
+When Facebook scaled Memcached across trillions of items, their NSDI 2013 paper documented a pattern every team eventually hits when a cache sits in front of a database. A hot key gets deleted on a write or expires. Before the first miss finishes querying the database and writing the new value back, hundreds of other requests ask for the same key, miss the cache, and pile onto the database together. That wave is a **thundering herd** (or **cache stampede**). With a simple lease mechanism — handing out at most one rebuild token per key every 10 seconds so other clients wait briefly and retry the cache — Facebook dropped peak database queries on stampede-prone keys from **17,000 queries per second down to 1,300 queries per second**.
+
+Caching and background queues exist for the same reason: **keep the slow work off the hot request path**. A cache avoids repeating an expensive read; a queue moves an expensive write or side effect out of the HTTP response cycle. Both also share the same trap when AI writes them. An AI-generated FastAPI service will happily add `redis.get` / `redis.set` on your `GET` route without touching your `POST` route — leaving stale data behind — and will tell you to put slow PDF or email work into `BackgroundTasks`, which [post 6](/blog/backend-async-concurrency-workers/) already watched vanish on `kill -9`.
+
+One split up front. Caching here means **an application-level copy on the read path** — your own FastAPI code deciding when to read Redis, what TTL to set, and when to delete a key after a write. Server-side database replication (followers lagging behind a leader, read-your-writes, quorums) belongs to [Replication](/blog/replication-when-copies-disagree/), and nothing below re-teaches it.
+
+This post wires Redis onto `clue.api` in two halves — first as a read cache, then as a reliable job queue — and measures every failure mode locally:
+
+1. **Cache-aside in FastAPI** — a shared Redis pool via `Depends`, `X-Cache` headers, and 98.5 ms vs 4.2 ms.
+2. **Invalidation** — why forgetting one `delete` serves stale reads until TTL runs out.
+3. **Cache stampede** — 20 concurrent misses hitting the database vs single-flight with `SET NX`.
+4. **Reliable queues on Redis lists** — why `BRPOP` loses jobs on crash and `BLMOVE` + `LREM` keeps them.
+5. **Retries, backoff, and dead letters** — failing nicely without spinning the CPU.
+6. **At-least-once needs idempotency** — surviving a crash *after* the side effect and *before* the ack.
+
+---
+
+## 1. Cache-aside: look, fetch, remember
+
+The most common caching pattern is **cache-aside** (lazy loading). The application itself sits in the middle: Redis does not talk to your database. Every read checks Redis first. On a hit, return the JSON immediately. On a miss, query the database, write the result into Redis with an expiration time (**TTL**, time-to-live), and return it.
+
+First, `clue.api` needs one shared Redis connection pool — opening a fresh TCP connection on every request would trade database latency for Redis handshake latency. In `demo/p08_redis.py` (the whole file):
+
+```python
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6388/0")
+
+# decode_responses=True: Redis hands back str, not bytes.
+pool = redis.ConnectionPool.from_url(REDIS_URL, decode_responses=True)
+
+
+def get_redis() -> redis.Redis:
+    """A FastAPI dependency: cheap to build, the pool does the real work."""
+    return redis.Redis(connection_pool=pool)
+```
+
+Passing `Depends(get_redis)` into a FastAPI endpoint hands the handler a lightweight `Redis` client backed by the module-level `ConnectionPool`, the same dependency pattern from [post 4](/blog/backend-layered-architecture/) and [post 5](/blog/backend-database-access-layer/). Here is the `GET /cases/{case_id}` handler in `demo/p08_cache.py`, lines 68–82 (`read_case_from_db` sleeps 50 ms to stand in for a heavy multi-table join):
+
+```python
+@app.get("/cases/{case_id}")
+def get_case(
+    case_id: str, response: Response, cache: redis.Redis = Depends(get_redis)
+) -> dict:
+    """Cache-aside: look in Redis, on a miss ask the database and remember."""
+    cached = cache.get(case_key(case_id))
+    if cached is not None:
+        response.headers["X-Cache"] = "HIT"
+        return json.loads(cached)
+    case = read_case_from_db(case_id)
+    if case is None:
+        raise HTTPException(404, f"no case {case_id}")
+    cache.set(case_key(case_id), json.dumps(case), ex=TTL_SECONDS)
+    response.headers["X-Cache"] = "MISS"
+    return case
+```
+
+Two FastAPI details here make the cache visible and safe. Taking `response: Response` as a parameter lets the endpoint stamp `X-Cache: HIT` or `X-Cache: MISS` onto the outgoing HTTP headers without wrapping the JSON return value in a custom `JSONResponse`. And passing `ex=TTL_SECONDS` (`30` seconds here) to `cache.set(...)` ensures every key eventually expires on its own — never cache without a TTL unless you enjoy running out of memory on old keys nobody reads anymore. Note also that `if cached is not None:` checks for `None` explicitly rather than truthiness, and only caches when `case` exists so a 404 is not mistaken for a valid empty payload.
+
+Running `demo/p08_drive.py timing` against `p08_cache:app` (with Redis 7.4.1 on port 6388) shows two rounds of three requests each:
+
+<TerminalOutput command="python p08_drive.py timing (against uvicorn p08_cache:app --port 4338)" label="Python 3.13.16 · FastAPI 0.165.0 · redis 8.2.0 · SQLAlchemy 2.0.58 · httpx 0.28.1 · captured Nov 2026" caption="Round 1's first GET misses Redis and takes 98.5 ms (database query plus Redis SET); the second and third hit Redis in 4.2 ms and 1.9 ms. After deleting the key, round 2 behaves identically.">
+```text
+round 1: GET #1        X-Cache: MISS   98.5 ms  detective=None
+round 1: GET #2        X-Cache: HIT     4.2 ms  detective=None
+round 1: GET #3        X-Cache: HIT     1.9 ms  detective=None
+round 2: GET #1        X-Cache: MISS   71.2 ms  detective=None
+round 2: GET #2        X-Cache: HIT     1.6 ms  detective=None
+round 2: GET #3        X-Cache: HIT     1.2 ms  detective=None
+TTL case:C-1 = 30 s
+```
+</TerminalOutput>
+
+<BeP08CacheAside />
+
+The first request pays for the slow database path (`98.5 ms`) and seeds Redis with a 30-second TTL; every subsequent read stops at step 1 (`4.2 ms`, then `1.9 ms`). That speed is why caches are addictive — and why the next two failure modes catch people off guard.
+
+---
+
+## 2. Invalidation: why every write must know about the cache
+
+> "There are only two hard things in Computer Science: cache invalidation and naming things."
+> &mdash; *Phil Karlton*
+
+Ask an assistant to "speed up `GET /cases/{case_id}` with Redis" and it edits the `GET` handler. It rarely touches the endpoints that mutate the same table. Look at the two write routes in `demo/p08_cache.py`, lines 85–99:
+
+```python
+@app.post("/cases/{case_id}/assign-stale")
+def assign_stale(
+    case_id: str, detective: str, cache: redis.Redis = Depends(get_redis)
+) -> dict:
+    """The AI-typical version: write the database, forget the cache."""
+    write_detective(case_id, detective)
+    return {"case_id": case_id, "detective": detective}
+
+
+@app.post("/cases/{case_id}/assign")
+def assign(case_id: str, detective: str, cache: redis.Redis = Depends(get_redis)) -> dict:
+    """Delete-on-write: after the database changes, drop the cached copy."""
+    write_detective(case_id, detective)
+    cache.delete(case_key(case_id))  # the next read misses and refills
+    return {"case_id": case_id, "detective": detective}
+```
+
+Both endpoints update the database cleanly (`write_detective`). The difference is one line: `cache.delete(case_key(case_id))`. Notice it **deletes** the key rather than trying to `cache.set` the new JSON directly from the write handler. Deleting is almost always safer: if two concurrent writes happen in opposite order between the database and Redis, updating the cache can permanently leave the older write sitting in Redis until TTL expires; deleting forces the next reader to pull the latest committed state from the database.
+
+Here is what `demo/p08_drive.py stale` captures when we warm the cache and hit both endpoints:
+
+<TerminalOutput command="python p08_drive.py stale" label="Python 3.13.16 · FastAPI 0.165.0 · redis 8.2.0 · captured Nov 2026" caption="After assign-stale writes Wren to SQLite, the next GET hits Redis in 1.1 ms and cheerfully lies with detective=Hale. After assign deletes case:C-1, the next GET misses and returns detective=Okafor.">
+```text
+read (warms cache)     X-Cache: MISS   55.9 ms  detective=Hale
+-> assign-stale: database now says Wren
+read after update      X-Cache: HIT     1.1 ms  detective=Hale
+read (warms cache)     X-Cache: MISS   57.0 ms  detective=Wren
+-> assign (delete-on-write): database now says Okafor
+read after update      X-Cache: MISS   58.1 ms  detective=Okafor
+```
+</TerminalOutput>
+
+<BeP08StaleRead />
+
+**The trade-off with TTL:** a short TTL bounds how long a forgotten invalidation hurts, at the cost of a lower cache hit ratio. A long TTL raises your hit ratio, at the cost of serving stale data longer if *any* code path (a background script, a separate service, a migration) modifies the row without invalidating the key.
+
+---
+
+## 3. Cache stampede: 20 misses at once vs single-flight
+
+Suppose your invalidation is perfect, your hit rate is 99%, and `case:C-1` is the hottest key on the site. Its 30-second TTL ticks down to zero — or an `assign` just deleted it. At that exact millisecond, 20 requests arrive together. Every single one runs `cache.get("case:C-1")`, gets `None`, and walks straight into `read_case_from_db("C-1")`. Instead of 1 database query to refill the cache, you run 20 identical queries in parallel.
+
+The fix is **single-flight** (request coalescing): allow only **one** caller to rebuild a missing key while the others wait briefly for the cache to be populated. In Redis, `SET lock_key "1" NX EX 5` is atomic: `NX` means "set only if the key does not exist", and `EX 5` guarantees the lock clears itself after 5 seconds even if the lock-holding worker crashes mid-rebuild.
+
+Here is `GET /cases/{case_id}/guarded` in `demo/p08_cache.py`, lines 102–128:
+
+```python
+@app.get("/cases/{case_id}/guarded")
+def get_case_guarded(
+    case_id: str, response: Response, cache: redis.Redis = Depends(get_redis)
+) -> dict:
+    """Single-flight: when the key is missing, one request rebuilds it."""
+    key = case_key(case_id)
+    lock = f"lock:{key}"
+    for _ in range(100):  # wait up to about 2 s for whoever holds the lock
+        cached = cache.get(key)
+        if cached is not None:
+            response.headers["X-Cache"] = "HIT"
+            return json.loads(cached)
+        if cache.set(lock, "1", nx=True, ex=5):  # I won the right to rebuild
+            try:
+                cached = cache.get(key)  # re-check: the last winner may just be done
+                if cached is not None:
+                    return json.loads(cached)
+                case = read_case_from_db(case_id)
+                if case is None:
+                    raise HTTPException(404, f"no case {case_id}")
+                cache.set(key, json.dumps(case), ex=TTL_SECONDS)
+                response.headers["X-Cache"] = "MISS"
+                return case
+            finally:
+                cache.delete(lock)
+        time.sleep(0.02)  # somebody else is rebuilding: wait, then read again
+    raise HTTPException(503, "cache rebuild took too long")
+```
+
+Notice three defensive details inside that loop:
+- **Re-check after acquiring the lock:** another request might have finished writing the key and deleted the lock in the instant between your `cache.get(key)` and your `cache.set(lock, ..., nx=True)`. Checking `cache.get(key)` one more time avoids a redundant DB hit.
+- **`finally: cache.delete(lock)`:** if `read_case_from_db` raises a 404 or a database error, the lock must be released immediately rather than making everyone wait 5 seconds.
+- **Bounded wait (`100 × 0.02 s ≈ 2 s`) → `503`:** waiting forever creates the exact hanging request pile-up we saw with pools in [post 5](/blog/backend-database-access-layer/).
+
+Let's fire 20 concurrent `GET` requests right as `case:C-1` expires using `demo/p08_drive.py`:
+
+<TerminalOutput command="python p08_drive.py stampede && python p08_drive.py stampede /guarded" label="Python 3.13.16 · FastAPI 0.165.0 · redis 8.2.0 · ThreadPoolExecutor(20) · captured Nov 2026" caption="Both endpoints answer 20 concurrent requests in ~0.08–0.09 s wall time. Without the lock, the database is hit 20 times; with single-flight, it is hit once.">
+```text
+$ python p08_drive.py stampede
+20 concurrent GET /cases/C-1: wall 0.08 s
+responses marked MISS: 20; database reads: 20
+$ python p08_drive.py stampede /guarded
+20 concurrent GET /cases/C-1/guarded: wall 0.09 s
+responses marked MISS: 1; database reads: 1
+```
+</TerminalOutput>
+
+<BeP08Stampede />
+
+The wall clock time is nearly identical (`0.08 s` vs `0.09 s`), because the 19 waiting callers return as soon as the single winner writes Redis — while database load drops by 20×. (Two notes for production: first, deleting a lock safely across multiple processes should check a unique owner token with a Lua script so a slow worker never deletes a lock whose TTL already passed and was re-acquired; second, for a key that does not exist in the DB at all — a **cache penetration** attack asking for random nonexistent IDs — single-flight alone still hits the DB once per fake key unless you also briefly cache a sentinel `"null"` value or validate keys up front.)
+
+---
+
+## 4. Background queues: move the job, never pop it into thin air
+
+Now flip from reads to slow writes: generating a PDF report or sending a confirmation email takes 2 seconds. You cannot hold the HTTP worker open for 2 seconds per request, and [post 6](/blog/backend-async-concurrency-workers/) proved why `BackgroundTasks` fails if the server restarts or gets `kill -9`ed: the task lives only in process RAM.
+
+The proper boundary is an HTTP `202 Accepted` response whose entire job is to write a durable message to a queue and return immediately. Here is `demo/p08_jobs_app.py` (lines 16–29):
+
+```python
+@app.post("/cases/{case_id}/report", status_code=202)
+def request_report(case_id: str, r: redis.Redis = Depends(get_redis)) -> dict:
+    job_id = jobs.enqueue(r, case_id)  # one Redis write, then we are done
+    return {"status": "accepted", "job_id": job_id}
+
+
+@app.get("/jobs/stats")
+def job_stats(r: redis.Redis = Depends(get_redis)) -> dict:
+    return {
+        "queued": r.llen(jobs.QUEUE),
+        "processing": r.llen(jobs.PROCESSING),
+        "delayed": r.zcard(jobs.DELAYED),
+        "dead": r.llen(jobs.DEAD),
+    }
+```
+
+Now look at how the **worker** (a completely separate OS process) pulls jobs from Redis. A naive implementation calls `BRPOP jobs:reports`: Redis pops the JSON string off the list and hands it to the worker. **At that instant, the job exists nowhere in Redis** — it sits only in that worker's memory. If the worker hits an OOM kill, a deploy `SIGTERM`, or `kill -9` one second later, the job vanishes silently.
+
+Redis's **reliable queue** pattern fixes this using two lists instead of one (`demo/p08_jobs.py`, lines 22–35):
+
+```python
+def enqueue(r: redis.Redis, case_id: str) -> str:
+    job = {"id": uuid.uuid4().hex[:8], "case_id": case_id, "attempt": 1}
+    r.lpush(QUEUE, json.dumps(job))
+    return job["id"]
+
+
+def claim(r: redis.Redis, timeout: int = 1) -> str | None:
+    """Move the oldest job to the processing list; it is now ours, not gone."""
+    return r.blmove(QUEUE, PROCESSING, timeout, src="RIGHT", dest="LEFT")
+
+
+def ack(r: redis.Redis, raw: str) -> None:
+    r.lrem(PROCESSING, 1, raw)
+```
+
+Instead of popping, `claim()` runs `BLMOVE jobs:reports jobs:reports:processing 1 RIGHT LEFT`: Redis **atomically** removes the oldest job from `jobs:reports` and places it on `jobs:reports:processing` in a single server step. Only after `handler(r, job)` finishes without raising does the worker call `ack()` (`LREM jobs:reports:processing 1 raw`). At every microsecond of the job's life, it is safely stored in at least one Redis list.
+
+<BeP08QueueLists />
+
+On startup, `requeue_orphans(r)` sweeps anything left behind in `jobs:reports:processing` back to `jobs:reports` (`demo/p08_jobs.py`, lines 62–70):
+
+```python
+def requeue_orphans(r: redis.Redis) -> int:
+    """Startup recovery: anything still in processing belongs to a dead worker.
+
+    Safe with ONE worker. With several you need a lease or visibility timeout.
+    """
+    n = 0
+    while r.lmove(PROCESSING, QUEUE, src="LEFT", dest="RIGHT"):
+        n += 1
+    return n
+```
+
+Look closely at the docstring warning: sweeping the entire `processing` list on startup is safe when **one** worker owns that processing list. When you run five workers concurrently, worker B starting up must not steal a job that worker A is legitimately still running — in multi-worker setups you either give each worker its own processing list (`processing:<worker_id>`) or move to Redis Streams / a broker with visibility timeouts and per-consumer ACKs (like `XREADGROUP` + `XACK`, or RabbitMQ/SQS).
+
+---
+
+## 5. Retries, exponential backoff, and dead letters
+
+Jobs fail for two very different reasons:
+- **Transient failures** (a downstream mail relay times out twice and recovers on the third try — `C-FLAKY` in our demo).
+- **Permanent poison pills** (missing report template, malformed payload, deleted account — `C-BAD` in our demo, which will fail every single attempt forever).
+
+Retrying a failed job immediately in a tight `while` loop hammers a struggling downstream service and burns worker CPU. Instead, when `handler` raises, `fail()` (`demo/p08_jobs.py`, lines 37–52) either parks the job in a Redis **Sorted Set** (`jobs:reports:delayed`) scored by the future Unix timestamp `time.time() + delay` with **exponential backoff** (`1 s`, `2 s`, `4 s`), or — once `attempt >= MAX_ATTEMPTS` (`4`) — moves it to a **dead-letter queue** (`jobs:reports:dead`):
+
+```python
+def fail(r: redis.Redis, raw: str, error: str) -> str:
+    """Schedule a retry with backoff, or give up and dead-letter the job."""
+    job = json.loads(raw)
+    with r.pipeline(transaction=True) as pipe:  # MULTI/EXEC: all or nothing
+        if job["attempt"] >= MAX_ATTEMPTS:
+            job["error"] = error
+            pipe.lpush(DEAD, json.dumps(job))
+            outcome = "dead-lettered"
+        else:
+            delay = BACKOFF_BASE * 2 ** (job["attempt"] - 1)
+            job["attempt"] += 1
+            pipe.zadd(DELAYED, {json.dumps(job): time.time() + delay})
+            outcome = f"retry in {delay:g} s"
+        pipe.lrem(PROCESSING, 1, raw)
+        pipe.execute()
+    return outcome
+```
+
+Notice `r.pipeline(transaction=True)`: wrapping the push (`ZADD` or `LPUSH`) and the `LREM` from `PROCESSING` in Redis `MULTI`/`EXEC` guarantees a job is never stuck in both lists or lost between them. Each loop tick, `promote_due(r)` checks `ZRANGEBYSCORE delayed 0 now` and promotes due retries back onto `QUEUE` (`if r.zrem(DELAYED, raw):` ensures only one worker wins the promotion). In production with many failed jobs waking together, add **random jitter** to `delay` so retries don't synchronize into a second thundering herd.
+
+Here is the real worker log running `C-FLAKY` (recovers on attempt 3) followed by `C-BAD` (fails 4 times and lands in `jobs:reports:dead`):
+
+<TerminalOutput command="uv run python p08_worker.py once — after POST /cases/C-FLAKY/report and /cases/C-BAD/report" label="Python 3.13.16 · FastAPI 0.165.0 · redis 8.2.0 · captured Nov 2026" caption="C-FLAKY succeeds on attempt 3 after 1 s and 2 s waits. C-BAD hits MAX_ATTEMPTS=4 after 1 s, 2 s, 4 s waits and moves to jobs:reports:dead with its error attached.">
+```text
+POST /cases/C-FLAKY/report -> {"status":"accepted","job_id":"c6596c81"}
+POST /cases/C-BAD/report -> {"status":"accepted","job_id":"07946992"}
+[+ 0.01 s] worker up (once); requeued 0 orphan(s)
+[+ 0.33 s] job c6596c81 C-FLAKY: attempt 1 started
+[+ 2.34 s] job c6596c81 C-FLAKY: failed (mail relay timed out) -> retry in 1 s
+[+ 3.35 s] job c6596c81 C-FLAKY: attempt 2 started
+[+ 5.36 s] job c6596c81 C-FLAKY: failed (mail relay timed out) -> retry in 2 s
+[+ 7.46 s] job c6596c81 C-FLAKY: attempt 3 started
+[+ 9.47 s] job c6596c81 C-FLAKY: mail sent
+[+ 9.47 s] job c6596c81 C-FLAKY: acked
+[+11.86 s] job 07946992 C-BAD: attempt 1 started
+[+13.86 s] job 07946992 C-BAD: failed (report template missing) -> retry in 1 s
+[+14.92 s] job 07946992 C-BAD: attempt 2 started
+[+16.94 s] job 07946992 C-BAD: failed (report template missing) -> retry in 2 s
+[+18.99 s] job 07946992 C-BAD: attempt 3 started
+[+21.00 s] job 07946992 C-BAD: failed (report template missing) -> retry in 4 s
+[+25.05 s] job 07946992 C-BAD: attempt 4 started
+[+27.05 s] job 07946992 C-BAD: failed (report template missing) -> dead-lettered
+GET /jobs/stats -> {"queued":0,"processing":0,"delayed":0,"dead":1}
+dead = ['{"id": "07946992", "case_id": "C-BAD", "attempt": 4, "error": "report template missing"}']
+```
+</TerminalOutput>
+
+<BeP08Backoff />
+
+---
+
+## 6. At-least-once delivery means your handler must be idempotent
+
+Here is the catch with reliable queues. A worker runs the job (sends the email, charges the card, appends a row), and **crashes before calling `ack()`**. Because it crashed before `LREM`, the job is still in `jobs:reports:processing`. When the worker restarts, it requeues that orphan and runs it a second time.
+
+That guarantee is called **at-least-once delivery**. Compare the two handlers in `demo/p08_worker.py` (lines 34–52) when `CRASH_BEFORE_ACK=1` sends `SIGKILL` right after the side effect:
+
+```python
+def deliver_naive(r: redis.Redis, job: dict) -> None:
+    """Appends to a list: run the same job twice and the mail goes out twice."""
+    build_report(job)
+    r.rpush("outbox:naive", job["case_id"])
+    log(f"job {job['id']} {job['case_id']}: mail sent (appended)")
+    if os.environ.get("CRASH_BEFORE_ACK") == "1":
+        os.kill(os.getpid(), signal.SIGKILL)  # die after the effect, before the ack
+
+
+def deliver_once(r: redis.Redis, job: dict) -> None:
+    """The job id is the key: the effect and the dedupe are one atomic write."""
+    build_report(job)
+    if r.hsetnx("outbox:once", job["id"], job["case_id"]):
+        log(f"job {job['id']} {job['case_id']}: mail sent")
+    else:
+        log(f"job {job['id']} {job['case_id']}: already sent, skipping")
+    if os.environ.get("CRASH_BEFORE_ACK") == "1":
+        os.kill(os.getpid(), signal.SIGKILL)
+```
+
+`deliver_naive` appends unconditionally (`RPUSH outbox:naive`). `deliver_once` uses `r.hsetnx("outbox:once", job["id"], ...)` — "set if field `job['id']` does not exist yet". In a real Postgres database, the exact same trick is an `INSERT ... ON CONFLICT (job_id) DO NOTHING` inside your database transaction, or passing an `Idempotency-Key` to an external provider like Stripe (just like HTTP `Idempotency-Key` in [post 2](/blog/backend-rest-api-design/)).
+
+Let's kill all three worker modes (`forget`, `naive`, `once`) mid-flight and inspect Redis:
+
+<TerminalOutput command="p08_worker.py forget | CRASH_BEFORE_ACK=1 naive + restart | CRASH_BEFORE_ACK=1 once + restart" label="Python 3.13.16 · redis 8.2.0 · captured Nov 2026" caption="Under forget (BRPOP), job 502842f7 disappears completely. Under naive, job c4074d36 is requeued and sends C-3 twice. Under once, job 0eab7630 is requeued, sees its id already in outbox:once, skips the duplicate send, and acks.">
+```text
+=== 1. FORGET (BRPOP, kill -9 mid-job) ===
+POST /cases/C-1/report -> 202 {"status":"accepted","job_id":"502842f7"}
+[+ 0.00 s] worker up (fire-and-forget: BRPOP, no ack)
+[+ 0.35 s] job 502842f7 C-1: popped, working
+$ kill -9 42645
+GET /jobs/stats -> {"queued":0,"processing":0,"delayed":0,"dead":0}
+
+=== 2. NAIVE (crash before ack, then restart) ===
+POST /cases/C-3/report -> 202 {"status":"accepted","job_id":"c4074d36"}
+[+ 0.01 s] worker up (naive); requeued 0 orphan(s)
+[+ 0.33 s] job c4074d36 C-3: attempt 1 started
+[+ 2.33 s] job c4074d36 C-3: mail sent (appended)
+(worker exited with signal 9)
+GET /jobs/stats -> {"queued":0,"processing":1,"delayed":0,"dead":0}
+--- restart ---
+[+ 0.01 s] worker up (naive); requeued 1 orphan(s)
+[+ 0.01 s] job c4074d36 C-3: attempt 1 started
+[+ 2.01 s] job c4074d36 C-3: mail sent (appended)
+[+ 2.02 s] job c4074d36 C-3: acked
+outbox:naive = ['C-3', 'C-3']
+
+=== 3. ONCE (idempotent, crash before ack, then restart) ===
+POST /cases/C-3/report -> 202 {"status":"accepted","job_id":"0eab7630"}
+[+ 0.01 s] worker up (once); requeued 0 orphan(s)
+[+ 0.32 s] job 0eab7630 C-3: attempt 1 started
+[+ 2.33 s] job 0eab7630 C-3: mail sent
+(worker exited with signal 9)
+--- restart ---
+[+ 0.01 s] worker up (once); requeued 1 orphan(s)
+[+ 0.01 s] job 0eab7630 C-3: attempt 1 started
+[+ 2.02 s] job 0eab7630 C-3: already sent, skipping
+[+ 2.02 s] job 0eab7630 C-3: acked
+outbox:once = {'0eab7630': 'C-3'}
+```
+</TerminalOutput>
+
+<BeP08Redelivery />
+
+Notice the nuance in `deliver_once`: checking a separate outbox key inside Redis still assumes that the external mail API call itself was either idempotent by `job["id"]` or only fails before sending. Whenever you combine an external side effect with local state, pass the same `job["id"]` to the downstream API if it supports idempotency keys, and store the local dedupe record inside the same database transaction as your state change.
+
+<Callout type="note" title="Reviewing caching and background jobs written by AI">
+Five quick checks in any code review:
+1. Does every `cache.set` have an explicit `ex=` TTL?
+2. Does every endpoint or job that mutates the underlying row call `cache.delete` on the same key?
+3. If the key is hot and expensive to rebuild, is there a lock / single-flight guard with a bounded wait?
+4. Are slow or must-not-lose tasks pushed to a persistent queue (not `BackgroundTasks` in process RAM), with a `MAX_ATTEMPTS` cap and a dead-letter queue?
+5. If a worker crashes right after finishing a job and runs it a second time, is the handler safe to repeat?
+</Callout>
+
+<Concepts title="Key ideas from this post">
+- **Cache-aside**: the app checks the cache first, queries the DB on a miss, stores the result with a TTL, and deletes the key on writes.
+- **Thundering herd (cache stampede)**: many concurrent misses on an expired or deleted hot key hitting the database simultaneously; mitigated by single-flight locks or leases (`SET NX`).
+- **Reliable queue (`BLMOVE` + `LREM`)**: moving a job to a processing list before running it and removing it only after success gives at-least-once delivery across worker crashes.
+- **Dead-letter queue (DLQ)**: a parking list for poison-pill jobs that exhausted their exponential-backoff retries so they stop blocking or spinning workers.
+- **Idempotent handler**: keying the effect by `job_id` so redelivery after a crash-before-ack produces the result once.
+</Concepts>
+
+</En>
+
+<Vi>
+
+<Figure src={heroAirmail} alt="Một nhân viên bưu điện mặc áo sơ mi trắng đang phân loại thư vào các ngăn gỗ có nhãn các chặng trên tuyến hàng không xuyên lục địa Mỹ năm 1920 từ Hazelton, Cleveland tới Omaha, Salt Lake và Elko, bên dưới là các chồng thư và một chiếc cân bàn" caption="Chia thư vào từng ngăn giữ cho quầy tiếp nhận luôn thông: thư nằm chờ đúng ngăn trong khi đội vận chuyển riêng mang từng túi đi. Hàng đợi chạy nền (queue) hoạt động y hệt — web process đẩy job vào một ngăn rồi trả lời client ngay, còn worker riêng sẽ nhặt ra xử lý bên ngoài luồng HTTP." sourceTitle="Wikimedia Commons: Sorting Airmail (Smithsonian National Postal Museum, k. 1920)" sourceUrl="https://commons.wikimedia.org/wiki/File:Sorting_airmail_(2551172370).jpg" />
+
+### Cú mở đầu: lớp cache cứu tải lại tự tay đánh sập database
+
+Khi Facebook mở rộng Memcached lên hàng nghìn tỷ item, bài báo NSDI 2013 của họ mô tả một kịch bản mà đội nào đặt cache trước database rồi cũng gặp. Một key cực nóng vừa hết hạn hoặc bị xoá sau khi ghi. Trước khi request miss đầu tiên kịp query database và ghi giá trị mới vào cache, hàng trăm request khác hỏi đúng key đó, cùng miss cache và đồng loạt dội thẳng xuống database. Cơn sóng đó gọi là **thundering herd** (hay **cache stampede** — bầy đàn giẫm đạp lên cache). Bằng cơ chế **lease** — chỉ cấp tối đa một token dựng lại cho mỗi key trong cửa sổ 10 giây để các client khác chờ một nhịp rồi đọc lại cache — Facebook kéo lượng query cao điểm trên các key dễ nổ stampede từ **17.000 query/giây xuống còn 1.300 query/giây**.
+
+Cache và hàng đợi chạy nền sinh ra vì cùng một mục đích: **gạt phần việc chậm ra khỏi luồng request chính**. Cache giúp tránh lặp lại một lần đọc tốn kém; queue đẩy việc ghi chậm hoặc side effect ra ngoài chu kỳ trả HTTP response. Hai thứ này cũng mắc đúng một bệnh khi AI viết hộ: AI rất hay nhét `redis.get` / `redis.set` vào route `GET` mà quên đụng vào route `POST` (để lại dữ liệu cũ trong cache), rồi đẩy việc gửi mail hay xuất PDF vào `BackgroundTasks` — thứ mà [bài 6](/blog/backend-async-concurrency-workers/) đã thấy bốc hơi sạch khi dính `kill -9`.
+
+Tách ranh giới ngay từ đầu. Caching trong bài này là **bản sao ở tầng ứng dụng trên đường đọc** — code FastAPI của bạn tự quyết định khi nào hỏi Redis, đặt TTL bao lâu và khi nào xoá key sau khi ghi. Còn chuyện đồng bộ bản sao ở tầng database (replica trễ sau leader, read-your-writes, quorum) thuộc về bài [Replication](/blog/replication-when-copies-disagree/), mình không dạy lại ở đây.
+
+Bài này nối Redis vào `clue.api` theo hai nửa — nửa đầu làm cache cho đường đọc, nửa sau làm hàng đợi job bền vững — và đo thật từng lỗi thường gặp ngay trên máy:
+
+1. **Cache-aside trong FastAPI** — dùng chung pool Redis qua `Depends`, header `X-Cache`, và chênh lệch 98,5 ms vs 4,2 ms.
+2. **Invalidation** — vì sao quên một dòng `delete` khiến client đọc phải dữ liệu cũ tới tận lúc hết TTL.
+3. **Cache stampede** — 20 request miss cùng lúc chọc thẳng database vs single-flight bằng `SET NX`.
+4. **Reliable queue trên Redis list** — vì sao `BRPOP` làm mất job khi sập và `BLMOVE` + `LREM` giữ được job.
+5. **Retry, backoff và dead-letter** — thử lại có độ trễ nhân đôi để không đốt CPU trên job hỏng hẳn.
+6. **At-least-once đòi hỏi handler phải idempotent** — sống sót khi worker chết *sau* lúc gửi mail nhưng *trước* lúc ack.
+
+---
+
+## 1. Cache-aside: nhìn, lấy, rồi nhớ
+
+Mô hình cache phổ biến nhất là **cache-aside** (lazy loading). Code ứng dụng đứng ở giữa: Redis không tự nói chuyện với database. Mỗi lần đọc sẽ hỏi Redis trước. Nếu trúng (**hit**), trả JSON ngay. Nếu trượt (**miss**), query database, lưu kết quả vào Redis kèm thời gian sống (**TTL** — time-to-live), rồi trả về cho client.
+
+Trước hết, `clue.api` cần một connection pool Redis dùng chung — mở kết nối TCP mới ở mỗi request thì chẳng khác nào đổi độ trễ database lấy độ trễ bắt tay Redis. Toàn bộ file `demo/p08_redis.py`:
+
+```python
+REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6388/0")
+
+# decode_responses=True: Redis hands back str, not bytes.
+pool = redis.ConnectionPool.from_url(REDIS_URL, decode_responses=True)
+
+
+def get_redis() -> redis.Redis:
+    """A FastAPI dependency: cheap to build, the pool does the real work."""
+    return redis.Redis(connection_pool=pool)
+```
+
+Nhờ `Depends(get_redis)`, mỗi endpoint nhận một client `Redis` nhẹ hều mượn socket từ `ConnectionPool` dùng chung ở cấp module, giống đúng cách nối dependency ở [bài 4](/blog/backend-layered-architecture/) và [bài 5](/blog/backend-database-access-layer/). Đây là route `GET /cases/{case_id}` trong `demo/p08_cache.py`, dòng 68–82 (`read_case_from_db` ngủ 50 ms giả lập một câu query join nặng):
+
+```python
+@app.get("/cases/{case_id}")
+def get_case(
+    case_id: str, response: Response, cache: redis.Redis = Depends(get_redis)
+) -> dict:
+    """Cache-aside: look in Redis, on a miss ask the database and remember."""
+    cached = cache.get(case_key(case_id))
+    if cached is not None:
+        response.headers["X-Cache"] = "HIT"
+        return json.loads(cached)
+    case = read_case_from_db(case_id)
+    if case is None:
+        raise HTTPException(404, f"no case {case_id}")
+    cache.set(case_key(case_id), json.dumps(case), ex=TTL_SECONDS)
+    response.headers["X-Cache"] = "MISS"
+    return case
+```
+
+Có hai chi tiết của FastAPI giúp đoạn cache này sạch và dễ kiểm tra. Khai báo `response: Response` trong chữ ký hàm cho phép gắn header `X-Cache: HIT` hoặc `X-Cache: MISS` mà vẫn `return` dict để FastAPI serialize như bình thường. Còn tham số `ex=TTL_SECONDS` (`30` giây ở đây) trong `cache.set(...)` đảm bảo mọi key đều tự hết hạn — đừng bao giờ cache không có TTL nếu không muốn một ngày RAM tràn đầy những key cũ không ai đọc nữa. Chú ý thêm `if cached is not None:` kiểm tra `None` tường minh và chỉ lưu cache khi tìm thấy `case`, tránh lưu nhầm trạng thái 404.
+
+Chạy `demo/p08_drive.py timing` vào `p08_cache:app` (với Redis 7.4.1 ở cổng 6388) cho hai lượt, mỗi lượt 3 request liên tiếp:
+
+<TerminalOutput command="python p08_drive.py timing (chạy vào uvicorn p08_cache:app --port 4338)" label="Python 3.13.16 · FastAPI 0.165.0 · redis 8.2.0 · SQLAlchemy 2.0.58 · httpx 0.28.1 · capture tháng 11/2026" caption="Lượt 1: GET đầu miss Redis mất 98,5 ms (hỏi database rồi ghi vào Redis); hai lần sau hit Redis chỉ còn 4,2 ms và 1,9 ms. Sau khi xoá key, lượt 2 lặp lại y hệt.">
+```text
+round 1: GET #1        X-Cache: MISS   98.5 ms  detective=None
+round 1: GET #2        X-Cache: HIT     4.2 ms  detective=None
+round 1: GET #3        X-Cache: HIT     1.9 ms  detective=None
+round 2: GET #1        X-Cache: MISS   71.2 ms  detective=None
+round 2: GET #2        X-Cache: HIT     1.6 ms  detective=None
+round 2: GET #3        X-Cache: HIT     1.2 ms  detective=None
+TTL case:C-1 = 30 s
+```
+</TerminalOutput>
+
+<BeP08CacheAside />
+
+Request đầu tiên trả giá cho database (`98,5 ms`) và đặt key kèm TTL 30 giây vào Redis; những lần đọc sau dừng ngay ở bước 1 (`4,2 ms`, rồi `1,9 ms`). Tốc độ đó khiến ai cũng muốn gắn cache khắp nơi — và khiến hai cái bẫy tiếp theo càng dễ cắn hơn.
+
+---
+
+## 2. Invalidation: mọi chỗ ghi đều phải biết tới cache
+
+> "Khoa học máy tính chỉ có hai việc khó: làm mất hiệu lực cache (cache invalidation) và đặt tên."
+> &mdash; *Phil Karlton*
+
+Nếu bạn bảo AI "gắn Redis cache cho `GET /cases/{case_id}`", nó sửa đúng hàm `GET` đó. Hiếm khi nó tự đi kiểm tra tất cả những chỗ sửa bảng `cases` để xoá cache. Hãy xem hai endpoint ghi trong `demo/p08_cache.py`, dòng 85–99:
+
+```python
+@app.post("/cases/{case_id}/assign-stale")
+def assign_stale(
+    case_id: str, detective: str, cache: redis.Redis = Depends(get_redis)
+) -> dict:
+    """The AI-typical version: write the database, forget the cache."""
+    write_detective(case_id, detective)
+    return {"case_id": case_id, "detective": detective}
+
+
+@app.post("/cases/{case_id}/assign")
+def assign(case_id: str, detective: str, cache: redis.Redis = Depends(get_redis)) -> dict:
+    """Delete-on-write: after the database changes, drop the cached copy."""
+    write_detective(case_id, detective)
+    cache.delete(case_key(case_id))  # the next read misses and refills
+    return {"case_id": case_id, "detective": detective}
+```
+
+Cả hai endpoint đều cập nhật database đúng (`write_detective`). Khác biệt nằm ở đúng một dòng: `cache.delete(case_key(case_id))`. Để ý rằng mình chọn **xoá** key thay vì ghi đè JSON mới vào Redis ngay từ hàm ghi. Xoá key gần như luôn an toàn hơn: nếu hai request ghi chạy song song và ghi vào database theo thứ tự A rồi B, nhưng lại ghi vào Redis theo thứ tự B rồi A, Redis sẽ ôm bản ghi cũ của A cho tới khi hết TTL; còn xoá key thì ép lần đọc tiếp theo lấy bản mới nhất đang nằm trong database.
+
+Kết quả thật khi chạy `demo/p08_drive.py stale`:
+
+<TerminalOutput command="python p08_drive.py stale" label="Python 3.13.16 · FastAPI 0.165.0 · redis 8.2.0 · capture tháng 11/2026" caption="Sau khi assign-stale ghi Wren vào SQLite, lần GET kế tiếp hit Redis trong 1,1 ms và trả sai detective=Hale. Sau khi assign xoá case:C-1, lần GET sau miss và lấy đúng detective=Okafor.">
+```text
+read (warms cache)     X-Cache: MISS   55.9 ms  detective=Hale
+-> assign-stale: database now says Wren
+read after update      X-Cache: HIT     1.1 ms  detective=Hale
+read (warms cache)     X-Cache: MISS   57.0 ms  detective=Wren
+-> assign (delete-on-write): database now says Okafor
+read after update      X-Cache: MISS   58.1 ms  detective=Okafor
+```
+</TerminalOutput>
+
+<BeP08StaleRead />
+
+**Đánh đổi của TTL:** TTL ngắn giúp thu hẹp khoảng thời gian bị dữ liệu cũ nếu lỡ quên xoá cache ở một chỗ nào đó, đổi lại tỷ lệ hit giảm. TTL dài tăng hit rate, nhưng nếu có bất kỳ script chạy tay, service khác hoặc migration nào sửa bảng mà không đi qua hàm xoá key, user sẽ nhìn thấy dữ liệu cũ lâu hơn.
+
+---
+
+## 3. Cache stampede: 20 lần miss cùng lúc vs single-flight
+
+Giả sử bạn không bao giờ quên xoá cache, hit rate đạt 99%, và `case:C-1` là key nóng nhất hệ thống. Đúng mili-giây TTL 30 giây hết hạn — hoặc vừa bị `assign` xoá — 20 request ập vào cùng lúc. Cả 20 request đều gọi `cache.get("case:C-1")`, nhận `None`, rồi kéo nhau xuống `read_case_from_db("C-1")`. Thay vì 1 câu query để nạp lại cache, database gánh liền 20 câu query giống hệt nhau.
+
+Cách chặn là **single-flight** (gom request trùng): khi key biến mất, chỉ cho **một** request giành quyền đi hỏi database và dựng lại key, những request còn lại chờ một nhịp rồi đọc thẳng từ Redis. Trong Redis, lệnh `SET lock_key "1" NX EX 5` chạy nguyên tử: `NX` nghĩa là "chỉ ghi nếu key chưa tồn tại", còn `EX 5` đảm bảo khoá tự tan sau 5 giây nếu process giữ khoá bị crash giữa chừng.
+
+Đây là endpoint `GET /cases/{case_id}/guarded` trong `demo/p08_cache.py`, dòng 102–128:
+
+```python
+@app.get("/cases/{case_id}/guarded")
+def get_case_guarded(
+    case_id: str, response: Response, cache: redis.Redis = Depends(get_redis)
+) -> dict:
+    """Single-flight: when the key is missing, one request rebuilds it."""
+    key = case_key(case_id)
+    lock = f"lock:{key}"
+    for _ in range(100):  # wait up to about 2 s for whoever holds the lock
+        cached = cache.get(key)
+        if cached is not None:
+            response.headers["X-Cache"] = "HIT"
+            return json.loads(cached)
+        if cache.set(lock, "1", nx=True, ex=5):  # I won the right to rebuild
+            try:
+                cached = cache.get(key)  # re-check: the last winner may just be done
+                if cached is not None:
+                    return json.loads(cached)
+                case = read_case_from_db(case_id)
+                if case is None:
+                    raise HTTPException(404, f"no case {case_id}")
+                cache.set(key, json.dumps(case), ex=TTL_SECONDS)
+                response.headers["X-Cache"] = "MISS"
+                return case
+            finally:
+                cache.delete(lock)
+        time.sleep(0.02)  # somebody else is rebuilding: wait, then read again
+    raise HTTPException(503, "cache rebuild took too long")
+```
+
+Ba chi tiết nhỏ giữ cho vòng lặp này không hở sườn:
+- **Kiểm tra lại cache sau khi lấy được khoá:** có thể request giữ khoá trước đó vừa ghi xong key và nhả khoá đúng khoảnh khắc giữa hai dòng `cache.get` và `cache.set(lock, ..., nx=True)` của bạn. Đọc lại `cache.get(key)` một lần nữa tránh được một câu DB dư.
+- **`finally: cache.delete(lock)`:** nếu `read_case_from_db` ném lỗi 404 hay lỗi kết nối, phải trả khoá ngay thay vì bắt mọi người chờ đủ 5 giây.
+- **Chờ có giới hạn (`100 × 0,02 s ≈ 2 s`) → `503`:** chờ vô thời hạn sẽ tạo ra đúng cảnh kẹt dây chuyền như pool hết chỗ ở [bài 5](/blog/backend-database-access-layer/).
+
+Bắn thử 20 request `GET` song song ngay khoảnh khắc `case:C-1` hết hạn bằng `demo/p08_drive.py`:
+
+<TerminalOutput command="python p08_drive.py stampede && python p08_drive.py stampede /guarded" label="Python 3.13.16 · FastAPI 0.165.0 · redis 8.2.0 · ThreadPoolExecutor(20) · capture tháng 11/2026" caption="Cả hai endpoint trả lời xong 20 request trong ~0,08–0,09 s. Không có khoá, database ăn đủ 20 lần đọc; có single-flight, database chỉ đọc đúng 1 lần.">
+```text
+$ python p08_drive.py stampede
+20 concurrent GET /cases/C-1: wall 0.08 s
+responses marked MISS: 20; database reads: 20
+$ python p08_drive.py stampede /guarded
+20 concurrent GET /cases/C-1/guarded: wall 0.09 s
+responses marked MISS: 1; database reads: 1
+```
+</TerminalOutput>
+
+<BeP08Stampede />
+
+Tổng thời gian trả 20 request gần như y hệt (`0,08 s` vs `0,09 s`), vì 19 request chờ sẽ thoát vòng lặp ngay khi người thắng ghi xong vào Redis — trong khi tải xuống database giảm 20 lần. (Hai lưu ý khi đưa ra production: thứ nhất, khi mở rộng nhiều process, lệnh xoá khoá nên gắn token chủ sở hữu riêng kèm Lua script để một worker chạy chậm không xoá nhầm khoá đã hết hạn của người khác; thứ hai, nếu gặp tấn công **cache penetration** hỏi toàn ID không tồn tại, single-flight vẫn chọc DB một lần cho mỗi ID lạ trừ khi bạn cache thêm giá trị rỗng ngắn hạn hoặc validate ID trước.)
+
+---
+
+## 4. Hàng đợi chạy nền: chuyển chỗ job, đừng pop vào hư không
+
+Bây giờ lật sang phía ghi chậm: xuất báo cáo PDF hay gửi email mất 2 giây. Bạn không thể giữ HTTP worker treo 2 giây cho mỗi request, và [bài 6](/blog/backend-async-concurrency-workers/) đã chứng minh vì sao `BackgroundTasks` mất trắng khi server restart hay dính `kill -9`: tác vụ chỉ nằm trong RAM của process web.
+
+Ranh giới đúng là trả `202 Accepted` ngay sau khi đẩy một bản ghi job bền vững vào hàng đợi. File `demo/p08_jobs_app.py`, dòng 16–29:
+
+```python
+@app.post("/cases/{case_id}/report", status_code=202)
+def request_report(case_id: str, r: redis.Redis = Depends(get_redis)) -> dict:
+    job_id = jobs.enqueue(r, case_id)  # one Redis write, then we are done
+    return {"status": "accepted", "job_id": job_id}
+
+
+@app.get("/jobs/stats")
+def job_stats(r: redis.Redis = Depends(get_redis)) -> dict:
+    return {
+        "queued": r.llen(jobs.QUEUE),
+        "processing": r.llen(jobs.PROCESSING),
+        "delayed": r.zcard(jobs.DELAYED),
+        "dead": r.llen(jobs.DEAD),
+    }
+```
+
+Giờ nhìn sang **worker** — một process hệ điều hành chạy riêng. Nếu viết ngây thơ bằng `BRPOP jobs:reports`, Redis rút chuỗi JSON ra khỏi list và giao cho worker. **Ngay khoảnh khắc đó, job không còn nằm ở đâu trong Redis nữa** — nó chỉ tồn tại trong biến RAM của worker. Nếu worker hết RAM (OOM kill), bị khởi động lại lúc deploy, hay ăn `kill -9` một giây sau, job biến mất không dấu vết.
+
+Mẫu **reliable queue** (hàng đợi tin cậy) của Redis giải quyết bằng cách dùng hai list thay vì một (`demo/p08_jobs.py`, dòng 22–35):
+
+```python
+def enqueue(r: redis.Redis, case_id: str) -> str:
+    job = {"id": uuid.uuid4().hex[:8], "case_id": case_id, "attempt": 1}
+    r.lpush(QUEUE, json.dumps(job))
+    return job["id"]
+
+
+def claim(r: redis.Redis, timeout: int = 1) -> str | None:
+    """Move the oldest job to the processing list; it is now ours, not gone."""
+    return r.blmove(QUEUE, PROCESSING, timeout, src="RIGHT", dest="LEFT")
+
+
+def ack(r: redis.Redis, raw: str) -> None:
+    r.lrem(PROCESSING, 1, raw)
+```
+
+Thay vì rút hẳn ra, `claim()` gọi `BLMOVE jobs:reports jobs:reports:processing 1 RIGHT LEFT`: Redis **chuyển nguyên tử** job cũ nhất từ list `jobs:reports` sang list `jobs:reports:processing` trong một bước duy nhất. Chỉ sau khi `handler(r, job)` chạy xong không lỗi thì worker mới gọi `ack()` (`LREM jobs:reports:processing 1 raw`). Ở mọi thời điểm trong suốt vòng đời, job luôn nằm an toàn trong ít nhất một list trên Redis.
+
+<BeP08QueueLists />
+
+Lúc khởi động, `requeue_orphans(r)` quét những job còn kẹt trong `jobs:reports:processing` trả lại `jobs:reports` (`demo/p08_jobs.py`, dòng 62–70):
+
+```python
+def requeue_orphans(r: redis.Redis) -> int:
+    """Startup recovery: anything still in processing belongs to a dead worker.
+
+    Safe with ONE worker. With several you need a lease or visibility timeout.
+    """
+    n = 0
+    while r.lmove(PROCESSING, QUEUE, src="LEFT", dest="RIGHT"):
+        n += 1
+    return n
+```
+
+Đọc kỹ dòng cảnh báo trong docstring: quét sạch list `processing` khi khởi động chỉ an toàn khi có **một** worker sở hữu list đó. Khi chạy nhiều worker song song, worker B vừa khởi động không được cướp mất job mà worker A đang xử lý bình thường — ở quy mô nhiều worker bạn cần tách list `processing:<worker_id>` riêng cho từng worker, hoặc chuyển sang Redis Streams (`XREADGROUP` + `XACK`) hay message broker có visibility timeout (RabbitMQ, SQS).
+
+---
+
+## 5. Retry, exponential backoff và dead-letter queue
+
+Job thất bại vì hai nguyên nhân hoàn toàn khác nhau:
+- **Lỗi tạm thời (transient)** — ví dụ cổng gửi mail bị timeout hai lần rồi thông ở lần thứ ba (`C-FLAKY` trong demo).
+- **Lỗi vĩnh viễn (poison pill)** — thiếu template báo cáo, dữ liệu sai định dạng, tài khoản đã xoá (`C-BAD` trong demo, chạy 100 lần vẫn lỗi cả 100).
+
+Nếu job lỗi mà đẩy ngay lại đầu hàng đợi để thử liền trong vòng `while`, bạn tự bắn vào dịch vụ đang nghẽn và đốt sạch CPU của worker. Thay vào đó, khi `handler` ném exception, hàm `fail()` (`demo/p08_jobs.py`, dòng 37–52) đẩy job sang một **Sorted Set** của Redis (`jobs:reports:delayed`) với score là mốc thời gian Unix tương lai `time.time() + delay` theo cấp số nhân (**exponential backoff**: `1 s`, `2 s`, `4 s`), hoặc — khi chạm ngưỡng `MAX_ATTEMPTS` (`4`) — đẩy thẳng sang **dead-letter queue** (`jobs:reports:dead`):
+
+```python
+def fail(r: redis.Redis, raw: str, error: str) -> str:
+    """Schedule a retry with backoff, or give up and dead-letter the job."""
+    job = json.loads(raw)
+    with r.pipeline(transaction=True) as pipe:  # MULTI/EXEC: all or nothing
+        if job["attempt"] >= MAX_ATTEMPTS:
+            job["error"] = error
+            pipe.lpush(DEAD, json.dumps(job))
+            outcome = "dead-lettered"
+        else:
+            delay = BACKOFF_BASE * 2 ** (job["attempt"] - 1)
+            job["attempt"] += 1
+            pipe.zadd(DELAYED, {json.dumps(job): time.time() + delay})
+            outcome = f"retry in {delay:g} s"
+        pipe.lrem(PROCESSING, 1, raw)
+        pipe.execute()
+    return outcome
+```
+
+Để ý `r.pipeline(transaction=True)`: gói lệnh ghi sang `DELAYED`/`DEAD` cùng lệnh `LREM` khỏi `PROCESSING` vào một khối `MULTI`/`EXEC` đảm bảo job không bao giờ bị nằm trùng ở cả hai list hoặc lọt mất ở giữa chừng. Mỗi vòng lặp của worker, `promote_due(r)` đọc `ZRANGEBYSCORE delayed 0 now` rồi đẩy các job tới giờ về lại `QUEUE` (dùng `if r.zrem(DELAYED, raw):` để nếu có nhiều worker thì chỉ một worker thắng quyền promote). Ngoài production, khi hàng loạt job cùng lỗi một lúc, nhớ cộng thêm **jitter ngẫu nhiên** vào `delay` để chúng không đồng loạt thức dậy tạo thành một cơn stampede thứ hai.
+
+Log chạy thật trên máy cho `C-FLAKY` (thành công ở lần 3) nối tiếp bởi `C-BAD` (lỗi đủ 4 lần rồi vào `jobs:reports:dead`):
+
+<TerminalOutput command="uv run python p08_worker.py once — sau khi POST /cases/C-FLAKY/report và /cases/C-BAD/report" label="Python 3.13.16 · FastAPI 0.165.0 · redis 8.2.0 · capture tháng 11/2026" caption="C-FLAKY thành công ở lần thử 3 sau hai nhịp chờ 1 s và 2 s. C-BAD chạm trần MAX_ATTEMPTS=4 sau các nhịp chờ 1 s, 2 s, 4 s và bị chuyển vào jobs:reports:dead kèm thông báo lỗi.">
+```text
+POST /cases/C-FLAKY/report -> {"status":"accepted","job_id":"c6596c81"}
+POST /cases/C-BAD/report -> {"status":"accepted","job_id":"07946992"}
+[+ 0.01 s] worker up (once); requeued 0 orphan(s)
+[+ 0.33 s] job c6596c81 C-FLAKY: attempt 1 started
+[+ 2.34 s] job c6596c81 C-FLAKY: failed (mail relay timed out) -> retry in 1 s
+[+ 3.35 s] job c6596c81 C-FLAKY: attempt 2 started
+[+ 5.36 s] job c6596c81 C-FLAKY: failed (mail relay timed out) -> retry in 2 s
+[+ 7.46 s] job c6596c81 C-FLAKY: attempt 3 started
+[+ 9.47 s] job c6596c81 C-FLAKY: mail sent
+[+ 9.47 s] job c6596c81 C-FLAKY: acked
+[+11.86 s] job 07946992 C-BAD: attempt 1 started
+[+13.86 s] job 07946992 C-BAD: failed (report template missing) -> retry in 1 s
+[+14.92 s] job 07946992 C-BAD: attempt 2 started
+[+16.94 s] job 07946992 C-BAD: failed (report template missing) -> retry in 2 s
+[+18.99 s] job 07946992 C-BAD: attempt 3 started
+[+21.00 s] job 07946992 C-BAD: failed (report template missing) -> retry in 4 s
+[+25.05 s] job 07946992 C-BAD: attempt 4 started
+[+27.05 s] job 07946992 C-BAD: failed (report template missing) -> dead-lettered
+GET /jobs/stats -> {"queued":0,"processing":0,"delayed":0,"dead":1}
+dead = ['{"id": "07946992", "case_id": "C-BAD", "attempt": 4, "error": "report template missing"}']
+```
+</TerminalOutput>
+
+<BeP08Backoff />
+
+---
+
+## 6. Giao ít nhất một lần (at-least-once) đòi hỏi handler phải idempotent
+
+Mặt trái của reliable queue nằm ngay ở khe hở cuối cùng. Worker chạy xong job (gửi xong email, trừ xong tiền, ghi xong dòng dữ liệu) rồi **sập đúng lúc chưa kịp gọi `ack()`**. Vì chưa chạy `LREM`, job vẫn nằm nguyên trong `jobs:reports:processing`. Khi worker sống lại, nó nhặt lại job mồ côi đó và chạy lần thứ hai.
+
+Đảm bảo đó gọi là **at-least-once delivery** (giao ít nhất một lần — không mất job, nhưng có thể lặp). So sánh hai handler trong `demo/p08_worker.py` (dòng 34–52) khi `CRASH_BEFORE_ACK=1` bắn `SIGKILL` vào chính nó ngay sau side effect:
+
+```python
+def deliver_naive(r: redis.Redis, job: dict) -> None:
+    """Appends to a list: run the same job twice and the mail goes out twice."""
+    build_report(job)
+    r.rpush("outbox:naive", job["case_id"])
+    log(f"job {job['id']} {job['case_id']}: mail sent (appended)")
+    if os.environ.get("CRASH_BEFORE_ACK") == "1":
+        os.kill(os.getpid(), signal.SIGKILL)  # die after the effect, before the ack
+
+
+def deliver_once(r: redis.Redis, job: dict) -> None:
+    """The job id is the key: the effect and the dedupe are one atomic write."""
+    build_report(job)
+    if r.hsetnx("outbox:once", job["id"], job["case_id"]):
+        log(f"job {job['id']} {job['case_id']}: mail sent")
+    else:
+        log(f"job {job['id']} {job['case_id']}: already sent, skipping")
+    if os.environ.get("CRASH_BEFORE_ACK") == "1":
+        os.kill(os.getpid(), signal.SIGKILL)
+```
+
+`deliver_naive` cứ chạy là nối thêm vào cuối list (`RPUSH outbox:naive`). `deliver_once` dùng `r.hsetnx("outbox:once", job["id"], ...)` — chỉ ghi khi field `job["id"]` chưa tồn tại. Trong Postgres thật, chiêu tương ứng là `INSERT ... ON CONFLICT (job_id) DO NOTHING` nằm cùng transaction với cập nhật nghiệp vụ, hoặc gửi kèm `Idempotency-Key` sang API bên ngoài như Stripe (hệt cơ chế `Idempotency-Key` trên HTTP ở [bài 2](/blog/backend-rest-api-design/)).
+
+Giết thử cả ba chế độ worker (`forget`, `naive`, `once`) giữa lúc chạy và nhìn trạng thái Redis:
+
+<TerminalOutput command="p08_worker.py forget | CRASH_BEFORE_ACK=1 naive + chạy lại | CRASH_BEFORE_ACK=1 once + chạy lại" label="Python 3.13.16 · redis 8.2.0 · capture tháng 11/2026" caption="Với forget (BRPOP), job 502842f7 biến mất không dấu vết. Với naive, job c4074d36 chạy lại và gửi C-3 hai lần. Với once, job 0eab7630 được requeue, thấy id đã có trong outbox:once nên bỏ qua gửi trùng và ack sạch.">
+```text
+=== 1. FORGET (BRPOP, kill -9 mid-job) ===
+POST /cases/C-1/report -> 202 {"status":"accepted","job_id":"502842f7"}
+[+ 0.00 s] worker up (fire-and-forget: BRPOP, no ack)
+[+ 0.35 s] job 502842f7 C-1: popped, working
+$ kill -9 42645
+GET /jobs/stats -> {"queued":0,"processing":0,"delayed":0,"dead":0}
+
+=== 2. NAIVE (crash before ack, then restart) ===
+POST /cases/C-3/report -> 202 {"status":"accepted","job_id":"c4074d36"}
+[+ 0.01 s] worker up (naive); requeued 0 orphan(s)
+[+ 0.33 s] job c4074d36 C-3: attempt 1 started
+[+ 2.33 s] job c4074d36 C-3: mail sent (appended)
+(worker exited with signal 9)
+GET /jobs/stats -> {"queued":0,"processing":1,"delayed":0,"dead":0}
+--- restart ---
+[+ 0.01 s] worker up (naive); requeued 1 orphan(s)
+[+ 0.01 s] job c4074d36 C-3: attempt 1 started
+[+ 2.01 s] job c4074d36 C-3: mail sent (appended)
+[+ 2.02 s] job c4074d36 C-3: acked
+outbox:naive = ['C-3', 'C-3']
+
+=== 3. ONCE (idempotent, crash before ack, then restart) ===
+POST /cases/C-3/report -> 202 {"status":"accepted","job_id":"0eab7630"}
+[+ 0.01 s] worker up (once); requeued 0 orphan(s)
+[+ 0.32 s] job 0eab7630 C-3: attempt 1 started
+[+ 2.33 s] job 0eab7630 C-3: mail sent
+(worker exited with signal 9)
+--- restart ---
+[+ 0.01 s] worker up (once); requeued 1 orphan(s)
+[+ 0.01 s] job 0eab7630 C-3: attempt 1 started
+[+ 2.02 s] job 0eab7630 C-3: already sent, skipping
+[+ 2.02 s] job 0eab7630 C-3: acked
+outbox:once = {'0eab7630': 'C-3'}
+```
+</TerminalOutput>
+
+<BeP08Redelivery />
+
+Lưu ý một điểm tinh tế trong `deliver_once`: tự kiểm tra một bảng khử trùng trong Redis chỉ bảo vệ được phần ghi cục bộ, còn nếu bên trong có gọi API gửi mail ra ngoài thì API đó cũng phải hỗ trợ idempotency key bằng chính `job["id"]`, hoặc phần ghi trạng thái phải nằm chung một transaction database với bảng lưu id đã xử lý.
+
+<Callout type="note" title="Checklist review cache và queue do AI viết">
+Năm câu hỏi nhanh khi đọc pull request:
+1. Mọi lệnh `cache.set` có gắn `ex=` (TTL) tường minh không?
+2. Mọi endpoint hay job sửa bảng gốc có gọi `cache.delete` đúng key đó không?
+3. Với key nóng tốn công dựng lại, có khoá single-flight kèm giới hạn thời gian chờ không?
+4. Việc chậm hoặc không được phép mất có được đẩy vào queue bền vững (không nhét `BackgroundTasks` trong RAM) kèm giới hạn `MAX_ATTEMPTS` và dead-letter queue không?
+5. Nếu worker chết ngay sau khi thực hiện tác vụ rồi chạy lại lần hai, handler có an toàn khi lặp lại không?
+</Callout>
+
+<Concepts title="Tóm tắt các khái niệm chính">
+- **Cache-aside**: app tự hỏi cache trước, miss mới xuống DB, ghi vào cache kèm TTL, và xoá key khi có lệnh ghi.
+- **Thundering herd (cache stampede)**: nhiều request cùng miss một key nóng vừa hết hạn hay vừa bị xoá rồi dồn cả xuống DB; giảm tải bằng khoá single-flight hoặc lease (`SET NX`).
+- **Reliable queue (`BLMOVE` + `LREM`)**: chuyển job sang list `processing` trước khi chạy và chỉ xoá sau khi thành công, giữ được đảm bảo at-least-once khi worker sập.
+- **Dead-letter queue (DLQ)**: nơi nhốt các job hỏng hẳn sau khi hết số lần retry theo exponential backoff, tránh làm nghẽn hoặc quay vòng CPU worker.
+- **Handler idempotent**: gắn hiệu ứng theo `job_id` để lần chạy lại sau cú crash-trước-ack chỉ cho ra kết quả đúng một lần.
+</Concepts>
+
+</Vi>

@@ -33,6 +33,17 @@ Không cần đọc lại toàn bộ chat history — file này là nguồn sự
 - **Kiểm tra:** `npm run build` 85 pages (từ 74 → 85: +7 bài, +3 trang quiz AI Trading, +1 category `/blog/category/ai/`), `node --test` 59/59 pass; kiểm toàn bộ link nội bộ trong 7 bài đều trỏ tới bài đã xuất bản.
 - **Chưa chốt:** PR chờ user merge vào `main`.
 
+## 2026-11-25 — Wave C series backend: hoàn tất bài 8–10 (draft)
+
+- **Đã làm (nhánh `feat/backend-wave-c`, tổng hợp từ 3 worktree `backend-post-08..10`):**
+  - **Bài 8 (`backend-caching-queues`):** viết hoàn chỉnh phần bài song ngữ EN/VI theo đúng công thức series (`voice.md`, DDIA split rule trỏ sang `/blog/replication-when-copies-disagree/`, hook bài báo NSDI 2013 *Scaling Memcache at Facebook* giảm tải từ 17.000 xuống 1.300 query/s nhờ lease); dựng container Redis 7.4.1 chạy thật toàn bộ 6 file `demo/p08_*.py` (`p08_redis`, `p08_cache`, `p08_drive`, `p08_jobs`, `p08_jobs_app`, `p08_worker`) và cập nhật 5 sơ đồ dữ liệu `BeP08*` khớp 100% capture thật (`98.5 ms` vs `4.2 ms`, `assign-stale` vs `assign`, 20 vs 1 DB read single-flight, backoff `C-BAD` + DLQ, `forget`/`naive`/`once` dưới `kill -9`).
+  - **Bài 9 (`backend-testing-strategy`):** gom từ worktree `backend-post-09` (37 tests trong `demo/tests_p09/` qua 4 tầng `unit`/`api`/`contract`/`e2e`, `p09_weak_tests`, `p09_burst` p95 load check, 6 sơ đồ `BeP09*`, ảnh bìa Swagger OpenAPI + hero NASA test dummies).
+  - **Bài 10 (`backend-observability`):** gom từ worktree `backend-post-10` (hook sự cố Cloudflare 18/11/2025, `p10_logs`/`redact`/`middleware`/`metrics`/`cardinality`/`tracing`/`spans` trên `clue-api` + `evidence-lab`, 6 sơ đồ `BeP10*`, ảnh bìa `/metrics` Prometheus + hero phòng điều khiển San Onofre 1968).
+  - Cập nhật `demo/README.md` cho toàn bộ file `p08_*`, `p09_*`/`tests_p09/*`, `p10_*`.
+- **Ai quyết:** user yêu cầu hoàn tất Wave C và mở PR; số liệu capture bài 8 được chạy lại thật hôm nay trên Redis 7.4.1 và đồng bộ vào `BeP08*`.
+- **Kiểm tra:** `npm run build` (74 pages) + `node --test` (59/59 pass); toàn bộ 18+30+34 fence Python trong bài 8–10 khớp byte-for-byte với `demo/`; `post-check.sh` trên dev server kiểm 0 lỗi framing, 0 hex cứng, HTTP 200, 0 badIslands.
+- **Chưa chốt:** 3 bài giữ `draft: true` chờ user đọc duyệt trước khi bật xuất bản; Wave D (bài 11–12) tiếp theo sau Wave C.
+
 ## 2026-11-24 — Dọn nhãn "minh họa" khỏi hình và bài blog; sửa nút Next; thay 2 câu quiz trùng
 
 - **Đã làm (3 PR, mỗi việc một nhánh):** (1) `fix/quiz-next-button` (#64): nút Next trên trang quiz không còn `sticky`, hết đè lên dòng "Correct answer". (2) `fix/quiz-duplicate-cases` (#65): thay s02q4 (giờ hỏi vốn hóa không phải tiền mặt công ty đang giữ) và s08q3 (tiền đi từ người mua sang người bán, lợi nhuận FPT không đổi) vì trùng s03q5 và s03q3. (3) `chore/drop-illustrative-labels`: bỏ các nhãn "illustrative / minh họa / số bịa / made-up" trong chữ hiển thị của ~115 file (hình SVG, demo, 6 bài blog); số bịa thì nêu giả định trong câu ("Giả sử ..."). Không sửa comment code, không đụng AnimatedFlow / DemoFrame / DiagramIcon, giữ EN và VI đồng bộ. Hai hình bị xóa phần tử chú thích (`StorageBVectorSpace`, `MarketLimitQueue`; `StorageBitcask` bỏ nhãn "example values"); `MarketLimitQueue` thu viewBox 430 → 400.
