@@ -3,6 +3,14 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-25 — Wave D series backend: bài 11–12 (draft) — series đủ 12/12
+
+- **Đã làm (nhánh `feat/backend-wave-d`, gộp từ 2 worktree `backend-post-11`, `backend-post-12`, mỗi bài 1 agent Sonnet):**
+  - **Bài 11 (`backend-performance-p99`):** hook SoundCloud (8/2026, một dòng log làm p99 ~48 ms → ~18 ms; lead đã mở nguồn đối chiếu). Demo `p11_*` thật trên M2: p99 817 ms dù p50 30 ms (1/40 call chậm), loop bị chặn đẩy `/health` p99 lên 278 ms, profile bằng pyinstrument (py-spy cần root trên macOS, bài ghi rõ), timeout 0,25 s → 504, gate 8 in-flight trả 503 + `Retry-After`, locust. 11 hình `BeP11*`, ảnh bìa locust thật.
+  - **Bài 12 (`backend-production-deploy`):** hook Knight Capital (SEC order). Demo `p12_*`, Dockerfile multi-stage non-root (258 MB vs 1,7 GB), manifest K8s chạy thật trên cluster `kind` local (KUBECONFIG riêng, không đụng cluster công ty, đã xoá cluster). Rolling update: không probe 67/351 lỗi, có readiness 0/548, đủ manifest 0/523. `docker stop` vs `kill` vs shell PID 1. 11 hình `BeP12*`.
+- **Lead review:** bắt hook bài 11 ban đầu trùng bài 6 (Cloudflare 2019) → agent đổi sang SoundCloud. Xem dark VI `BeP12Rollout`, `BeP12Errors` (tổng cột = 67, khớp capture). Build 91 trang, `node --test` 71 pass, code trong bài khớp byte với `demo/` (agent chạy).
+- **Chưa chốt:** Knight Capital cũng là hook của bài DDIA `encoding-and-schema-evolution` (góc khác: cờ bị dùng lại) — chờ user quyết giữ hay đổi; chưa chạy humanizer cho VI; số chương sách Lubanovic chưa kiểm; `preStop` không tái hiện được race trên kind 1 node (bài nói thẳng). 2 bài giữ `draft: true`.
+
 ## 2026-11-25 — Quiz: câu tính toán không bắt buộc
 
 - Khang quyết: không phải tình huống nào cũng cần câu tính số liệu. Chỉ thêm khi tình huống thật sự xoay quanh một con số; bộ về phán đoán, thiết kế, đạo đức có thể không có câu tính nào.
