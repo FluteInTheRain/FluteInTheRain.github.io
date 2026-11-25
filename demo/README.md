@@ -62,3 +62,20 @@ uv run --python 3.13 --with 'fastapi==0.165.0' --with 'uvicorn[standard]' \
 | `p07_revocation.py` | `backend-auth-oauth2-jwt` | Session logout (401) vs JWT after logout (200) |
 | `p07_bola.py` | `backend-auth-oauth2-jwt` | Vulnerable vs owner-checked case endpoint |
 | `p07_bola_check.py` | `backend-auth-oauth2-jwt` | Driver capturing the before/after BOLA results |
+| `p08_redis.py` | `backend-caching-queues` | One shared Redis connection pool (`ConnectionPool`) and `get_redis` dependency |
+| `p08_cache.py` | `backend-caching-queues` | Cache-aside `GET`, stale write vs delete-on-write invalidation, and `SET NX` single-flight guard |
+| `p08_drive.py` | `backend-caching-queues` | Burst/timing driver capturing cache hits, stale reads, and 20-request stampedes |
+| `p08_jobs.py` | `backend-caching-queues` | Reliable queue on Redis lists (`LPUSH`, `BLMOVE`, `LREM`), exponential-backoff retries (`ZADD`), and dead-letter queue |
+| `p08_jobs_app.py` | `backend-caching-queues` | `POST /cases/{case_id}/report` returning `202` and `GET /jobs/stats` |
+| `p08_worker.py` | `backend-caching-queues` | Separate worker process comparing `forget` (`BRPOP`), `naive`, and idempotent (`HSETNX`) delivery under `kill -9` |
+| `p09_buggy_service.py` | `backend-testing-strategy` | Plausible AI refactor of `CaseService.close` with swapped save/mutation order |
+| `p09_weak_tests.py` | `backend-testing-strategy` | Two green-but-worthless tests (mocking the unit under test; asserting only status 201) |
+| `p09_snapshot.py` | `backend-testing-strategy` | Generates `tests_p09/openapi.snapshot.json` for contract diff checks |
+| `p09_burst.py` | `backend-testing-strategy` | Async httpx p95 load check comparing `/eager` vs `/lazy` against a CI bound |
+| `pytest.ini`, `tests_p09/*` | `backend-testing-strategy` | 37-test suite across `unit` (fakes vs mocks), `api` (`dependency_overrides` + SQLite), `contract`, and `e2e` layers |
+| `p10_print.py` | `backend-observability` | Interleaved `print()` lines from two concurrent requests |
+| `p10_logs.py`, `p10_redact.py` | `backend-observability` | Structured JSON logging formatter plus `RequestIdFilter` and `RedactFilter` |
+| `p10_middleware.py`, `p10_metrics.py` | `backend-observability` | Access-log middleware setting `ContextVar` request id and Prometheus request counter/histogram |
+| `p10_cardinality.py` | `backend-observability` | Demonstrates unbounded label cardinality exploding Prometheus time series |
+| `p10_tracing.py`, `p10_spans.py` | `backend-observability` | OpenTelemetry FastAPI/HTTPX/SQLAlchemy tracing (`traceparent`) and span waterfall table printer |
+| `p10_app.py`, `p10_lab.py`, `p10_walk.py` | `backend-observability` | `clue-api` + `evidence-lab` instrumented services and morning traffic driver |
