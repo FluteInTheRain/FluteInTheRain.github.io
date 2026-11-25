@@ -1,0 +1,431 @@
+{
+  "id": "set-08",
+  "title": {
+    "en": "Serving without melting OLTP",
+    "vi": "Phục vụ batch mà không sập OLTP"
+  },
+  "context": {
+    "text": {
+      "en": "An e-commerce team needs to serve daily Spark product recommendations at low latency to live shoppers while incorporating recent item clicks within minutes.\nThey compare writing directly into the live checkout PostgreSQL database versus using a decoupled derived store like LinkedIn Venice.\n• live Postgres `max_connections`: `300` (checkout and login need `120` connections)\n• Spark batch job: `200` parallel tasks writing `5,000,000` recommendation rows\n• LinkedIn Venice in production: `~500` use cases moved off Voldemort Read-Only by 2018, `>1,400` automated push jobs/day, `>200` hybrid datasets\nVenice loads each Full Push version in the background, replays recent nearline writes for hybrid stores, swaps reads per data center, and retains the previous version as a backup.",
+      "vi": "Một team thương mại điện tử cần phục vụ gợi ý sản phẩm hằng ngày do Spark tính ra với độ trễ thấp cho khách mua hàng, đồng thời gộp cả các lượt click mới trong vài phút.\nHọ so sánh giữa việc ghi thẳng vào PostgreSQL phục vụ thanh toán với việc dùng kho dữ liệu dẫn xuất tách lớp như LinkedIn Venice.\n• `max_connections` của Postgres production: `300` (luồng thanh toán và đăng nhập cần `120` kết nối)\n• job batch Spark: `200` task song song ghi `5.000.000` dòng gợi ý\n• LinkedIn Venice trong thực tế: `~500` use case chuyển từ Voldemort Read-Only tới 2018, `>1.400` push job/ngày, `>200` dataset hybrid\nVenice nạp từng phiên bản Full Push ở chế độ nền, phát lại các lượt ghi nearline gần nhất cho store hybrid, tráo luồng đọc theo từng data center và giữ bản trước làm dự phòng."
+    },
+    "media": [
+      {
+        "kind": "figure",
+        "component": "VeniceDualRead",
+        "alt": {
+          "en": "Contrast between 200 Spark tasks opening 2 connections each directly to live checkout Postgres (max_connections 300 with 120 needed for checkout) and LinkedIn Venice loading a Full Push version plus replayed Kafka nearline writes offline before swapping reads.",
+          "vi": "So sánh giữa 200 task Spark mở mỗi task 2 kết nối thẳng vào Postgres thanh toán (max_connections 300, thanh toán cần 120) với LinkedIn Venice nạp bản Full Push kèm phát lại ghi nearline từ Kafka ở chế độ nền trước khi tráo luồng đọc."
+        }
+      }
+    ]
+  },
+  "questions": [
+    {
+      "id": "s08q1",
+      "level": "apply",
+      "track": "ai",
+      "type": "ai-review",
+      "difficulty": 3,
+      "topic": "Batch workers saturating OLTP connections",
+      "stem": {
+        "en": "An AI assistant wrote this PySpark function to push `5,000,000` recommendations directly into the live checkout Postgres (`max_connections = 300`, `120` used by checkout and login).\n\nFormulas given:\n- `batch connections = tasks × connections_per_task`\n- `available connections = max_connections − checkout_connections`\n- `connection deficit = batch_connections − available_connections`\n\nWhat is the main issue to flag in code review?",
+        "vi": "Một trợ lý AI viết hàm PySpark sau để đẩy `5.000.000` dòng gợi ý thẳng vào Postgres thanh toán đang chạy thật (`max_connections = 300`, luồng thanh toán và đăng nhập dùng `120`).\n\nCông thức cho sẵn:\n- `kết nối batch = số_task × kết_nối_mỗi_task`\n- `kết nối còn trống = max_connections − kết_nối_thanh_toán`\n- `mức thiếu hụt kết nối = kết_nối_batch − kết_nối_còn_trống`\n\nVấn đề lớn nhất cần chỉ ra khi review code là gì?"
+      },
+      "media": [
+        {
+          "kind": "code",
+          "lang": "python",
+          "code": "def write_partition(rows):\n    r_conn = psycopg2.connect(LIVE_CHECKOUT_DSN)\n    w_conn = psycopg2.connect(LIVE_CHECKOUT_DSN)\n    with w_conn.cursor() as cur:\n        for row in rows:\n            cur.execute(UPSERT_SQL, (row.user_id, row.items))\n    w_conn.commit()\n\nrecs_df.repartition(200).foreachPartition(write_partition)",
+          "caption": {
+            "en": "Each of the 200 parallel tasks opens 2 direct connections to LIVE_CHECKOUT_DSN.",
+            "vi": "Mỗi trong 200 task song song mở 2 kết nối trực tiếp tới LIVE_CHECKOUT_DSN."
+          }
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Tasks ask for 200 connections against 180 free slots (20 short), so 10% of tasks pause.",
+            "vi": "Các task xin 200 kết nối so với 180 slot trống (thiếu 20), nên 10% số task sẽ tạm dừng."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Tasks ask for 400 connections, which Postgres queues smoothly in memory until tasks end.",
+            "vi": "Các task xin 400 kết nối, và Postgres tự xếp hàng mượt trong RAM cho tới khi task chạy xong."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Using ON CONFLICT DO UPDATE isolates reads from writes, keeping checkout p99 untouched.",
+            "vi": "Dùng ON CONFLICT DO UPDATE tách biệt đọc khỏi ghi nên giữ p99 thanh toán không đổi."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Tasks ask for 400 connections against 180 free slots (220 short), starving live checkout.",
+            "vi": "Các task xin 400 kết nối so với 180 slot trống (thiếu 220), làm sập kết nối thanh toán."
+          }
+        }
+      ],
+      "answer": [
+        "d"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "Each of the 200 tasks opens two connections (r_conn and w_conn), demanding 200 × 2 = 400 connections. Only 300 − 120 = 180 slots are free, leaving a 220-connection deficit and exceeding max_connections = 300 outright. Postgres rejects new connections—blocking live checkout and login—while row-by-row UPSERT storms spike lock contention and p99 latency, and retries leak partial commits.",
+          "vi": "Mỗi trong 200 task mở hai kết nối (r_conn và w_conn), đòi 200 × 2 = 400 kết nối. Chỉ còn 300 − 120 = 180 slot trống, thiếu hụt 220 kết nối và vượt thẳng trần max_connections = 300. Postgres sẽ từ chối kết nối mới — chặn luồng thanh toán và đăng nhập — đồng thời bão UPSERT từng dòng gây tranh chấp khoá, đẩy vọt p99 và để lộ dữ liệu dở dang khi retry."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "Each task opens two connections (r_conn and w_conn), not one, so batch demand is 400 rather than 200—and exceeding max_connections fails connections rather than pausing nicely.",
+            "vi": "Mỗi task mở hai kết nối (r_conn và w_conn) chứ không phải một, nên nhu cầu là 400 thay vì 200 — và vượt max_connections sẽ báo lỗi từ chối kết nối chứ không tạm dừng nhẹ nhàng."
+          },
+          "b": {
+            "en": "PostgreSQL enforces max_connections as a hard limit and refuses additional connections with an error instead of queuing 400 clients safely.",
+            "vi": "PostgreSQL áp đặt max_connections là ngưỡng cứng và từ chối mọi kết nối vượt ngưỡng bằng lỗi thay vì xếp hàng an toàn 400 client."
+          },
+          "c": {
+            "en": "Even under MVCC, row-by-row UPSERTs across millions of rows saturate connection slots, disk WAL I/O, and CPU, driving up p99 latency for checkout and login.",
+            "vi": "Ngay cả dưới cơ chế MVCC, bão UPSERT từng dòng trên hàng triệu bản ghi vẫn làm cạn slot kết nối, nghẽn WAL I/O và CPU, đẩy vọt độ trễ p99 của thanh toán và đăng nhập."
+          }
+        },
+        "reread": {
+          "anchor": "6-serving-batch-outputs-without-breaking-oltp",
+          "label": {
+            "en": "6. Serving batch outputs without breaking OLTP",
+            "vi": "6. Phục vụ đầu ra batch mà không đánh sập OLTP"
+          }
+        },
+        "say": {
+          "en": "When AI calls psycopg2.connect inside Spark foreachPartition, multiply partitions by connections per task and compare against Postgres max_connections before running anything.",
+          "vi": "Khi AI gọi psycopg2.connect bên trong foreachPartition của Spark, hãy nhân số partition với số kết nối mỗi task và đối chiếu với max_connections của Postgres trước khi chạy."
+        }
+      },
+      "ref": "Post: 6. Serving batch outputs without breaking OLTP",
+      "verifiedBy": "python3 -c \"batch=200*2; avail=300-120; print(batch, avail, batch-avail)\" -> 400 180 220"
+    },
+    {
+      "id": "s08q2",
+      "level": "apply",
+      "track": "interview",
+      "type": "scenario",
+      "difficulty": 4,
+      "topic": "Row-by-row RPC latency vs bulk file push",
+      "stem": {
+        "en": "Suppose an engineer adds a connection pooler that caps Spark writers at `pool_connections = 20` concurrent Postgres connections so checkout stays responsive. Each single-row `UPSERT` round trip takes `rpc_time_s = 0.002` s (`2 ms`) across `5,000,000` rows (`200` bytes per row).\nBy contrast, building immutable SSTables in Spark and pushing the dataset sequentially runs at `push_rate_MB_per_s = 200` MB/s.\n\nFormulas given:\n- `dataset_MB = total_rows × row_bytes ÷ 1,000,000`\n- `direct_rows_per_s = pool_connections ÷ rpc_time_s`\n- `direct_wall_s = total_rows ÷ direct_rows_per_s`\n- `bulk_push_s = dataset_MB ÷ push_rate_MB_per_s`\n\nHow do the two transfer wall times compare?",
+        "vi": "Giả sử một kỹ sư lắp connection pooler giới hạn luồng ghi Spark tối đa `pool_connections = 20` kết nối Postgres đồng thời để bảo vệ luồng thanh toán. Mỗi vòng gọi `UPSERT` từng dòng mất `rpc_time_s = 0,002` giây (`2 ms`) cho `5.000.000` dòng (`200` byte mỗi dòng).\nNgược lại, dựng file SSTable bất biến trong Spark rồi đẩy tuần tự sang kho phục vụ đạt `push_rate_MB_per_s = 200` MB/giây.\n\nCông thức cho sẵn:\n- `dataset_MB = tổng_số_dòng × số_byte_mỗi_dòng ÷ 1.000.000`\n- `tốc_độ_ghi_trực_tiếp_dòng_s = pool_connections ÷ rpc_time_s`\n- `thời_gian_ghi_trực_tiếp_s = tổng_số_dòng ÷ tốc_độ_ghi_trực_tiếp_dòng_s`\n- `thời_gian_đẩy_lô_s = dataset_MB ÷ push_rate_MB_per_s`\n\nThời gian truyền của hai cách chênh nhau thế nào?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Direct RPCs take 25 s vs. 5 s for bulk push (5x slower), since 200 tasks run in parallel.",
+            "vi": "Ghi RPC trực tiếp mất 25 giây so với 5 giây đẩy lô (chậm hơn 5 lần), vì 200 task chạy song song."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Direct RPCs take 500 s vs. 5 s for bulk push (100x slower), plus WAL and compaction load.",
+            "vi": "Ghi RPC trực tiếp mất 500 giây so với 5 giây đẩy lô (chậm hơn 100 lần), lại thêm tải WAL."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Direct RPCs take 10,000 s vs. 5 s for bulk push (2,000x slower), serialized on one slot.",
+            "vi": "Ghi RPC trực tiếp mất 10.000 giây so với 5 giây đẩy lô (chậm hơn 2.000 lần), chạy tuần tự một luồng."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Direct RPCs take 500 s vs. 50 s for bulk push (10x slower), as SSTables stream row by row.",
+            "vi": "Ghi RPC trực tiếp mất 500 giây so với 50 giây đẩy lô (chậm hơn 10 lần), vì SSTable đẩy từng dòng."
+          }
+        }
+      ],
+      "answer": [
+        "b"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "With 20 pooled connections at 0.002 s per RPC, direct throughput is 20 / 0.002 = 10,000 rows/s, so 5,000,000 rows take 500 s (plus WAL fsync and B-tree/index churn). Meanwhile, 5,000,000 × 200 bytes = 1,000 MB, which transfers sequentially at 200 MB/s in 1,000 / 200 = 5 s—100x faster while bypassing OLTP write paths.",
+          "vi": "Với 20 kết nối qua pool và 0,002 giây mỗi RPC, thông lượng trực tiếp đạt 20 / 0,002 = 10.000 dòng/giây, nên 5.000.000 dòng mất 500 giây (chưa kể áp lực WAL fsync và xáo trộn B-tree/index). Trong khi đó, 5.000.000 × 200 byte = 1.000 MB được đẩy tuần tự ở 200 MB/giây chỉ mất 1.000 / 200 = 5 giây — nhanh hơn 100 lần và bỏ qua hoàn toàn đường ghi OLTP."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "The pooler caps concurrency at 20 Postgres connections, not 400 or 200. Even if 200 Spark tasks run, only 20 database round trips proceed at once.",
+            "vi": "Pooler khoá trần đồng thời ở 20 kết nối Postgres chứ không phải 400 hay 200. Dù 200 task Spark cùng chạy, chỉ có 20 vòng gọi database được phục vụ cùng lúc."
+          },
+          "c": {
+            "en": "10,000 s (5,000,000 × 0.002 s) assumes only 1 connection is active instead of dividing by the 20 concurrent pool connections.",
+            "vi": "Con số 10.000 giây (5.000.000 × 0,002 giây) giả định chỉ có 1 kết nối chạy thay vì chia cho 20 kết nối đồng thời của pool."
+          },
+          "d": {
+            "en": "1,000 MB divided by 200 MB/s is 5 s, not 50 s, and pre-sorted SSTables transfer as sequential byte streams rather than row-by-row RPCs.",
+            "vi": "1.000 MB chia cho 200 MB/giây bằng 5 giây chứ không phải 50 giây, và các file SSTable đã sắp xếp sẵn truyền như luồng byte tuần tự chứ không phải RPC từng dòng."
+          }
+        },
+        "reread": {
+          "anchor": "6-serving-batch-outputs-without-breaking-oltp",
+          "label": {
+            "en": "6. Serving batch outputs without breaking OLTP",
+            "vi": "6. Phục vụ đầu ra batch mà không đánh sập OLTP"
+          }
+        },
+        "say": {
+          "en": "Millions of individual network round trips are orders of magnitude slower than sequential bulk file transfers, even after adding a connection pooler.",
+          "vi": "Hàng triệu vòng gọi mạng lẻ tẻ luôn chậm hơn hàng trăm lần so với đẩy file hàng loạt tuần tự, ngay cả khi đã lắp thêm connection pooler."
+        }
+      },
+      "ref": "Post: 6. Serving batch outputs without breaking OLTP; Post: Two safe ways to serve batch outputs",
+      "verifiedBy": "python3 -c \"rows=5_000_000; mb=rows*200//1_000_000; rps=20/0.002; dw=rows/rps; bw=mb/200; print(mb, int(rps), int(dw), int(bw), int(dw/bw))\" -> 1000 10000 500 5 100"
+    },
+    {
+      "id": "s08q3",
+      "level": "analyze",
+      "track": "ai",
+      "type": "multi",
+      "difficulty": 4,
+      "topic": "Three demands of batch-to-serving and retry leakage",
+      "stem": {
+        "en": "An AI assistant advises replacing Venice with a nightly Spark job that deletes old rows in one live serving table and inserts the new `5,000,000` rows over 15 minutes:\n\n\"Once the job completes, shoppers see the new batch, and Spark retries guarantee a clean result.\"\n\nTick the two failures this design creates.",
+        "vi": "Một trợ lý AI khuyên thay Venice bằng một job Spark chạy đêm: xoá dữ liệu cũ trong một bảng phục vụ duy nhất rồi chèn `5.000.000` dòng mới trong 15 phút:\n\n\"Khi job chạy xong, khách hàng thấy ngay lô dữ liệu mới, và cơ chế retry của Spark đảm bảo kết quả sạch.\"\n\nChọn hai lỗi mà thiết kế này gây ra."
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Live readers see missing or half-written recommendations during the 15-minute write window.",
+            "vi": "Người dùng đang đọc thấy gợi ý bị thiếu hoặc ghi dở dang suốt cửa sổ 15 phút đang chạy."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Enabling ON CONFLICT DO UPDATE on each task makes the whole multi-task batch all-or-nothing.",
+            "vi": "Bật ON CONFLICT DO UPDATE trên từng task giúp toàn bộ job nhiều task đạt tính nguyên tử."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Nearline user clicks arriving after the batch started are lost unless replayed afterward.",
+            "vi": "Các lượt click nearline tới sau khi job batch bắt đầu bị mất nếu không được phát lại sau đó."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Serving stores must pause all live reads whenever an immutable version loads in the background.",
+            "vi": "Kho phục vụ buộc phải dừng mọi lệnh đọc thật mỗi khi có một bản bất biến nạp ở chế độ nền."
+          }
+        },
+        {
+          "id": "e",
+          "text": {
+            "en": "Keeping a previous version backup only helps by forcing Spark to recompute from scratch.",
+            "vi": "Giữ lại bản dự phòng của phiên bản trước chỉ hữu ích khi ép Spark tính lại từ vạch xuất phát."
+          }
+        }
+      ],
+      "answer": [
+        "a",
+        "c"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "A safe batch-to-serving pipeline must load a whole dataset without interrupting readers, allow instant rollback, and preserve writes that arrived after the batch started. Deleting and inserting in place exposes an inconsistent 15-minute window (and partial retries if tasks fail mid-run) while overwriting nearline item clicks that arrived while Spark ran—exactly what Venice solves with background Full Push plus nearline Kafka replay.",
+          "vi": "Một đường dẫn từ batch sang phục vụ an toàn phải nạp trọn dataset mà không làm gián đoạn luồng đọc, cho phép hoàn tác tức thì và giữ được các lượt ghi đến sau khi batch bắt đầu. Xoá rồi chèn trực tiếp tạo ra cửa sổ 15 phút thiếu nhất quán (kèm dữ liệu dở dang nếu task retry) và đè mất các lượt click nearline phát sinh trong lúc Spark chạy — đúng hai bài toán Venice giải bằng Full Push ở nền cộng phát lại nearline từ Kafka."
+        },
+        "whyWrong": {
+          "b": {
+            "en": "ON CONFLICT DO UPDATE only guards single-row idempotency; it gives zero dataset-level atomicity across 200 tasks or between deletes and inserts.",
+            "vi": "ON CONFLICT DO UPDATE chỉ bảo vệ ở mức từng dòng; nó không tạo ra tính nguyên tử cho cả dataset xuyên suốt 200 task hay giữa lệnh xoá và lệnh chèn."
+          },
+          "d": {
+            "en": "Background version loading keeps the current version serving live reads untouched until the new files are completely loaded and swapped.",
+            "vi": "Nạp phiên bản mới ở chế độ nền giữ cho phiên bản hiện tại tiếp tục phục vụ luồng đọc bình thường cho tới khi mọi file mới nạp xong và tráo con trỏ."
+          },
+          "e": {
+            "en": "Keeping the previous version as a backup lets the serving tier switch reads back instantly on bad data without waiting for Spark to rerun.",
+            "vi": "Giữ phiên bản trước làm dự phòng cho phép tầng phục vụ trỏ luồng đọc quay lại tức thì khi dữ liệu sai mà không phải chờ Spark chạy lại."
+          }
+        },
+        "reread": {
+          "anchor": "a-real-case-how-linkedin-serves-batch-built-data-with-venice",
+          "label": {
+            "en": "A real case: how LinkedIn serves batch-built data with Venice",
+            "vi": "Một ca thực tế: LinkedIn phục vụ dữ liệu do batch dựng bằng Venice"
+          }
+        },
+        "say": {
+          "en": "When AI proposes mutating a live serving table in place, check three requirements: atomic swap without partial windows, instant rollback, and replaying writes that arrived mid-batch.",
+          "vi": "Khi AI đề xuất sửa đè trực tiếp bảng phục vụ đang chạy, hãy kiểm tra ba điều kiện: tráo nguyên tử không lộ cửa sổ dở dang, rollback tức thì và phát lại các lượt ghi đến giữa lúc chạy batch."
+        }
+      },
+      "ref": "Post: A real case: how LinkedIn serves batch-built data with Venice"
+    },
+    {
+      "id": "s08q4",
+      "level": "evaluate",
+      "track": "interview",
+      "type": "scenario",
+      "difficulty": 5,
+      "topic": "Choosing the right serving architecture",
+      "stem": {
+        "en": "A platform serves two workloads:\n- Workload X: Spark recomputes `50,000,000` product recommendations daily, needs recent hourly clicks merged in, zero `p99` disruption during loads, and instant rollback if rankings degrade.\n- Workload Y: An hourly batch job emits `20,000` updated SKU rows to three separate search and OLAP clusters across a network boundary; each sink pulls at its own safe pace and hides new rows until the batch finishes.\n\nWhich architecture pair fits best?",
+        "vi": "Một nền tảng phục vụ hai bài toán:\n- Bài toán X: Spark tính lại `50.000.000` gợi ý sản phẩm mỗi ngày, cần gộp thêm click giờ gần nhất, không làm nhấp nhổm `p99` lúc nạp và rollback tức thì nếu chất lượng gợi ý tụt.\n- Bài toán Y: Một job batch hằng giờ xuất `20.000` dòng SKU thay đổi sang ba cụm search và OLAP tách biệt qua ranh giới mạng; mỗi đích tự kéo theo nhịp an toàn và ẩn dòng mới tới khi job báo xong.\n\nCặp kiến trúc nào phù hợp nhất?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Workload X: direct Spark UPSERTs to Postgres; Workload Y: bulk SSTables swapped per data center.",
+            "vi": "Bài toán X: Spark UPSERT thẳng vào Postgres; Bài toán Y: dựng SSTable tráo theo từng data center."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Workload X: Kafka DMZ with row deletes; Workload Y: direct Postgres writes into every sink.",
+            "vi": "Bài toán X: Kafka DMZ kèm lệnh xoá dòng; Bài toán Y: ghi thẳng vào Postgres ở từng hệ thống đích."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Workload X: bulk SSTables / Venice Full Push + replay; Workload Y: Kafka DMZ + commit signal.",
+            "vi": "Bài toán X: file SSTable / Venice Full Push + phát lại; Bài toán Y: vùng đệm Kafka DMZ + tín hiệu commit."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Workload X: bulk SSTables without nearline replay; Workload Y: shared connection pool across sinks.",
+            "vi": "Bài toán X: SSTable không cần phát lại nearline; Bài toán Y: dùng chung connection pool qua các đích."
+          }
+        }
+      ],
+      "answer": [
+        "c"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "Workload X replaces an entire large derived snapshot while still merging recent stream clicks and needing instant rollback—the exact fit for bulk-built immutable files / Venice Full Push plus nearline replay and version swap. Workload Y sends small incremental updates across a network security boundary to multiple search/OLAP consumers that pull at their own pace—the exact fit for a Kafka DMZ buffer plus a commit signal.",
+          "vi": "Bài toán X thay trọn một snapshot dẫn xuất khổng lồ nhưng vẫn phải gộp click gần thời gian thực và cần rollback tức thì — đúng sở trường của file bất biến dựng sẵn / Venice Full Push kèm phát lại nearline và tráo phiên bản. Bài toán Y đẩy cập nhật gia tăng nhỏ xuyên ranh giới mạng tới nhiều cụm search/OLAP tự kéo theo nhịp riêng — đúng sở trường của vùng đệm Kafka DMZ kèm tín hiệu commit."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "Direct Spark UPSERTs melt live Postgres on 50M rows, while building full SSTables for 20,000 incremental SKU changes across three independent search/OLAP sinks adds unnecessary rebuild overhead.",
+            "vi": "Spark UPSERT trực tiếp sẽ đánh sập Postgres sống trên 50 triệu dòng, còn dựng trọn bộ SSTable cho 20.000 dòng SKU thay đổi tới ba cụm search/OLAP lại tốn công dựng lại không cần thiết."
+          },
+          "b": {
+            "en": "Streaming 50M rows and deletes through Kafka lacks Venice's instant full-version rollback, and direct writes into each sink reintroduce pool saturation and security coupling across the network boundary.",
+            "vi": "Đẩy 50 triệu dòng kèm lệnh xoá qua Kafka thiếu cơ chế rollback nguyên bản tức thì như Venice, còn ghi thẳng vào từng đích làm tái diễn nghẽn pool và mất cách ly mạng."
+          },
+          "d": {
+            "en": "Omitting nearline replay drops shoppers' recent hourly clicks after each daily push, and sharing a direct database connection pool across sinks breaks DMZ isolation and atomicity.",
+            "vi": "Bỏ phát lại nearline làm rơi mất các lượt click trong giờ gần nhất sau mỗi lần push hằng ngày, còn nối thẳng connection pool xuyên các đích phá vỡ cách ly DMZ và tính nguyên tử."
+          }
+        },
+        "reread": {
+          "anchor": "two-safe-ways-to-serve-batch-outputs",
+          "label": {
+            "en": "Two safe ways to serve batch outputs",
+            "vi": "Hai cách an toàn để phục vụ đầu ra batch"
+          }
+        },
+        "say": {
+          "en": "Use a Kafka DMZ plus commit signal for incremental multi-sink updates, and bulk-built immutable files like Venice Full Push with replay when swapping large snapshots with instant rollback.",
+          "vi": "Dùng vùng đệm Kafka DMZ kèm tín hiệu commit cho cập nhật gia tăng tới nhiều đích, và dùng file bất biến dựng sẵn như Venice Full Push kèm phát lại khi cần tráo snapshot lớn và rollback tức thì."
+        }
+      },
+      "ref": "Post: Two safe ways to serve batch outputs; Post: A real case: how LinkedIn serves batch-built data with Venice"
+    },
+    {
+      "id": "s08q5",
+      "level": "evaluate",
+      "track": "ai",
+      "type": "ai-advice",
+      "difficulty": 5,
+      "topic": "Multi-DC Venice swap and rollback order",
+      "stem": {
+        "en": "An AI assistant configures a Venice hybrid dataset across two data centers and proposes:\n\n\"To save disk and ship faster, delete the previous backup version as soon as the Push Job starts loading, swap live reads before replaying recent nearline clicks so traffic switches earlier, and turn off version retention because Full Push files are immutable.\"\n\nWhich assessment catches every flaw in this checklist?",
+        "vi": "Một trợ lý AI cấu hình dataset Venice hybrid qua hai data center và đề xuất:\n\n\"Để tiết kiệm đĩa và phát hành nhanh hơn, hãy xoá bản backup trước đó ngay khi Push Job bắt đầu nạp, tráo luồng đọc trước khi phát lại các lượt click nearline gần đây để chuyển lưu lượng sớm, và tắt lưu phiên bản cũ vì file Full Push vốn bất biến.\"\n\nĐánh giá nào bắt trúng mọi lỗ hổng trong checklist này?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Delete the backup only when Push Job starts, swap DC East first, and replay nearline clicks afterward.",
+            "vi": "Chỉ xoá backup khi Push Job bắt đầu, tráo DC East trước rồi phát lại các lượt click nearline sau đó."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Keep the old version live until load and nearline replay finish per DC, then swap and retain backup.",
+            "vi": "Giữ bản cũ chạy tới khi nạp nền và phát lại nearline xong ở từng DC, rồi mới tráo và giữ bản dự phòng."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Swap reads before loading finishes because immutable Push Job files eliminate bad recommendation bugs.",
+            "vi": "Tráo luồng đọc trước khi nạp xong vì file bất biến của Push Job loại bỏ hoàn toàn lỗi gợi ý sai."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Replay nearline clicks onto the previous version before swapping, then purge the old backup right away.",
+            "vi": "Phát lại lượt click nearline lên phiên bản cũ trước khi tráo, rồi xoá ngay bản dự phòng ngay sau đó."
+          }
+        }
+      ],
+      "answer": [
+        "b"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "In Venice, each data center keeps serving the current live version while the new version loads in the background, replays recent nearline writes on top of that new version, and only then atomically swaps reads to it. Retaining the previous version as a backup stays essential: immutable files protect against disk corruption, not human or model bugs that ship bad recommendations.",
+          "vi": "Trong Venice, mỗi data center tiếp tục đọc từ phiên bản đang chạy trong khi phiên bản mới nạp ở chế độ nền, phát lại các lượt ghi nearline mới nhất đè lên bản mới đó, rồi mới tráo luồng đọc sang nó một cách nguyên tử. Việc giữ bản trước làm dự phòng vẫn bắt buộc: file bất biến chỉ chống hỏng giữa chừng chứ không ngăn được lỗi code hay mô hình đẩy ra gợi ý sai."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "Deleting the backup when the Push Job starts leaves readers with nothing if the push fails or serves bad rankings, and replaying nearline clicks after swapping exposes stale state to live traffic.",
+            "vi": "Xoá backup ngay lúc Push Job bắt đầu làm mất đường lùi nếu push hỏng hoặc ra gợi ý tệ, còn phát lại click nearline sau khi tráo sẽ khiến người dùng thật đọc phải dữ liệu thiếu cập nhật."
+          },
+          "c": {
+            "en": "Swapping before background loading finishes serves an incomplete dataset, and immutability never catches semantic bugs like bad model weights or wrong join keys.",
+            "vi": "Tráo trước khi nạp nền xong sẽ phục vụ một dataset chưa hoàn chỉnh, và tính bất biến không bao giờ bắt được lỗi logic như sai trọng số mô hình hay nhầm khoá join."
+          },
+          "d": {
+            "en": "Nearline writes must replay onto the new version before the swap so the new version merges batch and stream data; purging the backup afterward removes instant rollback.",
+            "vi": "Lượt ghi nearline phải được phát lại lên phiên bản mới trước khi tráo để bản mới hoà dữ liệu batch và stream; xoá bản dự phòng sau đó làm mất khả năng rollback tức thì."
+          }
+        },
+        "reread": {
+          "anchor": "a-real-case-how-linkedin-serves-batch-built-data-with-venice",
+          "label": {
+            "en": "A real case: how LinkedIn serves batch-built data with Venice",
+            "vi": "Một ca thực tế: LinkedIn phục vụ dữ liệu do batch dựng bằng Venice"
+          }
+        },
+        "say": {
+          "en": "When AI optimizes a Venice push checklist, verify the order: load in background, replay nearline writes onto the new version, swap per DC, and keep the old version for rollback.",
+          "vi": "Khi AI tối ưu checklist đẩy dữ liệu Venice, hãy kiểm tra đúng thứ tự: nạp nền, phát lại nearline lên bản mới, tráo theo từng DC và giữ lại bản cũ để rollback."
+        }
+      },
+      "ref": "Post: A real case: how LinkedIn serves batch-built data with Venice"
+    }
+  ]
+}

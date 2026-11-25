@@ -3,6 +3,36 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-25 — Quiz: câu tính toán không bắt buộc
+
+- Khang quyết: không phải tình huống nào cũng cần câu tính số liệu. Chỉ thêm khi tình huống thật sự xoay quanh một con số; bộ về phán đoán, thiết kế, đạo đức có thể không có câu tính nào.
+- Đã sửa: `specs/2026-11-20-ddia-quiz-design.md`, rule 10 của `specs/2026-11-20-ddia-quiz-authoring-brief.md` (bỏ luôn nhãn "illustrative" cũ), bước brief trong plan các bài còn lại.
+
+## 2026-11-25 — Quiz DDIA đợt 3: stream, unbundling, ethics (3 bài × 8 bộ × 5 câu) — xong cả series DDIA
+
+- **Đã làm (nhánh `feat/ddia-quiz-wave-3`, cắt từ `main`):** 3 agent Sonnet soạn brief `docs/superpowers/specs/2026-11-25-ddia-quiz-authoring-brief-{stream,unbundling,ethics}.md`; 24 agent Sonnet (mỗi agent 1 bộ + 1 figure), chạy tối đa ~10 cùng lúc. 120 câu, 24 figure mới. Khai báo 3 bài `code` trong `domains.ts` (đặt ngay dưới dòng `// DDIA series` để không đụng dòng của đợt 2 khi merge).
+- **Lead review:** đọc 3 brief, thêm mục "Cross-post guard" vào brief stream vì set 01 (dual write PostgreSQL → Elasticsearch) và set 07 (replay join theo tỷ giá) trùng với brief unbundling. Validator `ok` 24 bộ; đọc ảnh dark VI cả 24 bộ. Sửa: `DeployGapBuckets` (icon đặt như góc trên-trái nên bị cắt mép trái), `LostReplyRetry` (chữ "Mất sóng" sát icon), `LedgerReconcile` + `OffsetGuardReplay` + `DualViewCutover` (số VI viết kiểu EN), 21 dòng `vi` trong JSON đổi `50,000` → `50.000` (công thức trong backtick có số thập phân giữ nguyên).
+- **Sửa chung (commit riêng):** `.quiz-questions` thêm `grid-template-columns: minmax(0, 1fr)`; trước đó một dòng code dài trong câu hỏi kéo rộng cả cột câu hỏi, đáp án bị cắt bên phải (ảnh hưởng mọi quiz có code dài, không riêng đợt này).
+- **Ai quyết:** user ("chạy tiếp đợt 3"). Bài ethics khai báo `code` (nói về cách kỹ sư xây hệ thống dữ liệu) — AI quyết, chờ user xác nhận.
+- **Kiểm tra:** `node --test` 65 pass, build 77 trang. Chưa xem ảnh từng câu q1–q5 của mọi bộ, chưa kiểm 360px.
+- **Lỗi/ý lỏng trong bài gốc (agent brief phát hiện, chưa sửa bài):** stream: chú thích hình Flink gọi event 12, 17 là trễ nhưng hình không có event trễ; watermark "earlier than t" vs Flink "at or before t"; tombstone Kafka bị xóa sau `delete.retention.ms`, không phải "khi đã lan truyền"; Pub/Sub xếp vào nhóm AMQP/JMS chưa kiểm. Unbundling: EN nói VisiCalc, VI nói Excel; VI có thêm một câu trích mà EN không có; "Stripe yêu cầu UUID" không có trong nguồn; RFC 9162 là Experimental. Ethics: ProPublica nói "hơn 7.000" bị cáo, bài ghi 10.000; câu trích Schneier "poor civic hygiene" không tìm thấy trong bài luận được dẫn; VI đoạn Amazon ("để nhận ra nam giới") khác EN; VI GDPR Art. 22 mạnh hơn EN; chi tiết vụ Hà Lan (hai quốc tịch, số tiền) không có trong trang Amnesty được dẫn; nghiên cứu giá xăng là working paper CESifo 2020, không phải "JPE 2024".
+- **Chưa chốt:** PR #69 (đợt 2) và PR đợt 3 chờ user merge; `domains.ts` hai nhánh sửa khác chỗ. CHANGELOG và file plan sẽ xung đột nhẹ với đợt 2 (cùng chèn entry đầu file / cùng sửa dòng checkbox) — giữ cả hai khi merge.
+
+## 2026-11-25 — Quiz DDIA đợt 2: trouble, consensus, batch (3 bài × 8 bộ × 5 câu)
+
+- **Đã làm (nhánh `feat/ddia-quiz-wave-2`):** 3 brief `docs/superpowers/specs/2026-11-25-ddia-quiz-authoring-brief-{trouble,consensus,batch}.md`, 24 bộ câu hỏi (120 câu), 24 figure SVG mới; khai báo 3 bài `code` trong `domains.ts`. Một phiên trước soạn xong nhưng chưa commit; phiên này kiểm, sửa và commit (mỗi bài 1 commit).
+- **Lead review:** validator `ok` cả 24 bộ; chụp 72 ảnh (light EN, light VI, dark VI), đọc đủ 24 ảnh dark VI + vài ảnh light EN. Sửa 2 hình: `TimeoutSweep` (nhãn "100 ms" đè đường RTT rơi xuống ở giây 2,6 → dời vào giữa vùng nghẽn; icon node đè dòng chữ thứ hai → thu nhỏ, dời lên), `PipeSortSpill` (chữ `awk` / `sort -S 8M` sát icon → lùi 4px).
+- **Ai quyết:** user ("làm hết luôn").
+- **Kiểm tra:** `node --test` 65 pass, build 77 trang.
+- **Chưa chốt / yếu:** chưa xem từng câu q1–q5 (`--questions`) và 360px; vài icon trong `RaftTermElection` hơi lấn mép ô (nhỏ, để nguyên). Lead chưa mở lại nguồn của từng hook (GitHub 21/10/2018, Cloudflare leap second 2017, Jepsen etcd 3.4.3, LinkedIn Venice...); dựa vào `ref` agent đã ghi. Đợt 3 (stream, unbundling, ethics) chưa bắt đầu.
+
+## 2026-11-25 — Xuất bản 7 bài draft sẵn sàng (Backend 5–7, Go 20, AI Trading 1–3)
+
+- **Đã làm (branch `content/publish-ready-drafts`):** bật `draft: false` cho 7 bài đã hoàn thiện trên `main`: Backend Wave B (`backend-database-access-layer`, `backend-async-concurrency-workers`, `backend-auth-oauth2-jwt`), Go bài 20 (`go-interview-questions-output-live-coding` — chốt trọn bộ 20/20 bài series `golang`), và 3 bài đầu AI Trading (`ai-trading-the-market`, `ai-trading-signals`, `ai-trading-data` kèm kích hoạt 3 trang quiz tương ứng + card series `ai-trading` và category `ai`).
+- **Ai quyết:** user yêu cầu hoàn tất luôn cả 4 đầu việc (trong đó có xuất bản các bài draft đang chờ).
+- **Kiểm tra:** `npm run build` 85 pages (từ 74 → 85: +7 bài, +3 trang quiz AI Trading, +1 category `/blog/category/ai/`), `node --test` 59/59 pass; kiểm toàn bộ link nội bộ trong 7 bài đều trỏ tới bài đã xuất bản.
+- **Chưa chốt:** PR chờ user merge vào `main`.
+
 ## 2026-11-25 — Wave C series backend: hoàn tất bài 8–10 (draft)
 
 - **Đã làm (nhánh `feat/backend-wave-c`, tổng hợp từ 3 worktree `backend-post-08..10`):**
