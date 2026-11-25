@@ -3,6 +3,21 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-25 — Quiz: câu tính toán không bắt buộc
+
+- Khang quyết: không phải tình huống nào cũng cần câu tính số liệu. Chỉ thêm khi tình huống thật sự xoay quanh một con số; bộ về phán đoán, thiết kế, đạo đức có thể không có câu tính nào.
+- Đã sửa: `specs/2026-11-20-ddia-quiz-design.md`, rule 10 của `specs/2026-11-20-ddia-quiz-authoring-brief.md` (bỏ luôn nhãn "illustrative" cũ), bước brief trong plan các bài còn lại.
+
+## 2026-11-25 — Quiz DDIA đợt 3: stream, unbundling, ethics (3 bài × 8 bộ × 5 câu) — xong cả series DDIA
+
+- **Đã làm (nhánh `feat/ddia-quiz-wave-3`, cắt từ `main`):** 3 agent Sonnet soạn brief `docs/superpowers/specs/2026-11-25-ddia-quiz-authoring-brief-{stream,unbundling,ethics}.md`; 24 agent Sonnet (mỗi agent 1 bộ + 1 figure), chạy tối đa ~10 cùng lúc. 120 câu, 24 figure mới. Khai báo 3 bài `code` trong `domains.ts` (đặt ngay dưới dòng `// DDIA series` để không đụng dòng của đợt 2 khi merge).
+- **Lead review:** đọc 3 brief, thêm mục "Cross-post guard" vào brief stream vì set 01 (dual write PostgreSQL → Elasticsearch) và set 07 (replay join theo tỷ giá) trùng với brief unbundling. Validator `ok` 24 bộ; đọc ảnh dark VI cả 24 bộ. Sửa: `DeployGapBuckets` (icon đặt như góc trên-trái nên bị cắt mép trái), `LostReplyRetry` (chữ "Mất sóng" sát icon), `LedgerReconcile` + `OffsetGuardReplay` + `DualViewCutover` (số VI viết kiểu EN), 21 dòng `vi` trong JSON đổi `50,000` → `50.000` (công thức trong backtick có số thập phân giữ nguyên).
+- **Sửa chung (commit riêng):** `.quiz-questions` thêm `grid-template-columns: minmax(0, 1fr)`; trước đó một dòng code dài trong câu hỏi kéo rộng cả cột câu hỏi, đáp án bị cắt bên phải (ảnh hưởng mọi quiz có code dài, không riêng đợt này).
+- **Ai quyết:** user ("chạy tiếp đợt 3"). Bài ethics khai báo `code` (nói về cách kỹ sư xây hệ thống dữ liệu) — AI quyết, chờ user xác nhận.
+- **Kiểm tra:** `node --test` 65 pass, build 77 trang. Chưa xem ảnh từng câu q1–q5 của mọi bộ, chưa kiểm 360px.
+- **Lỗi/ý lỏng trong bài gốc (agent brief phát hiện, chưa sửa bài):** stream: chú thích hình Flink gọi event 12, 17 là trễ nhưng hình không có event trễ; watermark "earlier than t" vs Flink "at or before t"; tombstone Kafka bị xóa sau `delete.retention.ms`, không phải "khi đã lan truyền"; Pub/Sub xếp vào nhóm AMQP/JMS chưa kiểm. Unbundling: EN nói VisiCalc, VI nói Excel; VI có thêm một câu trích mà EN không có; "Stripe yêu cầu UUID" không có trong nguồn; RFC 9162 là Experimental. Ethics: ProPublica nói "hơn 7.000" bị cáo, bài ghi 10.000; câu trích Schneier "poor civic hygiene" không tìm thấy trong bài luận được dẫn; VI đoạn Amazon ("để nhận ra nam giới") khác EN; VI GDPR Art. 22 mạnh hơn EN; chi tiết vụ Hà Lan (hai quốc tịch, số tiền) không có trong trang Amnesty được dẫn; nghiên cứu giá xăng là working paper CESifo 2020, không phải "JPE 2024".
+- **Chưa chốt:** PR #69 (đợt 2) và PR đợt 3 chờ user merge; `domains.ts` hai nhánh sửa khác chỗ. CHANGELOG và file plan sẽ xung đột nhẹ với đợt 2 (cùng chèn entry đầu file / cùng sửa dòng checkbox) — giữ cả hai khi merge.
+
 ## 2026-11-24 — Dọn nhãn "minh họa" khỏi hình và bài blog; sửa nút Next; thay 2 câu quiz trùng
 
 - **Đã làm (3 PR, mỗi việc một nhánh):** (1) `fix/quiz-next-button` (#64): nút Next trên trang quiz không còn `sticky`, hết đè lên dòng "Correct answer". (2) `fix/quiz-duplicate-cases` (#65): thay s02q4 (giờ hỏi vốn hóa không phải tiền mặt công ty đang giữ) và s08q3 (tiền đi từ người mua sang người bán, lợi nhuận FPT không đổi) vì trùng s03q5 và s03q3. (3) `chore/drop-illustrative-labels`: bỏ các nhãn "illustrative / minh họa / số bịa / made-up" trong chữ hiển thị của ~115 file (hình SVG, demo, 6 bài blog); số bịa thì nêu giả định trong câu ("Giả sử ..."). Không sửa comment code, không đụng AnimatedFlow / DemoFrame / DiagramIcon, giữ EN và VI đồng bộ. Hai hình bị xóa phần tử chú thích (`StorageBVectorSpace`, `MarketLimitQueue`; `StorageBitcask` bỏ nhãn "example values"); `MarketLimitQueue` thu viewBox 430 → 400.

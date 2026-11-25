@@ -1,0 +1,415 @@
+{
+  "id": "set-08",
+  "title": {
+    "en": "Crash, restart, count twice",
+    "vi": "Sập, chạy lại, đếm hai lần"
+  },
+  "context": {
+    "text": {
+      "en": "Suppose a stream job reads partition 7 of a Kafka topic and keeps a counter in PostgreSQL.\n• The counter for partition 7 reads `1,000`. That total covers every record up to offset 100.\n• The last committed offset is `100`: records up to 100 are done.\n• For each record, the job runs one `UPDATE` that adds `1` to the counter.\n• It writes records 101 to 105, then crashes before it commits offset 105.\nA replacement job starts and reads from the last committed offset.",
+      "vi": "Giả sử một stream job đọc partition 7 của một topic Kafka và giữ một counter trong PostgreSQL.\n• Counter của partition 7 đang là `1.000`. Con số này đã tính mọi bản ghi tới offset 100.\n• Offset đã commit gần nhất là `100`: các bản ghi tới 100 đã xong.\n• Với mỗi bản ghi, job chạy một lệnh `UPDATE` cộng `1` vào counter.\n• Nó ghi các bản ghi 101 đến 105, rồi sập trước khi commit offset 105.\nMột job thay thế khởi động và đọc từ offset đã commit gần nhất."
+    },
+    "media": [
+      {
+        "kind": "figure",
+        "component": "OffsetGuardReplay",
+        "alt": {
+          "en": "Partition 7 as boxes for offsets 99 to 106: offset 100 is the last committed one, records 101 to 105 are already written to the PostgreSQL counter, and the job crashes before committing 105.",
+          "vi": "Partition 7 dưới dạng các ô offset từ 99 đến 106: offset 100 là offset đã commit gần nhất, các bản ghi 101 đến 105 đã được ghi vào counter PostgreSQL, và job sập trước khi commit 105."
+        }
+      }
+    ]
+  },
+  "questions": [
+    {
+      "id": "s08q1",
+      "level": "apply",
+      "track": "ai",
+      "type": "ai-review",
+      "difficulty": 3,
+      "topic": "Commit after write",
+      "stem": {
+        "en": "An AI assistant wrote the loop below and says: \"Offsets are committed after the writes, so every record counts exactly once.\" The job dies right after the `for` loop ends, before `commitSync()` runs. What happens next?",
+        "vi": "Một AI viết vòng lặp bên dưới và nói: \"Offset được commit sau khi ghi, nên mỗi bản ghi chỉ được đếm đúng một lần.\" Job chết ngay sau khi vòng `for` kết thúc, trước khi `commitSync()` chạy. Chuyện gì xảy ra tiếp theo?"
+      },
+      "media": [
+        {
+          "kind": "code",
+          "lang": "java",
+          "code": "for (ConsumerRecord<String, String> r : consumer.poll(Duration.ofSeconds(1))) {\n    db.update(\"UPDATE counters SET total = total + 1 WHERE partition_id = ?\", r.partition());\n}\nconsumer.commitSync();"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "The five PostgreSQL updates roll back, because the commit call never ran.",
+            "vi": "Năm lệnh update PostgreSQL bị rollback, vì lệnh commit chưa bao giờ chạy."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "The replacement resumes after offset 105, since PostgreSQL already holds the writes.",
+            "vi": "Job thay thế đọc tiếp sau offset 105, vì PostgreSQL đã giữ các lần ghi."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "The replacement starts again at 101, so those five records add to the counter twice.",
+            "vi": "Job thay thế bắt đầu lại từ 101, nên năm bản ghi đó cộng vào counter hai lần."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "The group stays blocked until someone commits offset 105 by hand, so nothing repeats.",
+            "vi": "Group đứng yên tới khi ai đó commit offset 105 bằng tay, nên không gì bị lặp."
+          }
+        }
+      ],
+      "answer": ["c"],
+      "explanation": {
+        "whyRight": {
+          "en": "The write to PostgreSQL and the offset commit are two separate steps, and nothing ties them together. A crash between them leaves the counter updated and the committed offset still at 100. The replacement resumes from 100, reads 101 to 105 again, and adds them again. Committing after the writes gives at-least-once, not exactly-once.",
+          "vi": "Lần ghi vào PostgreSQL và lần commit offset là hai bước riêng, không có gì buộc chúng lại với nhau. Một cú sập giữa hai bước để counter đã cập nhật mà offset đã commit vẫn là 100. Job thay thế đọc tiếp từ 100, đọc lại 101 đến 105 và cộng lại lần nữa. Commit sau khi ghi cho at-least-once, không phải exactly-once."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "Each `UPDATE` was already applied in PostgreSQL on its own. The Kafka commit call has no link to those transactions, so it cannot undo them.",
+            "vi": "Mỗi lệnh `UPDATE` đã được áp dụng trong PostgreSQL một cách độc lập. Lệnh commit của Kafka không liên quan gì tới các transaction đó nên không thể hoàn tác chúng."
+          },
+          "b": {
+            "en": "Kafka knows only the committed offset, not what the job wrote elsewhere. It cannot see PostgreSQL, so the replacement restarts at the committed position.",
+            "vi": "Kafka chỉ biết offset đã commit, không biết job đã ghi gì ở nơi khác. Nó không nhìn thấy PostgreSQL, nên job thay thế bắt đầu lại ở vị trí đã commit."
+          },
+          "d": {
+            "en": "Nothing waits for a human. When a consumer dies, its work is handed to a replacement, which resumes from the last commit without any manual step.",
+            "vi": "Không có gì chờ con người. Khi một consumer chết, phần việc được giao cho consumer thay thế, và nó đọc tiếp từ lần commit gần nhất mà không cần thao tác tay."
+          }
+        },
+        "reread": {
+          "anchor": "consumer-groups-offsets-and-retention-math",
+          "label": {
+            "en": "Consumer groups, offsets, and retention math",
+            "vi": "Consumer group, offset và bài toán dung lượng lưu trữ"
+          }
+        },
+        "say": {
+          "en": "When AI says \"commit after the write is exactly-once\", check the gap between the write and the commit: a crash there means replay.",
+          "vi": "Khi AI nói \"commit sau khi ghi là exactly-once\", hãy kiểm tra khoảng giữa lần ghi và lần commit: sập ở đó nghĩa là phải replay."
+        }
+      },
+      "ref": "Post: Consumer groups, offsets, and retention math"
+    },
+    {
+      "id": "s08q2",
+      "level": "apply",
+      "track": "interview",
+      "type": "scenario",
+      "difficulty": 4,
+      "topic": "Rerunning a failed microbatch",
+      "stem": {
+        "en": "Suppose the same counter is fed by microbatches instead. A batch holds records 101 to 105 and adds `1` to the counter for each record. It crashes right after record 103 has been written, and the engine reruns the whole batch from record 101. The counter read `1,000` before the batch.\n- `counter after the rerun = counter at the crash + records in the rerun batch`\nWhat does the counter read when the rerun finishes?",
+        "vi": "Giả sử counter đó được nuôi bằng microbatch. Một batch chứa các bản ghi 101 đến 105 và cộng `1` vào counter cho mỗi bản ghi. Nó sập ngay sau khi bản ghi 103 được ghi, và engine chạy lại cả batch từ bản ghi 101. Counter đọc `1.000` trước batch.\n- `counter after the rerun = counter at the crash + records in the rerun batch`\nKhi lần chạy lại kết thúc, counter đọc bao nhiêu?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "1,008, because the three writes before the crash stay in PostgreSQL.",
+            "vi": "1,008, vì ba lần ghi trước khi sập vẫn nằm trong PostgreSQL."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "1,005, because a rerun of a fixed batch gives the same total as a clean run.",
+            "vi": "1,005, vì chạy lại một batch cố định cho cùng tổng như một lần chạy sạch."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "1,003, because the engine replaces the half-done batch with the rerun result.",
+            "vi": "1,003, vì engine thay batch làm dở bằng kết quả của lần chạy lại."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "1,010, because all five writes had already landed when the batch crashed.",
+            "vi": "1,010, vì cả năm lần ghi đã vào xong khi batch sập."
+          }
+        }
+      ],
+      "answer": ["a"],
+      "explanation": {
+        "whyRight": {
+          "en": "Before the crash the counter was `1,000 + 3 = 1,003`, because three updates had landed. The rerun reads all five records again and adds five more: `1,003 + 5 = 1,008`. Records 101, 102 and 103 are counted twice. A microbatch is deterministic, but its `+1` writes to PostgreSQL are side effects that the engine cannot undo.",
+          "vi": "Trước khi sập, counter là `1.000 + 3 = 1.003`, vì ba lệnh update đã vào. Lần chạy lại đọc cả năm bản ghi và cộng thêm năm: `1.003 + 5 = 1.008`. Các bản ghi 101, 102 và 103 bị đếm hai lần. Microbatch có tính tất định, nhưng các lệnh `+1` vào PostgreSQL là tác dụng phụ mà engine không hoàn tác được."
+        },
+        "whyWrong": {
+          "b": {
+            "en": "This treats the batch as pure. Re-reading the same input is repeatable, but the writes to an outside database stack on top of what the crashed run already did.",
+            "vi": "Cách nghĩ này coi batch là thuần. Đọc lại cùng đầu vào thì lặp lại được, nhưng các lần ghi vào database bên ngoài cộng chồng lên những gì lần chạy sập đã làm."
+          },
+          "c": {
+            "en": "The engine can discard its own batch state, but it cannot reach into PostgreSQL and erase updates that already committed there.",
+            "vi": "Engine có thể bỏ trạng thái batch của chính nó, nhưng không thể chui vào PostgreSQL xoá các update đã commit ở đó."
+          },
+          "d": {
+            "en": "Only three records were written before the crash, not five. Counting all five at the crash point adds two writes that never happened.",
+            "vi": "Chỉ ba bản ghi được ghi trước khi sập, không phải năm. Tính cả năm tại điểm sập là thêm hai lần ghi chưa từng xảy ra."
+          }
+        },
+        "reread": {
+          "anchor": "fault-tolerance-checkpoints-barriers-and-idempotent-sinks",
+          "label": {
+            "en": "Fault tolerance: checkpoints, barriers, and idempotent sinks",
+            "vi": "Chịu lỗi: checkpoint, barrier và sink bất biến"
+          }
+        },
+        "say": {
+          "en": "A rerun batch is repeatable, but the writes it already sent outside are not undone, so the total counts those records twice.",
+          "vi": "Chạy lại batch thì lặp lại được, nhưng những lần ghi nó đã gửi ra ngoài không bị hoàn tác, nên tổng đếm các bản ghi đó hai lần."
+        }
+      },
+      "ref": "Post: Fault tolerance: checkpoints, barriers, and idempotent sinks",
+      "verifiedBy": "python3 -c \"c=1000+3; print(c, c+5)\"  ->  1003 1008"
+    },
+    {
+      "id": "s08q3",
+      "level": "analyze",
+      "track": "ai",
+      "type": "multi",
+      "difficulty": 4,
+      "topic": "What transactions and checkpoints cover",
+      "stem": {
+        "en": "An AI assistant says: \"Turn on Kafka transactions and checkpoints, and both the PostgreSQL counter and the confirmation email become exactly-once.\" Which two statements about these tools are true?",
+        "vi": "Một AI nói: \"Bật giao dịch Kafka và checkpoint thì cả counter PostgreSQL lẫn email xác nhận đều thành exactly-once.\" Hai phát biểu nào về các công cụ này là đúng?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Restoring a checkpoint makes the replacement skip writes the old job already sent to PostgreSQL.",
+            "vi": "Khôi phục checkpoint khiến job thay thế bỏ qua các lần ghi mà job cũ đã gửi tới PostgreSQL."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "A Kafka transaction commits output records in several partitions and the consumed offsets as one unit.",
+            "vi": "Một giao dịch Kafka commit các bản ghi đầu ra ở nhiều partition và các offset đã đọc như một khối."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Aborting a Kafka transaction also rolls back an update already made to PostgreSQL.",
+            "vi": "Huỷ một giao dịch Kafka cũng rollback một update đã thực hiện trên PostgreSQL."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "An email sent before the crash stays sent, and neither tool can take it back.",
+            "vi": "Email đã gửi trước khi sập vẫn là đã gửi, và không công cụ nào lấy lại được."
+          }
+        },
+        {
+          "id": "e",
+          "text": {
+            "en": "Microbatching avoids repeated side effects, because a rerun batch never reads the same records.",
+            "vi": "Microbatching tránh lặp tác dụng phụ, vì batch chạy lại không bao giờ đọc cùng các bản ghi."
+          }
+        }
+      ],
+      "answer": ["b", "d"],
+      "explanation": {
+        "whyRight": {
+          "en": "A Kafka transaction makes writes to several partitions, plus the offsets consumed in that read-process-write step, succeed or fail together. That atomicity lives inside Kafka. An email or a PostgreSQL update is outside it, so once it has happened, neither a transaction abort nor a checkpoint restore can reverse it. That is why the AI's claim covers only the part inside the pipeline.",
+          "vi": "Một giao dịch Kafka khiến các lần ghi vào nhiều partition, cùng các offset đã đọc trong bước đọc-xử lý-ghi đó, thành công hoặc thất bại cùng nhau. Tính nguyên tử này nằm bên trong Kafka. Email hay update PostgreSQL nằm ngoài nó, nên khi đã xảy ra thì cả việc huỷ giao dịch lẫn khôi phục checkpoint đều không đảo ngược được. Vì thế lời AI chỉ đúng cho phần nằm trong pipeline."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "A restore rewinds the engine's own state and the source position. It then replays records, so writes to an outside store get repeated, not skipped.",
+            "vi": "Khôi phục tua lại trạng thái của chính engine và vị trí nguồn. Sau đó nó phát lại các bản ghi, nên các lần ghi ra kho bên ngoài bị lặp chứ không bị bỏ qua."
+          },
+          "c": {
+            "en": "A Kafka transaction does not include PostgreSQL. Aborting it cancels Kafka writes and offsets only; the database commit stays.",
+            "vi": "Giao dịch Kafka không bao gồm PostgreSQL. Huỷ nó chỉ huỷ các lần ghi và offset trong Kafka; lần commit ở database vẫn còn."
+          },
+          "e": {
+            "en": "A failed batch is rerun from its start, so it does read the same records again. The earlier side effects of that batch are repeated with it.",
+            "vi": "Batch lỗi được chạy lại từ đầu, nên nó vẫn đọc lại cùng các bản ghi. Các tác dụng phụ trước đó của batch cũng bị lặp theo."
+          }
+        },
+        "reread": {
+          "anchor": "fault-tolerance-checkpoints-barriers-and-idempotent-sinks",
+          "label": {
+            "en": "Fault tolerance: checkpoints, barriers, and idempotent sinks",
+            "vi": "Chịu lỗi: checkpoint, barrier và sink bất biến"
+          }
+        },
+        "say": {
+          "en": "When AI says a tool makes a pipeline exactly-once, ask where the tool's atomicity ends and what side effect sits outside it.",
+          "vi": "Khi AI nói một công cụ làm pipeline thành exactly-once, hãy hỏi tính nguyên tử của công cụ đó dừng ở đâu và tác dụng phụ nào nằm ngoài nó."
+        }
+      },
+      "ref": "Post: Fault tolerance: checkpoints, barriers, and idempotent sinks; https://cwiki.apache.org/confluence/display/KAFKA/KIP-98+-+Exactly+Once+Delivery+and+Transactional+Messaging"
+    },
+    {
+      "id": "s08q4",
+      "level": "evaluate",
+      "track": "interview",
+      "type": "scenario",
+      "difficulty": 5,
+      "topic": "Making the sink safe to replay",
+      "stem": {
+        "en": "The team wants the PostgreSQL counter for partition 7 to count each record once, even though the job may replay records after any crash. Only this job writes that row. Which design stays correct after every crash and replay?",
+        "vi": "Nhóm muốn counter PostgreSQL của partition 7 đếm mỗi bản ghi đúng một lần, dù job có thể replay bản ghi sau bất kỳ cú sập nào. Chỉ job này ghi vào dòng đó. Thiết kế nào vẫn đúng sau mọi lần sập và replay?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Keep a set of applied offsets in the job's memory and skip any offset already in it.",
+            "vi": "Giữ một tập các offset đã áp dụng trong bộ nhớ của job và bỏ qua offset nào đã có trong đó."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Commit the Kafka offset more often, so the replay window shrinks to one record.",
+            "vi": "Commit offset Kafka thường xuyên hơn, để khoảng replay co lại còn một bản ghi."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Turn on Kafka transactions for the consumer, so an abort undoes the counter update.",
+            "vi": "Bật giao dịch Kafka cho consumer, để việc huỷ giao dịch hoàn tác cả update counter."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Keep the offset in the counter row; one write sets both, only if the offset is newer.",
+            "vi": "Giữ offset ngay trong dòng counter; một lần ghi đặt cả hai, chỉ khi offset mới hơn."
+          }
+        }
+      ],
+      "answer": ["d"],
+      "explanation": {
+        "whyRight": {
+          "en": "Store the last applied offset in the counter row and update total and offset in one atomic write that applies only when the incoming offset is newer. If the job replays 101 to 105, the row already holds a higher offset, so those writes do nothing. The check survives restarts because it lives in PostgreSQL, next to the effect. It works here because one partition writes that row.",
+          "vi": "Lưu offset đã áp dụng gần nhất trong dòng counter, và cập nhật total cùng offset trong một lần ghi nguyên tử chỉ có hiệu lực khi offset tới mới hơn. Nếu job replay 101 đến 105, dòng đó đã giữ offset cao hơn, nên các lần ghi này không làm gì. Phép kiểm tra sống sót qua restart vì nó nằm trong PostgreSQL, ngay cạnh tác dụng. Cách này đúng ở đây vì chỉ một partition ghi vào dòng đó."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "Memory dies with the crashed process. The replacement starts with an empty set and counts the replayed records again.",
+            "vi": "Bộ nhớ chết cùng tiến trình đã sập. Job thay thế bắt đầu với tập rỗng và đếm lại các bản ghi bị replay."
+          },
+          "b": {
+            "en": "A smaller window is still a window. A crash between a write and its commit still replays that record, so duplicates remain possible.",
+            "vi": "Cửa sổ nhỏ hơn vẫn là một cửa sổ. Sập giữa lần ghi và lần commit của nó vẫn replay bản ghi đó, nên trùng lặp vẫn có thể xảy ra."
+          },
+          "c": {
+            "en": "The transaction covers Kafka writes and offsets only. The PostgreSQL update sits outside it, so an abort cannot undo it.",
+            "vi": "Giao dịch chỉ bao gồm các lần ghi và offset trong Kafka. Update PostgreSQL nằm ngoài nó, nên việc huỷ không hoàn tác được."
+          }
+        },
+        "reread": {
+          "anchor": "fault-tolerance-checkpoints-barriers-and-idempotent-sinks",
+          "label": {
+            "en": "Fault tolerance: checkpoints, barriers, and idempotent sinks",
+            "vi": "Chịu lỗi: checkpoint, barrier và sink bất biến"
+          }
+        },
+        "say": {
+          "en": "I assume replay will happen, so I make the sink idempotent: the offset sits in the same row and the same write as the effect.",
+          "vi": "Tôi coi replay là chuyện chắc chắn xảy ra, nên làm sink idempotent: offset nằm cùng dòng, cùng lần ghi với tác dụng."
+        }
+      },
+      "ref": "Post: Fault tolerance: checkpoints, barriers, and idempotent sinks"
+    },
+    {
+      "id": "s08q5",
+      "level": "evaluate",
+      "track": "ai",
+      "type": "ai-advice",
+      "difficulty": 5,
+      "topic": "Commit before write",
+      "stem": {
+        "en": "To stop the double counting, an AI assistant advises: \"Commit the Kafka offset first, then update PostgreSQL. A committed offset can never be read twice, so the counter is exact.\" Which verdict on this advice is best?",
+        "vi": "Để hết đếm đôi, một AI khuyên: \"Commit offset Kafka trước, rồi mới update PostgreSQL. Offset đã commit thì không bao giờ bị đọc hai lần, nên counter chính xác.\" Nhận xét nào về lời khuyên này là tốt nhất?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Accept it: a committed offset means the record can never be read twice, so counts are exact.",
+            "vi": "Chấp nhận: offset đã commit nghĩa là bản ghi không bao giờ bị đọc hai lần, nên số đếm chính xác."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Reject it: it trades duplicates for loss, as a crash after the commit skips records for good.",
+            "vi": "Bác bỏ: nó đổi trùng lặp lấy mất dữ liệu, vì sập sau lúc commit sẽ bỏ qua bản ghi vĩnh viễn."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Reject it: committing early makes Kafka drop the records, so a later replay is impossible.",
+            "vi": "Bác bỏ: commit sớm khiến Kafka xoá các bản ghi, nên sau này không thể replay."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Accept it with a short commit interval, which removes both duplicates and lost records.",
+            "vi": "Chấp nhận kèm khoảng commit ngắn, vì nó loại bỏ cả bản ghi trùng lẫn bản ghi mất."
+          }
+        }
+      ],
+      "answer": ["b"],
+      "explanation": {
+        "whyRight": {
+          "en": "Commit-first gives at-most-once. Suppose the job commits offset 105, then crashes before the five updates reach PostgreSQL. The replacement starts at 106, and records 101 to 105 never reach the counter. That is a silent loss, which is usually worse than a visible duplicate. The fix is to keep the offset next to the effect and apply the write only if the offset is newer.",
+          "vi": "Commit trước cho at-most-once. Giả sử job commit offset 105, rồi sập trước khi năm lệnh update tới PostgreSQL. Job thay thế bắt đầu ở 106, và các bản ghi 101 đến 105 không bao giờ vào counter. Đó là mất dữ liệu trong im lặng, thường tệ hơn một bản ghi trùng nhìn thấy được. Cách sửa là giữ offset cạnh tác dụng và chỉ áp dụng lần ghi khi offset mới hơn."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "The commit only tells Kafka where to resume. It says nothing about whether the write happened, so the early commit can hide a record the counter never saw.",
+            "vi": "Lần commit chỉ cho Kafka biết chỗ để đọc tiếp. Nó không nói gì về việc lần ghi đã xảy ra chưa, nên commit sớm có thể che đi một bản ghi mà counter chưa từng thấy."
+          },
+          "c": {
+            "en": "Committing moves the consumer's position; it does not delete the log. Retention decides when records go, so the log stays readable.",
+            "vi": "Commit chỉ dời vị trí của consumer; nó không xoá log. Retention quyết định khi nào bản ghi bị xoá, nên log vẫn đọc được."
+          },
+          "d": {
+            "en": "A short interval shrinks the gap but never closes it. Any crash between the commit and the write still loses a record.",
+            "vi": "Khoảng ngắn làm khe hở nhỏ lại nhưng không bao giờ đóng được. Mọi cú sập giữa lần commit và lần ghi vẫn làm mất một bản ghi."
+          }
+        },
+        "reread": {
+          "anchor": "key-takeaways",
+          "label": {
+            "en": "Key takeaways",
+            "vi": "Điểm rút ra"
+          }
+        },
+        "say": {
+          "en": "When AI moves the commit to dodge duplicates, check what it gives up: commit-first loses records on a crash, commit-last repeats them.",
+          "vi": "Khi AI dời lần commit để né bản ghi trùng, hãy kiểm tra nó đánh đổi gì: commit trước thì mất bản ghi khi sập, commit sau thì lặp bản ghi."
+        }
+      },
+      "ref": "Post: Key takeaways"
+    }
+  ]
+}

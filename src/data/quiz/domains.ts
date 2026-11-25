@@ -12,6 +12,9 @@ import type { QuizDomain } from './types';
 
 export const QUIZ_DOMAIN: Record<string, QuizDomain> = {
   // DDIA series
+  'stream-processing-event-logs-cdc-windows-joins': 'code',
+  'philosophy-of-streaming-systems-unbundling-end-to-end-correctness': 'code',
+  'doing-the-right-thing-ethics-privacy-algorithmic-bias': 'code',
   'reliable-scalable-maintainable-data-systems': 'code',
   'trade-offs-in-data-systems-architecture': 'code',
   'data-models-and-query-languages': 'code',

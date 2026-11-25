@@ -164,6 +164,9 @@ rising in difficulty. Interview and AI questions mix freely inside a set.
   unanswerable. Checked by reading each stem with the others hidden.
 - **Calculation questions**: always state every formula the reader needs, inside the question. They test
   whether the reader can apply the formulas, not whether they remember them (Khang, 2026-11-20).
+- **Calculations are optional per set** (Khang, 2026-11-25): a set does not need a calculation question. Add one only
+  when the scenario really turns on a number (a rate, a lag, a fraction). Sets about judgment, design, ethics or
+  reading a flow can have zero calculation questions; never bolt arithmetic onto a scenario to fill a slot.
 - **Numbers** (amended 2026-11-24): no "illustrative", "minh họa" or "made up" labels. A figure invented for a scenario is
   introduced inside the sentence ("Say a replica applies 0.4 TB per hour", "Giả sử ...") so it is never read as a measured
   or quoted value. The `context.illustrative` flag and its italic note no longer exist.
