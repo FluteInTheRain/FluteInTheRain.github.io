@@ -425,16 +425,25 @@ Each red X is a code smell you will actually meet:
 The wiring makes the direction real, and the first version of it, `layered_app.py`, builds `service` as a module global that every endpoint reaches for. It works, but nothing in an endpoint's signature says it needs a service, and a test cannot hand it a different one. FastAPI has a feature for exactly this, `Depends`, and the file `demo/p04_depends.py` wires the same three layers with it:
 
 ```python
+class CountedRepository(InMemoryCaseRepository):
+    """The same store, plus a count, so ids can be derived from what is stored."""
+
+    def __len__(self) -> int:
+        return len(self._cases)
+
+
 @lru_cache
-def get_repo() -> CaseRepository:
-    return InMemoryCaseRepository()  # built once: the dict must outlive a request
+def get_repo() -> CountedRepository:
+    return CountedRepository()  # built once: the dict must outlive a request
 
 
-def get_service(repo: CaseRepository = Depends(get_repo)) -> CaseService:
-    return CaseService(repo)  # a fresh, cheap service per request
+def get_service(repo: CountedRepository = Depends(get_repo)) -> CaseService:
+    service = CaseService(repo)  # a fresh, cheap service per request
+    service._next_id = len(repo) + 1  # the id counter must not restart with it
+    return service
 ```
 
-Read it from the bottom. `get_service` declares that it needs a repository by naming `get_repo` in `Depends(...)`; FastAPI calls `get_repo` first and passes the result in. The `@lru_cache` is not decoration: the in-memory repository holds all the data, so it must be built once, while the service is cheap enough to rebuild per request. (AI-written code often forgets this and builds the repository inside `get_service`, so every request sees an empty store and every case is "not found".) The endpoints then ask for the service in their own signature:
+Read it from the bottom. `get_service` declares that it needs a repository by naming `get_repo` in `Depends(...)`; FastAPI calls `get_repo` first and passes the result in. The `@lru_cache` is not decoration: the in-memory repository holds all the data, so it must be built once, while the service is cheap enough to rebuild per request. The same logic applies to the id counter: `CaseService` keeps `_next_id` on itself, so a service rebuilt per request would start at `C-1` every time and the second case would overwrite the first. The two extra lines in `get_service` derive the next id from what the repository already stores. (AI-written code often forgets the first half of this and builds the repository inside `get_service`, so every request sees an empty store and every case is "not found".) The endpoints then ask for the service in their own signature:
 
 ```python
 @router.post("", status_code=201)
@@ -454,18 +463,21 @@ async def close(
 
 <BeP04DependsLifetime />
 
-<TerminalOutput command="uvicorn p04_depends:app --port 4334 — then: curl POST /cases?title=..., POST /cases/C-1/close?resolution=x" label="Python 3.13 · FastAPI 0.165 · captured Nov 2026" caption="Same layers, same rules, same 409 as before: the Depends version behaves exactly like the global one. The trace lines come from the service and data layers, which neither know nor care how they were wired.">
+<TerminalOutput command="uvicorn p04_depends:app --port 4334 — then: curl POST /cases?title=... twice, then POST /cases/C-1/close?resolution=x" label="Python 3.13 · FastAPI 0.165 · captured Nov 2026" caption="Same layers, same rules, same 409 as before: the Depends version behaves exactly like the global one, and two opens get two ids (C-1, C-2) even though each request builds its own service. The trace lines come from the service and data layers, which neither know nor care how they were wired.">
 ```text
-INFO:     Started server process [2022]
+INFO:     Started server process [47646]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 INFO:     Uvicorn running on http://127.0.0.1:4334 (Press CTRL+C to quit)
 service | open_case: the id and the open status are ours to set
 data    | add(C-1) -> in-memory store
-INFO:     127.0.0.1:53921 - "POST /cases?title=The%20missing%20gnome HTTP/1.1" 201 Created
+INFO:     127.0.0.1:55702 - "POST /cases?title=The%20missing%20gnome HTTP/1.1" 201 Created
+service | open_case: the id and the open status are ours to set
+data    | add(C-2) -> in-memory store
+INFO:     127.0.0.1:55703 - "POST /cases?title=The%20stolen%20pie HTTP/1.1" 201 Created
 data    | get(C-1) <- in-memory store
 service | close(C-1): rule — a case closes with a detective on it
-INFO:     127.0.0.1:53922 - "POST /cases/C-1/close?resolution=x HTTP/1.1" 409 Conflict
+INFO:     127.0.0.1:55704 - "POST /cases/C-1/close?resolution=x HTTP/1.1" 409 Conflict
 ```
 </TerminalOutput>
 
@@ -564,9 +576,26 @@ data    | save(C-1) -> in-memory store
 
 `FakeRepository` inherits nothing — the `Protocol` from section 2 is the whole reason that works. And notice what scenario [2] proves by existing: the same rules, a different repository, zero changes above the seam.
 
-**The same endpoints, tested over HTTP, still without a real store.** Because `get_repo` is a dependency, a test can replace it. `app.dependency_overrides` maps the original function to a substitute, and `TestClient` calls the app in-process, so no port is opened. `demo/p04_override.py`:
+**The same endpoints, tested over HTTP, still without a real store.** Because `get_repo` is a dependency, a test can replace it. This fake keeps its records in a dict, so the test can reach into `fake.records` by case id. `app.dependency_overrides` maps the original function to a substitute, and `TestClient` calls the app in-process, so no port is opened. `demo/p04_override.py`:
 
 ```python
+class FakeRepository:
+    def __init__(self) -> None:
+        self.records: dict[str, CaseRecord] = {}
+
+    def add(self, record: CaseRecord) -> None:
+        self.records[record.case_id] = record
+
+    def __len__(self) -> int:
+        return len(self.records)
+
+    def get(self, case_id: str) -> CaseRecord | None:
+        return self.records.get(case_id)
+
+    def save(self, record: CaseRecord) -> None:
+        self.records[record.case_id] = record
+
+
 fake = FakeRepository()
 app.dependency_overrides[get_repo] = lambda: fake
 client = TestClient(app)
@@ -1002,16 +1031,25 @@ Mỗi dấu X đỏ là một code smell bạn sẽ gặp thật:
 Cách wiring làm cho chiều phụ thuộc thành thật, và bản đầu tiên, `layered_app.py`, dựng `service` thành biến global của module để mọi endpoint với tay lấy. Chạy được, nhưng chữ ký endpoint không hề nói nó cần service, và test cũng không đưa được cho nó một service khác. FastAPI có sẵn tính năng cho đúng việc này, `Depends`, và file `demo/p04_depends.py` đấu ba tầng đó bằng nó:
 
 ```python
+class CountedRepository(InMemoryCaseRepository):
+    """The same store, plus a count, so ids can be derived from what is stored."""
+
+    def __len__(self) -> int:
+        return len(self._cases)
+
+
 @lru_cache
-def get_repo() -> CaseRepository:
-    return InMemoryCaseRepository()  # built once: the dict must outlive a request
+def get_repo() -> CountedRepository:
+    return CountedRepository()  # built once: the dict must outlive a request
 
 
-def get_service(repo: CaseRepository = Depends(get_repo)) -> CaseService:
-    return CaseService(repo)  # a fresh, cheap service per request
+def get_service(repo: CountedRepository = Depends(get_repo)) -> CaseService:
+    service = CaseService(repo)  # a fresh, cheap service per request
+    service._next_id = len(repo) + 1  # the id counter must not restart with it
+    return service
 ```
 
-Đọc từ dưới lên. `get_service` khai báo nó cần một repository bằng cách ghi `get_repo` trong `Depends(...)`; FastAPI gọi `get_repo` trước rồi truyền kết quả vào. `@lru_cache` không phải để trang trí: repository in-memory giữ toàn bộ dữ liệu nên chỉ được dựng một lần, còn service đủ rẻ để dựng lại mỗi request. (Code AI viết hay quên điều này và dựng repository ngay trong `get_service`, thế là request nào cũng thấy kho rỗng và case nào cũng "không tìm thấy".) Rồi các endpoint xin service ngay trong chữ ký của mình:
+Đọc từ dưới lên. `get_service` khai báo nó cần một repository bằng cách ghi `get_repo` trong `Depends(...)`; FastAPI gọi `get_repo` trước rồi truyền kết quả vào. `@lru_cache` không phải để trang trí: repository in-memory giữ toàn bộ dữ liệu nên chỉ được dựng một lần, còn service đủ rẻ để dựng lại mỗi request. Cùng logic đó áp dụng cho bộ đếm id: `CaseService` giữ `_next_id` ngay trên nó, nên service dựng lại mỗi request sẽ bắt đầu từ `C-1` lần nào cũng vậy và case thứ hai ghi đè case thứ nhất. Hai dòng thêm trong `get_service` lấy id kế tiếp từ những gì repository đang lưu. (Code AI viết hay quên vế đầu và dựng repository ngay trong `get_service`, thế là request nào cũng thấy kho rỗng và case nào cũng "không tìm thấy".) Rồi các endpoint xin service ngay trong chữ ký của mình:
 
 ```python
 @router.post("", status_code=201)
@@ -1031,18 +1069,21 @@ async def close(
 
 <BeP04DependsLifetime />
 
-<TerminalOutput command="uvicorn p04_depends:app --port 4334 — rồi: curl POST /cases?title=..., POST /cases/C-1/close?resolution=x" label="Python 3.13 · FastAPI 0.165 · chụp tháng 11/2026" caption="Cùng các tầng, cùng luật, cùng 409 như trước: bản Depends hành xử y hệt bản dùng global. Các dòng trace đến từ tầng service và data, hai tầng không biết và cũng không cần biết mình được đấu nối kiểu gì.">
+<TerminalOutput command="uvicorn p04_depends:app --port 4334 — rồi: curl POST /cases?title=... twice, then POST /cases/C-1/close?resolution=x" label="Python 3.13 · FastAPI 0.165 · chụp tháng 11/2026" caption="Cùng các tầng, cùng luật, cùng 409 như trước: bản Depends hành xử y hệt bản dùng global, và hai lần mở case ra hai id (C-1, C-2) dù mỗi request dựng service riêng. Các dòng trace đến từ tầng service và data, hai tầng không biết và cũng không cần biết mình được đấu nối kiểu gì.">
 ```text
-INFO:     Started server process [2022]
+INFO:     Started server process [47646]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 INFO:     Uvicorn running on http://127.0.0.1:4334 (Press CTRL+C to quit)
 service | open_case: the id and the open status are ours to set
 data    | add(C-1) -> in-memory store
-INFO:     127.0.0.1:53921 - "POST /cases?title=The%20missing%20gnome HTTP/1.1" 201 Created
+INFO:     127.0.0.1:55702 - "POST /cases?title=The%20missing%20gnome HTTP/1.1" 201 Created
+service | open_case: the id and the open status are ours to set
+data    | add(C-2) -> in-memory store
+INFO:     127.0.0.1:55703 - "POST /cases?title=The%20stolen%20pie HTTP/1.1" 201 Created
 data    | get(C-1) <- in-memory store
 service | close(C-1): rule — a case closes with a detective on it
-INFO:     127.0.0.1:53922 - "POST /cases/C-1/close?resolution=x HTTP/1.1" 409 Conflict
+INFO:     127.0.0.1:55704 - "POST /cases/C-1/close?resolution=x HTTP/1.1" 409 Conflict
 ```
 </TerminalOutput>
 
@@ -1141,9 +1182,26 @@ data    | save(C-1) -> in-memory store
 
 `FakeRepository` không inherit từ đâu cả — cái `Protocol` ở phần 2 chính là lý do nó chạy được. Và để ý kịch bản [2] chứng minh điều gì chỉ bằng việc tồn tại: cùng luật, repository khác, không sửa gì ở trên đường nối.
 
-**Cùng các endpoint, test qua HTTP, vẫn không cần kho thật.** Vì `get_repo` là một dependency, test có thể thay nó. `app.dependency_overrides` ánh xạ hàm gốc sang một hàm thay thế, còn `TestClient` gọi app ngay trong process nên không mở port nào. `demo/p04_override.py`:
+**Cùng các endpoint, test qua HTTP, vẫn không cần kho thật.** Vì `get_repo` là một dependency, test có thể thay nó. Bản giả này giữ record trong một dict, nên test với tay vào `fake.records` theo case id được. `app.dependency_overrides` ánh xạ hàm gốc sang một hàm thay thế, còn `TestClient` gọi app ngay trong process nên không mở port nào. `demo/p04_override.py`:
 
 ```python
+class FakeRepository:
+    def __init__(self) -> None:
+        self.records: dict[str, CaseRecord] = {}
+
+    def add(self, record: CaseRecord) -> None:
+        self.records[record.case_id] = record
+
+    def __len__(self) -> int:
+        return len(self.records)
+
+    def get(self, case_id: str) -> CaseRecord | None:
+        return self.records.get(case_id)
+
+    def save(self, record: CaseRecord) -> None:
+        self.records[record.case_id] = record
+
+
 fake = FakeRepository()
 app.dependency_overrides[get_repo] = lambda: fake
 client = TestClient(app)

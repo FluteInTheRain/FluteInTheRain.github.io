@@ -16,9 +16,11 @@ request_id_var: ContextVar[str] = ContextVar("request_id", default="-")
 
 # Attributes every LogRecord has; anything else came from `extra=` and is ours.
 _STANDARD = set(vars(logging.makeLogRecord({}))) | {"message", "asctime"}
-# Catches token=abc, 'password': 'hunter2' and "api_key": "abc" alike.
+# Catches token=abc, pwd=abc, 'password': 'hunter2', "api_key": "abc" and
+# Authorization: Bearer abc alike. The optional scheme word is eaten with the token.
 _SECRET = re.compile(
-    r"""(?i)(password|token|authorization|api[_-]?key)(['"]?\s*[=:]\s*)['"]?[^\s,'"})]+['"]?"""
+    r"""(?i)(password|passwd|pwd|token|secret|authorization|api[_-]?key)"""
+    r"""(['"]?\s*[=:]\s*)['"]?(?:(?:bearer|basic)\s+)?[^\s,'"})]+['"]?"""
 )
 
 
@@ -37,7 +39,7 @@ class RedactFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         record.msg = _SECRET.sub(r"\1\2[REDACTED]", record.getMessage())
         record.args = None
-        for key in ("password", "token", "authorization"):
+        for key in ("password", "passwd", "pwd", "token", "secret", "api_key", "authorization"):
             if key in record.__dict__:
                 record.__dict__[key] = "[REDACTED]"
         return True

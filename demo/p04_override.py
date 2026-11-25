@@ -20,6 +20,9 @@ class FakeRepository:
     def add(self, record: CaseRecord) -> None:
         self.records[record.case_id] = record
 
+    def __len__(self) -> int:
+        return len(self.records)
+
     def get(self, case_id: str) -> CaseRecord | None:
         return self.records.get(case_id)
 
