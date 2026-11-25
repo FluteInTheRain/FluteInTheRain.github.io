@@ -1,0 +1,885 @@
+---
+title: "Where the slow 1% hides"
+title_vi: "1% request chậm nằm ở đâu"
+description: "One log line on a hot path held a Python service at p99 48 ms. Measure p99 on FastAPI, profile before rewriting, set timeouts, shed load, then load-test with locust."
+description_vi: "Một dòng log trên đường nóng giữ p99 của service Python ở 48 ms. Đo p99 trên FastAPI, profile trước khi sửa, đặt timeout, từ chối bớt tải, rồi load test bằng locust."
+date: 2026-11-25
+category: "backend"
+tags: ["backend", "python", "fastapi", "performance", "latency", "locust"]
+cover: "../../assets/blog/backend-performance-p99/locust-ui-cover.png"
+cover_alt: "The locust web UI charts tab: requests per second climbing to about 70, the 50th and 95th percentile response times in milliseconds, and the user count ramping to 40"
+draft: true
+sources:
+  - { title: "FastAPI: Modern Python Web Development", author: "Bill Lubanovic", chapters: "Ch. 13", url: "https://www.oreilly.com/library/view/fastapi/9781098135091/" }
+  - { title: "One line of Python and a 3x drop in p99", author: "Filcho Dragunchev, SoundCloud", url: "https://developers.soundcloud.com/blog/one-line-of-python-and-a-3x-drop-in-p99" }
+  - { title: "Timeouts", author: "HTTPX docs", url: "https://www.python-httpx.org/advanced/timeouts/" }
+  - { title: "Concurrency and async / await", author: "FastAPI docs", url: "https://fastapi.tiangolo.com/async/" }
+  - { title: "pyinstrument: a Python profiler", author: "pyinstrument docs", url: "https://pyinstrument.readthedocs.io/en/latest/" }
+  - { title: "py-spy: a sampling profiler for Python (when you need to run as sudo)", author: "Ben Frederickson", url: "https://github.com/benfred/py-spy" }
+  - { title: "Locust documentation", author: "Locust", url: "https://docs.locust.io/en/stable/" }
+  - { title: "Synchronization primitives (asyncio.Semaphore)", author: "Python docs", url: "https://docs.python.org/3/library/asyncio-sync.html" }
+  - { title: "HTTP Semantics: 503 Service Unavailable and Retry-After", author: "RFC 9110", url: "https://www.rfc-editor.org/rfc/rfc9110.html" }
+  - { title: "Ramp meter on the ramp from Sahara Avenue to northbound Interstate 15 in Las Vegas (CC BY-SA 4.0)", author: "Famartin", url: "https://commons.wikimedia.org/wiki/File:2015-01-15_08_49_41_Ramp_meter_on_the_ramp_from_Sahara_Avenue_to_northbound_Interstate_15_in_Las_Vegas,_Nevada.JPG" }
+---
+
+import En from '../../components/mdx/En.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
+import BeP11LogLine from '../../components/mdx/BeP11LogLine.astro';
+import BeP11Percentiles from '../../components/mdx/BeP11Percentiles.astro';
+import BeP11OneInForty from '../../components/mdx/BeP11OneInForty.astro';
+import BeP11Blocked from '../../components/mdx/BeP11Blocked.astro';
+import BeP11WhereFirst from '../../components/mdx/BeP11WhereFirst.astro';
+import BeP11Flame from '../../components/mdx/BeP11Flame.astro';
+import BeP11BeforeAfter from '../../components/mdx/BeP11BeforeAfter.astro';
+import BeP11Deadline from '../../components/mdx/BeP11Deadline.astro';
+import BeP11Gate from '../../components/mdx/BeP11Gate.astro';
+import BeP11ShedCompare from '../../components/mdx/BeP11ShedCompare.astro';
+import BeP11Ramp from '../../components/mdx/BeP11Ramp.astro';
+import heroRamp from '../../assets/blog/backend-performance-p99/ramp-meter-las-vegas.jpg';
+import locustUi from '../../assets/blog/backend-performance-p99/locust-ui-cover.png';
+
+<En>
+
+<Figure src={heroRamp} alt="A freeway on-ramp in Las Vegas under a clear blue sky. A gantry over the ramp carries three traffic lights, two red and one green, and a few cars drive toward the highway." caption="A ramp meter lets one car onto the freeway per green, so the road keeps moving instead of jamming for everybody. It is load shedding for traffic, and a service needs the same gate before the night it gets more requests than it can answer." sourceTitle="Wikimedia Commons: Ramp meter on the ramp from Sahara Avenue to northbound Interstate 15, Las Vegas (CC BY-SA 4.0, Famartin)" sourceUrl="https://commons.wikimedia.org/wiki/File:2015-01-15_08_49_41_Ramp_meter_on_the_ramp_from_Sahara_Avenue_to_northbound_Interstate_15_in_Las_Vegas,_Nevada.JPG" />
+
+### The hook: one log line, 30 ms
+
+In August 2026 SoundCloud engineers wrote up a small Python service on their ad-serving path. For each listening session it answers one question: play an ad pod, or not. Its p99 sat at about 48 ms, and "it never dipped below 40ms at any point, at any volume". A validation check logged a structured warning and bumped four metrics on every request from callers that send no "posteriors" by design. For those fixed-policy callers, that was nearly all the traffic.
+
+The fix was one line: the guard went from `if missing_actions:` to `if missing_actions and request.posteriors:`. The p99 fell to about 18 ms. What I like is how honest they are about getting there. The team's first hypothesis was string formatting, and they write "We never isolated it with a benchmark, and we should be honest about that". The cost was the synchronous write of the log line, inside the request. Their summary: "the best hour of the old service was worse than the worst hour of the new one".
+
+<BeP11LogLine />
+
+Your FastAPI service probably has a line like that, and nothing in code review will say which one. It has a second weakness too: nothing says "no" when work arrives faster than it can be done. This post is about the single-service half of latency: measure the tail, profile before you rewrite, bound what you wait for, and refuse early. Why a whole *fleet* of services turns timeouts and retries into outages is a different problem, and the [distributed systems post](/blog/trouble-with-distributed-systems-networks-clocks-fencing/) owns it. Why averages hide the tail is explained in the [first post on reliability](/blog/reliable-scalable-maintainable-data-systems/); here I only use p50, p95 and p99 as numbers we read off real runs.
+
+All numbers below come from one laptop (Apple M2, macOS 26.4.1, Python 3.13) that was also running other things. Run them again and yours will differ. Where a number is noisy, I say so.
+
+---
+
+## 1. Measure the tail
+
+Start with a service that looks fine. `p11_upstream.py` stands in for evidence-lab, the second service from the [observability post](/blog/backend-observability/). It is quick almost always, and one call in 40 is slow (a garbage-collection pause, a cold cache, a noisy neighbour: pick your cause). `demo/p11_upstream.py`:
+
+```python
+@app.get("/analyze/{case_id}")
+async def analyze(case_id: str) -> dict:
+    n = next(calls)
+    # A GC pause, a cold cache, a noisy neighbour: 1 call in 40 takes 0.8 s.
+    await asyncio.sleep(0.8 if n % 40 == 0 else 0.02)
+    return {"case_id": case_id, "score": 0.87}
+```
+
+clue.api's report route calls it. The client is an `httpx.AsyncClient`, and note what is missing from the line that creates it (`demo/p11_naive.py`):
+
+```python
+lab = httpx.AsyncClient(base_url=LAB)  # no timeout= argument: httpx's default applies
+```
+
+```python
+@app.get("/cases/{case_id}/report")
+async def report(case_id: str) -> dict:
+    analysis = (await lab.get(f"/analyze/{case_id}")).json()
+    return {"case_id": case_id, "analysis": analysis}
+```
+
+To get percentiles you need many requests, not one `curl`. `demo/p11_measure.py` fires N requests with C in flight and sorts the results. The only maths is the nearest-rank rule: p99 is the smallest value that 99% of the samples sit at or below.
+
+```python
+def pct(sorted_ms: list[float], p: float) -> float:
+    """Nearest-rank percentile: the smallest value with p% of samples at or below."""
+    return sorted_ms[max(0, math.ceil(p / 100 * len(sorted_ms)) - 1)]
+```
+
+<TerminalOutput command="python p11_measure.py http://127.0.0.1:4360 /cases/C-1/report 400 8" label="Python 3.13 · FastAPI 0.165.0 · uvicorn 0.54.0 · httpx 0.28.1 · Apple M2 · captured Nov 2026" caption="400 requests, 8 at a time. The average, 54 ms, is close to the median. The 99th percentile is fifteen times larger, and no number between p50 and p95 hints at it.">
+```text
+/cases/C-1/report  n=400 in-flight=8  wall=3.3s  statuses={200: 400}
+  200 only: mean=54ms  p50=30ms  p95=69ms  p99=817ms  max=838ms
+```
+</TerminalOutput>
+
+<BeP11Percentiles />
+
+Why p99 and not p95? Because of simple counting. Ten of the 400 requests (one in 40, 2.5%) landed on a slow call. The slowest 1% of 400 is 4 requests, and all four are slow calls. If the slow rate were under 1%, p99 would look healthy and the tail would still exist at p99.9.
+
+<BeP11OneInForty />
+
+Read p99 as a rate. "Our p99 is 817 ms" means one user in a hundred waits that long, and users who make ten requests per page meet that user often.
+
+<Concepts>
+- **Percentile (p50, p95, p99)**: sort all the response times; p99 is the value that 99% of them are at or below.
+- **Tail latency**: the slowest few percent of requests. It is usually caused by something rare, not by the typical path.
+- **In flight**: requests the server has accepted and not yet answered.
+</Concepts>
+
+---
+
+## 2. One blocked loop slows every route
+
+A different tail comes from inside the service. In an `async def` endpoint, the event loop runs everything on one thread, and it only switches between requests when your code hits an `await`. Code that never awaits keeps the thread. The [async post](/blog/backend-async-concurrency-workers/) explains this in depth; here is what it costs in percentiles.
+
+`demo/p11_hotspot.py` has a route that scores a case by counting distinct clues, and a `/health` route that does nothing. The scoring is plain Python, with no `await` in it:
+
+```python
+@app.get("/cases/{case_id}/score")
+async def case_score(case_id: str) -> dict:
+    evidence = [f"clue-{i % 2500}" for i in range(10000)]
+    return {"case_id": case_id, "distinct_clues": score(evidence)}
+```
+
+<BeP11Blocked />
+
+Run four `/score` requests at once and probe `/health` while they are in flight. First alone, then under that load:
+
+<TerminalOutput command="p11_measure.py: /health and /score alone, then both while four /score calls are in flight" label="Python 3.13 · FastAPI 0.165.0 · uvicorn 0.54.0 · Apple M2 · captured Nov 2026" caption="/health did nothing different. Its median is still 1 ms, so a dashboard of averages or medians shows green. Only the tail shows that it waited behind /score.">
+```text
+/health  n=300 in-flight=1  wall=0.3s  statuses={200: 300}
+  200 only: mean=1ms  p50=1ms  p95=1ms  p99=2ms  max=18ms
+/cases/C-1/score  n=100 in-flight=1  wall=6.7s  statuses={200: 100}
+  200 only: mean=67ms  p50=65ms  p95=77ms  p99=108ms  max=153ms
+/health  n=300 in-flight=1  wall=8.2s  statuses={200: 300}
+  200 only: mean=27ms  p50=1ms  p95=258ms  p99=278ms  max=385ms
+/cases/C-1/score  n=120 in-flight=4  wall=8.3s  statuses={200: 120}
+  200 only: mean=276ms  p50=267ms  p95=357ms  p99=386ms  max=387ms
+```
+</TerminalOutput>
+
+`/score` itself went from a median of 65 ms alone to 267 ms with four at once, because the four take turns on the one thread. The blocked loop makes the *neighbours* slow, which is why the slow route is not always the one users complain about. The trap with AI code is that it will happily put a blocking call (`requests.get`, `time.sleep`, a big loop) inside `async def`, and the demo passes because nobody tested two requests together.
+
+<Concepts>
+- **Event loop**: the single thread that runs all `async def` code, switching between requests only at an `await`.
+- **Blocking call**: code that holds the thread without awaiting: CPU work, `time.sleep`, a synchronous HTTP client.
+</Concepts>
+
+---
+
+## 3. Profile before you rewrite
+
+Now that `/score` is slow, where do you look? The instinct is to read the code and guess: maybe the list comprehension, maybe the JSON. Do not guess, and do not start with a rewrite: SoundCloud's team guessed string formatting first, and by their own account never confirmed it. One question decides which tool to use.
+
+<BeP11WhereFirst />
+
+Here the CPU is busy, so a profiler fits. I wanted `py-spy` first: it attaches to a running process from outside and costs nothing to the service. On macOS it refuses to start without root:
+
+<TerminalOutput command="uv run --with py-spy py-spy dump --pid 49066" label="py-spy via uv · macOS 26.4.1 · captured Nov 2026" caption="py-spy needs root on macOS (its README says OSX always requires it). I did not use sudo for a demo, so the rest of the post uses pyinstrument, which runs inside the process and needs no privileges.">
+```text
+This program requires root on OSX.
+Try running again with elevated permissions by going 'sudo !!'
+```
+</TerminalOutput>
+
+`pyinstrument` is a sampling profiler you start and stop in your own code, so it works anywhere Python does. The middleware in `demo/p11_hotspot.py` turns it on for one request when the URL has `?profile=1`, and returns the report instead of the response:
+
+```python
+@app.middleware("http")
+async def profile_on_request(request: Request, call_next):
+    if request.query_params.get("profile") != "1":
+        return await call_next(request)
+    profiler = Profiler(async_mode="enabled")
+    profiler.start()
+    await call_next(request)
+    profiler.stop()
+    text = profiler.output_text(
+        unicode=False, color=False, processor_options={"hide_regex": r".*site-packages.*"}
+    )
+    return PlainTextResponse(text)
+```
+
+`async_mode="enabled"` makes it follow the request across `await`s. The `hide_regex` option folds framework frames, so the report shows our code. Ask for the profile of one slow request:
+
+<TerminalOutput command="curl 'localhost:4362/cases/C-1/score?profile=1'" label="Python 3.13 · FastAPI 0.165.0 · pyinstrument 5.1.3 · captured Nov 2026" caption="Read it from the top: each line is a function that called the one below it. The number is seconds. 0.065 of the 0.068 s is inside dedupe, and nothing else is above 0.002.">
+```text
+
+  _     ._   __/__   _ _  _  _ _/_   Recorded: 13:43:35  Samples:  19
+ /_//_/// /_\ / //_// / //_'/ //     Duration: 0.069     CPU time: 0.067
+/   _/                      v5.1.3
+
+Profile at /Users/nguyennhatkhang/Downloads/learning/fitr-wt/backend-post-11/demo/p11_hotspot.py:20
+
+0.068 Runner.run  asyncio/runners.py:87
+|- 0.067 coro  starlette/middleware/base.py:144
+|     [16 frames hidden]  starlette, fastapi, pydantic
+|        0.066 run_endpoint_function  fastapi/routing.py:372
+|        `- 0.066 case_score  p11_hotspot.py:41
+|           |- 0.065 score  p11_hotspot.py:37
+|           |  `- 0.065 dedupe  p11_hotspot.py:29
+|           `- 0.001 [self]  p11_hotspot.py
+`- 0.001 RequestResponseCycle.run_asgi  uvicorn/protocols/http/httptools_impl.py:420
+      [6 frames hidden]  uvicorn, fastapi, starlette
+         0.001 BaseHTTPMiddleware.__call__  starlette/middleware/base.py:101
+         `- 0.001 profile_on_request  p11_hotspot.py:15
+            `- 0.001 call_next  starlette/middleware/base.py:112
+                  [4 frames hidden]  anyio, asyncio
+```
+</TerminalOutput>
+
+<BeP11Flame />
+
+The report answers with a function and a line: `dedupe`, `p11_hotspot.py:29`. Not the JSON, not the list comprehension. Here is the function:
+
+```python
+def dedupe(items: list[str]) -> list[str]:
+    seen: list[str] = []
+    for item in items:
+        if item not in seen:
+            seen.append(item)
+    return seen
+```
+
+`item not in seen` scans a list, so each lookup is a walk. With 2,500 distinct clues the loop does millions of comparisons. Python's `dict` keeps insertion order and finds a key in one step, so `dict.fromkeys(items)` removes duplicates in one pass. Rather than editing the file, `demo/p11_hotfix.py` swaps the function, the way the observability post swapped `_trace`:
+
+```python
+p11_hotspot.dedupe = lambda items: list(dict.fromkeys(items))  # one pass, O(n)
+app = p11_hotspot.app
+```
+
+<TerminalOutput command="p11_measure.py on /cases/C-1/score alone, then /health while four /score calls run" label="Python 3.13 · FastAPI 0.165.0 · uvicorn 0.54.0 · Apple M2 · captured Nov 2026" caption="After the fix: /score is 3 ms at the median and /health's p99 under the same load is 12 ms. Same machine, same driver, same number of requests as before.">
+```text
+/cases/C-1/score  n=100 in-flight=1  wall=0.5s  statuses={200: 100}
+  200 only: mean=5ms  p50=3ms  p95=19ms  p99=23ms  max=24ms
+/health  n=300 in-flight=1  wall=0.5s  statuses={200: 300}
+  200 only: mean=2ms  p50=1ms  p95=5ms  p99=12ms  max=54ms
+```
+</TerminalOutput>
+
+<BeP11BeforeAfter />
+
+Profiling first paid twice. It found a cause nobody would have guessed from reading the route, and it fixed an unrelated route too. Had I "optimised" the response model or moved to a thread pool, I would have spent a day and saved nothing.
+
+<Callout type="warning" title="The AI habit to break">
+Ask an assistant "make this endpoint faster" and you usually get a rewrite: caching, `asyncio.gather`, a different JSON library. All plausible, none measured. Ask for the profile first, paste the report, and only then ask for a change to the function it names.
+</Callout>
+
+<Concepts>
+- **Profiler**: a tool that records where a program spends its time, by function and line.
+- **Sampling profiler**: looks at the call stack many times a second instead of tracing every call, so it is cheap enough to leave on for one request.
+- **Hot spot**: the one function or loop where most of the time goes.
+</Concepts>
+
+---
+
+## 4. Put a deadline on every outbound call
+
+Back to the slow dependency from section 1. With no deadline in the code, the answer to "how long will clue.api wait for evidence-lab?" is whatever the library default is. `httpx` does have one:
+
+<TerminalOutput command="python -c &quot;import httpx; print(httpx.AsyncClient().timeout)&quot;" label="Python 3.13 · httpx 0.28.1 · captured Nov 2026" caption="httpx waits up to 5 seconds, per phase. That is far above a user's patience, and some other clients (requests, for one) wait forever unless you pass a timeout.">
+```text
+Timeout(timeout=5.0)
+```
+</TerminalOutput>
+
+Five seconds is a choice somebody else made. Make your own, from what the route is for. The report is worth waiting a quarter of a second for. After that the caller is better served by a clear failure it can retry. `demo/p11_timeout.py`:
+
+```python
+lab = httpx.AsyncClient(base_url=LAB, timeout=httpx.Timeout(0.25))
+```
+
+```python
+@app.get("/cases/{case_id}/report")
+async def report(case_id: str) -> dict:
+    try:
+        analysis = (await lab.get(f"/analyze/{case_id}")).json()
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="evidence-lab: no answer in 0.25 s")
+    return {"case_id": case_id, "analysis": analysis}
+```
+
+`httpx.Timeout(0.25)` sets connect, read, write and pool waits to 0.25 s each. `httpx.TimeoutException` is the common parent of all four, so one `except` catches the lot. The route answers **504 Gateway Timeout**, the status that means "I asked someone else and they did not answer in time".
+
+<BeP11Deadline />
+
+<TerminalOutput command="p11_measure.py http://127.0.0.1:4363 /cases/C-1/report 400 8" label="Python 3.13 · FastAPI 0.165.0 · uvicorn 0.54.0 · httpx 0.28.1 · Apple M2 · captured Nov 2026" caption="Same upstream, same load as section 1. The slow calls now end at about 250 ms with a 504. The 200 answers have a p99 of 68 ms; counting the 504s too, 263 ms.">
+```text
+/cases/C-1/report  n=400 in-flight=8  wall=1.9s  statuses={200: 390, 504: 10}
+  200 only: mean=29ms  p50=25ms  p95=55ms  p99=68ms  max=75ms
+  all     : mean=35ms  p50=25ms  p95=63ms  p99=263ms  max=299ms
+```
+</TerminalOutput>
+
+Ten of 400 requests got a 504 instead of a correct-but-slow answer. That is the price of a decision, not a bug. Whether a stale result, a default value, or an error is the right answer when evidence-lab is slow depends on the product. Whether to retry, and how a retry storm across many services makes this worse, belongs to the distributed systems post. One more line of defence: a deadline also protects *you*. Without it, every slow call holds a connection, a task and memory for as long as it lasts.
+
+<Concepts>
+- **Timeout**: the longest you will wait for something before giving up.
+- **504 Gateway Timeout**: the status for "a service I depend on did not answer in time".
+- **Deadline**: the point in time by which the whole request must be done; a timeout is a deadline for one step.
+</Concepts>
+
+---
+
+## 5. Say no early: backpressure
+
+Timeouts bound one call. Bounding the service as a whole needs a different tool. Every service has something scarce: database connections, CPU, a worker pool. `demo/p11_shed.py` models it as four slots, each job holding a slot for 50 ms. That is 4 / 0.05 = 80 jobs per second at most. Send 40 clients at it with no limit, and everybody queues for the slots:
+
+<TerminalOutput command="MAX_IN_FLIGHT=1000 uvicorn p11_shed:app, then p11_measure.py ... /cases/C-1/report 400 40" label="Python 3.13 · FastAPI 0.165.0 · uvicorn 0.54.0 · Apple M2 · captured Nov 2026" caption="Every request succeeds, and every request takes half a second, for work that needs 50 ms. Forty users on four slots: ten per slot, each waiting for nine others.">
+```text
+/cases/C-1/report  n=400 in-flight=40  wall=5.4s  statuses={200: 400}
+  200 only: mean=509ms  p50=526ms  p95=554ms  p99=562ms  max=574ms
+```
+</TerminalOutput>
+
+Nothing here returns an error, which is why nothing alerts. It is just slow, and the slowness grows with the queue. The fix is a gate: allow a bounded number of requests inside, and answer the rest immediately with **503 Service Unavailable** and a `Retry-After` header that tells a well-behaved client when to come back.
+
+```python
+MAX_IN_FLIGHT = int(os.environ.get("MAX_IN_FLIGHT", "8"))
+slots = asyncio.Semaphore(4)  # the scarce thing: 4 jobs can run at once
+in_flight = 0
+app = FastAPI(title="clue.api", version="0.11.3")
+```
+
+```python
+@app.get("/cases/{case_id}/report")
+async def report(case_id: str):
+    global in_flight
+    if in_flight >= MAX_IN_FLIGHT:
+        return JSONResponse(
+            status_code=503,
+            headers={"Retry-After": "1"},
+            content={"detail": "busy, retry in 1 s"},
+        )
+    in_flight += 1
+    try:
+        async with slots:
+            await asyncio.sleep(0.05)  # the work: 50 ms of a slot
+            return {"case_id": case_id, "report": "ready"}
+    finally:
+        in_flight -= 1
+```
+
+`asyncio.Semaphore(4)` is the scarce resource. `in_flight` counts requests inside, running or waiting. The check and the increment have no `await` between them, so on one event loop no two requests can both pass at 7. Eight is four running plus four waiting; a longer queue only adds delay.
+
+<BeP11Gate />
+
+<TerminalOutput command="uvicorn p11_shed:app, then p11_measure.py http://127.0.0.1:4364 /cases/C-1/report 400 40" label="Python 3.13 · FastAPI 0.165.0 · uvicorn 0.54.0 · Apple M2 · captured Nov 2026" caption="124 of 400 got a 503; the rest were served at about 100 ms. The driver sleeps for Retry-After after a 503, as a polite client would. This is the median of five runs by p99; those five p99 values ran from 206 to 622 ms because the laptop was busy.">
+```text
+/cases/C-1/report  n=400 in-flight=40  wall=4.6s  statuses={503: 124, 200: 276}
+  200 only: mean=117ms  p50=105ms  p95=203ms  p99=278ms  max=409ms
+  all     : mean=99ms  p50=103ms  p95=199ms  p99=267ms  max=409ms
+```
+</TerminalOutput>
+
+<BeP11ShedCompare />
+
+The median fell from 526 ms to 105 ms. This only works if clients cooperate. A client that retries instantly turns your 503 into more load, so say how long to wait in `Retry-After`, and have callers add jitter (a random delay) to their retries.
+
+<Callout type="note" title="Where the limit really belongs">
+This gate lives in one process. Behind a load balancer with several workers, each worker has its own counter, so the real limit is eight times the number of workers. In production the same idea is usually set at the edge (a reverse proxy, an API gateway) and again at the scarce resource itself, such as a database connection pool.
+</Callout>
+
+<Concepts>
+- **Backpressure**: a signal from an overloaded part of the system telling upstream parts to slow down or stop sending.
+- **Load shedding**: refusing some work on purpose so the work you accept still finishes quickly.
+- **`Retry-After`**: a response header saying how many seconds a client should wait before trying again.
+- **Semaphore**: a counter of free slots; `async with` takes one and gives it back.
+</Concepts>
+
+---
+
+## 6. Load test it with locust
+
+Everything so far used a driver I wrote. For a real test you want users who behave like users: they wait between clicks, there are many of them, they arrive gradually. `locust` does that. A user is a Python class:
+
+```python
+class Detective(HttpUser):
+    wait_time = between(0.05, 0.15)  # think time between two requests of one user
+
+    @task
+    def report(self) -> None:
+        self.client.get("/cases/C-1/report", name="/cases/{id}/report")
+```
+
+`wait_time` is the pause between one user's requests, and `name=` groups URLs with ids under one row in the report. Run it headless against the version with no gate, ramping 2 new users per second up to 40. `uv run --with locust` fetches it for this run only:
+
+<TerminalOutput command="uv run --with locust locust -f p11_locustfile.py --host http://127.0.0.1:4365 --headless -u 40 -r 2 -t 40s" label="Python 3.13 · locust 2.47.0 · Apple M2 · captured Nov 2026 · log lines trimmed" caption="No errors and 71 requests per second, which sits near the 80-per-second capacity of four 50 ms slots. The median is 390 ms for work that costs 50 ms.">
+```text
+Type     Name                                                                          # reqs      # fails |    Avg     Min     Max    Med |   req/s  failures/s
+--------|----------------------------------------------------------------------------|-------|-------------|-------|-------|-------|-------|--------|-----------
+GET      /cases/{id}/report                                                              2845     0(0.00%) |    322      50     611    390 |   71.29        0.00
+--------|----------------------------------------------------------------------------|-------|-------------|-------|-------|-------|-------|--------|-----------
+         Aggregated                                                                      2845     0(0.00%) |    322      50     611    390 |   71.29        0.00
+
+Response time percentiles (approximated)
+Type     Name                                                                                  50%    66%    75%    80%    90%    95%    98%    99%  99.9% 99.99%   100% # reqs
+--------|--------------------------------------------------------------------------------|--------|------|------|------|------|------|------|------|------|------|------|------
+GET      /cases/{id}/report                                                                    390    410    420    430    450    470    510    550    610    610    610   2845
+--------|--------------------------------------------------------------------------------|--------|------|------|------|------|------|------|------|------|------|------|------
+         Aggregated                                                                            390    410    420    430    450    470    510    550    610    610    610   2845
+```
+</TerminalOutput>
+
+<BeP11Ramp />
+
+The same file against the gated server shows how a load test finds more than speed. locust counts every non-2xx as a failure, so it reports 65% failures, and nothing is broken:
+
+<TerminalOutput command="locust -f p11_locustfile.py --host http://127.0.0.1:4364 --headless -u 40 -r 2 -t 40s" label="Python 3.13 · locust 2.47.0 · Apple M2 · captured Nov 2026 · log lines trimmed" caption="Those failures are the gate working. The p50 of 11 ms is mostly the fast 503s; locust mixes them with the 200s, and these simulated users ignore Retry-After, which is why the 503 rate is so high.">
+```text
+Type     Name                                                                          # reqs      # fails |    Avg     Min     Max    Med |   req/s  failures/s
+--------|----------------------------------------------------------------------------|-------|-------------|-------|-------|-------|-------|--------|-----------
+GET      /cases/{id}/report                                                              7669 5025(65.52%) |     49       0     552     11 |  192.77      126.31
+--------|----------------------------------------------------------------------------|-------|-------------|-------|-------|-------|-------|--------|-----------
+         Aggregated                                                                      7669 5025(65.52%) |     49       0     552     11 |  192.77      126.31
+
+Response time percentiles (approximated)
+Type     Name                                                                                  50%    66%    75%    80%    90%    95%    98%    99%  99.9% 99.99%   100% # reqs
+--------|--------------------------------------------------------------------------------|--------|------|------|------|------|------|------|------|------|------|------|------
+GET      /cases/{id}/report                                                                     11     70     96    100    120    170    250    300    380    550    550   7669
+--------|--------------------------------------------------------------------------------|--------|------|------|------|------|------|------|------|------|------|------|------
+         Aggregated                                                                             11     70     96    100    120    170    250    300    380    550    550   7669
+
+Error report
+# occurrences      Error                                                                                               
+------------------|---------------------------------------------------------------------------------------------------------------------------------------------
+5025               GET /cases/{id}/report: HTTPError('503 Server Error: Service Unavailable for url: /cases/{id}/report')
+------------------|---------------------------------------------------------------------------------------------------------------------------------------------
+```
+</TerminalOutput>
+
+Two lessons. First, read a load test's numbers by status code, not as one blended percentile. Second, your test users need to behave like your real clients: these ignore `Retry-After`, so they hammer the gate, and real ones may not. For a visual of the same run, drop `--headless` and open `http://localhost:8089`.
+
+<Figure src={locustUi} alt="The locust web UI on its Charts tab: total requests per second climbing to about 70, response time lines for the 50th and 95th percentile, and the number of users ramping to 40" caption="The locust web UI during a ramp to 40 users against the ungated service: requests per second flatten near 70 while the response-time lines keep climbing. Captured locally." />
+
+<Concepts>
+- **Load test**: running many simulated users against a service to see how it behaves as load grows.
+- **Ramp-up**: adding users gradually, so you can see the load level where latency starts to climb.
+- **Capacity**: the throughput where adding more users stops adding finished work.
+</Concepts>
+
+---
+
+### The review habit
+
+A checklist for the next AI-written service, one line each:
+
+| It wrote | Ask | Fix in this post |
+|---|---|---|
+| "Faster" by rewrite: caching, `gather`, a new JSON library | Where is the profile? | `?profile=1` + pyinstrument (section 3) |
+| A blocking call or big loop inside `async def` | What else waits behind it? | p99 of a *neighbour* route (section 2) |
+| `httpx.AsyncClient()` with no `timeout=` | How long will it wait, and what does the caller get? | `httpx.Timeout(0.25)` + 504 (section 4) |
+| An unbounded queue, pool or burst of tasks | What happens at 10x the load? | Gate at 8, 503 + `Retry-After` (section 5) |
+| "p50 is 30 ms" as proof it is fast | What is p99, and how many requests were measured? | `p11_measure.py` (section 1) |
+| Tested with one user | What does the ramp look like? | locust (section 6) |
+
+</En>
+
+<Vi>
+
+<Figure src={heroRamp} alt="Một đường dẫn lên cao tốc ở Las Vegas dưới bầu trời xanh trong. Giàn đèn phía trên đường dẫn có ba đèn giao thông, hai đỏ một xanh, và vài chiếc xe đang chạy về phía cao tốc." caption="Đèn ramp meter chỉ cho một xe lên cao tốc mỗi lần đèn xanh, để đường vẫn chạy thay vì kẹt cứng với tất cả mọi người. Đây là việc từ chối bớt tải của giao thông, và service cũng cần một cái cổng như vậy trước cái đêm nhận nhiều request hơn khả năng trả lời." sourceTitle="Wikimedia Commons: Ramp meter on the ramp from Sahara Avenue to northbound Interstate 15, Las Vegas (CC BY-SA 4.0, Famartin)" sourceUrl="https://commons.wikimedia.org/wiki/File:2015-01-15_08_49_41_Ramp_meter_on_the_ramp_from_Sahara_Avenue_to_northbound_Interstate_15_in_Las_Vegas,_Nevada.JPG" />
+
+### Mở đầu: một dòng log, 30 ms
+
+Tháng 8/2026, các kỹ sư SoundCloud kể lại chuyện về một service Python nhỏ nằm trên đường phục vụ quảng cáo. Với mỗi phiên nghe, nó trả lời một câu hỏi: phát một cụm quảng cáo hay không. P99 của nó nằm ở khoảng 48 ms, và "it never dipped below 40ms at any point, at any volume" (chưa bao giờ xuống dưới 40 ms, ở bất kỳ lưu lượng nào). Một đoạn kiểm tra ghi một warning có cấu trúc và tăng bốn metric cho mọi request từ những caller vốn không gửi "posteriors" theo thiết kế. Với các caller dùng chính sách cố định, đó là gần như toàn bộ traffic.
+
+Cách sửa chỉ một dòng: điều kiện đi từ `if missing_actions:` thành `if missing_actions and request.posteriors:`. P99 rơi xuống còn khoảng 18 ms. Điều mình thích là họ kể thật về đoạn đường đi tới đó. Giả thuyết đầu của đội là format chuỗi, và họ viết "We never isolated it with a benchmark, and we should be honest about that" (chúng tôi chưa bao giờ cô lập nó bằng benchmark, và nên thành thật về điều đó). Cái tốn thật là việc ghi dòng log đồng bộ, ngay trong request. Họ tóm tắt: "the best hour of the old service was worse than the worst hour of the new one" (giờ tốt nhất của service cũ còn tệ hơn giờ tệ nhất của service mới).
+
+<BeP11LogLine />
+
+Service FastAPI của bạn rất có thể có một dòng như vậy, và code review sẽ không chỉ ra dòng nào. Nó còn một điểm yếu nữa: không có gì nói "không" khi việc đến nhanh hơn khả năng làm. Bài này nói về nửa "một service" của độ trễ: đo cái đuôi, profile trước khi viết lại, giới hạn thứ mình chờ, và từ chối sớm. Còn chuyện vì sao cả một *đội* service khiến timeout và retry thành sự cố thì là bài toán khác, mình để [bài hệ thống phân tán](/blog/trouble-with-distributed-systems-networks-clocks-fencing/) lo. Vì sao trung bình che mất cái đuôi thì mình đã giải thích trong [bài đầu về độ tin cậy](/blog/reliable-scalable-maintainable-data-systems/); ở đây mình chỉ dùng p50, p95, p99 như những con số đọc ra từ các lần chạy thật.
+
+Mọi con số bên dưới đo trên một laptop (Apple M2, macOS 26.4.1, Python 3.13), lúc máy còn đang chạy việc khác. Bạn chạy lại sẽ ra số khác. Chỗ nào số nhiễu, mình nói rõ.
+
+---
+
+## 1. Đo cái đuôi
+
+Bắt đầu với một service trông vẫn ổn. `p11_upstream.py` đóng vai evidence-lab, service thứ hai từ [bài observability](/blog/backend-observability/). Nó gần như lúc nào cũng nhanh, và cứ 40 lời gọi có một lời gọi chậm (GC pause, cache nguội, hàng xóm ồn ào: chọn nguyên nhân tùy bạn). `demo/p11_upstream.py`:
+
+```python
+@app.get("/analyze/{case_id}")
+async def analyze(case_id: str) -> dict:
+    n = next(calls)
+    # A GC pause, a cold cache, a noisy neighbour: 1 call in 40 takes 0.8 s.
+    await asyncio.sleep(0.8 if n % 40 == 0 else 0.02)
+    return {"case_id": case_id, "score": 0.87}
+```
+
+Route report của clue.api gọi sang nó. Client là một `httpx.AsyncClient`, và để ý dòng tạo nó thiếu cái gì (`demo/p11_naive.py`):
+
+```python
+lab = httpx.AsyncClient(base_url=LAB)  # no timeout= argument: httpx's default applies
+```
+
+```python
+@app.get("/cases/{case_id}/report")
+async def report(case_id: str) -> dict:
+    analysis = (await lab.get(f"/analyze/{case_id}")).json()
+    return {"case_id": case_id, "analysis": analysis}
+```
+
+Muốn có percentile thì cần nhiều request, không phải một lần `curl`. `demo/p11_measure.py` bắn N request với C request cùng lúc rồi sắp xếp kết quả. Phép toán duy nhất là quy tắc nearest-rank: p99 là giá trị nhỏ nhất mà 99% mẫu nằm ở hoặc dưới nó.
+
+```python
+def pct(sorted_ms: list[float], p: float) -> float:
+    """Nearest-rank percentile: the smallest value with p% of samples at or below."""
+    return sorted_ms[max(0, math.ceil(p / 100 * len(sorted_ms)) - 1)]
+```
+
+<TerminalOutput command="python p11_measure.py http://127.0.0.1:4360 /cases/C-1/report 400 8" label="Python 3.13 · FastAPI 0.165.0 · uvicorn 0.54.0 · httpx 0.28.1 · Apple M2 · captured Nov 2026" caption="400 request, mỗi lần 8. Trung bình 54 ms, gần với median. P99 lớn gấp mười lăm lần, và không con số nào giữa p50 và p95 gợi ý điều đó.">
+```text
+/cases/C-1/report  n=400 in-flight=8  wall=3.3s  statuses={200: 400}
+  200 only: mean=54ms  p50=30ms  p95=69ms  p99=817ms  max=838ms
+```
+</TerminalOutput>
+
+<BeP11Percentiles />
+
+Vì sao là p99 chứ không phải p95? Vì phép đếm đơn giản. Mười trong 400 request (một trên 40, tức 2,5%) rơi vào lời gọi chậm. 1% chậm nhất của 400 là 4 request, và cả bốn đều là lời gọi chậm. Nếu tỉ lệ chậm dưới 1%, p99 vẫn trông khỏe còn cái đuôi vẫn tồn tại ở p99.9.
+
+<BeP11OneInForty />
+
+Hãy đọc p99 như một tỉ lệ. "P99 của mình là 817 ms" nghĩa là cứ một người dùng trong một trăm phải chờ chừng đó, và người dùng gửi mười request mỗi trang sẽ gặp trường hợp này thường xuyên.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+- **Percentile (p50, p95, p99)**: sắp xếp mọi thời gian phản hồi; p99 là giá trị mà 99% số đó nằm ở hoặc dưới nó.
+- **Tail latency (độ trễ ở đuôi)**: vài phần trăm request chậm nhất. Thường do một thứ hiếm gặp gây ra, không phải đường đi thông thường.
+- **In flight (đang bay)**: request server đã nhận và chưa trả lời.
+</Concepts>
+
+---
+
+## 2. Một loop bị chặn làm chậm mọi route
+
+Một kiểu đuôi khác đến từ bên trong service. Trong endpoint `async def`, event loop chạy mọi thứ trên một thread, và chỉ chuyển qua lại giữa các request khi code gặp một `await`. Code không bao giờ await sẽ giữ luôn thread. [Bài async](/blog/backend-async-concurrency-workers/) giải thích kỹ chuyện này; ở đây là cái giá của nó tính bằng percentile.
+
+`demo/p11_hotspot.py` có một route chấm điểm case bằng cách đếm số manh mối khác nhau, và một route `/health` không làm gì cả. Phần chấm điểm là Python thuần, không có `await` nào:
+
+```python
+@app.get("/cases/{case_id}/score")
+async def case_score(case_id: str) -> dict:
+    evidence = [f"clue-{i % 2500}" for i in range(10000)]
+    return {"case_id": case_id, "distinct_clues": score(evidence)}
+```
+
+<BeP11Blocked />
+
+Chạy bốn request `/score` cùng lúc rồi thăm dò `/health` khi chúng đang bay. Đầu tiên chạy một mình, sau đó dưới tải đó:
+
+<TerminalOutput command="p11_measure.py: /health and /score alone, then both while four /score calls are in flight" label="Python 3.13 · FastAPI 0.165.0 · uvicorn 0.54.0 · Apple M2 · captured Nov 2026" caption="/health không làm gì khác. Median vẫn 1 ms, nên dashboard dùng trung bình hay median vẫn xanh. Chỉ cái đuôi cho thấy nó đã chờ sau /score.">
+```text
+/health  n=300 in-flight=1  wall=0.3s  statuses={200: 300}
+  200 only: mean=1ms  p50=1ms  p95=1ms  p99=2ms  max=18ms
+/cases/C-1/score  n=100 in-flight=1  wall=6.7s  statuses={200: 100}
+  200 only: mean=67ms  p50=65ms  p95=77ms  p99=108ms  max=153ms
+/health  n=300 in-flight=1  wall=8.2s  statuses={200: 300}
+  200 only: mean=27ms  p50=1ms  p95=258ms  p99=278ms  max=385ms
+/cases/C-1/score  n=120 in-flight=4  wall=8.3s  statuses={200: 120}
+  200 only: mean=276ms  p50=267ms  p95=357ms  p99=386ms  max=387ms
+```
+</TerminalOutput>
+
+Bản thân `/score` đi từ median 65 ms khi chạy một mình lên 267 ms khi bốn cái chạy cùng lúc, vì bốn request thay phiên nhau trên một thread. Một loop bị chặn làm chậm các route *hàng xóm*, nên route chậm không phải lúc nào cũng là route khiến người dùng phàn nàn. Và đây là cái bẫy của code AI: nó vui vẻ đặt một lời gọi chặn (`requests.get`, `time.sleep`, một vòng lặp lớn) trong `async def`, và bản demo vẫn qua vì không ai test hai request cùng lúc.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+- **Event loop**: thread duy nhất chạy mọi code `async def`, chỉ chuyển giữa các request tại `await`.
+- **Blocking call (lời gọi chặn)**: code giữ thread mà không await: tính toán CPU, `time.sleep`, HTTP client đồng bộ.
+</Concepts>
+
+---
+
+## 3. Profile trước khi viết lại
+
+Giờ `/score` đang chậm, nhìn vào đâu? Bản năng là đọc code rồi đoán: có thể là list comprehension, có thể là JSON. Đừng đoán, và đừng bắt đầu bằng việc viết lại: đội SoundCloud đã đoán là format chuỗi trước, và tự nhận chưa bao giờ xác nhận nó. Một câu hỏi quyết định dùng công cụ nào.
+
+<BeP11WhereFirst />
+
+Ở đây CPU đang bận nên dùng profiler là đúng bài. Mình định dùng `py-spy` trước: nó gắn vào tiến trình đang chạy từ bên ngoài và không tốn gì của service. Trên macOS nó từ chối chạy nếu không có root:
+
+<TerminalOutput command="uv run --with py-spy py-spy dump --pid 49066" label="py-spy via uv · macOS 26.4.1 · captured Nov 2026" caption="py-spy cần root trên macOS (README của nó ghi OSX luôn đòi root). Mình không dùng sudo cho một bản demo, nên phần còn lại dùng pyinstrument, chạy bên trong tiến trình và không cần đặc quyền.">
+```text
+This program requires root on OSX.
+Try running again with elevated permissions by going 'sudo !!'
+```
+</TerminalOutput>
+
+`pyinstrument` là sampling profiler mà bạn bật và tắt ngay trong code của mình, nên chạy được ở mọi nơi có Python. Middleware trong `demo/p11_hotspot.py` bật nó cho một request khi URL có `?profile=1`, và trả báo cáo thay cho response:
+
+```python
+@app.middleware("http")
+async def profile_on_request(request: Request, call_next):
+    if request.query_params.get("profile") != "1":
+        return await call_next(request)
+    profiler = Profiler(async_mode="enabled")
+    profiler.start()
+    await call_next(request)
+    profiler.stop()
+    text = profiler.output_text(
+        unicode=False, color=False, processor_options={"hide_regex": r".*site-packages.*"}
+    )
+    return PlainTextResponse(text)
+```
+
+`async_mode="enabled"` giúp nó đi theo request qua các `await`. Tùy chọn `hide_regex` gập các frame của framework lại, để báo cáo chỉ còn code của mình. Xin profile của một request chậm:
+
+<TerminalOutput command="curl 'localhost:4362/cases/C-1/score?profile=1'" label="Python 3.13 · FastAPI 0.165.0 · pyinstrument 5.1.3 · captured Nov 2026" caption="Đọc từ trên xuống: mỗi dòng là hàm gọi hàm bên dưới. Con số là giây. 0.065 trên 0.068 s nằm trong dedupe, và không dòng nào khác quá 0.002.">
+```text
+
+  _     ._   __/__   _ _  _  _ _/_   Recorded: 13:43:35  Samples:  19
+ /_//_/// /_\ / //_// / //_'/ //     Duration: 0.069     CPU time: 0.067
+/   _/                      v5.1.3
+
+Profile at /Users/nguyennhatkhang/Downloads/learning/fitr-wt/backend-post-11/demo/p11_hotspot.py:20
+
+0.068 Runner.run  asyncio/runners.py:87
+|- 0.067 coro  starlette/middleware/base.py:144
+|     [16 frames hidden]  starlette, fastapi, pydantic
+|        0.066 run_endpoint_function  fastapi/routing.py:372
+|        `- 0.066 case_score  p11_hotspot.py:41
+|           |- 0.065 score  p11_hotspot.py:37
+|           |  `- 0.065 dedupe  p11_hotspot.py:29
+|           `- 0.001 [self]  p11_hotspot.py
+`- 0.001 RequestResponseCycle.run_asgi  uvicorn/protocols/http/httptools_impl.py:420
+      [6 frames hidden]  uvicorn, fastapi, starlette
+         0.001 BaseHTTPMiddleware.__call__  starlette/middleware/base.py:101
+         `- 0.001 profile_on_request  p11_hotspot.py:15
+            `- 0.001 call_next  starlette/middleware/base.py:112
+                  [4 frames hidden]  anyio, asyncio
+```
+</TerminalOutput>
+
+<BeP11Flame />
+
+Báo cáo trả lời bằng một hàm và một dòng: `dedupe`, `p11_hotspot.py:29`. Không phải JSON, không phải list comprehension. Hàm đó đây:
+
+```python
+def dedupe(items: list[str]) -> list[str]:
+    seen: list[str] = []
+    for item in items:
+        if item not in seen:
+            seen.append(item)
+    return seen
+```
+
+`item not in seen` quét cả một list, nên mỗi lần tra là một lần đi bộ. Với 2.500 manh mối khác nhau, vòng lặp làm hàng triệu phép so sánh. `dict` của Python giữ thứ tự chèn và tìm khóa trong một bước, nên `dict.fromkeys(items)` bỏ trùng trong một lượt. Thay vì sửa file, `demo/p11_hotfix.py` thay hàm đó, giống cách bài observability thay `_trace`:
+
+```python
+p11_hotspot.dedupe = lambda items: list(dict.fromkeys(items))  # one pass, O(n)
+app = p11_hotspot.app
+```
+
+<TerminalOutput command="p11_measure.py on /cases/C-1/score alone, then /health while four /score calls run" label="Python 3.13 · FastAPI 0.165.0 · uvicorn 0.54.0 · Apple M2 · captured Nov 2026" caption="Sau khi sửa: /score còn 3 ms ở median và p99 của /health dưới cùng tải là 12 ms. Cùng máy, cùng driver, cùng số request như trước.">
+```text
+/cases/C-1/score  n=100 in-flight=1  wall=0.5s  statuses={200: 100}
+  200 only: mean=5ms  p50=3ms  p95=19ms  p99=23ms  max=24ms
+/health  n=300 in-flight=1  wall=0.5s  statuses={200: 300}
+  200 only: mean=2ms  p50=1ms  p95=5ms  p99=12ms  max=54ms
+```
+</TerminalOutput>
+
+<BeP11BeforeAfter />
+
+Profile trước có lợi hai lần: nó chỉ ra một nguyên nhân mà đọc route thì không ai đoán nổi, và nó sửa luôn cả một route không liên quan. Nếu mình "tối ưu" response model hay chuyển sang thread pool, mình đã mất một ngày mà chẳng được gì.
+
+<Callout type="warning" title="Thói quen AI cần bỏ">
+Bảo trợ lý "làm endpoint này nhanh hơn" thì thường nhận về một bản viết lại: cache, `asyncio.gather`, thư viện JSON khác. Cái nào cũng hợp lý, không cái nào được đo. Hãy xin profile trước, dán báo cáo vào, rồi mới nhờ sửa đúng hàm nó chỉ ra.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+- **Profiler**: công cụ ghi lại chương trình tốn thời gian ở đâu, theo hàm và theo dòng.
+- **Sampling profiler**: nhìn call stack nhiều lần mỗi giây thay vì theo dõi từng lời gọi, nên đủ rẻ để bật cho một request.
+- **Hot spot (điểm nóng)**: một hàm hoặc vòng lặp chiếm phần lớn thời gian.
+</Concepts>
+
+---
+
+## 4. Đặt deadline cho mọi lời gọi ra ngoài
+
+Quay lại dependency chậm ở mục 1. Không có deadline trong code thì câu trả lời cho "clue.api sẽ chờ evidence-lab bao lâu?" là giá trị mặc định của thư viện. `httpx` có một giá trị như vậy:
+
+<TerminalOutput command="python -c &quot;import httpx; print(httpx.AsyncClient().timeout)&quot;" label="Python 3.13 · httpx 0.28.1 · captured Nov 2026" caption="httpx chờ tối đa 5 giây, cho mỗi giai đoạn. Con số đó vượt xa sự kiên nhẫn của người dùng, và vài client khác (như requests) chờ mãi mãi nếu bạn không truyền timeout.">
+```text
+Timeout(timeout=5.0)
+```
+</TerminalOutput>
+
+Năm giây là lựa chọn của người khác. Hãy tự chọn, dựa vào mục đích của route. Report đáng để chờ một phần tư giây. Sau đó, người gọi được phục vụ tốt hơn bằng một lỗi rõ ràng mà nó có thể thử lại. `demo/p11_timeout.py`:
+
+```python
+lab = httpx.AsyncClient(base_url=LAB, timeout=httpx.Timeout(0.25))
+```
+
+```python
+@app.get("/cases/{case_id}/report")
+async def report(case_id: str) -> dict:
+    try:
+        analysis = (await lab.get(f"/analyze/{case_id}")).json()
+    except httpx.TimeoutException:
+        raise HTTPException(status_code=504, detail="evidence-lab: no answer in 0.25 s")
+    return {"case_id": case_id, "analysis": analysis}
+```
+
+`httpx.Timeout(0.25)` đặt thời gian chờ connect, read, write và pool đều là 0,25 s. `httpx.TimeoutException` là lớp cha chung của cả bốn, nên một `except` bắt hết. Route trả **504 Gateway Timeout**, status có nghĩa "mình hỏi người khác và họ không trả lời kịp".
+
+<BeP11Deadline />
+
+<TerminalOutput command="p11_measure.py http://127.0.0.1:4363 /cases/C-1/report 400 8" label="Python 3.13 · FastAPI 0.165.0 · uvicorn 0.54.0 · httpx 0.28.1 · Apple M2 · captured Nov 2026" caption="Cùng upstream, cùng tải như mục 1. Các lời gọi chậm giờ kết thúc ở khoảng 250 ms với 504. Các response 200 có p99 là 68 ms; tính cả 504 thì 263 ms.">
+```text
+/cases/C-1/report  n=400 in-flight=8  wall=1.9s  statuses={200: 390, 504: 10}
+  200 only: mean=29ms  p50=25ms  p95=55ms  p99=68ms  max=75ms
+  all     : mean=35ms  p50=25ms  p95=63ms  p99=263ms  max=299ms
+```
+</TerminalOutput>
+
+Mười trong 400 request nhận 504 thay vì một câu trả lời đúng nhưng chậm. Đó là cái giá, và là một quyết định chứ không phải lỗi. Khi evidence-lab chậm, câu trả lời đúng là kết quả cũ, giá trị mặc định hay một lỗi thì tùy sản phẩm. Chuyện có nên retry không, và retry storm giữa nhiều service làm mọi thứ tệ đi ra sao, mình để bài hệ thống phân tán nói. Còn một lý do nữa: deadline cũng bảo vệ *chính bạn*. Không có nó, mỗi lời gọi chậm giữ một connection, một task và bộ nhớ suốt thời gian nó kéo dài.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+- **Timeout**: khoảng chờ tối đa trước khi bỏ cuộc.
+- **504 Gateway Timeout**: status cho "một service mình phụ thuộc không trả lời kịp".
+- **Deadline**: thời điểm mà cả request phải xong; timeout là deadline cho một bước.
+</Concepts>
+
+---
+
+## 5. Từ chối sớm: backpressure
+
+Timeout giới hạn một lời gọi. Giới hạn cả service cần công cụ khác. Service nào cũng có thứ khan hiếm: connection database, CPU, một worker pool. `demo/p11_shed.py` mô hình hóa nó bằng bốn slot, mỗi job giữ một slot 50 ms. Tức tối đa 4 / 0,05 = 80 job mỗi giây. Cho 40 client dồn vào mà không giới hạn, mọi người xếp hàng chờ slot:
+
+<TerminalOutput command="MAX_IN_FLIGHT=1000 uvicorn p11_shed:app, then p11_measure.py ... /cases/C-1/report 400 40" label="Python 3.13 · FastAPI 0.165.0 · uvicorn 0.54.0 · Apple M2 · captured Nov 2026" caption="Request nào cũng thành công, và request nào cũng mất nửa giây cho việc chỉ cần 50 ms. Bốn mươi người dùng trên bốn slot: mười người mỗi slot, mỗi người chờ chín người khác.">
+```text
+/cases/C-1/report  n=400 in-flight=40  wall=5.4s  statuses={200: 400}
+  200 only: mean=509ms  p50=526ms  p95=554ms  p99=562ms  max=574ms
+```
+</TerminalOutput>
+
+Không có lỗi nào trả về nên cũng không có gì báo động. Nó chỉ chậm, và độ chậm lớn lên theo hàng đợi. Cách sửa là một cái cổng: cho một số request giới hạn vào trong, trả lời ngay phần còn lại bằng **503 Service Unavailable** kèm header `Retry-After` báo cho client biết khi nào quay lại.
+
+```python
+MAX_IN_FLIGHT = int(os.environ.get("MAX_IN_FLIGHT", "8"))
+slots = asyncio.Semaphore(4)  # the scarce thing: 4 jobs can run at once
+in_flight = 0
+app = FastAPI(title="clue.api", version="0.11.3")
+```
+
+```python
+@app.get("/cases/{case_id}/report")
+async def report(case_id: str):
+    global in_flight
+    if in_flight >= MAX_IN_FLIGHT:
+        return JSONResponse(
+            status_code=503,
+            headers={"Retry-After": "1"},
+            content={"detail": "busy, retry in 1 s"},
+        )
+    in_flight += 1
+    try:
+        async with slots:
+            await asyncio.sleep(0.05)  # the work: 50 ms of a slot
+            return {"case_id": case_id, "report": "ready"}
+    finally:
+        in_flight -= 1
+```
+
+`asyncio.Semaphore(4)` là tài nguyên khan hiếm. `in_flight` đếm số request bên trong, đang chạy hay đang chờ. Việc kiểm tra và tăng biến không có `await` ở giữa, nên trên một event loop không có hai request nào cùng qua được khi đếm đang là 7. Tám là bốn đang chạy cộng bốn đang chờ; hàng đợi dài hơn chỉ thêm độ trễ.
+
+<BeP11Gate />
+
+<TerminalOutput command="uvicorn p11_shed:app, then p11_measure.py http://127.0.0.1:4364 /cases/C-1/report 400 40" label="Python 3.13 · FastAPI 0.165.0 · uvicorn 0.54.0 · Apple M2 · captured Nov 2026" caption="124 trong 400 nhận 503; phần còn lại được phục vụ trong khoảng 100 ms. Driver ngủ đúng Retry-After sau mỗi 503, như một client lịch sự. Đây là lần chạy ở giữa trong năm lần theo p99; năm giá trị p99 đó dao động từ 206 đến 622 ms vì laptop đang bận.">
+```text
+/cases/C-1/report  n=400 in-flight=40  wall=4.6s  statuses={503: 124, 200: 276}
+  200 only: mean=117ms  p50=105ms  p95=203ms  p99=278ms  max=409ms
+  all     : mean=99ms  p50=103ms  p95=199ms  p99=267ms  max=409ms
+```
+</TerminalOutput>
+
+<BeP11ShedCompare />
+
+Median giảm từ 526 ms xuống 105 ms. Cách này chỉ hiệu quả nếu client hợp tác. Client retry ngay lập tức sẽ biến cái 503 của bạn thành thêm tải, nên hãy ghi rõ phải chờ bao lâu trong `Retry-After`, và bảo bên gọi thêm jitter (độ trễ ngẫu nhiên) cho các lần retry.
+
+<Callout type="note" title="Giới hạn thật sự nên đặt ở đâu">
+Cổng này chỉ nằm trong một tiến trình. Sau load balancer với nhiều worker, mỗi worker có bộ đếm riêng, nên giới hạn thật là tám nhân với số worker. Ở production, cùng ý tưởng này thường được đặt ở rìa (reverse proxy, API gateway) và đặt thêm ở chính tài nguyên khan hiếm, như connection pool của database.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+- **Backpressure (áp lực ngược)**: tín hiệu từ phần đang quá tải bảo các phần phía trước chậm lại hoặc ngừng gửi.
+- **Load shedding (từ chối bớt tải)**: cố ý từ chối một phần việc để phần việc nhận vào vẫn xong nhanh.
+- **`Retry-After`**: header phản hồi nói client nên chờ bao nhiêu giây trước khi thử lại.
+- **Semaphore**: bộ đếm slot trống; `async with` lấy một slot và trả lại.
+</Concepts>
+
+---
+
+## 6. Load test bằng locust
+
+Đến giờ mọi thứ dùng driver do mình tự viết. Một bài test thật cần những người dùng cư xử như người dùng: họ chờ giữa các lần bấm, có rất nhiều người, và họ đến dần dần. `locust` làm được việc đó. Một người dùng là một class Python:
+
+```python
+class Detective(HttpUser):
+    wait_time = between(0.05, 0.15)  # think time between two requests of one user
+
+    @task
+    def report(self) -> None:
+        self.client.get("/cases/C-1/report", name="/cases/{id}/report")
+```
+
+`wait_time` là khoảng nghỉ giữa các request của một người dùng, và `name=` gom các URL có id vào một dòng trong báo cáo. Chạy headless vào bản không có cổng, tăng 2 người dùng mới mỗi giây đến 40. `uv run --with locust` tải nó chỉ cho lần chạy này:
+
+<TerminalOutput command="uv run --with locust locust -f p11_locustfile.py --host http://127.0.0.1:4365 --headless -u 40 -r 2 -t 40s" label="Python 3.13 · locust 2.47.0 · Apple M2 · captured Nov 2026 · log lines trimmed" caption="Không có lỗi và 71 request mỗi giây, sát với sức chứa 80 mỗi giây của bốn slot 50 ms. Median là 390 ms cho một việc tốn 50 ms.">
+```text
+Type     Name                                                                          # reqs      # fails |    Avg     Min     Max    Med |   req/s  failures/s
+--------|----------------------------------------------------------------------------|-------|-------------|-------|-------|-------|-------|--------|-----------
+GET      /cases/{id}/report                                                              2845     0(0.00%) |    322      50     611    390 |   71.29        0.00
+--------|----------------------------------------------------------------------------|-------|-------------|-------|-------|-------|-------|--------|-----------
+         Aggregated                                                                      2845     0(0.00%) |    322      50     611    390 |   71.29        0.00
+
+Response time percentiles (approximated)
+Type     Name                                                                                  50%    66%    75%    80%    90%    95%    98%    99%  99.9% 99.99%   100% # reqs
+--------|--------------------------------------------------------------------------------|--------|------|------|------|------|------|------|------|------|------|------|------
+GET      /cases/{id}/report                                                                    390    410    420    430    450    470    510    550    610    610    610   2845
+--------|--------------------------------------------------------------------------------|--------|------|------|------|------|------|------|------|------|------|------|------
+         Aggregated                                                                            390    410    420    430    450    470    510    550    610    610    610   2845
+```
+</TerminalOutput>
+
+<BeP11Ramp />
+
+Cùng file đó chạy vào server có cổng cho thấy load test tìm ra nhiều hơn tốc độ. locust coi mọi status không phải 2xx là lỗi, nên nó báo 65% lỗi, trong khi không có gì hỏng:
+
+<TerminalOutput command="locust -f p11_locustfile.py --host http://127.0.0.1:4364 --headless -u 40 -r 2 -t 40s" label="Python 3.13 · locust 2.47.0 · Apple M2 · captured Nov 2026 · log lines trimmed" caption="Những lỗi đó là cái cổng đang làm việc. P50 11 ms phần lớn là các 503 nhanh; locust trộn chúng với các 200, và những người dùng giả lập này bỏ qua Retry-After, nên tỉ lệ 503 mới cao như vậy.">
+```text
+Type     Name                                                                          # reqs      # fails |    Avg     Min     Max    Med |   req/s  failures/s
+--------|----------------------------------------------------------------------------|-------|-------------|-------|-------|-------|-------|--------|-----------
+GET      /cases/{id}/report                                                              7669 5025(65.52%) |     49       0     552     11 |  192.77      126.31
+--------|----------------------------------------------------------------------------|-------|-------------|-------|-------|-------|-------|--------|-----------
+         Aggregated                                                                      7669 5025(65.52%) |     49       0     552     11 |  192.77      126.31
+
+Response time percentiles (approximated)
+Type     Name                                                                                  50%    66%    75%    80%    90%    95%    98%    99%  99.9% 99.99%   100% # reqs
+--------|--------------------------------------------------------------------------------|--------|------|------|------|------|------|------|------|------|------|------|------
+GET      /cases/{id}/report                                                                     11     70     96    100    120    170    250    300    380    550    550   7669
+--------|--------------------------------------------------------------------------------|--------|------|------|------|------|------|------|------|------|------|------|------
+         Aggregated                                                                             11     70     96    100    120    170    250    300    380    550    550   7669
+
+Error report
+# occurrences      Error                                                                                               
+------------------|---------------------------------------------------------------------------------------------------------------------------------------------
+5025               GET /cases/{id}/report: HTTPError('503 Server Error: Service Unavailable for url: /cases/{id}/report')
+------------------|---------------------------------------------------------------------------------------------------------------------------------------------
+```
+</TerminalOutput>
+
+Hai bài học. Thứ nhất, đọc số của load test theo status code, đừng đọc như một percentile trộn lẫn. Thứ hai, người dùng test phải cư xử như client thật của bạn: những người này bỏ qua `Retry-After`, nên dồn dập vào cổng, còn client thật thì có thể không. Muốn xem trực quan cùng lần chạy đó, bỏ `--headless` và mở `http://localhost:8089`.
+
+<Figure src={locustUi} alt="Giao diện web của locust ở tab Charts: tổng request mỗi giây tăng đến khoảng 70, các đường thời gian phản hồi percentile 50 và 95, và số người dùng tăng dần đến 40" caption="Giao diện web của locust khi tăng đến 40 người dùng vào service không có cổng: request mỗi giây đi ngang quanh 70 trong khi các đường thời gian phản hồi vẫn leo lên. Chụp tại máy." />
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+- **Load test**: chạy nhiều người dùng giả lập vào service để xem nó cư xử thế nào khi tải tăng.
+- **Ramp-up (tăng dần tải)**: thêm người dùng từ từ, để thấy mức tải mà tại đó độ trễ bắt đầu leo.
+- **Capacity (sức chứa)**: mức thông lượng mà thêm người dùng không còn thêm việc xong.
+</Concepts>
+
+---
+
+### Thói quen review
+
+Checklist cho service AI viết tiếp theo, mỗi mục một dòng:
+
+| Nó viết | Hỏi | Cách sửa trong bài |
+|---|---|---|
+| "Nhanh hơn" bằng cách viết lại: cache, `gather`, thư viện JSON mới | Profile đâu? | `?profile=1` + pyinstrument (mục 3) |
+| Lời gọi chặn hoặc vòng lặp lớn trong `async def` | Còn gì phải chờ sau nó? | p99 của route *hàng xóm* (mục 2) |
+| `httpx.AsyncClient()` không có `timeout=` | Nó chờ bao lâu, và người gọi nhận gì? | `httpx.Timeout(0.25)` + 504 (mục 4) |
+| Hàng đợi, pool hay đợt task không giới hạn | Điều gì xảy ra khi tải gấp 10? | Cổng ở mức 8, 503 + `Retry-After` (mục 5) |
+| "p50 là 30 ms" như bằng chứng là nhanh | P99 là bao nhiêu, đo bao nhiêu request? | `p11_measure.py` (mục 1) |
+| Test với một người dùng | Đường ramp trông thế nào? | locust (mục 6) |
+
+</Vi>

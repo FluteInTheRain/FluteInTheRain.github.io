@@ -79,3 +79,17 @@ uv run --python 3.13 --with 'fastapi==0.165.0' --with 'uvicorn[standard]' \
 | `p10_cardinality.py` | `backend-observability` | Demonstrates unbounded label cardinality exploding Prometheus time series |
 | `p10_tracing.py`, `p10_spans.py` | `backend-observability` | OpenTelemetry FastAPI/HTTPX/SQLAlchemy tracing (`traceparent`) and span waterfall table printer |
 | `p10_app.py`, `p10_lab.py`, `p10_walk.py` | `backend-observability` | `clue-api` + `evidence-lab` instrumented services and morning traffic driver |
+| `p11_upstream.py`, `p11_naive.py` | `backend-performance-p99` | evidence-lab stand-in where every 40th call takes 0.8 s, and clue.api's report route calling it with httpx's default timeout |
+| `p11_measure.py` | `backend-performance-p99` | Driver: N requests with C in flight, then mean/p50/p95/p99/max per status class (sleeps for `Retry-After` after a 503) |
+| `p11_hotspot.py`, `p11_hotfix.py` | `backend-performance-p99` | A blocking `dedupe` inside `async def`, a `?profile=1` pyinstrument middleware, and the one-line `dict.fromkeys` fix |
+| `p11_timeout.py` | `backend-performance-p99` | The report route with `httpx.Timeout(0.25)` and a 504 on `httpx.TimeoutException` |
+| `p11_shed.py` | `backend-performance-p99` | Four worker slots (`asyncio.Semaphore`) behind an in-flight gate: 503 + `Retry-After` past `MAX_IN_FLIGHT` |
+| `p11_locustfile.py` | `backend-performance-p99` | A locust `HttpUser` ramping against the gated and ungated service |
+| `p12_settings.py` | `backend-production-deploy` | `pydantic-settings` `Settings` read from `CLUE_*` env vars; required `database_url`, validated numbers |
+| `p12_app.py` | `backend-production-deploy` | Deploy-ready FastAPI app: lifespan warm-up and shutdown log, `/livez`, `/readyz`, `/work`, `/slow`, and `/debug/*` switches for probe demos |
+| `p12/Dockerfile`, `p12/Dockerfile.fat` | `backend-production-deploy` | Multi-stage, non-root, uv image (258 MB) vs the single-stage root image an assistant tends to write (1.7 GB) |
+| `p12/pyproject.toml`, `p12/uv.lock` | `backend-production-deploy` | Pinned dependency set the image installs with `uv sync --frozen` |
+| `p12/k8s/*.yaml` | `backend-production-deploy` | ConfigMap + Secret, NodePort Service, and three Deployments: naive, readiness only, full (startup/readiness/liveness, `preStop`, grace period) |
+| `p12_load.py`, `p12_rollout.py` | `backend-production-deploy` | Request loop counting failures during a rolling update on a local kind cluster (refuses any context but `kind-p12`) |
+| `p12_drain.py` | `backend-production-deploy` | One in-flight request across `docker stop`, `docker kill`, and a shell-wrapped entrypoint (PID 1 trap) |
+| `p12_check_blocks.py` | `backend-production-deploy` | Checks every code block in the post is a verbatim slice of a demo file |
