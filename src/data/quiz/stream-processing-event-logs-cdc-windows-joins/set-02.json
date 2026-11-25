@@ -1,0 +1,418 @@
+{
+  "id": "set-02",
+  "title": {
+    "en": "Shopify stops asking the table",
+    "vi": "Shopify thôi hỏi bảng, chuyển sang đọc log"
+  },
+  "context": {
+    "text": {
+      "en": "Shopify's data warehouse was fed by Longboat, an extractor that queried read replicas of 100+ MySQL shards, table by table, with no joins.\n• Each table was queried at most once an hour, with `updated_at > last run`.\n• The replacement runs one Debezium connector per shard, reading the MySQL change log (binlog) into Kafka.\n• A Kafka Streams app then writes one topic per table, keyed by primary key, with log compaction on.\n• Shopify reports a p99 under 10 seconds from a MySQL insert to Kafka.\nSuppose a poll just ran, and product 7 has `stock = 12`. Then:\n• Minute 3: stock is edited to 9.\n• Minute 20: stock is edited to 4.\n• Minute 41: stock is edited to 0.\n• Minute 60: the next poll runs.",
+      "vi": "Kho dữ liệu của Shopify được nuôi bằng Longboat, một công cụ trích xuất truy vấn replica chỉ đọc của hơn 100 shard MySQL, từng bảng một, không có join.\n• Mỗi bảng được quét tối đa mỗi giờ một lần, bằng `updated_at > last run`.\n• Hệ thay thế chạy một connector Debezium cho mỗi shard, đọc change log của MySQL (binlog) vào Kafka.\n• Một ứng dụng Kafka Streams rồi ghi mỗi bảng một topic, khoá là primary key, bật log compaction.\n• Shopify báo p99 dưới 10 giây từ lúc MySQL insert tới lúc bản ghi vào Kafka.\nGiả sử một lần poll vừa chạy xong, và sản phẩm 7 có `stock = 12`. Sau đó:\n• Phút 3: stock được sửa thành 9.\n• Phút 20: stock được sửa thành 4.\n• Phút 41: stock được sửa thành 0.\n• Phút 60: lần poll tiếp theo chạy."
+    },
+    "media": [
+      {
+        "kind": "figure",
+        "component": "HourlyPollGaps",
+        "alt": {
+          "en": "Three lanes on a 0 to 60 minute axis: product 7's stock is edited at minutes 3, 20 and 41, an hourly poll runs at minute 0 and minute 60, and the change log has one entry per commit.",
+          "vi": "Ba làn trên trục 0 đến 60 phút: stock của sản phẩm 7 được sửa ở phút 3, 20 và 41, poll mỗi giờ chạy ở phút 0 và phút 60, còn change log có một bản ghi cho mỗi commit."
+        }
+      }
+    ]
+  },
+  "questions": [
+    {
+      "id": "s02q1",
+      "level": "remember",
+      "track": "interview",
+      "type": "single",
+      "difficulty": 1,
+      "topic": "Query-based capture",
+      "stem": {
+        "en": "Why does a query such as `updated_at > last run` never report a hard `DELETE`?",
+        "vi": "Vì sao truy vấn kiểu `updated_at > last run` không bao giờ báo được một lệnh `DELETE` cứng?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Deletes run outside transactions, so the replica never receives them.",
+            "vi": "Lệnh delete chạy ngoài transaction, nên replica không bao giờ nhận được."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "A delete moves `updated_at` back in time, so the filter hides it.",
+            "vi": "Delete đẩy `updated_at` lùi về quá khứ, nên bộ lọc giấu nó đi."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "The query returns rows that exist, and a deleted row is gone.",
+            "vi": "Truy vấn chỉ trả về dòng còn tồn tại, mà dòng đã xoá thì mất rồi."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Replicas skip delete statements to save work while copying.",
+            "vi": "Replica bỏ qua câu lệnh delete để đỡ việc khi sao chép."
+          }
+        }
+      ],
+      "answer": [
+        "c"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "A poll asks the table which rows match a filter. A row that was deleted is no longer in the table, so no filter can match it and nothing is left to report. The change simply disappears. This is one blind spot of asking the table; reading the change log does not have it, because the log records the delete itself.",
+          "vi": "Poll là hỏi bảng xem dòng nào khớp bộ lọc. Dòng đã bị xoá không còn trong bảng, nên không bộ lọc nào khớp được và không còn gì để báo. Thay đổi đó đơn giản là biến mất. Đây là một điểm mù của việc hỏi bảng; đọc change log thì không bị, vì log ghi lại chính lệnh delete."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "Deletes are normal transactions and replicas replay them. The replica is just as empty of that row as the source.",
+            "vi": "Delete là transaction bình thường và replica phát lại chúng. Replica cũng không còn dòng đó giống như nguồn."
+          },
+          "b": {
+            "en": "A delete does not leave a row behind to carry any `updated_at` value, old or new. The filter has nothing to hide.",
+            "vi": "Delete không để lại dòng nào mang giá trị `updated_at`, cũ hay mới. Bộ lọc không có gì để giấu."
+          },
+          "d": {
+            "en": "Replication copies every committed change, deletes included. The gap is in the polling query, not in replication.",
+            "vi": "Replication chép mọi thay đổi đã commit, kể cả delete. Lỗ hổng nằm ở truy vấn poll, không nằm ở replication."
+          }
+        },
+        "reread": {
+          "anchor": "a-real-case-shopify-stops-polling-and-reads-the-binlog",
+          "label": {
+            "en": "A real case: Shopify stops polling and reads the binlog",
+            "vi": "Ca thực tế: Shopify bỏ polling, chuyển sang đọc binlog"
+          }
+        },
+        "say": {
+          "en": "A poll sees only rows that still exist, so a hard delete leaves nothing to find.",
+          "vi": "Poll chỉ thấy các dòng còn tồn tại, nên một lệnh delete cứng không để lại gì để tìm."
+        }
+      },
+      "ref": "Post: A real case: Shopify stops polling and reads the binlog; https://shopify.engineering/capturing-every-change-shopify-sharded-monolith"
+    },
+    {
+      "id": "s02q2",
+      "level": "understand",
+      "track": "interview",
+      "type": "single",
+      "difficulty": 2,
+      "topic": "Compacted topics",
+      "stem": {
+        "en": "A Kafka topic holds one record per change of the `products` table, keyed by primary key, with log compaction on. What does compaction give a brand-new consumer?",
+        "vi": "Một topic Kafka chứa mỗi thay đổi của bảng `products` thành một bản ghi, khoá là primary key, bật log compaction. Compaction mang lại điều gì cho một consumer hoàn toàn mới?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "It reads from the start and ends up with the latest value of each key.",
+            "vi": "Nó đọc từ đầu và kết thúc với giá trị mới nhất của từng key."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "It reads every earlier version of each row, however old, in order.",
+            "vi": "Nó đọc mọi phiên bản cũ của từng dòng, dù cũ đến đâu, theo thứ tự."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "It reads the topic faster, since each key's records are packed in one batch.",
+            "vi": "Nó đọc topic nhanh hơn, vì các bản ghi của mỗi key được gói vào một batch."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "It gets a copy of the table as of one exact instant for every key.",
+            "vi": "Nó nhận một bản sao của bảng tại đúng một thời điểm cho mọi key."
+          }
+        }
+      ],
+      "answer": [
+        "a"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "Compaction runs in the background and drops older records that have the same key, keeping at least the latest one. A new consumer that reads from the beginning to the end therefore ends with the newest value of every row, which is the current state of the table. That is how a new cache or search index is built without asking the shard.",
+          "vi": "Compaction chạy ngầm và bỏ các bản ghi cũ có cùng key, ít nhất giữ lại bản mới nhất. Vì vậy consumer mới đọc từ đầu đến cuối sẽ có giá trị mới nhất của mọi dòng, tức là trạng thái hiện tại của bảng. Đó là cách dựng một cache hoặc search index mới mà không phải hỏi shard."
+        },
+        "whyWrong": {
+          "b": {
+            "en": "Compaction exists to remove old versions. Once it has run, older values of a key are gone, so the full history of a row is not guaranteed.",
+            "vi": "Compaction sinh ra để bỏ các phiên bản cũ. Sau khi chạy, giá trị cũ của một key không còn, nên lịch sử đầy đủ của một dòng không được đảm bảo."
+          },
+          "c": {
+            "en": "Compaction is about which records stay, not how they are batched. It saves disk and shortens the replay, but it is not a read-speed feature.",
+            "vi": "Compaction quyết định bản ghi nào được giữ, không phải cách gom batch. Nó tiết kiệm đĩa và làm replay ngắn lại, nhưng không phải tính năng tăng tốc đọc."
+          },
+          "d": {
+            "en": "Cleaning runs at its own pace and the topic keeps growing while you read. Keys are as new as the last record you read for each, not frozen at one moment.",
+            "vi": "Việc dọn dẹp chạy theo nhịp riêng và topic vẫn lớn thêm khi bạn đọc. Mỗi key chỉ mới đến bản ghi cuối bạn đọc được, không bị đóng băng ở một thời điểm."
+          }
+        },
+        "reread": {
+          "anchor": "debezium-the-outbox-pattern-snapshots-and-log-compaction",
+          "label": {
+            "en": "Debezium, the Outbox pattern, snapshots, and log compaction",
+            "vi": "Debezium, Outbox pattern, snapshot và log compaction"
+          }
+        },
+        "say": {
+          "en": "Compaction keeps the latest record per key, so replaying the topic from zero rebuilds the current table.",
+          "vi": "Compaction giữ bản ghi mới nhất của mỗi key, nên replay topic từ đầu sẽ dựng lại bảng hiện tại."
+        }
+      },
+      "ref": "Post: Debezium, the Outbox pattern, snapshots, and log compaction"
+    },
+    {
+      "id": "s02q3",
+      "level": "apply",
+      "track": "ai",
+      "type": "scenario",
+      "difficulty": 3,
+      "topic": "Query-based capture",
+      "stem": {
+        "en": "An AI assistant says: \"An hourly `updated_at` poll is fine: the average delay is half the interval, 30 minutes, and every edit is captured.\" Check it against the trace of product 7, using these formulas:\n- `wait = next poll minute − edit minute`\n- `mean wait = sum of the 3 waits ÷ 3`\nWhich verdict matches the trace?",
+        "vi": "Một AI nói: \"Poll `updated_at` mỗi giờ là ổn: độ trễ trung bình bằng nửa chu kỳ, tức 30 phút, và mọi lần sửa đều được ghi nhận.\" Hãy đối chiếu với trace của sản phẩm 7, dùng các công thức:\n- `wait = phút của lần poll kế − phút của lần sửa`\n- `mean wait = tổng 3 wait ÷ 3`\nKết luận nào khớp với trace?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Waits of 57, 40 and 19 minutes (mean 38.7); the poll reports all three values.",
+            "vi": "Wait là 57, 40 và 19 phút (trung bình 38,7); poll báo cả ba giá trị."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Waits of 57, 40 and 19 minutes (mean 38.7); the poll reports only stock 0.",
+            "vi": "Wait là 57, 40 và 19 phút (trung bình 38,7); poll chỉ báo stock 0."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "A mean wait of 30 minutes, as the AI said; the poll reports only stock 0.",
+            "vi": "Wait trung bình 30 phút như AI nói; poll chỉ báo stock 0."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Waits of 3, 20 and 41 minutes (mean 21.3); the poll reports only stock 9.",
+            "vi": "Wait là 3, 20 và 41 phút (trung bình 21,3); poll chỉ báo stock 9."
+          }
+        }
+      ],
+      "answer": [
+        "b"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "The next poll is at minute 60, so the waits are 60 − 3 = 57, 60 − 20 = 40 and 60 − 41 = 19 minutes, and the mean is 116 ÷ 3 = 38.67. The poll reads the row as it is at minute 60, so it sees stock 0 only. The values 9 and 4 existed between two polls and are lost. The AI's 30 minutes is a long-run average for random edit times, not this trace, and its claim that every edit is captured is false.",
+          "vi": "Lần poll kế tiếp ở phút 60, nên wait là 60 − 3 = 57, 60 − 20 = 40 và 60 − 41 = 19 phút, trung bình 116 ÷ 3 = 38,67. Poll đọc dòng ở trạng thái lúc phút 60, nên chỉ thấy stock 0. Các giá trị 9 và 4 tồn tại giữa hai lần poll và bị mất. Con số 30 phút của AI là trung bình dài hạn cho giờ sửa ngẫu nhiên, không phải trace này, và câu \"mọi lần sửa đều được ghi nhận\" là sai."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "The waits are right, but a poll reads only the current row. It cannot return states the row held between two polls.",
+            "vi": "Các wait đúng, nhưng poll chỉ đọc dòng hiện tại. Nó không thể trả về các trạng thái dòng từng có giữa hai lần poll."
+          },
+          "c": {
+            "en": "Half the interval is an average over many random edits. For this trace the formula gives 38.67, so the AI's number does not match.",
+            "vi": "Nửa chu kỳ là trung bình của nhiều lần sửa ngẫu nhiên. Với trace này công thức cho 38,67, nên con số của AI không khớp."
+          },
+          "d": {
+            "en": "Those are the edit times counted from the last poll, not the waits until the next one. And the poll reads the row at minute 60, not minute 3.",
+            "vi": "Đó là giờ sửa tính từ lần poll trước, không phải thời gian chờ tới lần poll sau. Và poll đọc dòng ở phút 60, không phải phút 3."
+          }
+        },
+        "reread": {
+          "anchor": "a-real-case-shopify-stops-polling-and-reads-the-binlog",
+          "label": {
+            "en": "A real case: Shopify stops polling and reads the binlog",
+            "vi": "Ca thực tế: Shopify bỏ polling, chuyển sang đọc binlog"
+          }
+        },
+        "say": {
+          "en": "When AI says a poll captures every edit, trace one row with several edits between two polls and see what arrives.",
+          "vi": "Khi AI nói poll ghi nhận mọi lần sửa, hãy trace một dòng có nhiều lần sửa giữa hai lần poll và xem cái gì tới nơi."
+        }
+      },
+      "ref": "Post: A real case: Shopify stops polling and reads the binlog; https://shopify.engineering/capturing-every-change-shopify-sharded-monolith",
+      "verifiedBy": "python3 -c \"m=[3,20,41];w=[60-x for x in m];print(w,round(sum(w)/3,2),'states arriving: 1 of',len(m))\" -> [57, 40, 19] 38.67 states arriving: 1 of 3"
+    },
+    {
+      "id": "s02q4",
+      "level": "apply",
+      "track": "interview",
+      "type": "scenario",
+      "difficulty": 3,
+      "topic": "Initial snapshots",
+      "stem": {
+        "en": "A new analytics team needs a first full copy of the `products` table, about 40 million rows, and then live updates. The table is edited all day, the source cannot be locked, and the change log no longer reaches back to the first row. Which approach gives a correct copy?",
+        "vi": "Một team analytics mới cần bản sao đầy đủ đầu tiên của bảng `products`, khoảng 40 triệu dòng, rồi nhận cập nhật trực tiếp. Bảng được sửa suốt ngày, không được khoá nguồn, và change log không còn lùi tới dòng đầu tiên. Cách nào cho bản sao đúng?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Run one `SELECT *` on the whole table, then read the log from its current end.",
+            "vi": "Chạy một `SELECT *` trên cả bảng, rồi đọc log từ vị trí cuối hiện tại."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Copy the table in the quietest hour and trust that few edits land.",
+            "vi": "Chép bảng vào giờ vắng nhất và tin rằng ít lần sửa rơi vào."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Poll `updated_at > last run` from the start of time until all rows are seen.",
+            "vi": "Poll `updated_at > last run` từ thuở ban đầu cho tới khi thấy hết các dòng."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Select key ranges one by one, bracketed by low and high markers in the log.",
+            "vi": "Select từng khoảng key, mỗi khoảng kẹp giữa marker thấp và cao trong log."
+          }
+        }
+      ],
+      "answer": [
+        "d"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "This is the idea behind Netflix's DBLog. The copy is cut into small chunks by primary key, so no long query and no lock. Before and after each chunk, the tool writes a low and a high marker into the change log. A row that changed between the two markers is taken from the live log instead of from the chunk, so the stale copy loses and the live stream stays in charge.",
+          "vi": "Đây là ý tưởng của DBLog (Netflix). Bản sao được cắt thành các chunk nhỏ theo primary key, nên không có truy vấn dài và không có khoá. Trước và sau mỗi chunk, công cụ ghi một marker thấp và một marker cao vào change log. Dòng nào đổi giữa hai marker thì lấy từ log trực tiếp thay vì từ chunk, nên bản sao cũ thua và luồng trực tiếp giữ quyền quyết định."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "Edits that land while the long select runs are before the log's end, so they are never read. The copy would hold a mix of old and new rows. The long query also strains the source.",
+            "vi": "Các lần sửa rơi vào lúc select dài đang chạy nằm trước vị trí cuối log nên không bao giờ được đọc. Bản sao sẽ lẫn dòng cũ và mới. Truy vấn dài cũng làm nặng nguồn."
+          },
+          "b": {
+            "en": "Hoping for a quiet table is not a guarantee. One edit during the copy is enough to leave a wrong row, and nothing would reveal it.",
+            "vi": "Hy vọng bảng vắng không phải là bảo đảm. Chỉ cần một lần sửa trong lúc chép là đủ để có dòng sai, và không gì phát hiện ra."
+          },
+          "c": {
+            "en": "A poll misses hard deletes and rows edited several times between runs, so a copy built from it can silently carry rows that no longer exist.",
+            "vi": "Poll bỏ sót delete cứng và các dòng sửa nhiều lần giữa hai lần chạy, nên bản sao dựng từ đó có thể âm thầm mang các dòng không còn tồn tại."
+          }
+        },
+        "reread": {
+          "anchor": "debezium-the-outbox-pattern-snapshots-and-log-compaction",
+          "label": {
+            "en": "Debezium, the Outbox pattern, snapshots, and log compaction",
+            "vi": "Debezium, Outbox pattern, snapshot và log compaction"
+          }
+        },
+        "say": {
+          "en": "For a first copy, I would snapshot in chunks and bracket each with markers in the log, so no lock is needed and live edits win.",
+          "vi": "Với bản sao đầu tiên, tôi snapshot theo chunk và kẹp mỗi chunk giữa các marker trong log, nên không cần khoá và các lần sửa trực tiếp được ưu tiên."
+        }
+      },
+      "ref": "Post: Debezium, the Outbox pattern, snapshots, and log compaction; https://arxiv.org/abs/2010.12597 (DBLog paper, abstract: selects in chunks, no table lock)"
+    },
+    {
+      "id": "s02q5",
+      "level": "analyze",
+      "track": "ai",
+      "type": "ai-review",
+      "difficulty": 4,
+      "topic": "Tombstones and retention",
+      "stem": {
+        "en": "Suppose the topic keeps delete markers for 24 hours (`delete.retention.ms`), and this consumer was stopped for 3 days before restarting from its saved offset. The AI's note says: \"Safe, every delete arrives as a `null` record.\" What is the best review reply?",
+        "vi": "Giả sử topic giữ các delete marker trong 24 giờ (`delete.retention.ms`), và consumer này đã dừng 3 ngày trước khi chạy lại từ offset đã lưu. Ghi chú của AI nói: \"An toàn, mọi lệnh xoá đều tới dưới dạng bản ghi `null`.\" Phản hồi review nào tốt nhất?"
+      },
+      "media": [
+        {
+          "kind": "code",
+          "lang": "python",
+          "code": "# AI-written consumer for the compacted products topic\nfor rec in consumer:          # restarts from the saved offset\n    if rec.value is None:     # delete marker for this key\n        cache.delete(rec.key)\n    else:\n        cache.set(rec.key, rec.value)"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Safe: compaction keeps each `null` record until every consumer has read it.",
+            "vi": "An toàn: compaction giữ mỗi bản ghi `null` cho tới khi mọi consumer đã đọc nó."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Safe: later `cache.set` calls overwrite any product that was deleted.",
+            "vi": "An toàn: các lệnh `cache.set` về sau sẽ ghi đè mọi sản phẩm đã bị xoá."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Unsafe: markers can expire after 24 hours, so rebuild from the topic start.",
+            "vi": "Không an toàn: marker có thể hết hạn sau 24 giờ, nên hãy dựng lại từ đầu topic."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Unsafe: a `null` value is an error record, so skip it and log a warning.",
+            "vi": "Không an toàn: giá trị `null` là bản ghi lỗi, nên bỏ qua và ghi cảnh báo."
+          }
+        }
+      ],
+      "answer": [
+        "c"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "In a compacted topic a delete is a record with the key and a `null` value (a tombstone). Kafka removes tombstones after `delete.retention.ms`, not after every consumer has read them. A consumer away for 72 hours, longer than 24, can restart after the marker is gone and never learn the delete, so the product stays in the cache. The safe options are to keep lag below the retention or, after a longer gap, to rebuild from the start of the topic.",
+          "vi": "Trong topic compaction, delete là một bản ghi có key và giá trị `null` (tombstone). Kafka xoá tombstone sau `delete.retention.ms`, không phải sau khi mọi consumer đã đọc. Consumer vắng 72 giờ, lâu hơn 24, có thể chạy lại khi marker đã mất và không bao giờ biết lệnh xoá, nên sản phẩm vẫn nằm trong cache. Cách an toàn là giữ độ trễ dưới thời gian lưu, hoặc sau khoảng nghỉ dài hơn thì dựng lại từ đầu topic."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "Kafka does not track which consumers have read a marker. It removes it after the retention time, whether or not anyone read it.",
+            "vi": "Kafka không theo dõi consumer nào đã đọc marker. Nó xoá marker sau thời gian lưu, dù có ai đọc hay chưa."
+          },
+          "b": {
+            "en": "A deleted product is never written again, so no later `set` touches it. The stale entry stays in the cache until something else removes it.",
+            "vi": "Sản phẩm đã xoá sẽ không được ghi lại, nên không lệnh `set` nào về sau đụng tới nó. Mục cũ nằm lại trong cache cho tới khi có gì khác xoá nó."
+          },
+          "d": {
+            "en": "In this log a `null` value is the normal way to say that a key was deleted. Skipping it would keep every deleted product in the cache.",
+            "vi": "Trong log này, giá trị `null` là cách bình thường để nói key đã bị xoá. Bỏ qua nó sẽ giữ mọi sản phẩm đã xoá trong cache."
+          }
+        },
+        "reread": {
+          "anchor": "debezium-the-outbox-pattern-snapshots-and-log-compaction",
+          "label": {
+            "en": "Debezium, the Outbox pattern, snapshots, and log compaction",
+            "vi": "Debezium, Outbox pattern, snapshot và log compaction"
+          }
+        },
+        "say": {
+          "en": "When AI applies deletes from a log, ask how long delete markers live and what happens if the consumer was away longer.",
+          "vi": "Khi AI áp dụng lệnh xoá từ một log, hãy hỏi marker xoá sống bao lâu và chuyện gì xảy ra nếu consumer vắng mặt lâu hơn."
+        }
+      },
+      "ref": "https://kafka.apache.org/41/design/design/ (log compaction: tombstones and delete.retention.ms)"
+    }
+  ]
+}

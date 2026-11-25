@@ -12,6 +12,9 @@ import type { QuizDomain } from './types';
 
 export const QUIZ_DOMAIN: Record<string, QuizDomain> = {
   // DDIA series
+  'stream-processing-event-logs-cdc-windows-joins': 'code',
+  'philosophy-of-streaming-systems-unbundling-end-to-end-correctness': 'code',
+  'doing-the-right-thing-ethics-privacy-algorithmic-bias': 'code',
   'reliable-scalable-maintainable-data-systems': 'code',
   'trade-offs-in-data-systems-architecture': 'code',
   'data-models-and-query-languages': 'code',
@@ -20,6 +23,9 @@ export const QUIZ_DOMAIN: Record<string, QuizDomain> = {
   'replication-when-copies-disagree': 'code',
   'sharding-keys-ranges-hashes-hot-spots': 'code',
   'transactions-acid-isolation-anomalies-serializability': 'code',
+  'trouble-with-distributed-systems-networks-clocks-fencing': 'code',
+  'consistency-consensus-linearizability-logical-clocks-raft': 'code',
+  'batch-processing-unix-pipes-shuffle-dataflow-lakehouse': 'code',
   // AI trading series: about building AI/data systems, so AI-output questions still fit
   'ai-trading-the-market': 'code',
   'ai-trading-data': 'code',

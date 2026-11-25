@@ -1,0 +1,425 @@
+{
+  "id": "set-08",
+  "title": {
+    "en": "Replaying the 3 a.m. storm",
+    "vi": "Phát lại cơn bão lúc 3 giờ sáng"
+  },
+  "context": {
+    "text": {
+      "en": "Suppose a storage engine team builds a Raft metadata store in Go and Rust for cloud VMs, targeting a `partially synchronous + crash-recovery` model.\nProduction incidents and verification setup:\n• in production, one VM's NIC drops to `1 Kb/s` while `/health` still returns `200 OK`\n• on another host, drive firmware forgets flushed disk blocks after a power reboot\n• the team pairs `TLA+` (like AWS Newcombe et al. on DynamoDB and S3), `Jepsen` fault injection, and seeded Deterministic Simulation Testing (`DST` with `seed = 481516`, alongside patterns from FoundationDB `Flow` running `18 months` in one thread, TigerBeetle `VOPR`, `MadSim`, `FrostDB`, and `Antithesis`)\n• replaying `seed = 481516` twice produces two different message orders and diverging memory behavior",
+      "vi": "Giả sử một team làm storage engine xây dựng kho metadata Raft bằng Go và Rust cho các VM trên cloud, nhắm tới mô hình `partially synchronous + crash-recovery`.\nSự cố production và bộ công cụ kiểm chứng:\n• trên production, card mạng một VM tụt xuống `1 Kb/s` trong khi `/health` vẫn trả `200 OK`\n• trên máy khác, firmware ổ đĩa quên sạch các block đã flush sau một lần reboot mất điện\n• team kết hợp `TLA+` (như AWS Newcombe et al. dùng cho DynamoDB và S3), tiêm lỗi `Jepsen`, và mô phỏng tất định có seed (`DST` với `seed = 481516`, theo mô hình FoundationDB `Flow` chạy `18 tháng` trong một luồng, TigerBeetle `VOPR`, `MadSim`, `FrostDB` và `Antithesis`)\n• chạy lại `seed = 481516` hai lần lại cho hai thứ tự gửi tin nhắn và hành vi bộ nhớ khác nhau"
+    },
+    "media": [
+      {
+        "kind": "figure",
+        "component": "DstSeedReplay",
+        "alt": {
+          "en": "A Raft store targeting partially synchronous crash-recovery hits a 1 Kb/s NIC with /health 200 OK and firmware reboot block loss. Under DST with seed 481516 mocking network, disk, clock, and PRNG, Run 1 and Run 2 diverge on send order.",
+          "vi": "Kho Raft nhắm tới partially synchronous crash-recovery gặp NIC 1 Kb/s với /health 200 OK và mất block khi reboot firmware. Dưới DST dùng seed 481516 giả lập mạng, đĩa, giờ và PRNG, hai lần chạy vẫn lệch thứ tự gửi."
+        }
+      }
+    ]
+  },
+  "questions": [
+    {
+      "id": "s08q1",
+      "level": "apply",
+      "track": "ai",
+      "type": "ai-review",
+      "difficulty": 3,
+      "topic": "Hidden nondeterminism in DST",
+      "stem": {
+        "en": "An AI assistant writes the Go simulator helper below for `seed = 481516` and claims: \"Clock, RNG, and network are all mocked, so every replay of `seed = 481516` sends packets in the exact same order.\" Two runs still diverge between `N2` and `N3`. What breaks determinism here, and how do you fix it?",
+        "vi": "Một AI viết hàm hỗ trợ mô phỏng bằng Go dưới đây cho `seed = 481516` và khẳng định: \"Đồng hồ, RNG và mạng đều đã giả lập, nên mọi lần chạy lại `seed = 481516` sẽ gửi gói tin theo đúng cùng thứ tự.\" Hai lần chạy vẫn lệch giữa `N2` và `N3`. Điều gì phá tính tất định ở đây, và sửa thế nào?"
+      },
+      "media": [
+        {
+          "kind": "code",
+          "lang": "go",
+          "code": "func (n *Node) Broadcast(\n    peers map[string]*Peer,\n    rng *rand.Rand,\n    clk SimClock,\n) {\n    req := Heartbeat{\n        Term: n.term,\n        Sent: clk.Now(),\n        Wait: rng.Intn(5),\n    }\n    for peerID, p := range peers {\n        n.simNet.Send(peerID, p.Addr, req)\n    }\n}\n"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "The `rng.Intn(5)` call pulls fresh OS entropy each run; replace `rng` with `time.Now().UnixNano()`.",
+            "vi": "Lệnh `rng.Intn(5)` lấy entropy mới từ OS mỗi lần; thay `rng` bằng `time.Now().UnixNano()`."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Iterating over a hash map (`peers`) randomizes order across runs; sort `peerID` keys before calling `Send`.",
+            "vi": "Duyệt hash map (`peers`) ngẫu nhiên hóa thứ tự mỗi lần chạy; hãy sort khóa `peerID` trước khi gọi `Send`."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Passing `SimClock` by value leaks hardware crystal drift; read `CLOCK_MONOTONIC` directly inside `Send`.",
+            "vi": "Truyền `SimClock` theo giá trị làm lọt độ trôi thạch anh thật; hãy đọc thẳng `CLOCK_MONOTONIC` trong `Send`."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Sending through `simNet` opens real TCP sockets; switch `simNet` to UDP packets so ordering disappears.",
+            "vi": "Gửi qua `simNet` mở socket TCP thật; đổi `simNet` sang gói UDP để bỏ hẳn thứ tự."
+          }
+        }
+      ],
+      "answer": [
+        "b"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "Even when clocks, sockets, disks, and PRNGs are mocked with a fixed seed, runtime details can leak nondeterminism. Hash-map iteration order in languages like Go is intentionally randomized across executions, so `range peers` sends to `N2` then `N3` in Run 1 and `N3` then `N2` in Run 2. Sorting the map keys restores deterministic send order.",
+          "vi": "Ngay cả khi đồng hồ, socket, ổ đĩa và PRNG đều đã giả lập theo seed cố định, chi tiết runtime vẫn có thể làm lọt tính bất định. Thứ tự duyệt hash map trong ngôn ngữ như Go cố tình ngẫu nhiên hóa giữa các lần chạy, nên `range peers` gửi `N2` rồi `N3` ở lần 1 và `N3` rồi `N2` ở lần 2. Sort khóa map trước khi duyệt sẽ khôi phục thứ tự gửi tất định."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "Passing a seeded `*rand.Rand` is already deterministic across runs of `seed = 481516`. Replacing it with real `time.Now()` would actually break determinism.",
+            "vi": "Truyền `*rand.Rand` đã gắn seed là hoàn toàn tất định qua các lần chạy `seed = 481516`. Thay nó bằng `time.Now()` thật mới là thứ phá hỏng tính tất định."
+          },
+          "c": {
+            "en": "`SimClock` is a simulated software clock unaffected by quartz crystals. Reading `CLOCK_MONOTONIC` from the host OS would inject real-world timing jitter into the simulation.",
+            "vi": "`SimClock` là đồng hồ phần mềm mô phỏng không bị tinh thể thạch anh làm trôi. Đọc `CLOCK_MONOTONIC` từ OS máy chủ sẽ bơm jitter thời gian thật vào bộ mô phỏng."
+          },
+          "d": {
+            "en": "`simNet` is an in-memory simulator shim, not a kernel TCP stack; switching simulated transport labels does nothing while the loop still iterates an unsorted Go map.",
+            "vi": "`simNet` là lớp giả lập trong bộ nhớ chứ không phải TCP của kernel; đổi nhãn truyền tải không sửa được gì khi vòng lặp vẫn duyệt một map Go chưa sắp xếp."
+          }
+        },
+        "reread": {
+          "anchor": "testing-with-tla-jepsen-and-dst",
+          "label": {
+            "en": "Testing with TLA+, Jepsen, and DST",
+            "vi": "Kiểm chứng bằng TLA+, Jepsen và DST"
+          }
+        },
+        "say": {
+          "en": "When AI claims a seeded simulator is deterministic because clocks and sockets are mocked, check for hidden nondeterminism—random hash-map iteration order, goroutine scheduling, and sudden memory limits.",
+          "vi": "Khi AI khẳng định bộ mô phỏng có seed đã tất định vì đã giả lập đồng hồ và socket, hãy rà nguồn bất định ẩn — thứ tự duyệt hash map ngẫu nhiên, lập lịch goroutine và giới hạn bộ nhớ đột ngột."
+        }
+      },
+      "ref": "Post: Testing with TLA+, Jepsen, and DST"
+    },
+    {
+      "id": "s08q2",
+      "level": "apply",
+      "track": "interview",
+      "type": "scenario",
+      "difficulty": 4,
+      "topic": "Timing and fault models",
+      "stem": {
+        "en": "In production, one VM's NIC drops to `1 Kb/s` while `/health` returns `200 OK`, and another host's firmware forgets flushed blocks after a reboot. Under standard system models, how are these two faults classified?",
+        "vi": "Trên production, card mạng một VM tụt xuống `1 Kb/s` trong khi `/health` vẫn trả `200 OK`, còn firmware một máy khác quên mất các block đã flush sau reboot. Theo các mô hình hệ thống chuẩn, hai lỗi này được phân loại thế nào?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "The `1 Kb/s` NIC is a clean crash-stop fault, while firmware amnesia falls under synchronous timing where disk bounds stay finite.",
+            "vi": "Card mạng `1 Kb/s` là lỗi crash-stop sạch sẽ, còn firmware mất trí nhớ thuộc mô hình thời gian synchronous."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Both failures fit standard crash-recovery, because any slow link or wiped sector behaves identically to a clean node restart.",
+            "vi": "Cả hai lỗi đều khớp với crash-recovery chuẩn, vì mọi đường chậm hay mất dữ liệu đĩa đều giống hệt restart sạch."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "The `1 Kb/s` NIC is Byzantine lying from `/health`, whereas firmware amnesia means the cluster has switched to asynchronous timing.",
+            "vi": "Card mạng `1 Kb/s` là lỗi Byzantine nói dối từ `/health`, còn mất dữ liệu firmware nghĩa là cụm đã chuyển sang asynchronous."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "The `1 Kb/s` NIC is a fail-slow (gray) failure, and firmware amnesia breaks crash-recovery's assumption of intact disk state.",
+            "vi": "Card mạng `1 Kb/s` là lỗi fail-slow (gray failure), còn firmware mất trí nhớ phá giả định đĩa bền vững của crash-recovery."
+          }
+        }
+      ],
+      "answer": [
+        "d"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "A limping node whose NIC crawls at `1 Kb/s` while `/health` still returns `200 OK` is a fail-slow (gray) failure: it avoids clean crash detection while failing real traffic. Meanwhile, crash-recovery assumes nodes lose RAM on a crash yet preserve durable disk storage across restarts—so firmware that forgets flushed blocks violates that disk-durability assumption.",
+          "vi": "Một node đi khập khiễng với card mạng tụt còn `1 Kb/s` trong khi `/health` vẫn báo `200 OK` là lỗi fail-slow (gray failure): nó qua mặt kiểm tra sống-chết nhưng làm hỏng việc thật. Còn mô hình crash-recovery giả định node mất RAM khi sập nhưng đĩa bền vững vẫn còn nguyên qua các lần bật lại — nên firmware quên block đã flush phá thẳng giả định này."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "In crash-stop, a broken node halts once and never comes back. A `1 Kb/s` NIC stays half-alive and keeps answering `/health`, while synchronous timing requires strict upper bounds that cloud VMs lack.",
+            "vi": "Trong crash-stop, node hỏng là dừng hẳn và không quay lại. Card mạng `1 Kb/s` vẫn nửa sống nửa chết và trả lời `/health`, còn mô hình synchronous đòi hỏi trần trễ cứng mà VM cloud không có."
+          },
+          "b": {
+            "en": "Neither behaves like a clean restart: a `1 Kb/s` NIC stays running in a degraded half-dead state, and losing flushed disk state breaks the durability guarantee crash-recovery relies on.",
+            "vi": "Không lỗi nào giống một lần restart sạch: card mạng `1 Kb/s` tiếp tục chạy trong trạng thái suy giảm nửa sống, còn mất dữ liệu đĩa đã flush phá hỏng độ bền vững mà crash-recovery dựa vào."
+          },
+          "c": {
+            "en": "Degraded hardware or a starved worker queue is a gray failure, not malicious Byzantine equivocation, and lost disk blocks violate storage persistence rather than changing the timing model.",
+            "vi": "Phần cứng xuống cấp hay hàng đợi nghẽn là lỗi xám chứ không phải nói dối hai mặt kiểu Byzantine, và mất block đĩa vi phạm giả định lưu trữ bền vững chứ không đổi mô hình thời gian."
+          }
+        },
+        "reread": {
+          "anchor": "6-system-models-and-proving-correctness",
+          "label": {
+            "en": "6. System models and proving correctness",
+            "vi": "6. Mô hình hệ thống và kiểm chứng trước khi sập"
+          }
+        },
+        "say": {
+          "en": "Most clusters target partially synchronous plus crash-recovery, yet real outages bring gray failures like a `1 Kb/s` NIC passing `/health` and firmware amnesia that violates disk persistence.",
+          "vi": "Phần lớn cụm nhắm vào mô hình partially synchronous cộng crash-recovery, nhưng sự cố thật mang tới lỗi xám như NIC `1 Kb/s` vẫn qua `/health` và lỗi firmware làm đĩa mất trí nhớ."
+        }
+      },
+      "ref": "Post: 6. System models and proving correctness"
+    },
+    {
+      "id": "s08q3",
+      "level": "analyze",
+      "track": "ai",
+      "type": "multi",
+      "difficulty": 4,
+      "topic": "Comparing TLA+, Jepsen, and DST",
+      "stem": {
+        "en": "An AI assistant advises: \"Jepsen already cuts networks on the real cluster, so drop `TLA+` and `DST`—Jepsen covers everything both of them do.\"\n\nWhich two statements accurately identify what `TLA+` and `DST` give you that `Jepsen` does not?",
+        "vi": "Một AI khuyên: \"Jepsen đã cắt mạng ngay trên cụm chạy thật rồi, nên bỏ `TLA+` và `DST` đi — Jepsen làm được mọi thứ cả hai công cụ kia làm.\"\n\nHai nhận định nào nêu đúng những gì `TLA+` và `DST` mang lại mà `Jepsen` không có?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "`DST` replays the exact production failure deterministically from one `seed`, whereas `Jepsen` bugs can be hard to replay identically.",
+            "vi": "`DST` phát lại tất định đúng lỗi production từ một `seed`, còn lỗi `Jepsen` bắt được có thể khó tái hiện y hệt từng bước."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "`TLA+` executes the compiled Go/Rust production binary directly, so an abstract specification can never drift from live code.",
+            "vi": "`TLA+` chạy thẳng file thực thi Go/Rust trên production, nên đặc tả trừu tượng không bao giờ lệch khỏi code chạy thật."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "`Jepsen` compresses `18 months` of cluster runtime into seconds on a single CPU thread while leaving real sockets untouched.",
+            "vi": "`Jepsen` nén `18 tháng` chạy cụm vào vài giây trên một luồng CPU đơn mà vẫn giữ nguyên socket thật."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "`TLA+` exhaustively explores bounded protocol states on a math spec, whereas `Jepsen` only probes paths hit during live runs.",
+            "vi": "`TLA+` duyệt vét cạn trạng thái giới hạn trên đặc tả toán học, còn `Jepsen` chỉ thăm dò các nhánh kịp chạm tới lúc chạy."
+          }
+        },
+        {
+          "id": "e",
+          "text": {
+            "en": "Running a single `seed` in `DST` exhaustively proves every interleaving for all inputs, replacing model checking completely.",
+            "vi": "Chạy một `seed` trong `DST` chứng minh vét cạn mọi thứ tự xen kẽ cho mọi đầu vào, thay thế hoàn toàn kiểm tra mô hình."
+          }
+        }
+      ],
+      "answer": [
+        "a",
+        "d"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "The three tools close different gaps. `TLA+` model-checks an abstract mathematical specification exhaustively over bounded states before code drifts, catching subtle design flaws early. `Jepsen` tests a real cluster with brutal fault injection, yet timing jitter makes rare failures hard to replay deterministically. `DST` runs real production code inside mocked, seeded shims so any rare failing seed (like `seed = 481516`) replays step-by-step on a laptop.",
+          "vi": "Ba công cụ lấp những khoảng trống khác nhau. `TLA+` kiểm tra vét cạn một đặc tả toán học trừu tượng trên không gian trạng thái giới hạn để bắt lỗi thiết kế sớm. `Jepsen` tiêm lỗi thẳng vào cụm chạy thật, nhưng trễ mạng bất định khiến lỗi hiếm khó phát lại y nguyên. `DST` chạy chính code production trong bộ giả lập gắn seed để mọi seed lỗi hiếm (như `seed = 481516`) đều tái hiện từng bước trên laptop."
+        },
+        "whyWrong": {
+          "b": {
+            "en": "`TLA+` verifies an abstract mathematical model, not your compiled Go or Rust binary—specification drift away from real implementation code is its main trade-off.",
+            "vi": "`TLA+` kiểm chứng một mô hình toán học trừu tượng chứ không chạy file thực thi Go hay Rust — độ lệch giữa bản đặc tả và code chạy thật chính là điểm yếu của nó."
+          },
+          "c": {
+            "en": "Running `18 months` of simulated cluster time in a single thread describes FoundationDB's `Flow` DST runtime, not `Jepsen`, which operates against real nodes over wall-clock time.",
+            "vi": "Chạy mô phỏng `18 tháng` thời gian cụm trong một luồng là cách của runtime DST `Flow` ở FoundationDB, không phải `Jepsen` vốn đánh vào cụm máy thật theo thời gian thực."
+          },
+          "e": {
+            "en": "One `DST` seed explores a single randomized fault schedule; `DST` relies on running many seeds and still does not exhaustively prove all bounded states the way `TLA+` does.",
+            "vi": "Một `seed` của `DST` chỉ đi qua một kịch bản lỗi ngẫu nhiên; `DST` cần chạy hàng loạt seed và vẫn không chứng minh vét cạn mọi trạng thái giới hạn như `TLA+`."
+          }
+        },
+        "reread": {
+          "anchor": "testing-with-tla-jepsen-and-dst",
+          "label": {
+            "en": "Testing with TLA+, Jepsen, and DST",
+            "vi": "Kiểm chứng bằng TLA+, Jepsen và DST"
+          }
+        },
+        "say": {
+          "en": "`TLA+` exhaustively checks protocol design, `Jepsen` validates real binaries and OS chaos, and `DST` lets real production code replay any rare bug from one deterministic seed.",
+          "vi": "`TLA+` vét cạn thiết kế giao thức, `Jepsen` kiểm tra cụm chạy thật với hỗn loạn OS, còn `DST` cho code production phát lại mọi bug hiếm từ một seed tất định."
+        }
+      },
+      "ref": "Post: Testing with TLA+, Jepsen, and DST"
+    },
+    {
+      "id": "s08q4",
+      "level": "evaluate",
+      "track": "interview",
+      "type": "scenario",
+      "difficulty": 5,
+      "topic": "Safety vs. Liveness and VOPR modes",
+      "stem": {
+        "en": "In DST runs starting from `seed = 481516`, the simulator blasts nonstop packet drops and disk faults from start to finish. Zero invariants break, yet a deadlock still hits production after a transient partition heals and stalls elections indefinitely. Drawing on Alpern & Schneider (1985) and TigerBeetle's `VOPR`, why did DST miss it and what is the best fix?",
+        "vi": "Khi chạy DST từ `seed = 481516`, bộ mô phỏng bắn lỗi rớt gói và lỗi đĩa liên tục từ đầu tới cuối. Không bất biến nào bị phá, nhưng trên production vẫn xảy ra deadlock sau khi chia cắt mạng tạm thời lành lại và treo bầu leader vô hạn. Dựa theo Alpern & Schneider (1985) và `VOPR` của TigerBeetle, vì sao DST bỏ sót lỗi này và cách sửa tốt nhất là gì?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Continuous chaos already proves liveness whenever safety holds; the election freeze must come from runtime GC outside the model.",
+            "vi": "Hỗn loạn liên tục đã kiểm chứng sẵn liveness hễ safety giữ vững; treo bầu cử chắc chắn do GC của runtime nằm ngoài mô hình."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Safety means elections eventually finish, so the production deadlock proves the team must switch to `synchronous` cluster bounds.",
+            "vi": "Safety nghĩa là bầu cử cuối cùng sẽ xong, nên deadlock chứng tỏ team phải đổi cụm sang mô hình thời gian `synchronous`."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Relentless fault storms hid a liveness bug; split DST into a Safety mode and a protocol-aware Liveness mode where faults subside.",
+            "vi": "Bão lỗi không dứt đã che khuất lỗi liveness; tách DST thành chế độ Safety và chế độ Liveness có nhận thức giao thức khi bão lắng."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Keeping nonstop faults while raising the packet-drop rate makes election deadlocks easier to spot without any quiet recovery phase.",
+            "vi": "Giữ bão lỗi liên tục và tăng thêm tỉ lệ rớt gói sẽ làm deadlock bầu cử dễ lộ hơn mà không cần pha hồi phục yên tĩnh."
+          }
+        }
+      ],
+      "answer": [
+        "c"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "Per Alpern & Schneider (1985), safety (\"nothing bad happens\") must hold always—even under continuous storms—whereas liveness (\"something good eventually happens\") holds only once a majority is healthy and faults subside. Nonstop random fault injection masks liveness deadlocks because elections cannot finish under perpetual chaos anyway. TigerBeetle's `VOPR` splits testing into a Safety mode and a protocol-aware Liveness mode that lets faults quiet down to confirm progress resumes.",
+          "vi": "Theo Alpern & Schneider (1985), safety (\"điều xấu không bao giờ xảy ra\") phải đúng mọi lúc kể cả giữa bão lỗi, còn liveness (\"điều tốt cuối cùng sẽ xảy ra\") chỉ đòi hỏi khi đa số node khỏe và sự cố lắng xuống. Tiêm lỗi ngẫu nhiên không ngừng che khuất lỗi deadlock tiến độ vì giữa bão triền miên thì bầu cử vốn chẳng thể xong. `VOPR` của TigerBeetle tách riêng chế độ Safety và chế độ Liveness có nhận thức giao thức, cho bão lắng để kiểm tra cụm có thật sự chạy tiếp được không."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "A cluster that never commits anything or stays deadlocked forever satisfies safety trivially while failing liveness; holding safety never implies liveness holds.",
+            "vi": "Một cụm không bao giờ commit gì hoặc deadlock vĩnh viễn vẫn thỏa safety một cách tầm thường trong khi gãy hoàn toàn liveness; giữ safety không bao giờ suy ra liveness."
+          },
+          "b": {
+            "en": "You inverted safety and liveness: safety forbids wrong states (like split leaders), whereas elections eventually completing is a liveness property—and cloud VMs cannot enforce `synchronous` upper bounds.",
+            "vi": "Bạn đảo ngược safety và liveness: safety cấm trạng thái sai (như hai leader cùng lúc), còn bầu cử cuối cùng hoàn tất là tính chất liveness — và VM cloud không đảm bảo được trần `synchronous`."
+          },
+          "d": {
+            "en": "Increasing nonstop packet loss makes progress impossible for any consensus protocol, burying genuine post-recovery deadlock bugs even deeper.",
+            "vi": "Tăng tỉ lệ rớt gói liên tục khiến mọi giao thức đồng thuận đều bất lực không tiến tới được, vùi lấp các lỗi deadlock sau hồi phục sâu hơn nữa."
+          }
+        },
+        "reread": {
+          "anchor": "testing-with-tla-jepsen-and-dst",
+          "label": {
+            "en": "Testing with TLA+, Jepsen, and DST",
+            "vi": "Kiểm chứng bằng TLA+, Jepsen và DST"
+          }
+        },
+        "say": {
+          "en": "Nonstop fault storms test safety, not liveness: like TigerBeetle's `VOPR`, you need a protocol-aware liveness mode where faults subside so deadlocks after recovery actually surface.",
+          "vi": "Bão lỗi liên tục chỉ kiểm tra safety chứ không kiểm tra được liveness: giống `VOPR` của TigerBeetle, cần chế độ liveness có nhận thức giao thức để bão lắng xuống mới lòi ra bug deadlock sau hồi phục."
+        }
+      },
+      "ref": "Post: 6. System models and proving correctness; Testing with TLA+, Jepsen, and DST"
+    },
+    {
+      "id": "s08q5",
+      "level": "evaluate",
+      "track": "ai",
+      "type": "ai-advice",
+      "difficulty": 5,
+      "topic": "System models and verification limits",
+      "stem": {
+        "en": "An AI assistant reviews the test report and advises: \"Your DST suite passed 10,000 runs from `seed = 481516` onward with zero safety breaks, so your Raft store is proved error-free for cloud production—you can skip runtime checks for slow NICs, drive firmware surprises, and memory limits.\" Which verdict is best?",
+        "vi": "Một AI xem báo cáo kiểm thử và khuyên: \"Bộ DST đã vượt qua 10.000 lượt chạy từ `seed = 481516` trở đi mà không vi phạm safety, nên kho Raft đã được chứng minh sạch lỗi trên cloud production — có thể bỏ kiểm tra lúc chạy cho NIC chậm, lỗi bất ngờ từ firmware đĩa và giới hạn bộ nhớ.\" Đánh giá nào tốt nhất?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Reject it: DST tests only modeled faults, so unmodeled slow NICs, firmware data loss, and OOM crashes still need defenses.",
+            "vi": "Bác bỏ: DST chỉ thử các lỗi đã mô hình hóa, nên NIC chậm, mất dữ liệu firmware và sập OOM ngoài mô hình vẫn cần phòng bị."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Accept it: simulating production code across 10,000 seeds guarantees every real cloud hardware and OS path has been covered.",
+            "vi": "Chấp nhận: mô phỏng code thật qua 10.000 seed bảo đảm mọi nhánh phần cứng và OS trên cloud đều đã được phủ hết."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Raise the DST count to 1,000,000 seeds without changing the simulator mocks, which removes firmware and OOM risks completely.",
+            "vi": "Tăng số lượt DST lên 1.000.000 seed mà giữ nguyên giả lập của bộ mô phỏng, cách này xóa sạch rủi ro firmware và OOM."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Switch the production cluster to an `asynchronous` timing model without timeouts so neither slow NICs nor firmware affect it.",
+            "vi": "Đổi cụm production sang mô hình thời gian `asynchronous` không timeout để cả NIC chậm lẫn firmware đều không ảnh hưởng."
+          }
+        }
+      ],
+      "answer": [
+        "a"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "Passing 10,000 DST seeds verifies the code against the faults your simulator knows how to inject. Real cloud production still surprises the model—such as firmware bugs that forget flushed blocks on reboot, limping `1 Kb/s` NICs that pass `/health`, or sudden memory limits—so you still pair `TLA+`, `Jepsen`, and `DST` with runtime defenses and monitoring.",
+          "vi": "Vượt qua 10.000 seed DST kiểm chứng code trước đúng những lỗi mà bộ mô phỏng biết tiêm vào. Production trên cloud thật vẫn có thể vượt khỏi mô hình — như lỗi firmware quên block đã flush khi reboot, card mạng tụt `1 Kb/s` vẫn qua `/health`, hay giới hạn bộ nhớ đột ngột — nên vẫn phải kết hợp `TLA+`, `Jepsen`, `DST` với giám sát và phòng thủ lúc chạy."
+        },
+        "whyWrong": {
+          "b": {
+            "en": "Simulating a finite number of seeds never covers faults absent from the simulator's fault model, nor does it reproduce OS/hardware surprises like drive firmware amnesia.",
+            "vi": "Mô phỏng một số lượng seed hữu hạn không bao giờ phủ được các lỗi không có trong mô hình sự cố của simulator, cũng không tự tái hiện lỗi bất ngờ ở OS hay firmware ổ đĩa."
+          },
+          "c": {
+            "en": "Running 1,000,000 seeds under the exact same mocks only explores more schedules of already-modeled faults; it cannot surface an unmodeled failure mode such as reboot storage amnesia.",
+            "vi": "Chạy 1.000.000 seed dưới đúng bộ giả lập cũ chỉ thử thêm lịch trình của các lỗi đã mô hình hóa; nó không thể làm lộ kiểu hỏng nằm ngoài mô hình như mất trí nhớ ổ đĩa khi reboot."
+          },
+          "d": {
+            "en": "Removing timeouts does not recover lost disk blocks or speed up a `1 Kb/s` NIC, and deterministic consensus cannot even guarantee liveness in a purely asynchronous model without clocks or timeouts.",
+            "vi": "Bỏ timeout không lấy lại được block đĩa đã mất hay làm card mạng `1 Kb/s` chạy nhanh lên, và đồng thuận tất định thậm chí không bảo đảm được liveness trong mô hình bất đồng bộ thuần túy không đồng hồ hay timeout."
+          }
+        },
+        "reread": {
+          "anchor": "key-takeaways",
+          "label": {
+            "en": "Key takeaways",
+            "vi": "Điểm rút ra"
+          }
+        },
+        "say": {
+          "en": "When AI says passing N simulation seeds proves production safety, ask which real failures—like slow NICs passing health checks, firmware disk amnesia, or OOM limits—sit outside the simulator's fault model.",
+          "vi": "Khi AI nói vượt qua N seed mô phỏng là đã chứng minh an toàn production, hãy hỏi những sự cố thật nào — như NIC chậm vẫn qua health check, firmware quên dữ liệu đĩa hay giới hạn OOM — đang nằm ngoài mô hình lỗi của simulator."
+        }
+      },
+      "ref": "Post: 6. System models and proving correctness; Key takeaways"
+    }
+  ]
+}

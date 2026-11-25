@@ -1,0 +1,419 @@
+{
+  "id": "set-06",
+  "title": {
+    "en": "Frozen mid-function",
+    "vi": "Đóng băng ngay giữa hàm"
+  },
+  "context": {
+    "text": {
+      "en": "Like HBase's historical split-brain incident triggered by a long Java GC pause, a cloud team's JVM shard leader guards writes with a lease.\n• Suppose Leader 1 uses `CLOCK_MONOTONIC` to check a `10 s` TTL lease granted at `t = 0 s` (expiring at `t = 10 s`).\n• Suppose Leader 1 calls `lease.isValid()` at `t = 8 s` (`2 s` remaining) and the check returns `true`.\n• Before calling `process(request)`, the thread freezes for `15 s` in a stop-the-world GC worsened by OS swap thrashing (`vm.swappiness` is enabled).\n• At `t = 10.5 s`, Leader 2 acquires the expired lease and writes `v2` to storage.\n• When Leader 1 wakes up, it immediately runs `process(request)` and sends its stale write `v1`.",
+      "vi": "Tương tự sự cố split-brain từng xảy ra ở HBase do một cú khựng GC dài của Java, leader một shard chạy JVM trên cloud bảo vệ lệnh ghi bằng lease.\n• Giả sử Leader 1 dùng `CLOCK_MONOTONIC` để kiểm tra lease hạn `10 s` được cấp lúc `t = 0 s` (hết hạn lúc `t = 10 s`).\n• Giả sử Leader 1 gọi `lease.isValid()` lúc `t = 8 s` (còn `2 s`) và hàm trả về `true`.\n• Ngay trước khi chạy `process(request)`, luồng bị đóng băng suốt `15 s` trong một đợt GC stop-the-world kèm tráo trang nhớ qua đĩa (`vm.swappiness` đang bật).\n• Lúc `t = 10,5 s`, Leader 2 nhận được lease mới và ghi `v2` xuống tầng lưu trữ.\n• Khi Leader 1 tỉnh dậy, nó lập tức chạy `process(request)` và gửi lệnh ghi quá hạn `v1`."
+    },
+    "media": [
+      {
+        "kind": "figure",
+        "component": "GcPauseZombie",
+        "alt": {
+          "en": "Timeline of a 10 s lease: Leader 1 passes lease.isValid() at t = 8 s and freezes for 15 s in GC and swap. The lease expires at 10 s, Leader 2 gets the lease at 10.5 s and writes v2, and Leader 1 wakes at t = ? to send stale write v1.",
+          "vi": "Trục thời gian của một lease 10 s: Leader 1 vượt qua lease.isValid() lúc t = 8 s rồi khựng 15 s vì GC và swap. Lease hết hạn lúc 10 s, Leader 2 lấy lease lúc 10,5 s và ghi v2, còn Leader 1 tỉnh dậy lúc t = ? để gửi lệnh ghi cũ v1."
+        }
+      }
+    ]
+  },
+  "questions": [
+    {
+      "id": "s06q1",
+      "level": "understand",
+      "track": "interview",
+      "type": "single",
+      "difficulty": 2,
+      "topic": "Time-of-check to time-of-use pause gap",
+      "stem": {
+        "en": "Suppose Leader 1 rewrote its lease timer using a local `CLOCK_MONOTONIC` stopwatch instead of a wall clock. Why can it still execute a stale write?",
+        "vi": "Giả sử Leader 1 đã viết lại bộ đếm lease bằng đồng hồ đơn điệu cục bộ `CLOCK_MONOTONIC` thay vì wall clock. Vì sao nó vẫn có thể chạy một lệnh ghi quá hạn?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "CLOCK_MONOTONIC still jumps backward whenever NTP resets UTC time.",
+            "vi": "CLOCK_MONOTONIC vẫn nhảy lùi mỗi khi NTP chỉnh lại giờ UTC."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "The thread can freeze between checking the lease and running the write.",
+            "vi": "Luồng có thể bị đóng băng giữa lúc kiểm tra lease và lúc chạy lệnh ghi."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "CLOCK_MONOTONIC shares one global tick counter across all nodes.",
+            "vi": "CLOCK_MONOTONIC dùng chung một bộ đếm nhịp toàn cục giữa mọi node."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Monotonic clocks stop ticking whenever a thread enters a syscall.",
+            "vi": "Đồng hồ monotonic ngừng chạy mỗi khi một luồng gọi vào syscall."
+          }
+        }
+      ],
+      "answer": [
+        "b"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "Checking `lease.isValid()` and executing `process(request)` are two separate moments with no timing guarantee between them. If the runtime or OS freezes the thread right after the check, real time moves past lease expiry while the paused thread wakes up oblivious to how long it slept.",
+          "vi": "Kiểm tra `lease.isValid()` và chạy `process(request)` là hai thời điểm tách rời, không có bảo đảm gì về độ trễ ở giữa. Nếu runtime hay hệ điều hành đóng băng luồng ngay sau dòng kiểm tra, thời gian thực trôi qua hạn lease trong khi luồng thức dậy mà không hề biết mình vừa ngủ quên."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "Wall clocks (`CLOCK_REALTIME`) can step backward on NTP jumps; `CLOCK_MONOTONIC` only moves forward (NTP can only slew its rate slightly).",
+            "vi": "Wall clock (`CLOCK_REALTIME`) mới có thể nhảy lùi theo NTP; `CLOCK_MONOTONIC` chỉ tiến lên (NTP chỉ chỉnh nhẹ tốc độ chạy)."
+          },
+          "c": {
+            "en": "`CLOCK_MONOTONIC` is local to one kernel and has arbitrary raw values (like nanoseconds since boot), never shared across cluster hosts.",
+            "vi": "`CLOCK_MONOTONIC` là cục bộ của từng kernel với mốc gốc tùy ý (như từ lúc khởi động máy), không bao giờ dùng chung giữa các máy."
+          },
+          "d": {
+            "en": "The OS clock keeps ticking even while an application thread is suspended or paused — that is precisely why the lease expires while the thread is asleep.",
+            "vi": "Đồng hồ hệ điều hành vẫn chạy đều đặn trong khi luồng ứng dụng bị tạm dừng — đó chính là lý do lease hết hạn trong lúc luồng đang ngủ."
+          }
+        },
+        "reread": {
+          "anchor": "4-process-pauses",
+          "label": {
+            "en": "4. Process pauses",
+            "vi": "4. Khi tiến trình bị đóng băng giữa chừng"
+          }
+        },
+        "say": {
+          "en": "Monotonic clocks fix NTP jumps, not process pauses: any thread can stall right between if (lease.isValid()) and process(request).",
+          "vi": "Đồng hồ monotonic sửa được bước nhảy NTP nhưng không chặn được process pause: bất kỳ luồng nào cũng có thể khựng ngay giữa if (lease.isValid()) và process(request)."
+        }
+      },
+      "ref": "Post: 4. Process pauses"
+    },
+    {
+      "id": "s06q2",
+      "level": "apply",
+      "track": "ai",
+      "type": "ai-review",
+      "difficulty": 3,
+      "topic": "OS paging / thrashing vs. OOM killer",
+      "stem": {
+        "en": "Reviewing memory pressure in this cluster, an AI assistant advises:\n\n\"Keep disk swap enabled and raise vm.swappiness so the OS avoids killing the shard leader via the OOM killer during RAM spikes.\"\n\nWhich assessment is best?",
+        "vi": "Khi xem xét tình trạng thiếu RAM của cụm máy, một trợ lý AI gợi ý:\n\n\"Hãy giữ swap trên đĩa bật và tăng vm.swappiness để hệ điều hành tránh dùng OOM killer giết tiến trình shard leader khi RAM tăng vọt.\"\n\nĐánh giá nào là tốt nhất?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Wrong: disk paging causes multi-second stalls and silent stale writes.",
+            "vi": "Sai: tráo trang qua đĩa gây treo hàng giây và dẫn tới ghi quá hạn âm thầm."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Right: keeping the process alive on swap prevents any lease expiry.",
+            "vi": "Đúng: giữ tiến trình sống bằng swap sẽ ngăn lease không bao giờ hết hạn."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Wrong: enabling swap makes the OOM killer terminate processes faster.",
+            "vi": "Sai: bật swap khiến OOM killer kết thúc tiến trình nhanh hơn bình thường."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Right: SSD swap runs at RAM speed, so lease checks never fall behind.",
+            "vi": "Đúng: swap trên SSD chạy nhanh ngang RAM nên kiểm tra lease không trễ."
+          }
+        }
+      ],
+      "answer": [
+        "a"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "Under memory pressure, swap thrashing forces the OS to page memory in and out from disk — stalling JVM GC or application threads for seconds or minutes. Having the OOM killer terminate the process cleanly is far safer than letting a thrashing node freeze past lease expiry and wake up as a zombie.",
+          "vi": "Khi thiếu RAM, hiện tượng thrashing khiến hệ điều hành mất gần hết thời gian tráo trang nhớ qua lại với ổ đĩa — đóng băng GC hoặc luồng ứng dụng hàng giây tới cả phút. Để OOM killer kết thúc tiến trình dứt khoát an toàn hơn nhiều so với việc node khựng quá hạn lease rồi tỉnh dậy như zombie."
+        },
+        "whyWrong": {
+          "b": {
+            "en": "A process stalled in swap cannot renew its lease in time, so the lock service expires the lease and promotes another leader anyway.",
+            "vi": "Tiến trình bị treo vì swap không thể gia hạn lease đúng lúc, nên lock service vẫn cho lease hết hạn và cấp cho leader mới."
+          },
+          "c": {
+            "en": "Swap delays OOM by spilling memory pages onto disk, which is the exact problem: it turns a clean crash into minute-long stalls.",
+            "vi": "Swap trì hoãn OOM bằng cách đẩy trang nhớ xuống đĩa, và đó chính là cái bẫy: biến một cú sập sạch sẽ thành trạng thái treo kéo dài cả phút."
+          },
+          "d": {
+            "en": "Even NVMe SSDs are orders of magnitude slower than DRAM, and thrashing repeatedly faults pages during GC heap scans.",
+            "vi": "Ngay cả SSD NVMe vẫn chậm hơn DRAM nhiều bậc, và khi thrashing hệ thống phải nạp lỗi trang liên tục trong lúc GC quét heap."
+          }
+        },
+        "reread": {
+          "anchor": "4-process-pauses",
+          "label": {
+            "en": "4. Process pauses",
+            "vi": "4. Khi tiến trình bị đóng băng giữa chừng"
+          }
+        },
+        "say": {
+          "en": "Disable swap on distributed servers: a clean OOM kill beats a thrashing node that stalls for a minute and wakes up after its lease expired.",
+          "vi": "Hãy tắt swap trên server phân tán: chết sạch vì OOM killer vẫn tốt hơn một node bị thrashing treo cả phút rồi tỉnh dậy sau khi lease đã hết hạn."
+        }
+      },
+      "ref": "Post: 4. Process pauses"
+    },
+    {
+      "id": "s06q3",
+      "level": "apply",
+      "track": "ai",
+      "type": "scenario",
+      "difficulty": 3,
+      "topic": "Pause timeline arithmetic",
+      "stem": {
+        "en": "Reviewing the scenario trace, an AI assistant claims: \"Because Leader 1 checked `lease.isValid()` at `t = 8 s` on a `10 s` lease and froze for `15 s`, the stale write executed at `t = 15 s`, just `5 s` after expiry.\"\n\nUse these formulas:\n- `wake_time = check_time + pause_duration`\n- `past_expiry = wake_time - lease_ttl`\n\nWhen does the stale write actually run, and how long after the `10 s` lease expired?",
+        "vi": "Xem lại chuỗi sự kiện trong tình huống, một trợ lý AI kết luận: \"Vì Leader 1 kiểm tra `lease.isValid()` lúc `t = 8 s` với lease hạn `10 s` rồi khựng `15 s`, lệnh ghi quá hạn chạy lúc `t = 15 s`, chỉ trễ `5 s` sau khi hết hạn.\"\n\nDùng các công thức sau:\n- `wake_time = check_time + pause_duration`\n- `past_expiry = wake_time - lease_ttl`\n\nLệnh ghi quá hạn thực tế chạy vào lúc nào, và muộn hơn thời điểm lease `10 s` hết hạn bao lâu?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "At t = 15 s, which is 5 s after the lease expired.",
+            "vi": "Tại t = 15 s, tức 5 s sau khi lease hết hạn."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "At t = 23 s, which is 15 s after the lease expired.",
+            "vi": "Tại t = 23 s, tức 15 s sau khi lease hết hạn."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "At t = 25 s, which is 15 s after the lease expired.",
+            "vi": "Tại t = 25 s, tức 15 s sau khi lease hết hạn."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "At t = 23 s, which is 13 s after the lease expired.",
+            "vi": "Tại t = 23 s, tức 13 s sau khi lease hết hạn."
+          }
+        }
+      ],
+      "answer": [
+        "d"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "The thread paused at `check_time = 8 s` for `pause_duration = 15 s`, so it wakes up at `8 + 15 = 23 s`. Because the `10 s` lease granted at `t = 0 s` expired at `t = 10 s`, the stale write executes `23 − 10 = 13 s` after expiry (`12.5 s` after Leader 2 already took over at `10.5 s`).",
+          "vi": "Luồng bắt đầu khựng tại `check_time = 8 s` trong `pause_duration = 15 s`, nên nó tỉnh dậy lúc `8 + 15 = 23 s`. Vì lease hạn `10 s` cấp lúc `t = 0 s` đã hết hạn tại `t = 10 s`, lệnh ghi quá hạn chạy muộn `23 − 10 = 13 s` sau lúc hết hạn (`12,5 s` sau khi Leader 2 đã nhận quyền lúc `10,5 s`)."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "This confuses the `15 s` pause duration with the wake-up clock time (`t = 15 s`), ignoring the `8 s` that had already elapsed before the pause began.",
+            "vi": "Cách này nhầm độ dài cú khựng `15 s` thành mốc thời gian tỉnh dậy (`t = 15 s`), bỏ quên `8 s` đã trôi qua trước khi luồng bắt đầu đứng hình."
+          },
+          "b": {
+            "en": "This computes `t = 23 s` properly, then reports the total `15 s` freeze duration instead of subtracting the `2 s` that were still left on the lease at `t = 8 s`.",
+            "vi": "Cách này tính đúng mốc `t = 23 s`, nhưng lại lấy nguyên độ dài `15 s` khựng thay vì trừ đi `2 s` vẫn còn lại trong hạn lease lúc `t = 8 s`."
+          },
+          "c": {
+            "en": "This adds the `15 s` pause onto the `10 s` expiry time instead of `t = 8 s`, the moment the thread actually passed `lease.isValid()` and froze.",
+            "vi": "Cách này cộng `15 s` khựng vào mốc hết hạn `10 s` thay vì cộng vào `t = 8 s`, thời điểm luồng thực sự kiểm tra `lease.isValid()` rồi đứng hình."
+          }
+        },
+        "reread": {
+          "anchor": "4-process-pauses",
+          "label": {
+            "en": "4. Process pauses",
+            "vi": "4. Khi tiến trình bị đóng băng giữa chừng"
+          }
+        },
+        "say": {
+          "en": "Add the pause length to the moment the check passed, then subtract the lease expiry time — the remaining TTL at check time only absorbs the first slice of a freeze.",
+          "vi": "Cộng thời gian khựng vào thời điểm kiểm tra xong, rồi trừ mốc hết hạn lease — phần TTL còn lại lúc kiểm tra chỉ gánh được khúc đầu của cú đóng băng."
+        }
+      },
+      "ref": "Post: 4. Process pauses",
+      "verifiedBy": "python3 -c 'wake = 8 + 15; past = wake - 10; print(wake, past)' -> 23 13"
+    },
+    {
+      "id": "s06q4",
+      "level": "analyze",
+      "track": "interview",
+      "type": "multi",
+      "difficulty": 4,
+      "topic": "Pause sources beyond garbage collection",
+      "stem": {
+        "en": "To eliminate garbage collection altogether, the team considers rewriting the shard leader in Rust or Zig on standard cloud VMs. With zero GC pauses, which TWO causes from the post can still freeze the leader thread right after `lease.isValid()`?",
+        "vi": "Để loại bỏ hoàn toàn việc dọn rác, nhóm cân nhắc viết lại shard leader bằng Rust hoặc Zig trên các VM cloud phổ thông. Khi đã không còn GC pause, HAI nguyên nhân nào trong bài vẫn có thể đóng băng luồng leader ngay sau `lease.isValid()`?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Hypervisor VM live migration or CPU steal from other tenants",
+            "vi": "Chuyển VM trực tiếp ở hypervisor hoặc CPU steal từ khách khác"
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Synchronous disk fsync or OS paging under memory pressure",
+            "vi": "Ghi đĩa đồng bộ fsync hoặc OS swap trang nhớ khi thiếu RAM"
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Switching the lease timer from wall clock to CLOCK_MONOTONIC",
+            "vi": "Đổi bộ đếm lease từ wall clock sang dùng CLOCK_MONOTONIC"
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Stop-the-world heap compaction triggered by Rust or Zig runtime",
+            "vi": "Runtime của Rust hoặc Zig dừng toàn bộ luồng để nén heap"
+          }
+        },
+        {
+          "id": "e",
+          "text": {
+            "en": "Running inside a hard real-time RTOS built for strict deadlines",
+            "vi": "Chạy trên hệ điều hành thời gian thực cứng RTOS giữ hạn chót"
+          }
+        }
+      ],
+      "answer": [
+        "a",
+        "b"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "Removing a garbage collector leaves four other pause causes intact on cloud servers: VM live migration and hypervisor CPU steal time, slow synchronous disk I/O (`fsync` or stalled EBS network storage), OS page swapping/thrashing under memory pressure, and OS signals such as `SIGSTOP` (`Ctrl-Z`). Any of these can stall a Rust or Zig thread mid-function.",
+          "vi": "Bỏ bộ thu gom rác vẫn còn nguyên bốn nguồn gây khựng khác trên server cloud: chuyển VM trực tiếp và CPU steal time ở tầng hypervisor, I/O đĩa đồng bộ chậm (`fsync` hay nghẽn mạng tới đĩa EBS), tráo trang nhớ khi thiếu RAM, và tín hiệu OS như `SIGSTOP` (`Ctrl-Z`). Bất kỳ nguồn nào cũng có thể làm luồng Rust hay Zig đứng hình giữa hàm."
+        },
+        "whyWrong": {
+          "c": {
+            "en": "Reading `CLOCK_MONOTONIC` is a fast clock lookup (often via vDSO without even a slow kernel trap) and does not suspend threads for seconds.",
+            "vi": "Đọc `CLOCK_MONOTONIC` là thao tác lấy giờ rất nhanh (thường qua vDSO không cần bẫy kernel nặng) và không làm treo luồng hàng giây."
+          },
+          "d": {
+            "en": "The scenario explicitly assumes Rust or Zig with no stop-the-world garbage collector; those languages manage memory without stop-the-world heap compaction pauses.",
+            "vi": "Tình huống đang xét Rust hoặc Zig không có bộ thu gom rác; hai ngôn ngữ này quản lý bộ nhớ không dùng cơ chế dừng toàn bộ luồng để nén heap."
+          },
+          "e": {
+            "en": "A hard real-time RTOS (used in airbags or flight control) trades throughput specifically to guarantee deadlines and eliminate arbitrary pauses — the opposite of a cloud VM stall.",
+            "vi": "Hệ thống hard real-time RTOS (như trong túi khí hay điều khiển bay) hy sinh thông lượng để bảo đảm hạn chót và loại bỏ cú khựng bất chợt — trái ngược với việc treo trên VM cloud."
+          }
+        },
+        "reread": {
+          "anchor": "4-process-pauses",
+          "label": {
+            "en": "4. Process pauses",
+            "vi": "4. Khi tiến trình bị đóng băng giữa chừng"
+          }
+        },
+        "say": {
+          "en": "Rewriting in Rust or Zig kills GC pauses, not process pauses: VM migration, CPU steal, synchronous fsync, OS paging, and SIGSTOP can still freeze any thread on a cloud server.",
+          "vi": "Viết lại bằng Rust hay Zig chỉ bỏ được GC pause chứ không bỏ được process pause: chuyển VM, CPU steal, fsync đồng bộ, swap và SIGSTOP vẫn đóng băng được mọi luồng trên server cloud."
+        }
+      },
+      "ref": "Post: 4. Process pauses"
+    },
+    {
+      "id": "s06q5",
+      "level": "evaluate",
+      "track": "ai",
+      "type": "ai-advice",
+      "difficulty": 5,
+      "topic": "Low-pause GC, traffic draining, and timing guarantees",
+      "stem": {
+        "en": "To stop stale writes from the shard leader, an AI assistant advises:\n\n\"Switch to ZGC and drain traffic before full GCs (as in Netflix and LinkedIn experiments). Once GC pauses drop to a few milliseconds, checking `lease.isValid()` right before `process(request)` guarantees safety.\"\n\nWhich verdict is best?",
+        "vi": "Để ngăn lệnh ghi quá hạn từ shard leader, một trợ lý AI tư vấn:\n\n\"Hãy chuyển sang ZGC và rút bớt traffic trước khi full GC chạy (như thử nghiệm của Netflix và LinkedIn). Khi GC pause giảm còn vài mili-giây, kiểm tra `lease.isValid()` ngay trước `process(request)` sẽ bảo đảm an toàn.\"\n\nNhận định nào tốt nhất?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Accept it: ZGC and pre-GC draining keep every pause shorter than a 10 s lease.",
+            "vi": "Chấp nhận: ZGC và rút traffic trước GC giữ mọi cú khựng ngắn hơn lease 10 s."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Accept it: draining routes requests away, so the JVM never hits stale writes.",
+            "vi": "Chấp nhận: rút traffic đẩy hết request đi nơi khác nên JVM không ghi quá hạn."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Partially right: both cut tail latency, yet neither guarantees pause safety.",
+            "vi": "Đúng một phần: cả hai giảm độ trễ đuôi, nhưng không bảo đảm an toàn khi khựng."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Wrong: only moving to a hard real-time RTOS works with zero throughput loss.",
+            "vi": "Sai: chỉ chuyển sang hệ điều hành thời gian thực cứng RTOS mới giữ nguyên tải."
+          }
+        }
+      ],
+      "answer": [
+        "c"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "Low-pause collectors like ZGC or Shenandoah and draining traffic before full GC (or proactive rolling restarts) significantly reduce tail latency and shrink the blast radius. However, they cannot guarantee a thread never pauses between checking a lease and writing: VM steal, disk stalls, paging, `SIGSTOP`, or allocation bursts can still pause code arbitrarily, so correctness cannot rest on timing.",
+          "vi": "Bộ thu gom rác độ trễ thấp như ZGC hay Shenandoah và rút traffic trước full GC (hoặc restart cuốn chiếu chủ động) giảm rất tốt độ trễ đuôi và thu hẹp phạm vi ảnh hưởng. Nhưng chúng không thể cam kết luồng không bao giờ khựng giữa lúc kiểm tra lease và lúc ghi: CPU steal, nghẽn đĩa, swap, `SIGSTOP` hay kẹt cấp phát bộ nhớ vẫn có thể làm tiến trình đứng hình bất kỳ lúc nào, nên tính đúng đắn không được dựa vào thời gian."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "Even with ZGC and draining, allocation stalls, OS paging, VM live migration, or disk `fsync` blocks can still freeze threads past the 10 s TTL.",
+            "vi": "Ngay cả khi dùng ZGC và rút traffic, luồng vẫn có thể bị treo quá hạn 10 s do kẹt cấp phát, swap đĩa, chuyển VM trực tiếp hay `fsync` đĩa."
+          },
+          "b": {
+            "en": "Draining only stops new incoming traffic; a request already inside `process(request)` after passing `lease.isValid()` can still pause and wake up late.",
+            "vi": "Rút traffic chỉ chặn request mới tới; một request đã kịp vượt qua `lease.isValid()` để vào `process(request)` vẫn có thể bị khựng rồi thức dậy muộn."
+          },
+          "d": {
+            "en": "Hard real-time RTOS designs guarantee deadlines specifically by sacrificing throughput and dynamic flexibility — never with zero throughput trade-off on general servers.",
+            "vi": "Hệ thống hard real-time RTOS bảo đảm hạn chót bằng cách hy sinh thông lượng và sự linh hoạt bộ nhớ — không bao giờ có chuyện giữ nguyên thông lượng trên server phổ thông."
+          }
+        },
+        "reread": {
+          "anchor": "4-process-pauses",
+          "label": {
+            "en": "4. Process pauses",
+            "vi": "4. Khi tiến trình bị đóng băng giữa chừng"
+          }
+        },
+        "say": {
+          "en": "ZGC and pre-GC traffic draining are tail-latency optimizations, not safety proofs — server software never gets hard real-time bounds, so correctness cannot depend on pause timing.",
+          "vi": "ZGC và rút traffic trước GC chỉ là tối ưu độ trễ đuôi, không phải chứng minh an toàn — phần mềm server không bao giờ có trần thời gian thực cứng, nên tính đúng đắn không được đặt cược vào việc không bị khựng."
+        }
+      },
+      "ref": "Post: 4. Process pauses"
+    }
+  ]
+}
