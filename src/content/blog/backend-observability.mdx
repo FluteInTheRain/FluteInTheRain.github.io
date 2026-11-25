@@ -229,7 +229,7 @@ class RequestIdFilter(logging.Filter):
         return True
 ```
 
-Because the value lives in the context of the running request, the service layer never receives a `request` argument just to log. FastAPI runs a plain `def` endpoint in a worker thread and copies the context into it, so the id survives there too (post 6 covers why sync endpoints run in threads). The catch: a new `threading.Thread` or a separate process starts with an empty context on Python 3.13, so code you hand off that way logs the id as `-`.
+Because the value lives in the context of the running request, the service layer never receives a `request` argument just to log. FastAPI runs a plain `def` endpoint in a worker thread and copies the context into it, so the id survives there too (post 6 covers why sync endpoints run in threads). The catch: a plain `threading.Thread`, a pool's `submit` or `run_in_executor`, or a separate process starts with an empty context on Python 3.13, so code you hand off that way logs the id as `-`. Hand it off with `asyncio.to_thread(...)`, or give the thread `copy_context().run` as its target, and the context is copied across (checked on 3.13: both logged the id, the plain thread logged `-`).
 
 <BeP10Context />
 
@@ -293,9 +293,11 @@ log.info(f"login failed for {user} token={token}")
 An f-string builds the final message before logging sees it, so the secret is already inside the text. The fix is a filter on the handler, the last line of defence, in the same file as the formatter (`demo/p10_logs.py`):
 
 ```python
-# Catches token=abc, 'password': 'hunter2' and "api_key": "abc" alike.
+# Catches token=abc, pwd=abc, 'password': 'hunter2', "api_key": "abc" and
+# Authorization: Bearer abc alike. The optional scheme word is eaten with the token.
 _SECRET = re.compile(
-    r"""(?i)(password|token|authorization|api[_-]?key)(['"]?\s*[=:]\s*)['"]?[^\s,'"})]+['"]?"""
+    r"""(?i)(password|passwd|pwd|token|secret|authorization|api[_-]?key)"""
+    r"""(['"]?\s*[=:]\s*)['"]?(?:(?:bearer|basic)\s+)?[^\s,'"})]+['"]?"""
 )
 ```
 
@@ -306,17 +308,24 @@ class RedactFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         record.msg = _SECRET.sub(r"\1\2[REDACTED]", record.getMessage())
         record.args = None
-        for key in ("password", "token", "authorization"):
+        for key in ("password", "passwd", "pwd", "token", "secret", "api_key", "authorization"):
             if key in record.__dict__:
                 record.__dict__[key] = "[REDACTED]"
         return True
 ```
 
-<TerminalOutput command="python p10_redact.py" label="Python 3.13 · captured Nov 2026" caption="Same call, before and after the filter. The password in the dict and the token are masked in the message; the extra field named password is masked too. This is a safety net: the real fix is not logging the user dict at all.">
+Two more shapes the regex covers, the last call in `demo/p10_redact.py`: a header value with a scheme word in front of the token, and a short password name.
+
+```python
+log.info("calling the vendor with Authorization: Bearer abc123 and pwd=s3cret")
+```
+
+<TerminalOutput command="python p10_redact.py" label="Python 3.13 · opentelemetry-api 1.45.2 · capture tháng 11/2026" caption="Same call, before and after the filter. The password in the dict and the token are masked in the message; the extra field named password is masked too. This is a safety net: the real fix is not logging the user dict at all.">
 ```text
-{"ts": "17:28:40.708", "level": "INFO", "service": "clue-api", "logger": "clue.auth", "request_id": "-", "msg": "login failed for {'name': 'holmes', 'password': 'hunter2'} token=eyJhbGciOi.demo.signature"}
-{"ts": "17:28:40.708", "level": "INFO", "service": "clue-api", "logger": "clue.auth", "request_id": "-", "msg": "login failed for {'name': 'holmes', 'password': [REDACTED]} token=[REDACTED]"}
-{"ts": "17:28:40.708", "level": "INFO", "service": "clue-api", "logger": "clue.auth", "request_id": "-", "msg": "login failed", "user": "holmes", "password": "[REDACTED]"}
+{"ts": "16:24:35.722", "level": "INFO", "service": "clue-api", "logger": "clue.auth", "request_id": "-", "msg": "login failed for {'name': 'holmes', 'password': 'hunter2'} token=eyJhbGciOi.demo.signature"}
+{"ts": "16:24:35.722", "level": "INFO", "service": "clue-api", "logger": "clue.auth", "request_id": "-", "msg": "login failed for {'name': 'holmes', 'password': [REDACTED]} token=[REDACTED]"}
+{"ts": "16:24:35.722", "level": "INFO", "service": "clue-api", "logger": "clue.auth", "request_id": "-", "msg": "login failed", "user": "holmes", "password": "[REDACTED]"}
+{"ts": "16:24:35.722", "level": "INFO", "service": "clue-api", "logger": "clue.auth", "request_id": "-", "msg": "calling the vendor with Authorization: [REDACTED] and pwd=[REDACTED]"}
 ```
 </TerminalOutput>
 
@@ -728,7 +737,7 @@ class RequestIdFilter(logging.Filter):
         return True
 ```
 
-Vì giá trị nằm trong context của request đang chạy, tầng service không phải nhận thêm tham số `request` chỉ để log. FastAPI chạy endpoint `def` thường trong một worker thread và chép context sang đó, nên id vẫn còn (bài 6 giải thích vì sao endpoint sync chạy trong thread). Một cái bẫy: `threading.Thread` mới hoặc process riêng khởi đầu với context rỗng trên Python 3.13, nên code bạn đẩy sang đó sẽ log id là `-`.
+Vì giá trị nằm trong context của request đang chạy, tầng service không phải nhận thêm tham số `request` chỉ để log. FastAPI chạy endpoint `def` thường trong một worker thread và chép context sang đó, nên id vẫn còn (bài 6 giải thích vì sao endpoint sync chạy trong thread). Một cái bẫy: `threading.Thread` thường, `submit` hay `run_in_executor` của pool, hoặc process riêng khởi đầu với context rỗng trên Python 3.13, nên code bạn đẩy sang đó sẽ log id là `-`. Đẩy việc đi bằng `asyncio.to_thread(...)`, hoặc đưa cho thread `copy_context().run` làm target, thì context được chép sang (đã kiểm trên 3.13: cả hai log ra id, thread thường log `-`).
 
 <BeP10Context />
 
@@ -792,9 +801,11 @@ log.info(f"login failed for {user} token={token}")
 f-string dựng xong thông điệp trước khi logging nhìn thấy, nên bí mật đã nằm sẵn trong chuỗi. Cách sửa là một filter gắn trên handler, lớp chặn cuối cùng, nằm cùng file với formatter (`demo/p10_logs.py`):
 
 ```python
-# Catches token=abc, 'password': 'hunter2' and "api_key": "abc" alike.
+# Catches token=abc, pwd=abc, 'password': 'hunter2', "api_key": "abc" and
+# Authorization: Bearer abc alike. The optional scheme word is eaten with the token.
 _SECRET = re.compile(
-    r"""(?i)(password|token|authorization|api[_-]?key)(['"]?\s*[=:]\s*)['"]?[^\s,'"})]+['"]?"""
+    r"""(?i)(password|passwd|pwd|token|secret|authorization|api[_-]?key)"""
+    r"""(['"]?\s*[=:]\s*)['"]?(?:(?:bearer|basic)\s+)?[^\s,'"})]+['"]?"""
 )
 ```
 
@@ -805,17 +816,24 @@ class RedactFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         record.msg = _SECRET.sub(r"\1\2[REDACTED]", record.getMessage())
         record.args = None
-        for key in ("password", "token", "authorization"):
+        for key in ("password", "passwd", "pwd", "token", "secret", "api_key", "authorization"):
             if key in record.__dict__:
                 record.__dict__[key] = "[REDACTED]"
         return True
 ```
 
-<TerminalOutput command="python p10_redact.py" label="Python 3.13 · capture tháng 11/2026" caption="Cùng một lời gọi, trước và sau filter. Password trong dict và token bị che trong message; trường extra tên password cũng bị che. Đây là lưới an toàn: cách sửa thật là đừng log nguyên cái dict user.">
+Hai dạng nữa mà regex phủ, lời gọi cuối cùng trong `demo/p10_redact.py`: giá trị header có từ chỉ scheme đứng trước token, và một tên password viết tắt.
+
+```python
+log.info("calling the vendor with Authorization: Bearer abc123 and pwd=s3cret")
+```
+
+<TerminalOutput command="python p10_redact.py" label="Python 3.13 · opentelemetry-api 1.45.2 · capture tháng 11/2026" caption="Cùng một lời gọi, trước và sau filter. Password trong dict và token bị che trong message; trường extra tên password cũng bị che; dòng cuối che cả token Bearer trong header Authorization lẫn pwd=. Đây là lưới an toàn: cách sửa thật là đừng log nguyên cái dict user.">
 ```text
-{"ts": "17:28:40.708", "level": "INFO", "service": "clue-api", "logger": "clue.auth", "request_id": "-", "msg": "login failed for {'name': 'holmes', 'password': 'hunter2'} token=eyJhbGciOi.demo.signature"}
-{"ts": "17:28:40.708", "level": "INFO", "service": "clue-api", "logger": "clue.auth", "request_id": "-", "msg": "login failed for {'name': 'holmes', 'password': [REDACTED]} token=[REDACTED]"}
-{"ts": "17:28:40.708", "level": "INFO", "service": "clue-api", "logger": "clue.auth", "request_id": "-", "msg": "login failed", "user": "holmes", "password": "[REDACTED]"}
+{"ts": "16:24:35.722", "level": "INFO", "service": "clue-api", "logger": "clue.auth", "request_id": "-", "msg": "login failed for {'name': 'holmes', 'password': 'hunter2'} token=eyJhbGciOi.demo.signature"}
+{"ts": "16:24:35.722", "level": "INFO", "service": "clue-api", "logger": "clue.auth", "request_id": "-", "msg": "login failed for {'name': 'holmes', 'password': [REDACTED]} token=[REDACTED]"}
+{"ts": "16:24:35.722", "level": "INFO", "service": "clue-api", "logger": "clue.auth", "request_id": "-", "msg": "login failed", "user": "holmes", "password": "[REDACTED]"}
+{"ts": "16:24:35.722", "level": "INFO", "service": "clue-api", "logger": "clue.auth", "request_id": "-", "msg": "calling the vendor with Authorization: [REDACTED] and pwd=[REDACTED]"}
 ```
 </TerminalOutput>
 

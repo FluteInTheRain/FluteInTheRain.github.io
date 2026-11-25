@@ -14,17 +14,26 @@ from functools import lru_cache
 from fastapi import APIRouter, Depends, FastAPI, Request
 from fastapi.responses import JSONResponse
 
-from layered_data import CaseRepository, InMemoryCaseRepository
+from layered_data import InMemoryCaseRepository
 from layered_service import CaseNotFoundError, CaseRuleError, CaseService
 
 
+class CountedRepository(InMemoryCaseRepository):
+    """The same store, plus a count, so ids can be derived from what is stored."""
+
+    def __len__(self) -> int:
+        return len(self._cases)
+
+
 @lru_cache
-def get_repo() -> CaseRepository:
-    return InMemoryCaseRepository()  # built once: the dict must outlive a request
+def get_repo() -> CountedRepository:
+    return CountedRepository()  # built once: the dict must outlive a request
 
 
-def get_service(repo: CaseRepository = Depends(get_repo)) -> CaseService:
-    return CaseService(repo)  # a fresh, cheap service per request
+def get_service(repo: CountedRepository = Depends(get_repo)) -> CaseService:
+    service = CaseService(repo)  # a fresh, cheap service per request
+    service._next_id = len(repo) + 1  # the id counter must not restart with it
+    return service
 
 
 app = FastAPI(title="clue.api", version="0.4.0")

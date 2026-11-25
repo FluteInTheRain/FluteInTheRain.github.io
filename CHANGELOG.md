@@ -3,6 +3,21 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-25 — Quiz series backend: 12 bài × 8 bộ × 5 câu (480 câu)
+
+- **Đã làm (nhánh `feat/backend-quiz`):** user chọn tiết kiệm: **6 agent Sonnet, mỗi agent 2 bài** (không agent brief riêng, không agent theo bộ); giữ 8 × 5 nhưng **hình chỉ khi cần** (40 hình `Bq*`, 2–4/bài). Brief chung `docs/superpowers/specs/2026-11-25-backend-quiz-authoring-brief.md`; 12 bài khai báo `code` trong `domains.ts`. Mọi câu `code-output`/tính toán có `verifiedBy` chạy thật (FastAPI 0.165, uvicorn, pyinstrument...); bài 8 dùng mô hình Python thay Redis (máy không có redis-server); bài 12 không chạy kubectl.
+- **Kiểm tra:** validator `ok` cả 96 bộ, `node --test` 95 pass, build 108 trang (12 trang quiz backend). Agent tự chụp light EN + dark VI các bộ có hình; lead xem dark VI vài bộ bài 11–12.
+- **Lỗi/ý lỏng trong bài gốc (agent phát hiện; ĐÃ SỬA theo yêu cầu user "sửa luôn", commit `8264014` bài 1/2/3/6/8/9 và `6db88d1` demo bài 4/10 chạy lại capture, 2 câu quiz dựa trên hành vi cũ viết lại thành tình huống độc lập):**
+  - Bài 1: link nguồn Facebook trả 404 (đúng: `engineering.fb.com/2021/10/05/networking-traffic/outage-details/`); "lệnh bảo trì rút BGP" không đúng chữ Meta (lệnh làm đứt backbone, DNS tự rút BGP); "6 giờ", đầu đọc thẻ, "5 tỷ request" không có trên trang Meta.
+  - Bài 2: giải thích header `allow` của 405 lỏng (FastAPI chỉ liệt kê method của route khớp đầu tiên).
+  - Bài 3 mục 2: nói handler `Exception`/`try/except` nuốt 422 thành 400/500 — chạy thật thì vẫn 422; chỉ handler `RequestValidationError` đổi được.
+  - Bài 4: demo `p04_depends.py` đếm `_next_id` trong service tạo mới mỗi request → hai POST đều ra `C-1`, ghi đè; mục 4 dùng `fake.records[...]` (dict) với fake dạng list.
+  - Bài 6: ý "handler `def` vẫn phản hồi khi loop bị chặn" — đo thật `/health` `def` cũng kẹt 9,76 s.
+  - Bài 8: lock `EX 5` nhưng route chỉ chờ ~2 s → 3 s đầu sau khi holder chết trả 503 (bài chưa nói); đổi `lpush`→`rpush` biến queue thành stack.
+  - Bài 9: công thức p95 là một kiểu nearest-rank, không phải định nghĩa duy nhất.
+  - Bài 10: regex `_SECRET` không che token sau `Bearer`, bỏ sót `pwd=`; câu "thread mới context rỗng" rộng quá (`asyncio.to_thread` có copy context).
+- **Chưa chốt:** chưa kiểm 360px; chưa xem ảnh từng câu của mọi bộ.
+
 ## 2026-11-25 — Xuất bản bài backend 8–12 (series đủ 12/12 trên site)
 
 - **Đã làm (nhánh `content/publish-backend-8-12`):** `draft: true` → `false` cho `backend-caching-queues`, `backend-testing-strategy`, `backend-observability`, `backend-performance-p99`, `backend-production-deploy`. Repo không còn bài draft nào.
