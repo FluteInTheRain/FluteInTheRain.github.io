@@ -1,0 +1,420 @@
+{
+  "id": "set-07",
+  "title": {
+    "en": "Snapshot tree without list",
+    "vi": "Cây snapshot không cần lệnh list"
+  },
+  "context": {
+    "text": {
+      "en": "A lakehouse stores a multi-terabyte `orders` table on Amazon S3 as immutable Parquet files managed by Apache Iceberg.\n• total data files in snapshot `s2`: `50,000` Parquet files\n• manifests tracked by `s2`: `50` manifest files (`1,000` Parquet files each)\n• hierarchy: atomic Catalog pointer → `metadata.json` → manifest list → manifest files → Parquet data files\nEach manifest entry holds per-column `min`/`max` bounds for `order_date` and `customer_id`, while the manifest list stores partition-level `order_date` bounds per manifest.\nYesterday's snapshot `s1` holds clean pricing data; today's deploy committed `s2` with corrupted pricing columns, and two writers also race to commit a new snapshot `s3`.",
+      "vi": "Một data lakehouse lưu bảng `orders` nhiều terabyte trên Amazon S3 dưới dạng các file Parquet bất biến do Apache Iceberg quản lý.\n• tổng số file dữ liệu ở snapshot `s2`: `50.000` file Parquet\n• số manifest trong `s2`: `50` manifest file (`1.000` file Parquet mỗi manifest)\n• cấu trúc cây: con trỏ Catalog nguyên tử → `metadata.json` → manifest list → manifest file → file dữ liệu Parquet\nMỗi mục trong manifest lưu cận `min`/`max` theo từng cột cho `order_date` và `customer_id`, còn manifest list giữ cận phân vùng `order_date` của từng manifest.\nSnapshot `s1` hôm qua có cột giá sạch; bản deploy hôm nay commit `s2` với cột giá bị hỏng, đồng thời hai writer cũng đang đua nhau commit snapshot mới `s3`."
+    },
+    "media": [
+      {
+        "kind": "figure",
+        "component": "IcebergSnapshotManifest",
+        "alt": {
+          "en": "An Iceberg snapshot tree for orders on S3: an atomic Catalog pointer references metadata.json (v2) with clean snapshot s1 and corrupted snapshot s2, branching down through a manifest list and 50 manifest files with per-file min/max bounds to 50,000 Parquet files while two writers race for s3.",
+          "vi": "Cây snapshot Iceberg cho bảng orders trên S3: con trỏ Catalog nguyên tử trỏ tới metadata.json (v2) gồm snapshot sạch s1 và snapshot lỗi s2, đi xuống manifest list và 50 manifest file có cận min/max từng file tới 50.000 file Parquet trong lúc hai writer đua ghi s3."
+        }
+      }
+    ]
+  },
+  "questions": [
+    {
+      "id": "s07q1",
+      "level": "apply",
+      "track": "interview",
+      "type": "scenario",
+      "difficulty": 3,
+      "topic": "Manifest list and min/max pruning",
+      "stem": {
+        "en": "An engineer runs `SELECT order_id, amount FROM orders WHERE order_date = '2026-11-18' AND customer_id = 42` on snapshot `s2`.\nSuppose `2` of the `50` manifests have `order_date` bounds covering `'2026-11-18'`. Inside those `2` manifests, `3` Parquet files have `customer_id` `[min, max]` bounds covering `42`.\n\nFormulas given:\n- `candidate files = matching_manifests × files_per_manifest`\n- `parquet files skipped = total_files − matching_parquet_files`\n\nHow many manifest files and Parquet files are opened, and how many Parquet files are skipped?",
+        "vi": "Một kỹ sư chạy `SELECT order_id, amount FROM orders WHERE order_date = '2026-11-18' AND customer_id = 42` trên snapshot `s2`.\nGiả sử `2` trong `50` manifest có cận `order_date` chứa `'2026-11-18'`. Bên trong `2` manifest đó, có `3` file Parquet có cận `[min, max]` của `customer_id` chứa `42`.\n\nCông thức cho sẵn:\n- `số file ứng viên = số_manifest_khớp × số_file_mỗi_manifest`\n- `số file Parquet bỏ qua = tổng_số_file − số_file_Parquet_khớp`\n\nEngine mở bao nhiêu manifest và file Parquet, và bỏ qua bao nhiêu file Parquet?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Opens 50 manifests and 2,000 Parquet files; skips 48,000 Parquet files.",
+            "vi": "Mở 50 manifest và 2.000 file Parquet; bỏ qua 48.000 file Parquet."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Opens 2 manifests and 2,000 Parquet files; skips 48,000 Parquet files.",
+            "vi": "Mở 2 manifest và 2.000 file Parquet; bỏ qua 48.000 file Parquet."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Opens 2 manifests and 3 Parquet files; skips 49,997 Parquet files.",
+            "vi": "Mở 2 manifest và 3 file Parquet; bỏ qua 49.997 file Parquet."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Opens 50 manifests and 3 Parquet files; skips 49,997 Parquet files.",
+            "vi": "Mở 50 manifest và 3 file Parquet; bỏ qua 49.997 file Parquet."
+          }
+        }
+      ],
+      "answer": [
+        "c"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "Iceberg prunes at two levels before touching any Parquet object. First, the manifest list's partition bounds drop 48 manifests, so the engine opens only 2 manifests (2,000 candidate files). Second, the per-file customer_id min/max bounds inside those 2 manifests narrow 2,000 candidates down to 3 Parquet files, skipping 50,000 − 3 = 49,997 files entirely.",
+          "vi": "Iceberg lọc ở hai tầng trước khi đụng tới file Parquet nào. Trước hết, cận phân vùng trong manifest list loại bỏ 48 manifest, nên engine chỉ mở 2 manifest (2.000 file ứng viên). Tiếp theo, cận min/max theo file của customer_id trong 2 manifest đó rút 2.000 file xuống còn 3 file Parquet, bỏ qua trọn vẹn 50.000 − 3 = 49.997 file."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "This ignores both the manifest list bounds (which filter out 48 of the 50 manifests) and the per-file customer_id bounds inside each manifest.",
+            "vi": "Cách này bỏ qua cả cận trong manifest list (vốn lọc bớt 48 trên 50 manifest) lẫn cận customer_id theo từng file bên trong manifest."
+          },
+          "b": {
+            "en": "Filtering by order_date via the manifest list leaves 2 manifests (2,000 candidate files), yet skipping per-file customer_id min/max bounds forces reading all 2,000 files instead of 3.",
+            "vi": "Lọc theo order_date qua manifest list giữ lại 2 manifest (2.000 file ứng viên), nhưng bỏ qua cận min/max của customer_id ép đọc cả 2.000 file thay vì 3."
+          },
+          "d": {
+            "en": "Because the manifest list already summarizes order_date bounds for each manifest, the planner does not need to open the other 48 manifests at all.",
+            "vi": "Vì manifest list đã tóm tắt sẵn cận order_date cho từng manifest, trình lập lịch không cần mở 48 manifest còn lại."
+          }
+        },
+        "reread": {
+          "anchor": "the-convergence-dataframes-arrow-and-iceberg",
+          "label": {
+            "en": "The convergence: DataFrames, Arrow, and Iceberg",
+            "vi": "Điểm giao thoa: DataFrame, Arrow và Iceberg"
+          }
+        },
+        "say": {
+          "en": "Iceberg prunes twice without listing S3: manifest-list bounds skip irrelevant manifests, and manifest min/max bounds skip irrelevant Parquet files before a single data byte is read.",
+          "vi": "Iceberg lọc hai lần mà không cần liệt kê S3: cận ở manifest list loại các manifest thừa, rồi cận min/max trong manifest loại các file Parquet thừa trước khi đọc một byte dữ liệu nào."
+        }
+      },
+      "ref": "Post: The convergence: DataFrames, Arrow, and Iceberg; https://iceberg.apache.org/spec/",
+      "verifiedBy": "python3 -c \"total=50000; m=2; fpm=1000; cand=m*fpm; read=3; print(cand, read, total-read)\" -> 2000 3 49997"
+    },
+    {
+      "id": "s07q2",
+      "level": "apply",
+      "track": "ai",
+      "type": "scenario",
+      "difficulty": 3,
+      "topic": "Why Iceberg replaces S3 prefix list",
+      "stem": {
+        "en": "An AI assistant suggests speeding up narrow point queries on the `50,000`-file `orders` table by bypassing Iceberg metadata: call S3 `ListObjectsV2` (`1,000` keys per page) over the bucket prefix and read every Parquet footer (`1` HTTP GET per file).\nSuppose Iceberg's metadata path for that narrow lookup opens `4` metadata files plus `4` matching Parquet files (`8` GET calls total).\n\nFormulas given:\n- `list requests = total_files ÷ keys_per_list_page`\n- `direct HTTP calls = list_requests + total_files`\n- `request ratio = direct HTTP calls ÷ iceberg HTTP calls`\n\nHow many HTTP calls does the direct scan make, and what extra flaw does it introduce?",
+        "vi": "Một trợ lý AI gợi ý tăng tốc truy vấn điểm trên bảng `orders` `50.000` file bằng cách bỏ qua metadata của Iceberg: gọi S3 `ListObjectsV2` (`1.000` key mỗi trang) trên tiền tố bucket rồi đọc footer của từng file Parquet (`1` HTTP GET mỗi file).\nGiả sử đường dẫn qua metadata của Iceberg cho truy vấn hẹp đó mở `4` file metadata cộng `4` file Parquet khớp (tổng `8` lần gọi GET).\n\nCông thức cho sẵn:\n- `số lệnh list = tổng_số_file ÷ số_key_mỗi_trang_list`\n- `số lần gọi HTTP trực tiếp = số_lệnh_list + tổng_số_file`\n- `tỉ lệ số lần gọi = số_HTTP_trực_tiếp ÷ số_HTTP_Iceberg`\n\nCách quét trực tiếp tốn bao nhiêu lệnh HTTP, và gây thêm lỗi gì?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "50,050 calls (~6,256x more), and prefix list includes files outside the live snapshot.",
+            "vi": "50.050 lần (~6.256 lần nhiều hơn), và lệnh list gom cả file không thuộc snapshot sống."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "50 calls (~6x more), and prefix list automatically hides any files from older snapshots.",
+            "vi": "50 lần (~6 lần nhiều hơn), và lệnh list tự động ẩn mọi file từ các snapshot cũ hơn."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "50,000 calls (6,250x more), and S3 prefix listing isolates readers from active writers.",
+            "vi": "50.000 lần (6.250 lần nhiều hơn), và lệnh list S3 cô lập người đọc khỏi luồng ghi đang chạy."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "50,050 calls (~6,256x more), though Iceberg must also run S3 list before opening manifests.",
+            "vi": "50.050 lần (~6.256 lần nhiều hơn), nhưng Iceberg vẫn phải chạy S3 list trước khi mở manifest."
+          }
+        }
+      ],
+      "answer": [
+        "a"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "Paginating 50,000 keys at 1,000 keys per page takes 50 ListObjectsV2 calls, and reading 50,000 Parquet footers adds 50,000 GETs, totaling 50,050 HTTP requests (50,050 / 8 ≈ 6,256x more). Worse, an S3 prefix is a flat string namespace with no snapshot isolation, so listing sees files from rolled-back snapshots, concurrent uncommitted writes, or older table states.",
+          "vi": "Phân trang 50.000 key với 1.000 key mỗi trang tốn 50 lệnh ListObjectsV2, cộng thêm 50.000 lệnh GET để đọc footer của từng file Parquet, thành 50.050 lệnh HTTP (50.050 / 8 ≈ 6.256 lần nhiều hơn). Tệ hơn, tiền tố S3 chỉ là không gian tên phẳng không có cô lập snapshot, nên lệnh list sẽ quét trúng file của snapshot đã rollback, file đang ghi dở hoặc bản cũ."
+        },
+        "whyWrong": {
+          "b": {
+            "en": "50 is only the ListObjectsV2 pagination cost before reading any Parquet footer to check bounds. S3 prefix listing also has no concept of snapshot boundaries and returns every object matching the prefix.",
+            "vi": "50 mới chỉ là số lần phân trang ListObjectsV2 trước khi đọc footer của các file Parquet. Lệnh list theo tiền tố S3 cũng không biết ranh giới snapshot và trả về mọi object khớp tiền tố."
+          },
+          "c": {
+            "en": "This drops the 50 ListObjectsV2 calls needed to discover the keys and reverses S3's behavior: prefix listing does not isolate readers from concurrent writers or orphaned files.",
+            "vi": "Cách này quên mất 50 lệnh ListObjectsV2 để liệt kê key và hiểu ngược về S3: lệnh list theo tiền tố không cô lập người đọc khỏi writer đang ghi hay file mồ côi."
+          },
+          "d": {
+            "en": "The HTTP total is right, yet Iceberg never calls S3 list during query planning: each metadata file holds exact object URIs down to the manifest list, manifests, and Parquet paths.",
+            "vi": "Tổng số lệnh HTTP đúng, nhưng Iceberg không bao giờ gọi S3 list khi lập lịch truy vấn: mỗi tầng metadata ghi sẵn đường dẫn chính xác tới manifest list, manifest và file Parquet."
+          }
+        },
+        "reread": {
+          "anchor": "2-distributed-filesystems-and-object-stores",
+          "label": {
+            "en": "2. Distributed filesystems and object stores",
+            "vi": "2. Hệ thống file phân tán và Object Store"
+          }
+        },
+        "say": {
+          "en": "When AI suggests scanning S3 via prefix list instead of reading table metadata, compare the HTTP round-trip count and remember S3 list breaks snapshot isolation.",
+          "vi": "Khi AI gợi ý quét S3 bằng prefix list thay vì đọc metadata bảng, hãy tính tổng số lệnh HTTP và nhớ rằng S3 list làm mất cô lập snapshot."
+        }
+      },
+      "ref": "Post: 2. Distributed filesystems and object stores; Post: The convergence: DataFrames, Arrow, and Iceberg",
+      "verifiedBy": "python3 -c \"total=50000; page=1000; lst=total//page; direct=lst+total; ice=8; print(lst, direct, round(direct/ice))\" -> 50 50050 6256"
+    },
+    {
+      "id": "s07q3",
+      "level": "analyze",
+      "track": "interview",
+      "type": "scenario",
+      "difficulty": 4,
+      "topic": "Optimistic Catalog commits",
+      "stem": {
+        "en": "Writer A (compacting old partitions) and Writer B (appending new `orders` rows) both read snapshot `s2` (`v2`) as their base.\nWriter A finishes first, writes new manifests and `metadata/v3.json`, and atomically flips the Catalog pointer from `v2` to `v3` (`s3`). Seconds later, Writer B finishes writing its new Parquet files, its manifest, and `metadata/v3-b.json` (parent `s2`), and calls `compareAndSwap(expected=v2, new=v3-b)` on the Catalog.\n\nWhat happens next so neither writer's work is lost?",
+        "vi": "Writer A (đang gộp các phân vùng cũ) và Writer B (đang chèn thêm dòng `orders` mới) đều đọc snapshot `s2` (`v2`) làm gốc.\nWriter A xong trước, ghi các manifest mới cùng `metadata/v3.json`, rồi lật nguyên tử con trỏ Catalog từ `v2` sang `v3` (`s3`). Vài giây sau, Writer B ghi xong các file Parquet mới, manifest của mình và `metadata/v3-b.json` (gốc vẫn là `s2`), rồi gọi `compareAndSwap(expected=v2, new=v3-b)` lên Catalog.\n\nĐiều gì xảy ra tiếp theo để không mất kết quả của writer nào?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Catalog rejects the stale CAS; Writer B retries the exact v3-b CAS until the lock clears.",
+            "vi": "Catalog từ chối CAS cũ; Writer B thử lại đúng lệnh CAS v3-b cho tới khi khoá được nhả."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Catalog merges v3 and v3-b JSON in place so both snapshots publish as one joint table.",
+            "vi": "Catalog tự trộn tại chỗ hai file JSON v3 và v3-b để gộp thành một phiên bản bảng chung."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Catalog accepts v3-b for disjoint rows, and downstream readers reconcile two active heads.",
+            "vi": "Catalog nhận v3-b vì khác dòng, và trình đọc phía sau tự gộp hai nhánh đang hoạt động."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Catalog rejects the stale CAS; Writer B reads s3, builds new metadata over s3, and retries.",
+            "vi": "Catalog từ chối CAS cũ; Writer B đọc s3, dựng metadata mới trên s3 rồi thử CAS lại."
+          }
+        }
+      ],
+      "answer": [
+        "d"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "Iceberg uses optimistic concurrency control over immutable files. Because the Catalog pointer already moved to v3, Writer B's expected=v2 CAS fails cleanly without touching s3. Writer B reloads the latest metadata (s3), checks that its append does not conflict with Writer A's compaction, builds a fresh metadata file whose parent is s3 pointing to its already-written Parquet files and manifest, and retries the atomic swap.",
+          "vi": "Iceberg dùng điều khiển đồng thời lạc quan (optimistic concurrency) trên các file bất biến. Vì con trỏ Catalog đã nhảy sang v3, lệnh CAS expected=v2 của Writer B bị từ chối sạch sẽ mà không đụng tới s3. Writer B nạp lại metadata mới nhất (s3), kiểm tra xem lệnh chèn có xung đột với bước compaction của Writer A không, tạo file metadata mới có gốc là s3 trỏ tới các file Parquet và manifest đã ghi sẵn, rồi thử tráo nguyên tử lại."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "There is no lock waiting to clear: the Catalog pointer is already v3, so retrying expected=v2 with v3-b will fail forever and would erase Writer A's compaction if accepted.",
+            "vi": "Không có khoá nào đang chờ nhả: con trỏ Catalog đã là v3, nên lặp lại expected=v2 với v3-b sẽ thất bại mãi mãi và sẽ xoá mất bước compaction của Writer A nếu được nhận."
+          },
+          "b": {
+            "en": "Object-store metadata files are immutable and the Catalog only swaps a single pointer; it never edits or merges JSON metadata files in place.",
+            "vi": "File metadata trên object store là bất biến và Catalog chỉ tráo đúng một con trỏ; nó không bao giờ sửa hay trộn tại chỗ các file JSON metadata."
+          },
+          "c": {
+            "en": "An Iceberg table maintains a single current snapshot pointer in the Catalog, not two concurrent live heads for readers to merge on every scan.",
+            "vi": "Bảng Iceberg chỉ giữ một con trỏ snapshot hiện hành duy nhất tại Catalog, chứ không để hai nhánh sống song song cho người đọc tự gộp mỗi lần quét."
+          }
+        },
+        "reread": {
+          "anchor": "the-convergence-dataframes-arrow-and-iceberg",
+          "label": {
+            "en": "The convergence: DataFrames, Arrow, and Iceberg",
+            "vi": "Điểm giao thoa: DataFrame, Arrow và Iceberg"
+          }
+        },
+        "say": {
+          "en": "Iceberg commits optimistically: write immutable data and manifests first, then CAS the Catalog pointer; on conflict, reload the latest snapshot, rebase metadata, and swap again.",
+          "vi": "Iceberg commit theo kiểu lạc quan: ghi dữ liệu và manifest bất biến trước, rồi CAS con trỏ Catalog; nếu xung đột, đọc lại snapshot mới nhất, dựng lại metadata rồi tráo lại."
+        }
+      },
+      "ref": "Post: The convergence: DataFrames, Arrow, and Iceberg; https://iceberg.apache.org/spec/"
+    },
+    {
+      "id": "s07q4",
+      "level": "analyze",
+      "track": "ai",
+      "type": "multi",
+      "difficulty": 4,
+      "topic": "Iceberg metadata and pruning limits",
+      "stem": {
+        "en": "The team wants fast queries on `WHERE customer_id = 42`. An AI assistant says:\n\n\"Because Iceberg stores column min/max bounds inside manifest files, any filter on `customer_id` skips nearly all 50,000 Parquet files automatically, and compacting small files is unnecessary once manifests exist.\"\n\nTick the two statements that correct this claim.",
+        "vi": "Nhóm muốn truy vấn `WHERE customer_id = 42` chạy nhanh. Một trợ lý AI nói:\n\n\"Vì Iceberg lưu cận min/max theo cột trong manifest file, mọi bộ lọc theo `customer_id` sẽ tự động bỏ qua gần hết 50.000 file Parquet, và không cần gộp (compact) các file nhỏ nữa khi đã có manifest.\"\n\nChọn hai nhận định sửa lại phát biểu này."
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Manifest min/max bounds work only with BETWEEN ranges and never prune equality filters.",
+            "vi": "Cận min/max trong manifest chỉ chạy với phép BETWEEN chứ không bao giờ lọc được phép bằng."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "If rows are unsorted on customer_id, wide per-file bounds span 42 and skip zero files.",
+            "vi": "Nếu dữ liệu không sắp theo customer_id, cận rộng ở mọi file đều chứa 42 nên không bỏ qua file nào."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Manifest files store bounds only for partition columns like order_date, not customer_id.",
+            "vi": "Manifest file chỉ lưu cận cho cột phân vùng như order_date, không lưu cho customer_id."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Thousands of small files still bloat manifest planning and per-object S3 GET latency.",
+            "vi": "Hàng nghìn file nhỏ vẫn làm phình thời gian lập kế hoạch trên manifest và độ trễ S3 GET từng file."
+          }
+        },
+        {
+          "id": "e",
+          "text": {
+            "en": "Adding manifests slows planning linearly unless readers fall back to S3 prefix listing.",
+            "vi": "Thêm manifest làm chậm lập kế hoạch tuyến tính trừ khi engine quay về dùng S3 prefix listing."
+          }
+        }
+      ],
+      "answer": [
+        "b",
+        "d"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "Per-column min/max bounds only prune a Parquet file when the filtered value falls outside [min, max]. If incoming orders arrive in arbitrary customer_id order without sorting or clustering, almost every file contains both low and high customer_ids, so 42 sits inside all bounds and zero files get skipped. Meanwhile, leaving tens of thousands of tiny files uncompacted swells manifest Avro files, query planning time, and HTTP GET overhead on S3.",
+          "vi": "Cận min/max theo cột chỉ bỏ qua một file Parquet khi giá trị lọc nằm ngoài đoạn [min, max]. Nếu đơn hàng đổ vào theo thứ tự customer_id ngẫu nhiên mà không sắp xếp hay gom cụm, hầu như mọi file đều chứa cả customer_id nhỏ lẫn lớn, nên 42 lọt vào cận của mọi file và không bỏ qua được file nào. Đồng thời, để hàng chục nghìn file tí hon không gộp (compact) sẽ làm phình file Avro manifest, tăng thời gian lập lịch và độ trễ HTTP GET trên S3."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "Equality filters prune against [min, max] bounds the same way range predicates do: an engine skips any file where 42 < min or 42 > max.",
+            "vi": "Bộ lọc dấu bằng vẫn tận dụng cận [min, max] như lọc khoảng: engine bỏ qua mọi file mà 42 < min hoặc 42 > max."
+          },
+          "c": {
+            "en": "The manifest list summarizes partition columns like order_date, while manifest files record lower_bound and upper_bound metrics for regular data columns such as customer_id as well.",
+            "vi": "Manifest list tóm tắt cột phân vùng như order_date, còn manifest file bên dưới ghi cận lower_bound và upper_bound cho cả các cột dữ liệu thường như customer_id."
+          },
+          "e": {
+            "en": "Switching back to S3 prefix listing discards snapshot isolation and column pruning; the manifest list itself prunes irrelevant manifests via partition bounds before reading them.",
+            "vi": "Quay lại liệt kê tiền tố S3 làm mất cả cô lập snapshot lẫn lọc theo cột; chính manifest list tự loại các manifest thừa nhờ cận phân vùng trước khi đọc."
+          }
+        },
+        "reread": {
+          "anchor": "the-convergence-dataframes-arrow-and-iceberg",
+          "label": {
+            "en": "The convergence: DataFrames, Arrow, and Iceberg",
+            "vi": "Điểm giao thoa: DataFrame, Arrow và Iceberg"
+          }
+        },
+        "say": {
+          "en": "When AI claims min/max bounds prune automatically, check the physical sort or cluster order and ask whether small-file compaction is running.",
+          "vi": "Khi AI khẳng định cận min/max tự động lọc hết dữ liệu thừa, hãy kiểm tra thứ tự sắp xếp vật lý của cột đó và hỏi xem job compaction gộp file nhỏ có đang chạy không."
+        }
+      },
+      "ref": "Post: The convergence: DataFrames, Arrow, and Iceberg; https://iceberg.apache.org/spec/"
+    },
+    {
+      "id": "s07q5",
+      "level": "evaluate",
+      "track": "interview",
+      "type": "scenario",
+      "difficulty": 5,
+      "topic": "Zero-rewrite rollback and human fault tolerance",
+      "stem": {
+        "en": "Today's deploy committed snapshot `s2` with corrupted pricing columns, and dashboards plus downstream Spark pipelines are querying `orders` continuously. Yesterday's snapshot `s1` is intact on S3, and engineers have already patched the transform code.\n\nWhich recovery plan restores clean reads fastest with zero partial state?",
+        "vi": "Bản deploy hôm nay đã commit snapshot `s2` với cột giá bị hỏng, trong khi các dashboard và pipeline Spark phía sau đang truy vấn bảng `orders` liên tục. Snapshot `s1` hôm qua vẫn nguyên vẹn trên S3, và kỹ sư đã vá xong đoạn code xử lý.\n\nKế hoạch khôi phục nào trả lại dữ liệu sạch nhanh nhất mà không lộ trạng thái dở dang?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Copy all 50,000 Parquet files from s1 over s2's keys on S3, then trigger S3 list to refresh readers.",
+            "vi": "Copy cả 50.000 file Parquet của s1 đè lên key của s2 trên S3, rồi gọi S3 list để làm mới luồng đọc."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Switch the Catalog pointer back to snapshot s1 atomically, then rerun the patched job into a new snapshot.",
+            "vi": "Đổi con trỏ Catalog quay lại snapshot s1 một cách nguyên tử, rồi chạy lại job đã vá ra snapshot mới."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Delete s2's Parquet files straight from S3 right away so live queries fall back cleanly to snapshot s1.",
+            "vi": "Xoá thẳng các file Parquet của s2 khỏi S3 ngay lập tức để các truy vấn đang chạy tự lùi về snapshot s1."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Run an in-place SQL UPDATE across s2's corrupted Parquet objects to overwrite bad prices without moving s2.",
+            "vi": "Chạy lệnh SQL UPDATE tại chỗ trên các object Parquet lỗi của s2 để sửa cột giá mà không cần đổi s2."
+          }
+        }
+      ],
+      "answer": [
+        "b"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "Because s1's immutable Parquet files and manifests are still untouched on S3, rolling back is a single atomic Catalog pointer flip from s2 back to s1—taking milliseconds with zero data copies. Active queries finish cleanly against s2 or immediately read complete s1, and rerunning the patched transform builds a fresh snapshot from immutable inputs (human fault tolerance).",
+          "vi": "Vì các file Parquet và manifest bất biến của s1 vẫn còn nguyên vẹn trên S3, rollback chỉ cần một cú lật con trỏ nguyên tử ở Catalog từ s2 quay lại s1 — mất vài mili giây và không copy byte dữ liệu nào. Các truy vấn đang chạy hoàn tất trên s2 hoặc chuyển ngay sang toàn bộ s1, rồi chạy lại job đã vá tạo snapshot mới từ đầu vào bất biến (khả năng chịu lỗi do con người)."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "Copying 50,000 objects on S3 is slow and non-atomic, exposing half-overwritten files and still failing to update Iceberg's metadata pointer.",
+            "vi": "Copy 50.000 object trên S3 vừa chậm vừa không nguyên tử, làm lộ dữ liệu ghi dở và vẫn không cập nhật con trỏ metadata của Iceberg."
+          },
+          "c": {
+            "en": "Deleting s2's Parquet files while the Catalog still points to s2 causes immediate missing-file errors for live readers instead of falling back to s1.",
+            "vi": "Xoá file Parquet của s2 trong khi Catalog vẫn đang trỏ tới s2 sẽ làm mọi truy vấn đang chạy văng lỗi mất file ngay lập tức thay vì tự lùi về s1."
+          },
+          "d": {
+            "en": "S3 objects and Parquet files are immutable and cannot be updated in place; patching prices on s2 still writes new files and a new snapshot instead of instantly restoring s1.",
+            "vi": "Object S3 và file Parquet là bất biến nên không thể cập nhật tại chỗ; sửa giá trên s2 thực chất vẫn phải ghi file và snapshot mới thay vì khôi phục s1 tức thì."
+          }
+        },
+        "reread": {
+          "anchor": "1-unix-pipes-and-human-fault-tolerance",
+          "label": {
+            "en": "1. Unix pipes and human fault tolerance",
+            "vi": "1. Unix pipe và khả năng chịu lỗi do con người"
+          }
+        },
+        "say": {
+          "en": "Because Iceberg keeps older snapshots immutable, rollback is one atomic Catalog pointer flip back to s1, then a clean rerun from fixed code.",
+          "vi": "Nhờ Iceberg giữ các snapshot cũ bất biến, rollback chỉ là một lần lật con trỏ Catalog nguyên tử về s1, rồi chạy lại sạch sẽ bằng code đã sửa."
+        }
+      },
+      "ref": "Post: 1. Unix pipes and human fault tolerance; Post: The convergence: DataFrames, Arrow, and Iceberg"
+    }
+  ]
+}
