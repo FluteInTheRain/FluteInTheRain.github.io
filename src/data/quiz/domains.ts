@@ -23,6 +23,9 @@ export const QUIZ_DOMAIN: Record<string, QuizDomain> = {
   'replication-when-copies-disagree': 'code',
   'sharding-keys-ranges-hashes-hot-spots': 'code',
   'transactions-acid-isolation-anomalies-serializability': 'code',
+  'trouble-with-distributed-systems-networks-clocks-fencing': 'code',
+  'consistency-consensus-linearizability-logical-clocks-raft': 'code',
+  'batch-processing-unix-pipes-shuffle-dataflow-lakehouse': 'code',
   // AI trading series: about building AI/data systems, so AI-output questions still fit
   'ai-trading-the-market': 'code',
   'ai-trading-data': 'code',
