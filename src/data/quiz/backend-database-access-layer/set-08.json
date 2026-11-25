@@ -1,0 +1,415 @@
+{
+  "id": "set-08",
+  "title": {
+    "en": "From laptop SQLite to real Postgres",
+    "vi": "Từ SQLite trên laptop sang Postgres thật"
+  },
+  "context": {
+    "text": {
+      "en": "Suppose clue.api moves from SQLite on a laptop to Postgres in production.\n• Postgres is on another machine, across the network.\n• A firewall between them closes TCP connections that sit idle for 5 minutes.\n• The platform probes `GET /health` and restarts a pod only when the probe fails.\n• The pool is `pool_size=5`, `max_overflow=10`, `pool_timeout=30`.",
+      "vi": "Giả sử clue.api chuyển từ SQLite trên laptop sang Postgres ở production.\n• Postgres nằm trên một máy khác, qua mạng.\n• Một firewall giữa hai bên đóng các kết nối TCP nhàn rỗi quá 5 phút.\n• Platform gọi probe `GET /health` và chỉ restart pod khi probe lỗi.\n• Pool là `pool_size=5`, `max_overflow=10`, `pool_timeout=30`."
+    }
+  },
+  "questions": [
+    {
+      "id": "s08q1",
+      "level": "apply",
+      "track": "ai",
+      "type": "ai-review",
+      "difficulty": 3,
+      "topic": "What the probe can see",
+      "stem": {
+        "en": "One night every connection of a pod is held by stuck queries and requests time out. An AI assistant says: \"The check shows `ok`, so the service is healthy.\" What does this check tell the platform?",
+        "vi": "Một đêm mọi connection của một pod bị các query kẹt giữ và request bị timeout. Một AI nói: \"Check hiện `ok`, nên service khỏe.\" Check này cho platform biết điều gì?"
+      },
+      "media": [
+        {
+          "kind": "code",
+          "lang": "python",
+          "code": "@app.get(\"/health\")\ndef health() -> dict:\n    return {\"ok\": True}"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "It fails with a pool error, because every request shares the same pool.",
+            "vi": "Nó lỗi với một lỗi của pool, vì mọi request dùng chung một pool."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "It slows down, and the platform notices the slow answer and restarts the pod.",
+            "vi": "Nó chậm đi, và platform nhận ra câu trả lời chậm rồi restart pod."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "It stays `ok`, because it never needs a connection, so the pod looks healthy.",
+            "vi": "Nó vẫn `ok`, vì nó không cần connection nào, nên pod trông vẫn khỏe."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "It returns `ok` only after the database confirms that it is reachable.",
+            "vi": "Nó chỉ trả `ok` sau khi database xác nhận có thể truy cập được."
+          }
+        }
+      ],
+      "answer": [
+        "c"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "The handler returns a constant and never takes a session, so it never waits in the pool. Even with all 15 connections stuck, it answers `ok` in a millisecond and the platform sees nothing wrong. A probe that cannot reach the failing part cannot report it.",
+          "vi": "Handler trả về một hằng số và không bao giờ lấy session, nên nó không bao giờ chờ trong pool. Dù cả 15 connection đang kẹt, nó vẫn trả `ok` trong một mili giây và platform không thấy gì sai. Một probe không chạm tới phần đang hỏng thì không thể báo về nó."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "Only code that asks the pool for a connection can hit a pool error. This handler never asks, so nothing fails.",
+            "vi": "Chỉ code xin pool một connection mới gặp lỗi pool. Handler này không bao giờ xin, nên không có gì lỗi."
+          },
+          "b": {
+            "en": "The handler does no database work, so its time does not change when the pool is busy. There is no slowdown to notice.",
+            "vi": "Handler không làm việc gì với database, nên thời gian của nó không đổi khi pool bận. Không có độ chậm nào để nhận ra."
+          },
+          "d": {
+            "en": "The code never calls the database. Nothing in it confirms reachability; it only returns a constant.",
+            "vi": "Code không hề gọi database. Không dòng nào xác nhận khả năng truy cập; nó chỉ trả một hằng số."
+          }
+        },
+        "reread": {
+          "anchor": "the-hook-a-server-that-stopped-answering-and-looked-healthy",
+          "label": {
+            "en": "The hook: a server that stopped answering and looked healthy",
+            "vi": "Mở đầu: con server ngừng trả lời mà trông vẫn khỏe"
+          }
+        },
+        "say": {
+          "en": "Ask what a health check actually touches: if it skips the database, it cannot see a database problem.",
+          "vi": "Hãy hỏi health check thực sự chạm vào gì: nếu nó bỏ qua database thì không thể thấy lỗi của database."
+        }
+      },
+      "ref": "Post: The hook: a server that stopped answering and looked healthy"
+    },
+    {
+      "id": "s08q2",
+      "level": "apply",
+      "track": "interview",
+      "type": "scenario",
+      "difficulty": 4,
+      "topic": "The first requests after a quiet night",
+      "stem": {
+        "en": "On Postgres, after a quiet night, the first few requests of the morning fail with a closed-connection error and later ones succeed. On SQLite this never happened. Which setting fits the cause?",
+        "vi": "Trên Postgres, sau một đêm yên ắng, vài request đầu tiên của buổi sáng lỗi với lỗi connection đã đóng rồi các request sau thành công. Trên SQLite điều này chưa từng xảy ra. Thiết lập nào khớp với nguyên nhân?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "`pool_size`, raised so more connections are kept open overnight.",
+            "vi": "`pool_size`, tăng lên để nhiều connection hơn được giữ mở qua đêm."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "`pool_timeout`, raised so a request waits longer before it gives up.",
+            "vi": "`pool_timeout`, tăng lên để một request chờ lâu hơn trước khi bỏ cuộc."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "`pool_pre_ping=True`, so a connection is tested when it is lent out.",
+            "vi": "`pool_pre_ping=True`, để một connection được kiểm tra khi được cho mượn."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "`max_overflow=0`, so the pool never opens extra connections at all.",
+            "vi": "`max_overflow=0`, để pool không bao giờ mở thêm connection phụ."
+          }
+        }
+      ],
+      "answer": [
+        "c"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "The firewall closed the idle connections overnight, but the pool still holds them and lends them out. With `pool_pre_ping=True` the pool tests a connection on checkout and replaces a dead one before the request uses it. SQLite never had the problem, because its file is always there.",
+          "vi": "Firewall đã đóng các connection nhàn rỗi qua đêm, nhưng pool vẫn giữ và cho mượn chúng. Với `pool_pre_ping=True`, pool kiểm tra connection khi cho mượn và thay cái đã chết trước khi request dùng. SQLite không bao giờ có vấn đề này, vì file của nó luôn ở đó."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "More idle connections means more connections for the firewall to close. The dead ones are still lent out.",
+            "vi": "Nhiều connection nhàn rỗi hơn nghĩa là firewall có nhiều connection hơn để đóng. Những cái đã chết vẫn được cho mượn."
+          },
+          "b": {
+            "en": "The request does not wait: it gets a connection at once, but that connection is dead. A longer wait would not change that.",
+            "vi": "Request không phải chờ: nó nhận connection ngay, nhưng connection đó đã chết. Chờ lâu hơn không đổi được điều đó."
+          },
+          "d": {
+            "en": "Overflow only limits extra connections under load. A dead connection in the base pool is lent out just the same.",
+            "vi": "Overflow chỉ giới hạn connection phụ khi tải cao. Một connection chết trong phần pool gốc vẫn được cho mượn như thường."
+          }
+        },
+        "reread": {
+          "anchor": "7-sqlite-to-postgres-what-changes",
+          "label": {
+            "en": "7. SQLite to Postgres: what changes",
+            "vi": "7. SQLite sang Postgres: cái gì đổi"
+          }
+        },
+        "say": {
+          "en": "On Postgres, idle connections can die behind a firewall, so I turn on `pool_pre_ping`.",
+          "vi": "Trên Postgres, connection nhàn rỗi có thể chết sau firewall, nên tôi bật `pool_pre_ping`."
+        }
+      },
+      "ref": "https://docs.sqlalchemy.org/en/20/core/pooling.html"
+    },
+    {
+      "id": "s08q3",
+      "level": "analyze",
+      "track": "ai",
+      "type": "multi",
+      "difficulty": 4,
+      "topic": "What SQLite tests do not prove",
+      "stem": {
+        "en": "An AI assistant says: \"Everything passed on SQLite, so Postgres will behave the same.\" Which TWO real differences make that claim weak?",
+        "vi": "Một AI nói: \"Mọi thứ đều pass trên SQLite, nên Postgres sẽ hoạt động y như vậy.\" HAI khác biệt thật nào làm nhận định đó yếu?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "An N+1 loop costs microseconds on SQLite, but each query is a network round trip on Postgres.",
+            "vi": "Vòng lặp N+1 tốn micro giây trên SQLite, nhưng mỗi query là một lượt đi về qua mạng trên Postgres."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Postgres allows only one writer at a time, so concurrent writes queue behind each other.",
+            "vi": "Postgres chỉ cho một bên ghi tại một thời điểm, nên các lệnh ghi đồng thời xếp hàng sau nhau."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "SQLite accepts almost any value in a column, while Postgres rejects values of the wrong type.",
+            "vi": "SQLite chấp nhận gần như mọi giá trị trong một cột, còn Postgres từ chối giá trị sai kiểu."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Postgres needs `check_same_thread=False`, so threads cannot share connections without it.",
+            "vi": "Postgres cần `check_same_thread=False`, nên các thread không dùng chung connection được nếu thiếu nó."
+          }
+        },
+        {
+          "id": "e",
+          "text": {
+            "en": "Postgres manages connections itself, so a pool size no longer has to be chosen.",
+            "vi": "Postgres tự quản lý connection, nên không còn phải chọn kích thước pool."
+          }
+        }
+      ],
+      "answer": [
+        "a",
+        "c"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "The cost of a query changes completely once there is a network between the app and the database, so an N+1 that looked free becomes slow. And SQLite is loose about column types, while Postgres is strict, so bad data that slipped through now fails at the database.",
+          "vi": "Chi phí của một query đổi hoàn toàn khi giữa app và database có mạng, nên N+1 trông như miễn phí trở nên chậm. Và SQLite lỏng lẻo về kiểu cột, còn Postgres thì nghiêm, nên dữ liệu sai từng lọt qua giờ lỗi ngay ở database."
+        },
+        "whyWrong": {
+          "b": {
+            "en": "It is the other way round. SQLite allows one writer per database file; Postgres allows many concurrent writers that lock rows, not the whole database.",
+            "vi": "Ngược lại mới đúng. SQLite chỉ cho một bên ghi cho mỗi file database; Postgres cho nhiều bên ghi đồng thời, khóa theo dòng chứ không khóa cả database."
+          },
+          "d": {
+            "en": "That flag is SQLite-only. Postgres does not use it, and the post's `p05_db.py` already skips it for Postgres.",
+            "vi": "Cờ đó chỉ dành cho SQLite. Postgres không dùng nó, và `p05_db.py` trong bài đã bỏ qua nó với Postgres."
+          },
+          "e": {
+            "en": "The pool matters more on Postgres: it protects `max_connections`, and every worker has its own, so the size must come from the budget.",
+            "vi": "Pool quan trọng hơn trên Postgres: nó bảo vệ `max_connections`, và mỗi worker có pool riêng, nên kích thước phải tính từ ngân sách."
+          }
+        },
+        "reread": {
+          "anchor": "7-sqlite-to-postgres-what-changes",
+          "label": {
+            "en": "7. SQLite to Postgres: what changes",
+            "vi": "7. SQLite sang Postgres: cái gì đổi"
+          }
+        },
+        "say": {
+          "en": "SQLite results do not carry over: the cost per query, the types and the pool all change on Postgres.",
+          "vi": "Kết quả SQLite không mang sang được: chi phí mỗi query, kiểu dữ liệu và pool đều đổi trên Postgres."
+        }
+      },
+      "ref": "Post: 7. SQLite to Postgres: what changes"
+    },
+    {
+      "id": "s08q4",
+      "level": "evaluate",
+      "track": "interview",
+      "type": "scenario",
+      "difficulty": 5,
+      "topic": "Planning the move to Postgres",
+      "stem": {
+        "en": "Suppose the team moves the code to Postgres next week. The service and `SqlCaseRepository` stay unchanged. Which plan fits best?",
+        "vi": "Giả sử nhóm chuyển code sang Postgres vào tuần sau. Service và `SqlCaseRepository` giữ nguyên. Kế hoạch nào hợp lý nhất?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Rewrite the repository for Postgres first, then change the URL when it is done.",
+            "vi": "Viết lại repository cho Postgres trước, rồi đổi URL khi xong."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Change `DATABASE_URL`, size the pool against `max_connections`, then load test it.",
+            "vi": "Đổi `DATABASE_URL`, tính kích thước pool theo `max_connections`, rồi load test nó."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Keep the SQLite timings as the reference, and skip the load test to save time.",
+            "vi": "Giữ các số đo SQLite làm chuẩn, và bỏ load test để tiết kiệm thời gian."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Raise `pool_size` to 100 on every worker, so the pool can never run out.",
+            "vi": "Tăng `pool_size` lên 100 trên mọi worker, để pool không bao giờ cạn."
+          }
+        }
+      ],
+      "answer": [
+        "b"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "The code mostly carries over, so the first line to touch is `DATABASE_URL`, the second is the pool settings tuned against Postgres's own limit, and the third is a load test against a database like the production one. Each step answers something SQLite could not show.",
+          "vi": "Code phần lớn mang sang được, nên dòng đầu cần chạm vào là `DATABASE_URL`, dòng thứ hai là các thiết lập pool điều chỉnh theo giới hạn riêng của Postgres, và bước thứ ba là một load test trên database giống production. Mỗi bước trả lời một điều mà SQLite không cho thấy."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "A rewrite is not needed. The seam kept the SQL behind the repository, so the repository and service carry over as they are.",
+            "vi": "Không cần viết lại. Seam giữ phần SQL sau repository, nên repository và service mang sang nguyên vẹn."
+          },
+          "c": {
+            "en": "SQLite timings measure an in-process file. They say nothing about network round trips, row locks or the connection limit.",
+            "vi": "Số đo SQLite là của một file chạy trong tiến trình. Chúng không nói gì về lượt đi về qua mạng, khóa dòng hay giới hạn connection."
+          },
+          "d": {
+            "en": "Each worker has its own pool, so 100 each multiplies fast and soon passes the server's total. Size from the budget, not from fear.",
+            "vi": "Mỗi worker có pool riêng, nên 100 cho mỗi cái nhân lên rất nhanh và sớm vượt tổng của server. Hãy tính từ ngân sách, đừng tính từ nỗi sợ."
+          }
+        },
+        "reread": {
+          "anchor": "7-sqlite-to-postgres-what-changes",
+          "label": {
+            "en": "7. SQLite to Postgres: what changes",
+            "vi": "7. SQLite sang Postgres: cái gì đổi"
+          }
+        },
+        "say": {
+          "en": "First the URL, then the pool against the database limit, then a load test on a real Postgres.",
+          "vi": "Trước hết là URL, rồi pool theo giới hạn của database, rồi load test trên Postgres thật."
+        }
+      },
+      "ref": "Post: 7. SQLite to Postgres: what changes"
+    },
+    {
+      "id": "s08q5",
+      "level": "evaluate",
+      "track": "ai",
+      "type": "ai-advice",
+      "difficulty": 5,
+      "topic": "Fixing the blind health check",
+      "stem": {
+        "en": "After the incident you ask an AI assistant how to make the pod's health check catch an exhausted pool. Which of its four ideas does that?",
+        "vi": "Sau sự cố bạn hỏi một AI cách để health check của pod bắt được pool cạn. Ý tưởng nào trong bốn ý tưởng của nó làm được điều đó?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Make `/health` run `SELECT 1` through the pool, with a short wait for a connection.",
+            "vi": "Cho `/health` chạy `SELECT 1` qua pool, với thời gian chờ connection ngắn."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Make `/health` run `SELECT 1` on a separate connection that bypasses the pool.",
+            "vi": "Cho `/health` chạy `SELECT 1` trên một connection riêng không đi qua pool."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Keep `/health` as it is and add more replicas, so some pods are always healthy.",
+            "vi": "Giữ `/health` như cũ và thêm replica, để luôn có vài pod khỏe."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Raise `pool_size` so the pool cannot be exhausted, then no check is needed.",
+            "vi": "Tăng `pool_size` để pool không thể cạn, khi đó không cần check nữa."
+          }
+        }
+      ],
+      "answer": [
+        "a"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "A check that borrows a connection from the same pool sees what a user request sees. If every connection is held, it waits and then fails, and a short wait makes that failure fast and clear instead of letting the probe sit in the 30 s queue behind the stuck requests.",
+          "vi": "Một check mượn connection từ cùng pool sẽ thấy đúng điều mà request của người dùng thấy. Nếu mọi connection đang bị giữ, nó chờ rồi lỗi, và thời gian chờ ngắn làm cho lỗi đó nhanh và rõ thay vì để probe nằm trong hàng đợi 30 s sau các request đang kẹt."
+        },
+        "whyWrong": {
+          "b": {
+            "en": "A private connection skips the pool, so the check keeps passing while real requests queue for the pool. It tests the database, not the path users take.",
+            "vi": "Connection riêng bỏ qua pool, nên check vẫn pass trong khi request thật xếp hàng chờ pool. Nó kiểm tra database, không phải đường mà người dùng đi."
+          },
+          "c": {
+            "en": "More replicas hide the symptom but leave every blind pod blind. The stuck pod still looks healthy and still serves timeouts.",
+            "vi": "Thêm replica che triệu chứng nhưng vẫn để mỗi pod mù như cũ. Pod bị kẹt vẫn trông khỏe và vẫn trả timeout."
+          },
+          "d": {
+            "en": "A bigger pool only moves the point where it runs dry, and each worker's pool counts against the server's `max_connections`. It is no check at all.",
+            "vi": "Pool lớn hơn chỉ dời điểm cạn đi xa hơn, và pool của mỗi worker đều tính vào `max_connections` của server. Nó hoàn toàn không phải một check."
+          }
+        },
+        "reread": {
+          "anchor": "the-hook-a-server-that-stopped-answering-and-looked-healthy",
+          "label": {
+            "en": "The hook: a server that stopped answering and looked healthy",
+            "vi": "Mở đầu: con server ngừng trả lời mà trông vẫn khỏe"
+          }
+        },
+        "say": {
+          "en": "A health check should travel the same path as a user request, with its own short timeout.",
+          "vi": "Health check nên đi cùng đường với request của người dùng, với timeout ngắn của riêng nó."
+        }
+      },
+      "ref": "Post: The hook: a server that stopped answering and looked healthy"
+    }
+  ]
+}
