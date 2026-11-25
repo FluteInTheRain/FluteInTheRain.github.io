@@ -1,0 +1,402 @@
+{
+  "id": "set-03",
+  "title": {
+    "en": "The log that remembers",
+    "vi": "Cuốn nhật ký không quên"
+  },
+  "context": {
+    "text": {
+      "en": "Suppose an online shop moves order events through two pipelines.\nPipeline A is a queue broker with 2 consumers. Each message goes to one consumer.\n• Messages `m3` and `m4` arrive in this order\n• `m3` goes to Consumer 2\n• `m4` goes to Consumer 1\nPipeline B is a Kafka-style topic called `orders`.\n• 12 partitions, record key = `user_id`\n• consumer group `billing` has 20 consumers\n• partition P1 holds a refund record for user `u64` that takes 30 s to process; a normal record takes 20 ms\n• the log lives on one 20 TB disk that is written sequentially\nIt is Tuesday morning. A bug in the `billing` code shipped on Monday at 09:00. Monday's records are still in the log.",
+      "vi": "Giả sử một cửa hàng online chuyển các sự kiện đơn hàng qua hai pipeline.\nPipeline A là một queue broker có 2 consumer. Mỗi message đi tới một consumer.\n• Message `m3` và `m4` tới theo thứ tự này\n• `m3` đi tới Consumer 2\n• `m4` đi tới Consumer 1\nPipeline B là một topic kiểu Kafka tên là `orders`.\n• 12 partition, key của record = `user_id`\n• consumer group `billing` có 20 consumer\n• partition P1 có một record hoàn tiền của user `u64` mất 30 giây để xử lý; một record bình thường mất 20 ms\n• log nằm trên một đĩa 20 TB được ghi tuần tự\nBây giờ là sáng thứ Ba. Một lỗi trong code `billing` đã được deploy lúc 09:00 thứ Hai. Các record của thứ Hai vẫn còn trong log."
+    },
+    "media": [
+      {
+        "kind": "figure",
+        "component": "PartitionKeyLanes",
+        "alt": {
+          "en": "An orders service sends records keyed by user_id into partitions P0, P1 and P2, each lane showing offsets 0 to 4; one record in P1 is slow and the records behind it are queued; each lane is read by one consumer of group billing.",
+          "vi": "Một service đơn hàng gửi các record theo key user_id vào partition P0, P1 và P2, mỗi làn hiện offset 0 đến 4; một record ở P1 chạy chậm và các record phía sau nó xếp hàng; mỗi làn được một consumer của group billing đọc."
+        }
+      }
+    ]
+  },
+  "questions": [
+    {
+      "id": "s03q1",
+      "level": "understand",
+      "track": "interview",
+      "type": "single",
+      "difficulty": 2,
+      "topic": "Redelivery reorders a queue",
+      "stem": {
+        "en": "In pipeline A the broker keeps a message until its consumer sends an ACK. Consumer 2 crashes while handling `m3`, and Consumer 1 has already taken `m4`. Why can `m3` end up handled after `m4`?",
+        "vi": "Ở pipeline A, broker giữ message cho tới khi consumer gửi ACK. Consumer 2 sập khi đang xử lý `m3`, còn Consumer 1 đã nhận `m4`. Vì sao `m3` có thể được xử lý sau `m4`?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "The broker re-sorts its queue by finish time, so slower messages move to the back.",
+            "vi": "Broker sắp xếp lại queue theo thời điểm xong, nên message chậm bị đẩy xuống cuối."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "The producer sends `m3` again, and the new copy gets a new place in line.",
+            "vi": "Producer gửi lại `m3`, và bản sao mới được xếp vào một chỗ mới trong hàng."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "No ACK arrived for `m3`, so the broker hands it to Consumer 1 after `m4`.",
+            "vi": "Không có ACK cho `m3`, nên broker giao nó cho Consumer 1 sau `m4`."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "The broker always prefers the consumer that is alive, so `m4` outranks `m3`.",
+            "vi": "Broker luôn ưu tiên consumer còn sống, nên `m4` được xếp trước `m3`."
+          }
+        }
+      ],
+      "answer": ["c"],
+      "explanation": {
+        "whyRight": {
+          "en": "The broker cannot tell whether `m3` was finished, so it keeps it until an ACK arrives. When Consumer 2 crashes, no ACK comes, and the broker redelivers `m3` to another consumer. Consumer 1 has already taken `m4`, so the two messages are handled as `m4`, then `m3`. Sharing work across consumers plus retry breaks the order.",
+          "vi": "Broker không biết `m3` đã xong hay chưa, nên giữ nó cho tới khi có ACK. Khi Consumer 2 sập, ACK không bao giờ tới, và broker giao lại `m3` cho một consumer khác. Consumer 1 đã nhận `m4` rồi, nên hai message được xử lý theo thứ tự `m4` rồi `m3`. Chia việc cho nhiều consumer cộng với gửi lại làm vỡ thứ tự."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "A queue broker does not rank messages by how long they take. The order flips because of the missing ACK and the redelivery, not because of a re-sort.",
+            "vi": "Queue broker không xếp hạng message theo thời gian xử lý. Thứ tự đảo vì thiếu ACK và bị giao lại, không phải vì sắp xếp lại."
+          },
+          "b": {
+            "en": "The producer sent `m3` once and has no idea that a consumer crashed. The redelivery comes from the broker, which still holds the unconfirmed message.",
+            "vi": "Producer chỉ gửi `m3` một lần và không biết consumer đã sập. Việc giao lại đến từ broker, nơi vẫn đang giữ message chưa được xác nhận."
+          },
+          "d": {
+            "en": "The broker has no rule that favours one consumer's message over another's. It only reacts to the missing ACK by delivering `m3` again.",
+            "vi": "Broker không có luật nào ưu ái message của consumer này hơn consumer kia. Nó chỉ phản ứng với ACK bị thiếu bằng cách giao `m3` lại."
+          }
+        },
+        "reread": {
+          "anchor": "1-why-message-queues-scramble-your-order",
+          "label": {
+            "en": "1. Why message queues scramble your order",
+            "vi": "1. Vì sao hàng đợi tin nhắn làm đảo thứ tự"
+          }
+        },
+        "say": {
+          "en": "A shared queue holds a message until its ACK, so a crash means redelivery to someone else, and that flips the order.",
+          "vi": "Queue dùng chung giữ message cho tới khi có ACK, nên consumer sập đồng nghĩa với giao lại cho người khác, và việc đó làm đảo thứ tự."
+        }
+      },
+      "ref": "Post: 1. Why message queues scramble your order"
+    },
+    {
+      "id": "s03q2",
+      "level": "apply",
+      "track": "ai",
+      "type": "scenario",
+      "difficulty": 3,
+      "topic": "Ordering by partition key",
+      "stem": {
+        "en": "An AI assistant reviews pipeline B and writes: \"Because the topic is keyed by `user_id`, a consumer reads all events in the order they were produced.\"\nSuppose the shop produces these three records, in this order:\n• `u18 order_placed`\n• `u45 refund_issued`\n• `u18 order_paid`\nWhich statement about what consumers see is correct?",
+        "vi": "Một AI review pipeline B và viết: \"Vì topic dùng key `user_id`, consumer đọc mọi sự kiện đúng theo thứ tự chúng được tạo ra.\"\nGiả sử cửa hàng tạo ba record này, theo thứ tự:\n• `u18 order_placed`\n• `u45 refund_issued`\n• `u18 order_paid`\nPhát biểu nào về những gì consumer thấy là đúng?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "`order_placed` always comes before `order_paid`; the refund has no fixed place between them.",
+            "vi": "`order_placed` luôn tới trước `order_paid`; refund không có vị trí cố định giữa hai record đó."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "All three arrive in the order produced, because a topic is one single ordered log.",
+            "vi": "Cả ba tới đúng thứ tự đã tạo, vì một topic là một log duy nhất có thứ tự."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "The refund always arrives last, because partitions are read in order of user id.",
+            "vi": "Refund luôn tới sau cùng, vì các partition được đọc theo thứ tự của user id."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "No pair is guaranteed, because the consumers of a group read the same partition in parallel.",
+            "vi": "Không cặp nào được đảm bảo, vì các consumer trong group đọc cùng một partition song song."
+          }
+        }
+      ],
+      "answer": ["a"],
+      "explanation": {
+        "whyRight": {
+          "en": "The key decides the partition, so both `u18` records land in the same partition, and a partition is read in offset order. The `u45` record may sit in a different partition, and the order between two partitions is not defined. So the AI's claim holds per key, not across keys.",
+          "vi": "Key quyết định partition, nên hai record của `u18` rơi vào cùng một partition, và partition được đọc theo thứ tự offset. Record của `u45` có thể nằm ở partition khác, và thứ tự giữa hai partition không được định nghĩa. Vì vậy câu của AI chỉ đúng theo từng key, không đúng giữa các key."
+        },
+        "whyWrong": {
+          "b": {
+            "en": "A topic is split into partitions, each an independent log. Only inside one partition is the order fixed; across partitions there is no global order.",
+            "vi": "Topic được chia thành các partition, mỗi cái là một log độc lập. Chỉ trong một partition thứ tự mới cố định; giữa các partition không có thứ tự toàn cục."
+          },
+          "c": {
+            "en": "Partitions are not read in any order of user id, and the key is hashed to pick a partition. Nothing makes the `u45` record come last.",
+            "vi": "Partition không được đọc theo thứ tự user id, và key được băm để chọn partition. Không có gì khiến record của `u45` đứng cuối."
+          },
+          "d": {
+            "en": "Inside a group, one partition goes to one consumer, so two consumers never split a partition. That is why order inside a partition is safe.",
+            "vi": "Trong một group, mỗi partition chỉ giao cho một consumer, nên hai consumer không bao giờ chia nhau một partition. Vì vậy thứ tự trong partition được giữ."
+          }
+        },
+        "reread": {
+          "anchor": "2-log-based-brokers-and-non-destructive-reads",
+          "label": {
+            "en": "2. Log-based brokers and non-destructive reads",
+            "vi": "2. Broker dạng log và cách đọc không phá huỷ"
+          }
+        },
+        "say": {
+          "en": "When AI says a keyed topic keeps order, check what the order is scoped to: it holds per key, never across keys.",
+          "vi": "Khi AI nói topic có key giữ được thứ tự, hãy kiểm tra phạm vi của thứ tự đó: nó đúng theo từng key, không bao giờ giữa các key."
+        }
+      },
+      "ref": "Post: 2. Log-based brokers and non-destructive reads"
+    },
+    {
+      "id": "s03q3",
+      "level": "apply",
+      "track": "interview",
+      "type": "scenario",
+      "difficulty": 3,
+      "topic": "Retention as a circular buffer",
+      "stem": {
+        "en": "Assume the log is the only data on the 20 TB disk. Old data is dropped as new data overwrites it, so the log works like a circular buffer. After the evening peak, writes fall to 100 MB/s. Use these formulas:\n- `1 TB = 1,000,000 MB`\n- `seconds to overwrite once = disk size in MB ÷ write rate in MB/s`\nAbout how long does the log take to overwrite itself once?",
+        "vi": "Giả sử log là dữ liệu duy nhất trên đĩa 20 TB. Dữ liệu cũ bị bỏ đi khi dữ liệu mới ghi đè lên, nên log hoạt động như một circular buffer. Sau giờ cao điểm buổi tối, tốc độ ghi giảm còn 100 MB/s. Dùng các công thức sau:\n- `1 TB = 1.000.000 MB`\n- `số giây để ghi đè một vòng = dung lượng đĩa tính bằng MB ÷ tốc độ ghi tính bằng MB/s`\nLog mất khoảng bao lâu để ghi đè hết một vòng?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "About 22.2 hours, the figure for a disk written at 250 MB/s.",
+            "vi": "Khoảng 22,2 giờ, con số của đĩa được ghi ở 250 MB/s."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "About 5.6 hours, because 20 TB is read as 2 TB of space.",
+            "vi": "Khoảng 5,6 giờ, vì 20 TB bị đọc nhầm thành 2 TB dung lượng."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "About 555.6 hours, because the slower rate is applied twice.",
+            "vi": "Khoảng 555,6 giờ, vì tốc độ chậm hơn bị tính hai lần."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "About 55.6 hours, from 200,000 seconds of writing.",
+            "vi": "Khoảng 55,6 giờ, từ 200.000 giây ghi liên tục."
+          }
+        }
+      ],
+      "answer": ["d"],
+      "explanation": {
+        "whyRight": {
+          "en": "20 TB is 20,000,000 MB. Divided by 100 MB/s that is 200,000 seconds, and 200,000 ÷ 3,600 is about 55.6 hours. A slower write rate means the old data lives longer, so retention grows when traffic drops and shrinks at the evening peak.",
+          "vi": "20 TB là 20.000.000 MB. Chia cho 100 MB/s ra 200.000 giây, và 200.000 ÷ 3.600 xấp xỉ 55,6 giờ. Tốc độ ghi chậm hơn nghĩa là dữ liệu cũ sống lâu hơn, nên thời gian lưu dài ra khi tải giảm và ngắn lại lúc cao điểm."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "This keeps the old write rate. At 250 MB/s the log would overwrite in about 22.2 hours, but the rate here is 100 MB/s, so the window is longer.",
+            "vi": "Đáp án này giữ tốc độ ghi cũ. Ở 250 MB/s log ghi đè trong khoảng 22,2 giờ, nhưng ở đây tốc độ là 100 MB/s nên cửa sổ dài hơn."
+          },
+          "b": {
+            "en": "This is a unit slip: 20 TB is 20,000,000 MB, not 2,000,000 MB. A factor of 10 off in size gives a factor of 10 off in time.",
+            "vi": "Đây là lỗi đổi đơn vị: 20 TB là 20.000.000 MB, không phải 2.000.000 MB. Lệch 10 lần về dung lượng thì lệch 10 lần về thời gian."
+          },
+          "c": {
+            "en": "The rate is divided into the size once, not twice. Counting the slow rate a second time overshoots the real answer by a factor of 10.",
+            "vi": "Tốc độ chỉ chia vào dung lượng một lần, không phải hai lần. Tính tốc độ chậm lần thứ hai làm kết quả lệch 10 lần."
+          }
+        },
+        "reread": {
+          "anchor": "consumer-groups-offsets-and-retention-math",
+          "label": {
+            "en": "Consumer groups, offsets, and retention math",
+            "vi": "Consumer group, offset và bài toán dung lượng lưu trữ"
+          }
+        },
+        "say": {
+          "en": "Retention is disk size divided by write rate, so the window shrinks when traffic peaks and the log is a circular buffer.",
+          "vi": "Thời gian lưu bằng dung lượng đĩa chia cho tốc độ ghi, nên cửa sổ co lại khi lưu lượng cao điểm và log là một circular buffer."
+        }
+      },
+      "ref": "Post: Consumer groups, offsets, and retention math",
+      "verifiedBy": "python3 -c \"mb=20*1_000_000; print(mb/250, mb/250/3600); print(mb/100, mb/100/3600)\"\n80000.0 22.22222222222222\n200000.0 55.55555555555556"
+    },
+    {
+      "id": "s03q4",
+      "level": "analyze",
+      "track": "ai",
+      "type": "ai-advice",
+      "difficulty": 4,
+      "topic": "Group size and a stuck partition",
+      "stem": {
+        "en": "Lag grows only on P1. An AI assistant advises: \"Raise group `billing` from 20 to 30 consumers so the P1 backlog drains faster.\"\nFor a check, use this formula:\n- `active consumers = min(partitions, consumers)`\nWhat is the right review of this advice?",
+        "vi": "Lag chỉ tăng ở P1. Một AI khuyên: \"Tăng group `billing` từ 20 lên 30 consumer để backlog của P1 được xả nhanh hơn.\"\nĐể kiểm tra, dùng công thức:\n- `consumer đang hoạt động = min(số partition, số consumer)`\nCách review đúng cho lời khuyên này là gì?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "It helps: the broker splits the P1 backlog across the 10 new consumers.",
+            "vi": "Có tác dụng: broker chia backlog của P1 cho 10 consumer mới."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "It does not help: 12 consumers are already active, and P1 stays with one stuck consumer.",
+            "vi": "Không có tác dụng: đã có 12 consumer hoạt động, và P1 vẫn nằm ở một consumer bị kẹt."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "It helps if the 10 new consumers join a new group, because a group is capped at 20.",
+            "vi": "Có tác dụng nếu 10 consumer mới vào một group mới, vì một group bị giới hạn 20."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "It hurts: more consumers raise the chance that two of them read the same P1 record.",
+            "vi": "Có hại: nhiều consumer hơn làm tăng khả năng hai consumer đọc cùng một record của P1."
+          }
+        }
+      ],
+      "answer": ["b"],
+      "explanation": {
+        "whyRight": {
+          "en": "`min(12, 20) = 12` and `min(12, 30) = 12`, so 12 consumers are already the most a group can use on 12 partitions; extra ones sit idle. P1 is read by one consumer, and the 30-second record holds every record behind it in P1. A better fix is to cap retries and move the slow record to a dead-letter queue, so the partition keeps moving.",
+          "vi": "`min(12, 20) = 12` và `min(12, 30) = 12`, nên 12 consumer đã là mức tối đa một group dùng được trên 12 partition; consumer thêm vào nằm không. P1 do một consumer đọc, và record 30 giây giữ lại mọi record phía sau nó trong P1. Cách sửa tốt hơn là giới hạn số lần thử rồi chuyển record chậm sang dead-letter queue để partition chạy tiếp."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "A broker hands out whole partitions, never single records of one partition. New consumers beyond the partition count get nothing to read.",
+            "vi": "Broker giao nguyên partition, không bao giờ chia từng record của một partition. Consumer vượt quá số partition sẽ không có gì để đọc."
+          },
+          "c": {
+            "en": "A group has no 20-member cap. A new group would read every record again as its own full copy, doing the work twice instead of draining P1.",
+            "vi": "Group không có giới hạn 20 thành viên. Một group mới sẽ đọc lại mọi record như một bản sao đầy đủ của riêng nó, làm việc hai lần thay vì xả P1."
+          },
+          "d": {
+            "en": "Inside a group each partition has exactly one reader, so two consumers do not read the same P1 record. Extra consumers are idle, not harmful.",
+            "vi": "Trong một group, mỗi partition chỉ có đúng một consumer đọc, nên hai consumer không đọc cùng một record của P1. Consumer thừa chỉ nằm không, không gây hại."
+          }
+        },
+        "reread": {
+          "anchor": "consumer-groups-offsets-and-retention-math",
+          "label": {
+            "en": "Consumer groups, offsets, and retention math",
+            "vi": "Consumer group, offset và bài toán dung lượng lưu trữ"
+          }
+        },
+        "say": {
+          "en": "When AI says to add consumers for lag, check the partition count first: a group never uses more consumers than partitions.",
+          "vi": "Khi AI bảo thêm consumer để giảm lag, hãy kiểm tra số partition trước: một group không bao giờ dùng nhiều consumer hơn số partition."
+        }
+      },
+      "ref": "Post: Consumer groups, offsets, and retention math",
+      "verifiedBy": "python3 -c \"print(min(12,20), min(12,30))\"\n12 12"
+    },
+    {
+      "id": "s03q5",
+      "level": "evaluate",
+      "track": "interview",
+      "type": "scenario",
+      "difficulty": 5,
+      "topic": "Replaying a log to test a fix",
+      "stem": {
+        "en": "The team has fixed the `billing` bug and wants to test it on real Monday traffic from 09:00. The live `billing` group must keep serving customers the whole time. Which plan is best?",
+        "vi": "Team đã sửa lỗi `billing` và muốn thử trên lưu lượng thật của thứ Hai từ 09:00. Group `billing` đang chạy phải tiếp tục phục vụ khách hàng suốt thời gian đó. Kế hoạch nào tốt nhất?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Reset the live group's offsets to Monday 09:00 and run the fixed code there.",
+            "vi": "Đặt lại offset của group đang chạy về 09:00 thứ Hai và chạy code đã sửa ở đó."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Add one test consumer to `billing`, since the group hands it a copy of every record.",
+            "vi": "Thêm một consumer thử nghiệm vào `billing`, vì group sẽ đưa cho nó bản sao của mọi record."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Start a new group at Monday 09:00 and write its results to a staging table.",
+            "vi": "Chạy một group mới từ 09:00 thứ Hai và ghi kết quả vào một bảng staging."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Have the producers resend Monday's orders into `orders` and let `billing` read them.",
+            "vi": "Cho producer gửi lại các đơn hàng của thứ Hai vào `orders` và để `billing` đọc chúng."
+          }
+        }
+      ],
+      "answer": ["c"],
+      "explanation": {
+        "whyRight": {
+          "en": "Reading a log does not delete anything. A new consumer group keeps its own offsets, so it can start at Monday 09:00, read the real traffic, and write to a staging table while the live group carries on untouched. This works only because Monday's records are still inside the retention window.",
+          "vi": "Đọc log không xoá gì cả. Một consumer group mới có offset riêng, nên nó có thể bắt đầu từ 09:00 thứ Hai, đọc lưu lượng thật và ghi vào bảng staging trong khi group đang chạy không bị đụng tới. Cách này chạy được chỉ vì các record của thứ Hai vẫn còn trong cửa sổ lưu trữ."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "Rewinding the live group makes production reprocess a day of orders and write them again to the real tables, while customers are waiting on it.",
+            "vi": "Tua lại group đang chạy khiến production xử lý lại một ngày đơn hàng và ghi lại vào các bảng thật, trong lúc khách hàng đang chờ nó."
+          },
+          "b": {
+            "en": "Inside one group each partition goes to one consumer, so a new member takes over some partitions instead of getting a copy. Copies go to separate groups.",
+            "vi": "Trong một group, mỗi partition chỉ giao cho một consumer, nên thành viên mới giành lấy một số partition chứ không nhận bản sao. Bản sao đi tới các group riêng."
+          },
+          "d": {
+            "en": "Resent orders become new records that mix with live traffic and reach the real tables. The old records are already in the log, so no resend is needed.",
+            "vi": "Đơn hàng gửi lại trở thành record mới, trộn với lưu lượng đang chạy và đi vào các bảng thật. Record cũ đã nằm sẵn trong log nên không cần gửi lại."
+          }
+        },
+        "reread": {
+          "anchor": "2-log-based-brokers-and-non-destructive-reads",
+          "label": {
+            "en": "2. Log-based brokers and non-destructive reads",
+            "vi": "2. Broker dạng log và cách đọc không phá huỷ"
+          }
+        },
+        "say": {
+          "en": "A log is non-destructive, so I start a separate consumer group from the old offset and test against a staging table.",
+          "vi": "Log không bị phá huỷ khi đọc, nên tôi chạy một consumer group riêng từ offset cũ và thử trên một bảng staging."
+        }
+      },
+      "ref": "Post: 2. Log-based brokers and non-destructive reads"
+    }
+  ]
+}
