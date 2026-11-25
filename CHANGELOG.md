@@ -3,6 +3,11 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-25 — Xuất bản bài backend 8–12 (series đủ 12/12 trên site)
+
+- **Đã làm (nhánh `content/publish-backend-8-12`):** `draft: true` → `false` cho `backend-caching-queues`, `backend-testing-strategy`, `backend-observability`, `backend-performance-p99`, `backend-production-deploy`. Repo không còn bài draft nào.
+- **Ai quyết:** user ("cho nó hiện hết luôn").
+
 ## 2026-11-25 — Wave D series backend: bài 11–12 (draft) — series đủ 12/12
 
 - **Đã làm (nhánh `feat/backend-wave-d`, gộp từ 2 worktree `backend-post-11`, `backend-post-12`, mỗi bài 1 agent Sonnet):**
