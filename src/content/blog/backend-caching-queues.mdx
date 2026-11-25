@@ -230,7 +230,7 @@ responses marked MISS: 1; database reads: 1
 
 <BeP08Stampede />
 
-The wall clock time is nearly identical (`0.08 s` vs `0.09 s`), because the 19 waiting callers return as soon as the single winner writes Redis — while database load drops by 20×. (Two notes for production: first, deleting a lock safely across multiple processes should check a unique owner token with a Lua script so a slow worker never deletes a lock whose TTL already passed and was re-acquired; second, for a key that does not exist in the DB at all — a **cache penetration** attack asking for random nonexistent IDs — single-flight alone still hits the DB once per fake key unless you also briefly cache a sentinel `"null"` value or validate keys up front.)
+The wall clock time is nearly identical (`0.08 s` vs `0.09 s`), because the 19 waiting callers return as soon as the single winner writes Redis — while database load drops by 20×. One cost of the lock's expiry: it lives `EX 5` while waiters give up after about 2 s (100 tries of 0.02 s). If the process holding the lock dies before its `finally` runs, requests that arrive during roughly the next 3 s wait out their 2 s and get a 503 until the lock expires. (Two notes for production: first, deleting a lock safely across multiple processes should check a unique owner token with a Lua script so a slow worker never deletes a lock whose TTL already passed and was re-acquired; second, for a key that does not exist in the DB at all — a **cache penetration** attack asking for random nonexistent IDs — single-flight alone still hits the DB once per fake key unless you also briefly cache a sentinel `"null"` value or validate keys up front.)
 
 ---
 
@@ -279,7 +279,7 @@ def ack(r: redis.Redis, raw: str) -> None:
     r.lrem(PROCESSING, 1, raw)
 ```
 
-Instead of popping, `claim()` runs `BLMOVE jobs:reports jobs:reports:processing 1 RIGHT LEFT`: Redis **atomically** removes the oldest job from `jobs:reports` and places it on `jobs:reports:processing` in a single server step. Only after `handler(r, job)` finishes without raising does the worker call `ack()` (`LREM jobs:reports:processing 1 raw`). At every microsecond of the job's life, it is safely stored in at least one Redis list.
+Instead of popping, `claim()` runs `BLMOVE jobs:reports jobs:reports:processing 1 RIGHT LEFT`: Redis **atomically** removes the oldest job from `jobs:reports` and places it on `jobs:reports:processing` in a single server step. Only after `handler(r, job)` finishes without raising does the worker call `ack()` (`LREM jobs:reports:processing 1 raw`). At every microsecond of the job's life, it is safely stored in at least one Redis list. This only works if the producer pushes at the opposite end: `enqueue()` uses `lpush` and `BLMOVE` takes from the `RIGHT`, so the oldest job comes out first. Push at the same end you take from and the queue becomes a stack.
 
 <BeP08QueueLists />
 
@@ -646,7 +646,7 @@ responses marked MISS: 1; database reads: 1
 
 <BeP08Stampede />
 
-Tổng thời gian trả 20 request gần như y hệt (`0,08 s` vs `0,09 s`), vì 19 request chờ sẽ thoát vòng lặp ngay khi người thắng ghi xong vào Redis — trong khi tải xuống database giảm 20 lần. (Hai lưu ý khi đưa ra production: thứ nhất, khi mở rộng nhiều process, lệnh xoá khoá nên gắn token chủ sở hữu riêng kèm Lua script để một worker chạy chậm không xoá nhầm khoá đã hết hạn của người khác; thứ hai, nếu gặp tấn công **cache penetration** hỏi toàn ID không tồn tại, single-flight vẫn chọc DB một lần cho mỗi ID lạ trừ khi bạn cache thêm giá trị rỗng ngắn hạn hoặc validate ID trước.)
+Tổng thời gian trả 20 request gần như y hệt (`0,08 s` vs `0,09 s`), vì 19 request chờ sẽ thoát vòng lặp ngay khi người thắng ghi xong vào Redis — trong khi tải xuống database giảm 20 lần. Một cái giá của việc khoá tự hết hạn: khoá sống `EX 5` trong khi request chờ bỏ cuộc sau khoảng 2 s (100 lần thử, mỗi lần 0,02 s). Nếu process đang giữ khoá chết trước khi `finally` chạy, các request tới trong khoảng 3 s kế tiếp sẽ chờ hết 2 s rồi nhận 503, cho tới khi khoá hết hạn. (Hai lưu ý khi đưa ra production: thứ nhất, khi mở rộng nhiều process, lệnh xoá khoá nên gắn token chủ sở hữu riêng kèm Lua script để một worker chạy chậm không xoá nhầm khoá đã hết hạn của người khác; thứ hai, nếu gặp tấn công **cache penetration** hỏi toàn ID không tồn tại, single-flight vẫn chọc DB một lần cho mỗi ID lạ trừ khi bạn cache thêm giá trị rỗng ngắn hạn hoặc validate ID trước.)
 
 ---
 
@@ -695,7 +695,7 @@ def ack(r: redis.Redis, raw: str) -> None:
     r.lrem(PROCESSING, 1, raw)
 ```
 
-Thay vì rút hẳn ra, `claim()` gọi `BLMOVE jobs:reports jobs:reports:processing 1 RIGHT LEFT`: Redis **chuyển nguyên tử** job cũ nhất từ list `jobs:reports` sang list `jobs:reports:processing` trong một bước duy nhất. Chỉ sau khi `handler(r, job)` chạy xong không lỗi thì worker mới gọi `ack()` (`LREM jobs:reports:processing 1 raw`). Ở mọi thời điểm trong suốt vòng đời, job luôn nằm an toàn trong ít nhất một list trên Redis.
+Thay vì rút hẳn ra, `claim()` gọi `BLMOVE jobs:reports jobs:reports:processing 1 RIGHT LEFT`: Redis **chuyển nguyên tử** job cũ nhất từ list `jobs:reports` sang list `jobs:reports:processing` trong một bước duy nhất. Chỉ sau khi `handler(r, job)` chạy xong không lỗi thì worker mới gọi `ack()` (`LREM jobs:reports:processing 1 raw`). Ở mọi thời điểm trong suốt vòng đời, job luôn nằm an toàn trong ít nhất một list trên Redis. Cách này chỉ đúng khi bên producer đẩy vào đầu đối diện: `enqueue()` dùng `lpush` còn `BLMOVE` lấy từ `RIGHT`, nên job cũ nhất ra trước. Đẩy vào cùng đầu với đầu lấy ra thì hàng đợi biến thành stack.
 
 <BeP08QueueLists />
 
