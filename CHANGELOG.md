@@ -3,6 +3,13 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-25 — Xuất bản 7 bài draft sẵn sàng (Backend 5–7, Go 20, AI Trading 1–3)
+
+- **Đã làm (branch `content/publish-ready-drafts`):** bật `draft: false` cho 7 bài đã hoàn thiện trên `main`: Backend Wave B (`backend-database-access-layer`, `backend-async-concurrency-workers`, `backend-auth-oauth2-jwt`), Go bài 20 (`go-interview-questions-output-live-coding` — chốt trọn bộ 20/20 bài series `golang`), và 3 bài đầu AI Trading (`ai-trading-the-market`, `ai-trading-signals`, `ai-trading-data` kèm kích hoạt 3 trang quiz tương ứng + card series `ai-trading` và category `ai`).
+- **Ai quyết:** user yêu cầu hoàn tất luôn cả 4 đầu việc (trong đó có xuất bản các bài draft đang chờ).
+- **Kiểm tra:** `npm run build` 85 pages (từ 74 → 85: +7 bài, +3 trang quiz AI Trading, +1 category `/blog/category/ai/`), `node --test` 59/59 pass; kiểm toàn bộ link nội bộ trong 7 bài đều trỏ tới bài đã xuất bản.
+- **Chưa chốt:** PR chờ user merge vào `main`.
+
 ## 2026-11-24 — Dọn nhãn "minh họa" khỏi hình và bài blog; sửa nút Next; thay 2 câu quiz trùng
 
 - **Đã làm (3 PR, mỗi việc một nhánh):** (1) `fix/quiz-next-button` (#64): nút Next trên trang quiz không còn `sticky`, hết đè lên dòng "Correct answer". (2) `fix/quiz-duplicate-cases` (#65): thay s02q4 (giờ hỏi vốn hóa không phải tiền mặt công ty đang giữ) và s08q3 (tiền đi từ người mua sang người bán, lợi nhuận FPT không đổi) vì trùng s03q5 và s03q3. (3) `chore/drop-illustrative-labels`: bỏ các nhãn "illustrative / minh họa / số bịa / made-up" trong chữ hiển thị của ~115 file (hình SVG, demo, 6 bài blog); số bịa thì nêu giả định trong câu ("Giả sử ..."). Không sửa comment code, không đụng AnimatedFlow / DemoFrame / DiagramIcon, giữ EN và VI đồng bộ. Hai hình bị xóa phần tử chú thích (`StorageBVectorSpace`, `MarketLimitQueue`; `StorageBitcask` bỏ nhãn "example values"); `MarketLimitQueue` thu viewBox 430 → 400.
