@@ -1,0 +1,430 @@
+{
+  "id": "set-08",
+  "title": {
+    "en": "The lease expired while paused",
+    "vi": "Lease hết hạn trong lúc tiến trình bị treo"
+  },
+  "context": {
+    "text": {
+      "en": "In January 2020, Jepsen analyzed `etcd 3.4.3` locks bound to heartbeat-renewed leases.\nMeasured incident facts:\n• Lock lease TTL: `2 s` (`1`, `2`, and `3 s` TTLs all broke mutual exclusion within minutes on a healthy cluster with synchronized clocks)\n• Shared-set workload: `5` concurrent processes with a process pause every `5 s` lost about `18%` of acknowledged updates\n• Server bug: after waiting in a queue, `etcd` did not re-check an expired lease before granting the lock\nMeanwhile, the same platform runs a `3`-node `etcd` cluster alongside `4 TB` of user orders, `20,000` service-discovery lookups/s, and `200` worker processes.",
+      "vi": "Tháng 1 năm 2020, Jepsen phân tích khoá của `etcd 3.4.3` gắn với lease được gia hạn bằng heartbeat.\nSố liệu đo được từ sự cố thật:\n• Lease TTL của khoá: `2 giây` (các mức TTL `1`, `2` và `3 giây` đều mất tính loại trừ lẫn nhau chỉ sau vài phút trên cụm khoẻ có đồng hồ đồng bộ)\n• Bài thử tập hợp chung: `5` tiến trình song song với một lần tạm dừng mỗi `5 giây` làm mất khoảng `18%` cập nhật đã xác nhận\n• Lỗi phía server: sau khi chờ trong hàng đợi, `etcd` không kiểm tra lại lease đã hết hạn trước khi cấp khoá\nCùng lúc đó, hệ thống vận hành một cụm `etcd` `3` node bên cạnh `4 TB` đơn hàng người dùng, `20.000` lượt tra cứu service discovery/giây và `200` worker."
+    },
+    "media": [
+      {
+        "kind": "figure",
+        "component": "EtcdLeaseBarrier",
+        "alt": {
+          "en": "Timeline of the Jepsen etcd 3.4.3 lock incident showing Worker A acquiring a 2-second lease, pausing while the lease expires, Worker B acquiring the lock and writing to shared storage, and Worker A resuming to overwrite Worker B, alongside platform scale of 4 TB orders, 20,000 lookups/s, and 200 workers.",
+          "vi": "Dòng thời gian sự cố khoá etcd 3.4.3 của Jepsen: Worker A lấy lease 2 giây rồi tạm dừng làm lease hết hạn, Worker B lấy khoá và ghi vào kho dữ liệu, rồi Worker A tỉnh lại ghi đè Worker B, kèm quy mô nền tảng 4 TB đơn hàng, 20.000 lượt tra cứu/giây và 200 worker."
+        }
+      }
+    ]
+  },
+  "questions": [
+    {
+      "id": "s08q1",
+      "level": "apply",
+      "track": "ai",
+      "type": "ai-review",
+      "difficulty": 3,
+      "topic": "Spotting missing fencing tokens in etcd lock writes",
+      "stem": {
+        "en": "An AI assistant generated this Go snippet so workers serialize updates to `orderStore` with a `2`-second `etcd` lease lock. Even when `etcd` works without the queue bug, why can this flow still overwrite another worker's acknowledged write?",
+        "vi": "Một trợ lý AI sinh ra đoạn code Go sau để các worker tuần tự hoá việc cập nhật `orderStore` bằng khoá lease `2` giây của `etcd`. Ngay cả khi `etcd` không dính lỗi hàng đợi, vì sao luồng này vẫn có thể ghi đè lên lần ghi đã xác nhận của worker khác?"
+      },
+      "media": [
+        {
+          "kind": "code",
+          "lang": "go",
+          "code": "lease, _ := etcdClient.Grant(ctx, 2) // 2s TTL\nmu := concurrency.NewMutex(session, \"/locks/shard-7\")\nif err := mu.Lock(ctx); err != nil {\n    return err\n}\ndefer mu.Unlock(ctx)\n\n// Update external storage after acquiring lock\norderStore.Put(ctx, orderKey, newState)",
+          "caption": {
+            "en": "AI-generated etcd lock wrapper writing to external orderStore",
+            "vi": "Code bọc khoá etcd do AI tạo để ghi vào orderStore bên ngoài"
+          }
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Because defer mu.Unlock(ctx) runs on a second goroutine and unlocks before Put begins.",
+            "vi": "Vì defer mu.Unlock(ctx) chạy ở goroutine khác và nhả khoá trước khi Put bắt đầu."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Because Grant(ctx, 2) sets a 2-minute TTL, letting two workers share one session.",
+            "vi": "Vì Grant(ctx, 2) đặt TTL 2 phút, khiến hai worker dùng chung một phiên khoá."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Because orderStore.Put carries no monotonic fencing token (revision) to reject stale writes.",
+            "vi": "Vì orderStore.Put không gửi kèm fencing token tăng đơn điệu (revision) để chặn ghi muộn."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Because etcd lease locks are local to one Raft member and never replicate to the quorum.",
+            "vi": "Vì khoá lease của etcd chỉ nằm cục bộ ở một node Raft chứ không nhân bản sang quorum."
+          }
+        }
+      ],
+      "answer": [
+        "c"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "A lock service must revoke an expired lease when a holder pauses, so it cannot stop a paused worker from waking up and sending a delayed write to `orderStore`. Fixing this requires passing a monotonically increasing fencing token (the lock key's `revision` in `etcd`) on `orderStore.Put`, so `orderStore` rejects any write carrying an older token than it has already seen.",
+          "vi": "Dịch vụ khoá buộc phải thu hồi lease hết hạn khi máy giữ khoá bị treo, nên nó không thể ngăn worker bị treo tỉnh dậy gửi lệnh ghi muộn vào `orderStore`. Cách sửa nằm ở tài nguyên đích: mỗi lệnh `orderStore.Put` phải gửi kèm một fencing token tăng đơn điệu (`revision` của khoá trong `etcd`) để `orderStore` từ chối mọi lệnh ghi mang token cũ hơn mức nó đã thấy."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "Go's `defer` executes when the surrounding function returns, after `orderStore.Put` completes—not concurrently beforehand.",
+            "vi": "Từ khoá `defer` trong Go chạy khi hàm chứa nó return, tức là sau khi `orderStore.Put` xong—không chạy song song trước đó."
+          },
+          "b": {
+            "en": "`etcdClient.Grant(ctx, 2)` sets a `2`-second TTL, not `2` minutes, and `Grant` creates an independent lease ID.",
+            "vi": "`etcdClient.Grant(ctx, 2)` đặt TTL `2` giây chứ không phải `2` phút, và `Grant` tạo một lease ID độc lập."
+          },
+          "d": {
+            "en": "`etcd` replicates lease grants and lock keys through Raft consensus across the cluster quorum, not on one isolated node.",
+            "vi": "`etcd` nhân bản việc cấp lease và khoá qua đồng thuận Raft tới toàn quorum cụm, không chỉ giữ cục bộ trên một node."
+          }
+        },
+        "reread": {
+          "anchor": "case-when-an-etcd-lock-did-not-keep-the-second-writer-out",
+          "label": {
+            "en": "Case: when an etcd lock did not keep the second writer out",
+            "vi": "Tình huống thật: khi khoá etcd không chặn nổi người ghi thứ hai"
+          }
+        },
+        "say": {
+          "en": "When AI wraps an external write in an `etcd` lock, check whether the lock's monotonic `revision` reaches the destination store as a fencing token.",
+          "vi": "Khi AI bọc một lệnh ghi bên ngoài bằng khoá `etcd`, hãy kiểm tra xem `revision` tăng đơn điệu của khoá có được gửi xuống kho lưu trữ làm fencing token hay không."
+        }
+      },
+      "ref": "Post: Case: when an etcd lock did not keep the second writer out; 6. Coordination services: ZooKeeper, etcd, and Consul"
+    },
+    {
+      "id": "s08q2",
+      "level": "apply",
+      "track": "interview",
+      "type": "scenario",
+      "difficulty": 4,
+      "topic": "etcd Txn (version > 0) vs. external fencing tokens",
+      "stem": {
+        "en": "After reading Jepsen's `etcd 3.4.3` report, an engineer suggests replacing external resource token checks with an `etcd` `Txn` checking `version > 0` on the lock key. Which boundary separates Jepsen's `Txn` pattern from a monotonic fencing token (`revision`, `zxid`, or `ModifyIndex`)?",
+        "vi": "Sau khi đọc báo cáo `etcd 3.4.3` của Jepsen, một kỹ sư đề xuất bỏ bước kiểm tra token ở tài nguyên bên ngoài và thay bằng `etcd` `Txn` kiểm tra `version > 0` trên khoá lease. Ranh giới nào phân biệt mẫu `Txn` của Jepsen với fencing token tăng đơn điệu (`revision`, `zxid` hay `ModifyIndex`)?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Txn (version > 0) guards one single write inside etcd; external storage still needs a monotonic fencing token.",
+            "vi": "Txn (version > 0) chỉ bảo vệ một lệnh ghi đơn bên trong etcd; kho ngoài vẫn cần fencing token tăng đơn điệu."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Txn (version > 0) commits multi-step external DB writes atomically, while revision protects only reads in etcd.",
+            "vi": "Txn (version > 0) commit nguyên tử các ghi nhiều bước ở DB ngoài, còn revision chỉ bảo vệ lệnh đọc trong etcd."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "version is a global cluster counter checked by external disks, while revision resets to 0 when a key deletes.",
+            "vi": "version là bộ đếm toàn cụm để ổ đĩa ngoài kiểm tra, còn revision quay về 0 mỗi khi khoá bị xoá."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Both mechanisms stop a paused worker from writing to external S3 or SQL unless etcd loses its quorum.",
+            "vi": "Cả hai cơ chế đều chặn được worker bị treo ghi vào S3 hay SQL bên ngoài trừ phi etcd mất quorum."
+          }
+        }
+      ],
+      "answer": [
+        "a"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "Jepsen's `Txn` check (`version > 0` on the lock key) verifies inside `etcd` that the lock key still exists at the moment of that single `etcd` write—and Jepsen explicitly notes it does not make multi-step updates atomic or protect external stores. To protect external storage (like SQL shards or object stores) after a worker pause, the lock key's global monotonic `revision` (or ZooKeeper `zxid`, Consul `ModifyIndex`) must be checked by the external resource itself.",
+          "vi": "Kiểm tra `Txn` của Jepsen (`version > 0` trên khoá) xác minh ngay bên trong `etcd` rằng khoá vẫn còn tồn tại ở đúng thời điểm thực hiện một lệnh ghi đơn vào `etcd`—và Jepsen nhấn mạnh cách này không làm cho cập nhật nhiều bước thành nguyên tử hay bảo vệ kho dữ liệu ngoài. Muốn bảo vệ tài nguyên bên ngoài (như shard SQL hay object store) khi worker bị treo, chính tài nguyên đó phải kiểm tra `revision` toàn cục tăng đơn điệu (hoặc `zxid` của ZooKeeper, `ModifyIndex` của Consul)."
+        },
+        "whyWrong": {
+          "b": {
+            "en": "The `etcd` `Txn` executes only against keys stored in `etcd`; it cannot span external databases or make multi-step updates atomic, whereas `revision` is the cluster-wide write fencing token.",
+            "vi": "`etcd` `Txn` chỉ chạy trên các khoá nằm trong `etcd`; nó không trải sang được database ngoài hay biến cập nhật nhiều bước thành nguyên tử, còn `revision` là fencing token toàn cụm cho lệnh ghi."
+          },
+          "c": {
+            "en": "This swaps the two terms: `version` is per-key (resetting when the key is deleted and recreated), whereas `revision` is the global monotonically increasing counter across cluster mutations.",
+            "vi": "Cách hiểu này tráo ngược hai khái niệm: `version` gắn theo từng khoá (về 0 khi xoá rồi tạo lại), còn `revision` mới là bộ đếm toàn cụm chỉ tăng qua mọi lần sửa."
+          },
+          "d": {
+            "en": "An `etcd` `Txn` cannot stop a worker that already left `etcd` and is writing straight to external S3 or SQL after a pause.",
+            "vi": "Một `etcd` `Txn` không thể chặn một worker đã rời `etcd` và đang gửi lệnh ghi thẳng sang S3 hay SQL bên ngoài sau cơn treo máy."
+          }
+        },
+        "reread": {
+          "anchor": "case-when-an-etcd-lock-did-not-keep-the-second-writer-out",
+          "label": {
+            "en": "Case: when an etcd lock did not keep the second writer out",
+            "vi": "Tình huống thật: khi khoá etcd không chặn nổi người ghi thứ hai"
+          }
+        },
+        "say": {
+          "en": "`etcd` `Txn` (`version > 0`) guards a single write inside `etcd`, whereas external storage requires a monotonic fencing token such as `revision`, `zxid`, or `ModifyIndex`.",
+          "vi": "`etcd` `Txn` (`version > 0`) chỉ giữ được một lệnh ghi đơn bên trong `etcd`, còn kho ngoài bắt buộc phải kiểm tra fencing token tăng đơn điệu như `revision`, `zxid` hay `ModifyIndex`."
+        }
+      },
+      "ref": "Post: Case: when an etcd lock did not keep the second writer out; 6. Coordination services: ZooKeeper, etcd, and Consul"
+    },
+    {
+      "id": "s08q3",
+      "level": "analyze",
+      "track": "ai",
+      "type": "multi",
+      "difficulty": 4,
+      "topic": "Coordination service sizing and scaling service discovery",
+      "stem": {
+        "en": "An AI architect proposes simplifying the platform by moving the `4 TB` of user orders into the `3`-node `etcd` cluster and routing all `20,000` service-discovery lookups/s through `etcd`'s default linearizable quorum reads. Select the TWO reasons this plan fails and what replaces it.",
+        "vi": "Một kiến trúc sư AI đề xuất đơn giản hoá hệ thống bằng cách chuyển luôn `4 TB` đơn hàng người dùng vào cụm `etcd` `3` node và đẩy toàn bộ `20.000` lượt tra cứu service discovery/giây qua lệnh đọc quorum khả tuyến tính mặc định của `etcd`. Chọn HAI lý do thiết kế này thất bại và giải pháp thay thế đúng."
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "etcd's Raft log silently deletes uncommitted user rows once total key-value storage passes 100 MB.",
+            "vi": "Log Raft của etcd tự động xoá âm thầm các dòng chưa commit hễ tổng dung lượng key-value vượt quá 100 MB."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Coordination services (Chubby model) hold megabytes of slow-changing metadata, so 4 TB of orders belongs in sharded DBs.",
+            "vi": "Dịch vụ điều phối (theo mô hình Chubby) chỉ giữ vài megabyte metadata ít đổi, nên 4 TB đơn hàng phải nằm ở các DB phân mảnh."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Adding 20 voting nodes to etcd speeds up the 20,000/s discovery lookups without slowing write quorums.",
+            "vi": "Thêm 20 node bỏ phiếu vào etcd giúp tăng tốc 20.000 lượt tra cứu/giây mà không làm chậm quorum ghi."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Service discovery values availability and speed over strict recency, so use TTL caches, ZooKeeper observers, or etcd Serializable reads.",
+            "vi": "Service discovery ưu tiên độ sẵn sàng và tốc độ hơn tính mới nhất tuyệt đối, nên hãy dùng TTL cache, ZooKeeper observer hoặc đọc Serializable của etcd."
+          }
+        },
+        {
+          "id": "e",
+          "text": {
+            "en": "etcd v3 default reads are already uncoordinated local reads like ZooKeeper, so 20,000/s lookups add zero quorum cost.",
+            "vi": "Lệnh đọc mặc định của etcd v3 vốn đã đọc cục bộ không qua quorum giống ZooKeeper, nên 20.000 lượt/giây không tốn chi phí quorum."
+          }
+        }
+      ],
+      "answer": [
+        "b",
+        "d"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "Coordination services (`ZooKeeper`, `etcd`, `Consul`, modeled on Google Chubby) run tiny `3`- or `5`-node clusters for megabytes of slow-changing control metadata (shard maps, leaders, leases)—never terabytes of application orders, which belong in sharded databases. Likewise, routing `20,000/s` discovery lookups through linearizable quorum/`ReadIndex` checks couples API calls to consensus availability and quorum latency; TTL caches, non-voting ZooKeeper observers, or `etcd` `Serializable` local reads keep discovery fast and resilient.",
+          "vi": "Các dịch vụ điều phối (`ZooKeeper`, `etcd`, `Consul`, phỏng theo Chubby của Google) chỉ chạy cụm nhỏ `3` hoặc `5` node để chứa vài megabyte metadata điều khiển ít đổi (bản đồ shard, leader, lease)—tuyệt đối không chứa hàng terabyte dữ liệu đơn hàng, vốn phải đặt ở các database phân mảnh. Tương tự, đẩy `20.000` lượt tra cứu discovery/giây qua kiểm tra quorum/`ReadIndex` khiến toàn nền tảng phụ thuộc độ sẵn sàng và độ trễ đồng thuận; TTL cache, ZooKeeper observer không bỏ phiếu hoặc đọc cục bộ `Serializable` của `etcd` giữ discovery nhanh và chịu lỗi tốt."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "`etcd` does not silently delete uncommitted rows at `100 MB` as normal behavior; it is bounded by backend storage quotas and snapshot/memory limits meant for small control metadata.",
+            "vi": "`etcd` không âm thầm xoá dòng ở mốc `100 MB`; nó bị giới hạn bởi hạn mức lưu trữ và bộ nhớ snapshot vốn thiết kế riêng cho metadata điều khiển cỡ nhỏ."
+          },
+          "c": {
+            "en": "Adding voting members slows down every write quorum and does not scale linearizable quorum reads; read scaling uses non-voting observers or `Serializable` local reads.",
+            "vi": "Thêm máy bỏ phiếu làm chậm mọi quorum ghi chứ không mở rộng được đọc khả tuyến tính; muốn tăng tải đọc phải dùng observer không bỏ phiếu hoặc đọc cục bộ `Serializable`."
+          },
+          "e": {
+            "en": "In `etcd v3+`, default reads are linearizable (checking quorum/`ReadIndex`); you must explicitly opt out with `Serializable` to serve local reads.",
+            "vi": "Từ `etcd v3+`, lệnh đọc mặc định là khả tuyến tính (kiểm tra quorum/`ReadIndex`); bạn phải chủ động bật cờ `Serializable` mới đọc cục bộ được."
+          }
+        },
+        "reread": {
+          "anchor": "service-discovery-doesnt-need-linearizability--use-observers",
+          "label": {
+            "en": "Service discovery doesn't need linearizability — use observers",
+            "vi": "Service discovery không cần khả tuyến tính — hãy dùng observer"
+          }
+        },
+        "say": {
+          "en": "Keep coordination services tiny (`3` or `5` nodes) for megabytes of control metadata only, and serve high-volume service discovery from TTL caches, observers, or `Serializable` reads.",
+          "vi": "Giữ dịch vụ điều phối nhỏ gọn (`3` hoặc `5` node) chỉ cho vài megabyte metadata điều khiển, và phục vụ tải tra cứu discovery lớn bằng TTL cache, observer hoặc đọc `Serializable`."
+        }
+      },
+      "ref": "Post: 6. Coordination services: ZooKeeper, etcd, and Consul; Service discovery doesn't need linearizability — use observers"
+    },
+    {
+      "id": "s08q4",
+      "level": "evaluate",
+      "track": "interview",
+      "type": "scenario",
+      "difficulty": 5,
+      "topic": "Comparing ZooKeeper (Zab) and etcd v3 (Raft) defaults",
+      "stem": {
+        "en": "The platform runs two distinct coordination workloads:\n1. Distributed shard locks, where reading stale lock state risks split brain.\n2. `20,000/s` microservice IP discovery, where high read throughput and partition survival outweigh strict recency.\n\nHow do default `ZooKeeper` (`Zab`) and default `etcd v3` (`Raft`) compare across these two workloads?",
+        "vi": "Nền tảng chạy hai tải điều phối khác hẳn nhau:\n1. Khoá phân tán cho shard, nơi đọc nhầm trạng thái cũ có nguy cơ gây split brain.\n2. Tra cứu IP microservice ở mức `20.000/giây`, nơi thông lượng đọc cao và sống sót qua chia cắt mạng quan trọng hơn tính mới nhất tuyệt đối.\n\nMặc định của `ZooKeeper` (`Zab`) và `etcd v3` (`Raft`) khác nhau ra sao khi phục vụ hai tải này?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Both ZooKeeper and etcd v3 make default reads linearizable, so both need observers enabled before handling locks.",
+            "vi": "Cả ZooKeeper và etcd v3 đều đọc khả tuyến tính mặc định, nên cả hai cần bật observer trước khi chạy khoá."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "ZooKeeper uses Raft and enforces linearizable reads by default; etcd v3 uses Zab and defaults to stale follower reads.",
+            "vi": "ZooKeeper dùng Raft và ép đọc khả tuyến tính mặc định; etcd v3 dùng Zab và mặc định đọc từ follower trễ."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "etcd v3 reads cannot opt out of Raft quorums, whereas ZooKeeper routes every discovery lookup through Zab voting.",
+            "vi": "Lệnh đọc etcd v3 không tắt được quorum Raft, trong khi ZooKeeper đẩy mọi tra cứu discovery qua bỏ phiếu Zab."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "etcd v3 defaults to linearizable reads (opt out with Serializable); ZooKeeper defaults to local reads and uses observers.",
+            "vi": "etcd v3 mặc định đọc khả tuyến tính (tắt bằng Serializable); ZooKeeper mặc định đọc cục bộ và mở rộng bằng observer."
+          }
+        }
+      ],
+      "answer": [
+        "d"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "`etcd v3` builds on `Raft` and runs linearizable quorum/`ReadIndex` checks by default (safe for reading current lock state), while offering the `Serializable` flag to opt into fast local reads for read-heavy discovery. `ZooKeeper` builds on `Zab` with linearizable writes, yet default reads hit local followers (sequentially consistent, potentially stale) and scale read-only traffic through non-voting `observers` that copy the log asynchronously without slowing write quorums.",
+          "vi": "`etcd v3` chạy trên `Raft` và kiểm tra quorum/`ReadIndex` khả tuyến tính theo mặc định (an toàn khi đọc trạng thái khoá hiện tại), đồng thời cung cấp cờ `Serializable` để chuyển sang đọc cục bộ nhanh cho tải discovery dày đặc. `ZooKeeper` chạy trên `Zab` với lệnh ghi khả tuyến tính, nhưng lệnh đọc mặc định đi tới follower cục bộ (có thể chậm hơn hiện tại) và mở rộng tải chỉ đọc bằng các `observer` không bỏ phiếu, nhận log bất đồng bộ mà không làm chậm quorum ghi."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "ZooKeeper default reads are not linearizable—they read from local followers—and observers scale reads asynchronously rather than making locks safe.",
+            "vi": "Lệnh đọc mặc định của ZooKeeper không khả tuyến tính—chúng đọc từ follower cục bộ—còn observer dùng để tăng tải đọc bất đồng bộ chứ không bảo vệ khoá."
+          },
+          "b": {
+            "en": "This swaps both the consensus protocols and the default read guarantees (`ZooKeeper = Zab` with local default reads; `etcd v3 = Raft` with linearizable default reads).",
+            "vi": "Phương án này tráo ngược cả giao thức đồng thuận lẫn mặc định đọc (`ZooKeeper = Zab` đọc cục bộ mặc định; `etcd v3 = Raft` đọc khả tuyến tính mặc định)."
+          },
+          "c": {
+            "en": "`etcd v3` explicitly supports `Serializable` reads to bypass quorum checks, and ZooKeeper serves discovery reads from local followers or observers without Zab write voting.",
+            "vi": "`etcd v3` hỗ trợ rõ cờ `Serializable` để bỏ qua kiểm tra quorum, còn ZooKeeper phục vụ tra cứu từ follower cục bộ hoặc observer mà không tốn vòng bỏ phiếu ghi Zab."
+          }
+        },
+        "reread": {
+          "anchor": "6-coordination-services-zookeeper-etcd-and-consul",
+          "label": {
+            "en": "6. Coordination services: ZooKeeper, etcd, and Consul",
+            "vi": "6. Dịch vụ điều phối: ZooKeeper, etcd và Consul"
+          }
+        },
+        "say": {
+          "en": "Remember the default split: `etcd v3` (`Raft`) gives linearizable reads by default with `Serializable` opt-out, while `ZooKeeper` (`Zab`) gives linearizable writes, local default reads, and non-voting observers.",
+          "vi": "Nhớ ranh giới mặc định: `etcd v3` (`Raft`) đọc khả tuyến tính mặc định và tắt bằng `Serializable`, còn `ZooKeeper` (`Zab`) ghi khả tuyến tính, đọc cục bộ mặc định và mở rộng đọc bằng observer."
+        }
+      },
+      "ref": "Post: 6. Coordination services: ZooKeeper, etcd, and Consul"
+    },
+    {
+      "id": "s08q5",
+      "level": "evaluate",
+      "track": "ai",
+      "type": "ai-advice",
+      "difficulty": 5,
+      "topic": "Evaluating TTL cuts, polling load, and Serializable lock reads",
+      "stem": {
+        "en": "After the `etcd 3.4.3` incident (`2 s` TTL, pauses every `5 s`), an AI assistant advises:\n\"Cut the lock TTL from `2 s` to `1 s` so locks recover faster, replace `etcd` watches with `50 ms` polling across all `200` workers, and use `Serializable` reads when checking who owns a lock.\"\n\nFormula given:\n- `polling_reads_per_sec = workers / poll_interval_sec`\n\nWhich assessment of this three-part advice is accurate?",
+        "vi": "Sau sự cố `etcd 3.4.3` (TTL `2 giây`, tiến trình tạm dừng mỗi `5 giây`), một trợ lý AI khuyên:\n\"Hãy giảm lease TTL của khoá từ `2 giây` xuống `1 giây` để thu hồi nhanh hơn, thay `watch` của `etcd` bằng polling mỗi `50 ms` trên cả `200` worker, và dùng lệnh đọc `Serializable` khi kiểm tra ai đang giữ khoá.\"\n\nCông thức cho sẵn:\n- `polling_reads_per_sec = workers / poll_interval_sec`\n\nĐánh giá nào đúng về ba lời khuyên này?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Safe overall: a 1s TTL bounds pause overlap, 400 reads/s fits etcd easily, and Serializable keeps reads linearizable.",
+            "vi": "Ổn về tổng thể: TTL 1 giây chặn chồng lấn, 400 lượt đọc/giây rất nhẹ cho etcd, và Serializable giữ đọc khả tuyến tính."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "All three fail: 1s TTLs still broke mutual exclusion, polling adds 4,000 reads/s, and Serializable reads stale locks.",
+            "vi": "Cả ba đều sai: TTL 1 giây vẫn hỏng loại trừ lẫn nhau, polling tạo 4.000 lượt đọc/giây, và Serializable đọc khoá cũ."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Mixed: keep the 1s TTL and Serializable lock reads, and drop polling only because 200 / 0.05 produces 40,000 reads/s.",
+            "vi": "Nửa đúng: giữ TTL 1 giây và đọc khoá Serializable, chỉ bỏ polling vì phép chia 200 / 0,05 tạo ra 40.000 lượt đọc/giây."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Mostly valid: watches use more Raft quorum rounds than 4,000 reads/s polling, though TTL should drop further to 0.5 s.",
+            "vi": "Gần đúng: watch tốn nhiều vòng quorum Raft hơn polling 4.000 lượt đọc/giây, dù TTL nên hạ tiếp xuống 0,5 giây."
+          }
+        }
+      ],
+      "answer": [
+        "b"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "All three parts break the system. First, Jepsen found `1`, `2`, and `3`-second TTLs all failed mutual exclusion within minutes—a shorter `1 s` TTL expires even sooner during a `5 s` pause and still requires fencing tokens at the storage layer. Second, `200 / 0.05 = 4,000 reads/s` of continuous polling hammers `etcd` compared to server-pushed `watch` streams. Third, `Serializable` skips Raft quorum checks and can return stale lock ownership.",
+          "vi": "Cả ba gợi ý đều làm hệ thống tệ hơn. Thứ nhất, Jepsen ghi nhận cả TTL `1`, `2` lẫn `3 giây` đều mất tính loại trừ lẫn nhau chỉ sau vài phút—hạ TTL xuống `1 giây` càng khiến khoá hết hạn sớm hơn trong cơn tạm dừng `5 giây` và vẫn phải dùng fencing token ở kho lưu trữ. Thứ hai, `200 / 0,05 = 4.000 lượt đọc/giây` từ polling liên tục dội tải vô ích lên `etcd` so với luồng đẩy `watch`. Thứ ba, `Serializable` bỏ qua kiểm tra quorum Raft nên có thể trả về chủ khoá đã lỗi thời."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "The arithmetic misses a zero (`200 / 0.05 = 4,000`, not `400`), `1 s` TTLs still lose mutual exclusion under pauses, and `Serializable` is explicitly non-linearizable.",
+            "vi": "Phép chia thiếu một số không (`200 / 0,05 = 4.000`, không phải `400`), TTL `1 giây` vẫn mất loại trừ lẫn nhau khi tạm dừng, và `Serializable` vốn không khả tuyến tính."
+          },
+          "c": {
+            "en": "`200 / 0.05` equals `4,000`, not `40,000`, and both the `1 s` TTL without fencing and `Serializable` lock reads actively break lock safety.",
+            "vi": "`200 / 0,05` bằng `4.000`, không phải `40.000`, đồng thời cả TTL `1 giây` thiếu fencing lẫn đọc khoá bằng `Serializable` đều phá hỏng an toàn khoá."
+          },
+          "d": {
+            "en": "`watch` pushes updates from `etcd` to subscribed clients without repeated polling rounds, while cutting TTL to `0.5 s` makes spurious lease expirations worse.",
+            "vi": "`watch` đẩy thay đổi từ `etcd` tới các client đăng ký mà không tốn các vòng polling lặp lại, còn hạ TTL xuống `0,5 giây` càng làm khoá hết hạn oan nhiều hơn."
+          }
+        },
+        "reread": {
+          "anchor": "6-coordination-services-zookeeper-etcd-and-consul",
+          "label": {
+            "en": "6. Coordination services: ZooKeeper, etcd, and Consul",
+            "vi": "6. Dịch vụ điều phối: ZooKeeper, etcd và Consul"
+          }
+        },
+        "say": {
+          "en": "Never fix pause-induced lock bugs with shorter TTLs, polling loops, or `Serializable` reads—keep `watch` notifications, use default linearizable lock reads, and enforce fencing tokens.",
+          "vi": "Đừng chữa lỗi khoá do tạm dừng tiến trình bằng TTL ngắn hơn, vòng lặp polling hay đọc `Serializable`—hãy giữ thông báo `watch`, đọc khoá khả tuyến tính mặc định và ép fencing token."
+        }
+      },
+      "ref": "Post: 6. Coordination services: ZooKeeper, etcd, and Consul; Case: when an etcd lock did not keep the second writer out",
+      "verifiedBy": "python3 -c \"workers=200; interval=0.05; print(int(workers/interval))\" -> 4000"
+    }
+  ]
+}
