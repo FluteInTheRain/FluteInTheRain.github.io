@@ -79,3 +79,9 @@ uv run --python 3.13 --with 'fastapi==0.165.0' --with 'uvicorn[standard]' \
 | `p10_cardinality.py` | `backend-observability` | Demonstrates unbounded label cardinality exploding Prometheus time series |
 | `p10_tracing.py`, `p10_spans.py` | `backend-observability` | OpenTelemetry FastAPI/HTTPX/SQLAlchemy tracing (`traceparent`) and span waterfall table printer |
 | `p10_app.py`, `p10_lab.py`, `p10_walk.py` | `backend-observability` | `clue-api` + `evidence-lab` instrumented services and morning traffic driver |
+| `p11_upstream.py`, `p11_naive.py` | `backend-performance-p99` | evidence-lab stand-in where every 40th call takes 0.8 s, and clue.api's report route calling it with httpx's default timeout |
+| `p11_measure.py` | `backend-performance-p99` | Driver: N requests with C in flight, then mean/p50/p95/p99/max per status class (sleeps for `Retry-After` after a 503) |
+| `p11_hotspot.py`, `p11_hotfix.py` | `backend-performance-p99` | A blocking `dedupe` inside `async def`, a `?profile=1` pyinstrument middleware, and the one-line `dict.fromkeys` fix |
+| `p11_timeout.py` | `backend-performance-p99` | The report route with `httpx.Timeout(0.25)` and a 504 on `httpx.TimeoutException` |
+| `p11_shed.py` | `backend-performance-p99` | Four worker slots (`asyncio.Semaphore`) behind an in-flight gate: 503 + `Retry-After` past `MAX_IN_FLIGHT` |
+| `p11_locustfile.py` | `backend-performance-p99` | A locust `HttpUser` ramping against the gated and ungated service |
