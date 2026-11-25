@@ -1,0 +1,423 @@
+{
+  "id": "set-08",
+  "title": {
+    "en": "Close case: cache and queue together",
+    "vi": "Đóng case: cache và queue cùng nhau"
+  },
+  "context": {
+    "text": {
+      "en": "Suppose the team adds a \"close case\" feature to `clue.api`, built from the two halves of the post.\n• `GET /cases/{case_id}` is cache-aside with a 30-second TTL and the key `case:<id>`.\n• Reports and close-out emails go through a Redis list queue with a dead-letter list.\n• Three workers run, and one report job takes 2 seconds of work.\n• At peak, 2 report jobs arrive per second.",
+      "vi": "Giả sử nhóm thêm tính năng \"đóng case\" vào `clue.api`, xây từ hai nửa của bài.\n• `GET /cases/{case_id}` là cache-aside với TTL 30 giây và key `case:<id>`.\n• Báo cáo và email đóng case đi qua một queue là list Redis, có list dead-letter.\n• Có ba worker chạy, và một job báo cáo tốn 2 giây làm việc.\n• Ở giờ cao điểm, mỗi giây có 2 job báo cáo tới."
+    }
+  },
+  "questions": [
+    {
+      "id": "s08q1",
+      "level": "apply",
+      "track": "ai",
+      "type": "ai-review",
+      "difficulty": 3,
+      "topic": "A job that changes a cached row",
+      "stem": {
+        "en": "An AI assistant wrote the worker job below to close a case. `GET /cases/{case_id}` is cached. What is the right review comment?",
+        "vi": "Một AI viết job worker dưới đây để đóng case. `GET /cases/{case_id}` được cache. Nhận xét review đúng là gì?"
+      },
+      "media": [
+        {
+          "kind": "code",
+          "lang": "python",
+          "code": "def close_case_job(db, job: dict) -> None:\n    db.execute(\n        \"UPDATE cases SET status = 'closed' \"\n        \"WHERE id = :case_id\",\n        job,\n    )"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Nothing is wrong: only HTTP routes need to invalidate the cache, not workers.",
+            "vi": "Không sao cả: chỉ các route HTTP cần invalidate cache, worker thì không."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Call `cache.delete(case_key(case_id))` after the update: any code that changes the row must.",
+            "vi": "Gọi `cache.delete(case_key(case_id))` sau lệnh update: mọi code đổi dòng dữ liệu đều phải làm vậy."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Set the TTL of `GET /cases` to 0, so that jobs never need to care about the cache.",
+            "vi": "Đặt TTL của `GET /cases` bằng 0, để các job không bao giờ phải quan tâm tới cache."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Run the update inside an `async def`, so that the cached copy refreshes itself.",
+            "vi": "Chạy lệnh update trong một `async def`, để bản sao đã cache tự làm mới."
+          }
+        }
+      ],
+      "answer": [
+        "b"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "The cached `case:<id>` still says the old status. Readers keep getting it until the 30-second TTL ends, because the job changed the row without telling Redis. The post's rule is that every endpoint or job that mutates the row must delete the same key; the job is one more write path.",
+          "vi": "`case:<id>` đã cache vẫn ghi trạng thái cũ. Người đọc tiếp tục nhận nó cho tới khi TTL 30 giây kết thúc, vì job đổi dòng dữ liệu mà không báo cho Redis. Quy tắc trong bài là mọi endpoint hay job làm đổi dòng dữ liệu đều phải xoá cùng key đó; job chỉ là thêm một đường ghi."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "A stale read does not care who wrote the row. Background jobs, scripts and migrations are all write paths.",
+            "vi": "Một lần đọc dữ liệu cũ không quan tâm ai đã ghi dòng dữ liệu. Background job, script và migration đều là các đường ghi."
+          },
+          "c": {
+            "en": "A TTL of 0 turns the cache off for that route. That removes the stale data and the cache together.",
+            "vi": "TTL bằng 0 tắt cache cho route đó. Cách này bỏ cả dữ liệu cũ lẫn cache."
+          },
+          "d": {
+            "en": "`async def` does not link a database write to a Redis key. Nothing refreshes the copy unless code deletes it.",
+            "vi": "`async def` không nối một lệnh ghi database với một key Redis. Không có gì làm mới bản sao trừ khi code xoá nó."
+          }
+        },
+        "reread": {
+          "anchor": "2-invalidation-why-every-write-must-know-about-the-cache",
+          "label": {
+            "en": "2. Invalidation: why every write must know about the cache",
+            "vi": "2. Invalidation: mọi chỗ ghi đều phải biết tới cache"
+          }
+        },
+        "say": {
+          "en": "Whenever I see an UPDATE, I ask which cached keys hold that row and where they get deleted.",
+          "vi": "Mỗi khi thấy một lệnh UPDATE, tôi hỏi những key cache nào giữ dòng đó và chúng bị xoá ở đâu."
+        }
+      },
+      "ref": "Post: 2. Invalidation: why every write must know about the cache"
+    },
+    {
+      "id": "s08q2",
+      "level": "apply",
+      "track": "interview",
+      "type": "scenario",
+      "difficulty": 4,
+      "topic": "Will the queue keep up",
+      "stem": {
+        "en": "Use:\n- `capacity = workers ÷ seconds per job`\n- `backlog after t seconds = (arrival rate − capacity) × t`\nDoes the queue keep up at peak? What is the backlog after 10 minutes, and how long does the last of those jobs wait?",
+        "vi": "Dùng:\n- `capacity = workers ÷ seconds per job`\n- `backlog after t seconds = (arrival rate − capacity) × t`\nQueue có theo kịp ở giờ cao điểm không? Backlog sau 10 phút là bao nhiêu, và job cuối cùng trong số đó phải chờ bao lâu?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Capacity is 6 jobs/s, so it keeps up and the backlog stays at 0 all the time.",
+            "vi": "Capacity là 6 job/s, nên nó theo kịp và backlog luôn giữ ở 0."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Capacity is 1.5 jobs/s; the backlog is about 30 jobs after 10 minutes of peak.",
+            "vi": "Capacity là 1,5 job/s; backlog khoảng 30 job sau 10 phút cao điểm."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Capacity is 1.5 jobs/s; about 300 queued after 10 minutes, the last waits 200 s.",
+            "vi": "Capacity là 1,5 job/s; khoảng 300 job xếp hàng sau 10 phút, job cuối chờ 200 s."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Capacity is 1.5 jobs/s; the backlog is about 900 jobs after 10 minutes of peak.",
+            "vi": "Capacity là 1,5 job/s; backlog khoảng 900 job sau 10 phút cao điểm."
+          }
+        }
+      ],
+      "answer": [
+        "c"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "Three workers at 2 s per job finish 3 ÷ 2 = 1.5 jobs per second, but 2 arrive. The backlog grows by 0.5 jobs/s, so after 600 s it is 0.5 × 600 = 300 jobs. Draining 300 jobs at 1.5 jobs/s takes 200 s. A queue hides overload for a while; it does not remove it, so the worker count has to match the arrival rate.",
+          "vi": "Ba worker với 2 s mỗi job xử lý được 3 ÷ 2 = 1,5 job mỗi giây, nhưng có 2 job tới. Backlog tăng 0,5 job/s, nên sau 600 s là 0,5 × 600 = 300 job. Xả 300 job với tốc độ 1,5 job/s mất 200 s. Queue che giấu quá tải một lúc; nó không loại bỏ quá tải, nên số worker phải khớp với tốc độ job tới."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "3 × 2 = 6 multiplies where the formula divides. A worker that takes 2 s per job finishes half a job per second.",
+            "vi": "3 × 2 = 6 là nhân trong khi công thức chia. Một worker mất 2 s mỗi job xử lý nửa job mỗi giây."
+          },
+          "b": {
+            "en": "0.5 × 600 is 300, not 30. The rate is per second and the time is in seconds, so there is no factor of ten to remove.",
+            "vi": "0,5 × 600 là 300, không phải 30. Tốc độ tính theo giây và thời gian cũng theo giây, nên không có hệ số mười nào để bỏ."
+          },
+          "d": {
+            "en": "900 jobs is what the workers finish in 600 s (1.5 × 600). The backlog is what is left: 2 × 600 arrive minus 900 done.",
+            "vi": "900 job là số worker xử lý xong trong 600 s (1,5 × 600). Backlog là phần còn lại: 2 × 600 job tới trừ 900 job đã xong."
+          }
+        },
+        "reread": {
+          "anchor": "4-background-queues-move-the-job-never-pop-it-into-thin-air",
+          "label": {
+            "en": "4. Background queues: move the job, never pop it into thin air",
+            "vi": "4. Hàng đợi chạy nền: chuyển chỗ job, đừng pop vào hư không"
+          }
+        },
+        "say": {
+          "en": "A queue absorbs a burst, not a permanent overload; I compare arrival rate with worker capacity.",
+          "vi": "Queue hấp thụ một đợt tăng đột biến, không hấp thụ quá tải kéo dài; tôi so tốc độ tới với capacity của worker."
+        }
+      },
+      "ref": "Post: 4. Background queues: move the job, never pop it into thin air",
+      "verifiedBy": "python3 v08.py  (set08 q2)\ncapacity 1.5 /s; backlog growth 0.5 /s; after 10 min 300.0 jobs; wait for the last job 200.0 s"
+    },
+    {
+      "id": "s08q3",
+      "level": "analyze",
+      "track": "ai",
+      "type": "multi",
+      "difficulty": 4,
+      "topic": "Two checklist items that fail",
+      "stem": {
+        "en": "An AI assistant wrote the route below. Which TWO of the post's review checks does it fail?",
+        "vi": "Một AI viết route dưới đây. Nó trượt hai phép kiểm review NÀO của bài?"
+      },
+      "media": [
+        {
+          "kind": "code",
+          "lang": "python",
+          "code": "@app.post(\"/cases/{case_id}/close\")\ndef close_case(\n    case_id: str,\n    background: BackgroundTasks,\n    cache: redis.Redis = Depends(get_redis),\n) -> dict:\n    close_in_db(case_id)\n    cache.delete(case_key(case_id))\n    cache.set(f\"summary:{case_id}\",\n              build_summary(case_id))\n    background.add_task(send_close_email, case_id)\n    return {\"closed\": case_id}"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "The `cache.set` for the summary has no `ex=` TTL.",
+            "vi": "`cache.set` cho summary không có `ex=` TTL."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "`close_in_db` runs before `cache.delete`, so the delete should come first.",
+            "vi": "`close_in_db` chạy trước `cache.delete`, nên phải xoá trước."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "The confirmation email goes through `BackgroundTasks`, so a restart can lose it.",
+            "vi": "Email xác nhận đi qua `BackgroundTasks`, nên một lần restart có thể làm mất nó."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "`Depends(get_redis)` should be replaced by a new `redis.Redis()` per request.",
+            "vi": "Nên thay `Depends(get_redis)` bằng một `redis.Redis()` mới ở mỗi request."
+          }
+        },
+        {
+          "id": "e",
+          "text": {
+            "en": "The route must be `async def` before it may call Redis safely.",
+            "vi": "Route phải là `async def` thì mới được gọi Redis một cách an toàn."
+          }
+        }
+      ],
+      "answer": [
+        "a",
+        "c"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "Check 1: every `cache.set` needs an explicit TTL, and the summary key has none, so it lives until something deletes it. Check 4: slow or must-not-lose work belongs in a persistent queue, and `BackgroundTasks` lives in process memory. The delete after the database write is correct, and the shared pool via `Depends` is the intended pattern.",
+          "vi": "Phép kiểm 1: mọi `cache.set` đều cần TTL tường minh, và key summary không có, nên nó sống cho tới khi có gì đó xoá nó. Phép kiểm 4: công việc chậm hoặc không được mất thuộc về một queue bền, còn `BackgroundTasks` nằm trong bộ nhớ process. Lệnh xoá sau khi ghi database là đúng, và pool dùng chung qua `Depends` là pattern đúng."
+        },
+        "whyWrong": {
+          "b": {
+            "en": "Writing the database first and deleting the key after is the post's order. A delete before the write lets a reader refill the old row.",
+            "vi": "Ghi database trước rồi xoá key sau là thứ tự trong bài. Xoá trước khi ghi cho phép một người đọc nạp lại dòng cũ."
+          },
+          "d": {
+            "en": "A new connection per request is what the shared pool avoids. It would add handshake latency to each call.",
+            "vi": "Một kết nối mới ở mỗi request là điều pool dùng chung tránh. Nó sẽ thêm độ trễ bắt tay vào mỗi lời gọi."
+          },
+          "e": {
+            "en": "This `def` route runs in a worker thread, and the sync Redis client works fine there. `async def` is not a requirement.",
+            "vi": "Route `def` này chạy trong worker thread, và Redis client đồng bộ chạy tốt ở đó. `async def` không phải yêu cầu."
+          }
+        },
+        "reread": {
+          "anchor": "4-background-queues-move-the-job-never-pop-it-into-thin-air",
+          "label": {
+            "en": "4. Background queues: move the job, never pop it into thin air",
+            "vi": "4. Hàng đợi chạy nền: chuyển chỗ job, đừng pop vào hư không"
+          }
+        },
+        "say": {
+          "en": "My cache-and-queue checklist: TTL on every set, delete on every write, durable queue for must-not-lose work.",
+          "vi": "Checklist cache và queue của tôi: TTL ở mọi lệnh set, xoá ở mọi lệnh ghi, queue bền cho công việc không được mất."
+        }
+      },
+      "ref": "Post: Reviewing caching and background jobs written by AI (the five checks)"
+    },
+    {
+      "id": "s08q4",
+      "level": "evaluate",
+      "track": "interview",
+      "type": "scenario",
+      "difficulty": 5,
+      "topic": "Matching workloads to tools",
+      "stem": {
+        "en": "Three workloads: (1) a product page read 5,000 times per second that changes a few times a day; (2) a PDF report that takes 2 seconds on request; (3) a payment email that must not be lost. Which pairing is best?",
+        "vi": "Ba khối lượng công việc: (1) một trang sản phẩm được đọc 5.000 lần mỗi giây, đổi vài lần mỗi ngày; (2) một báo cáo PDF mất 2 giây khi được yêu cầu; (3) một email thanh toán không được mất. Cặp ghép nào tốt nhất?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "(1) a queue, (2) a cache, (3) `BackgroundTasks` kept in the web process.",
+            "vi": "(1) một queue, (2) một cache, (3) `BackgroundTasks` giữ trong web process."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "(1) a cache with no TTL and no delete, (2) a second cache, (3) a queue.",
+            "vi": "(1) một cache không có TTL và không xoá, (2) một cache thứ hai, (3) một queue."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "(1) cache-aside, (2) `BackgroundTasks`, (3) caching the email text in Redis.",
+            "vi": "(1) cache-aside, (2) `BackgroundTasks`, (3) cache nội dung email trong Redis."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "(1) cache-aside, (2) a queue with 202, (3) a queue with an idempotent handler.",
+            "vi": "(1) cache-aside, (2) một queue với 202, (3) một queue với handler idempotent."
+          }
+        }
+      ],
+      "answer": [
+        "d"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "A cache fits reads that repeat and change rarely, as long as every write deletes the key. A queue with a 202 fits slow work the request must not wait for. A payment email must survive a crash and may be delivered twice, so it needs a durable queue and a handler that tolerates a repeat.",
+          "vi": "Cache hợp với các lần đọc lặp lại và ít đổi, miễn là mọi lệnh ghi đều xoá key. Queue với 202 hợp với công việc chậm mà request không được chờ. Email thanh toán phải sống sót qua một lần crash và có thể bị giao hai lần, nên cần queue bền và handler chịu được một lần lặp."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "A queue does not speed up 5,000 reads per second, and a report needs a worker, not a cache. `BackgroundTasks` would lose the payment email.",
+            "vi": "Queue không làm 5.000 lần đọc mỗi giây nhanh hơn, và một báo cáo cần worker chứ không cần cache. `BackgroundTasks` sẽ làm mất email thanh toán."
+          },
+          "b": {
+            "en": "A cache with no TTL and no delete serves stale pages forever, and a PDF report is slow work, not a repeated read.",
+            "vi": "Cache không TTL và không xoá phục vụ trang cũ mãi mãi, và báo cáo PDF là công việc chậm, không phải lần đọc lặp lại."
+          },
+          "c": {
+            "en": "`BackgroundTasks` loses the report on a restart, and an email is an action, not a value to cache.",
+            "vi": "`BackgroundTasks` làm mất báo cáo khi restart, và email là một hành động, không phải giá trị để cache."
+          }
+        },
+        "reread": {
+          "anchor": "the-hook-the-fast-path-that-melted-the-database",
+          "label": {
+            "en": "The hook: the fast path that melted the database",
+            "vi": "Cú mở đầu: lớp cache cứu tải lại tự tay đánh sập database"
+          }
+        },
+        "say": {
+          "en": "A cache keeps slow work off repeated reads; a queue keeps slow or must-not-lose work off the request.",
+          "vi": "Cache giữ công việc chậm khỏi các lần đọc lặp lại; queue giữ công việc chậm hoặc không được mất khỏi request."
+        }
+      },
+      "ref": "Post: The hook: the fast path that melted the database (caches and queues keep slow work off the hot path)"
+    },
+    {
+      "id": "s08q5",
+      "level": "evaluate",
+      "track": "ai",
+      "type": "ai-advice",
+      "difficulty": 5,
+      "topic": "Skipping invalidation",
+      "stem": {
+        "en": "An AI assistant says: \"Cache every GET for one day. Invalidation is hard, so skip it; the high hit ratio is worth it.\" How do you answer?",
+        "vi": "Một AI nói: \"Cache mọi GET trong một ngày. Invalidation khó, nên bỏ qua; hit ratio cao là xứng đáng.\" Bạn trả lời thế nào?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Agree: a one-day TTL gives the best hit ratio and invalidation is optional.",
+            "vi": "Đồng ý: TTL một ngày cho hit ratio tốt nhất và invalidation là tuỳ chọn."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Pick the TTL by how stale each page may be, and delete the key on every write path.",
+            "vi": "Chọn TTL theo mức độ cũ mà mỗi trang chịu được, và xoá key ở mọi đường ghi."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Disagree: use no TTL at all and rely on explicit deletes alone to keep data fresh.",
+            "vi": "Không đồng ý: không dùng TTL và chỉ dựa vào các lệnh xoá tường minh để giữ dữ liệu mới."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Disagree: cache for 1 second only, so that no reader is ever stale.",
+            "vi": "Không đồng ý: chỉ cache 1 giây, để không người đọc nào bị dữ liệu cũ."
+          }
+        }
+      ],
+      "answer": [
+        "b"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "A TTL is the safety net that bounds the damage of any write path that forgets to delete, and a delete on write keeps normal changes fresh. A day-long TTL with no deletes makes every change invisible for up to 24 hours. No TTL at all risks old keys that nobody reads filling memory. Choose the TTL from the staleness the product can tolerate.",
+          "vi": "TTL là lưới an toàn giới hạn tác hại của mọi đường ghi quên xoá, và việc xoá khi ghi giữ các thay đổi thông thường luôn mới. TTL một ngày không kèm lệnh xoá làm mọi thay đổi vô hình tới 24 giờ. Không có TTL thì các key cũ không ai đọc sẽ lấp đầy bộ nhớ. Hãy chọn TTL theo mức độ cũ mà sản phẩm chịu được."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "One day of staleness for every change is rarely acceptable, and any forgotten write path would hide data for a day.",
+            "vi": "Một ngày dữ liệu cũ cho mọi thay đổi hiếm khi chấp nhận được, và bất kỳ đường ghi bị quên nào cũng sẽ giấu dữ liệu cả ngày."
+          },
+          "c": {
+            "en": "Without a TTL, one missed delete leaves a stale value forever, and unused keys pile up in memory.",
+            "vi": "Không có TTL thì một lệnh xoá bị bỏ sót để lại giá trị cũ mãi mãi, và các key không dùng chất đống trong bộ nhớ."
+          },
+          "d": {
+            "en": "One second is so short that on most keys the cache barely helps, and writes can still leave a one-second stale read.",
+            "vi": "Một giây ngắn tới mức với đa số key thì cache gần như không giúp được, và các lệnh ghi vẫn có thể để lại một lần đọc cũ trong một giây."
+          }
+        },
+        "reread": {
+          "anchor": "2-invalidation-why-every-write-must-know-about-the-cache",
+          "label": {
+            "en": "2. Invalidation: why every write must know about the cache",
+            "vi": "2. Invalidation: mọi chỗ ghi đều phải biết tới cache"
+          }
+        },
+        "say": {
+          "en": "A TTL bounds the damage of a forgotten delete; a delete on write keeps normal changes fresh. I want both.",
+          "vi": "TTL giới hạn tác hại của một lệnh xoá bị quên; xoá khi ghi giữ các thay đổi thông thường luôn mới. Tôi muốn cả hai."
+        }
+      },
+      "ref": "Post: 2. Invalidation: why every write must know about the cache"
+    }
+  ]
+}

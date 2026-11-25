@@ -1,0 +1,416 @@
+{
+  "id": "set-06",
+  "title": {
+    "en": "Crash after the effect",
+    "vi": "Crash sau khi đã làm việc"
+  },
+  "context": {
+    "text": {
+      "en": "Suppose the report worker handles each job in this order: run the side effect, then call `ack`.\n• The side effect is either sending a confirmation email or charging a card 25.00.\n• `ack` is `LREM` on the processing list, and a job still on that list is requeued when a worker starts.\n• A `kill -9` or a deploy can land at any moment, including between the side effect and the `ack`.\n• Every job has a unique `job_id`.",
+      "vi": "Giả sử worker báo cáo xử lý mỗi job theo thứ tự: chạy side effect, rồi gọi `ack`.\n• Side effect là gửi một email xác nhận hoặc tính tiền thẻ 25,00.\n• `ack` là `LREM` trên list processing, và job còn nằm trên list đó sẽ được requeue khi một worker khởi động.\n• Một `kill -9` hoặc một lần deploy có thể xảy ra bất cứ lúc nào, kể cả giữa side effect và `ack`.\n• Mỗi job có một `job_id` duy nhất."
+    }
+  },
+  "questions": [
+    {
+      "id": "s06q1",
+      "level": "understand",
+      "track": "interview",
+      "type": "single",
+      "difficulty": 2,
+      "topic": "Why a second mail",
+      "stem": {
+        "en": "The worker sends the email, then is killed before `ack`. After the restart, the customer gets a second email. Why?",
+        "vi": "Worker gửi email, rồi bị giết trước `ack`. Sau khi restart, khách nhận email thứ hai. Vì sao?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Redis copies every job when a worker restarts, to be safe.",
+            "vi": "Redis chép mọi job khi một worker restart, để cho an toàn."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "The `ack` was sent twice, so the email provider sent two mails.",
+            "vi": "`ack` bị gửi hai lần, nên nhà cung cấp email gửi hai thư."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "The job was still on the processing list, so it was requeued and ran again.",
+            "vi": "Job vẫn nằm trên list processing, nên nó được requeue và chạy lại."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "The email provider retries by itself whenever a worker disappears.",
+            "vi": "Nhà cung cấp email tự retry mỗi khi một worker biến mất."
+          }
+        }
+      ],
+      "answer": [
+        "c"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "That is at-least-once delivery. The job leaves the processing list only at `ack`, and the kill came before it. On restart `requeue_orphans` puts the job back on the queue, and the handler runs the whole job again, side effect included.",
+          "vi": "Đó là giao ít nhất một lần (at-least-once). Job chỉ rời list processing ở `ack`, mà lần kill tới trước nó. Khi restart, `requeue_orphans` đưa job về queue, và handler chạy lại cả job, kể cả side effect."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "Redis does nothing on a restart. The job was not copied; the original never left the processing list.",
+            "vi": "Redis không làm gì khi restart. Job không bị chép; bản gốc chưa bao giờ rời list processing."
+          },
+          "b": {
+            "en": "There was no ack at all: the crash happened before it. The problem is a missing ack, not a doubled one.",
+            "vi": "Hoàn toàn không có ack: crash xảy ra trước đó. Vấn đề là ack bị thiếu, không phải bị gấp đôi."
+          },
+          "d": {
+            "en": "A provider knows nothing about the worker or the queue. A second send happens only because the code asked for it.",
+            "vi": "Nhà cung cấp không biết gì về worker hay queue. Lần gửi thứ hai chỉ xảy ra vì code đã yêu cầu."
+          }
+        },
+        "reread": {
+          "anchor": "6-at-least-once-delivery-means-your-handler-must-be-idempotent",
+          "label": {
+            "en": "6. At-least-once delivery means your handler must be idempotent",
+            "vi": "6. Giao ít nhất một lần (at-least-once) đòi hỏi handler phải idempotent"
+          }
+        },
+        "say": {
+          "en": "A crash between the effect and the ack means the job runs again, so every handler must tolerate a repeat.",
+          "vi": "Crash giữa side effect và ack nghĩa là job chạy lại, nên mọi handler phải chịu được việc lặp."
+        }
+      },
+      "ref": "Post: 6. At-least-once delivery means your handler must be idempotent"
+    },
+    {
+      "id": "s06q2",
+      "level": "apply",
+      "track": "ai",
+      "type": "ai-review",
+      "difficulty": 3,
+      "topic": "A handler that inserts blindly",
+      "stem": {
+        "en": "An AI assistant wrote the handler below. A redelivered job runs it again. What is the right review comment?",
+        "vi": "Một AI viết handler dưới đây. Một job bị giao lại sẽ chạy nó lần nữa. Nhận xét review đúng là gì?"
+      },
+      "media": [
+        {
+          "kind": "code",
+          "lang": "python",
+          "code": "def handler(db, job: dict) -> None:\n    db.execute(\n        \"INSERT INTO payments \"\n        \"(job_id, case_id, amount) \"\n        \"VALUES (:job_id, :case_id, 25.00)\",\n        job,\n    )"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Make `job_id` unique and use `ON CONFLICT (job_id) DO NOTHING`, in the same transaction.",
+            "vi": "Đặt `job_id` là duy nhất và dùng `ON CONFLICT (job_id) DO NOTHING`, trong cùng một transaction."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Wrap the insert in `try/except` and ignore every error that might come out of it.",
+            "vi": "Bọc lệnh insert trong `try/except` và bỏ qua mọi lỗi có thể phát sinh từ nó."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Call `ack` before the insert, so that the job can never be delivered a second time.",
+            "vi": "Gọi `ack` trước lệnh insert, để job không bao giờ bị giao lần thứ hai."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Add `sleep(1)` after the insert, so that the ack always lands before a crash can.",
+            "vi": "Thêm `sleep(1)` sau lệnh insert, để ack luôn tới trước khi một lần crash có thể xảy ra."
+          }
+        }
+      ],
+      "answer": [
+        "a"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "Each run inserts a new payment row, so a redelivery charges twice. With a unique `job_id`, the second insert does nothing: the effect and the dedupe are one atomic write. This is the Postgres version of the post's `hsetnx` on the job id.",
+          "vi": "Mỗi lần chạy chèn một dòng payment mới, nên một lần giao lại tính tiền hai lần. Với `job_id` duy nhất, lệnh insert thứ hai không làm gì: side effect và việc khử trùng là một lệnh ghi nguyên tử. Đây là phiên bản Postgres của `hsetnx` trên job id trong bài."
+        },
+        "whyWrong": {
+          "b": {
+            "en": "Swallowing errors hides failures but still lets the duplicate insert succeed, because nothing says the row exists.",
+            "vi": "Nuốt lỗi che giấu thất bại nhưng vẫn để lần insert trùng thành công, vì không có gì nói rằng dòng đó đã tồn tại."
+          },
+          "c": {
+            "en": "An early ack swaps a duplicate for a lost job: a crash after it leaves nothing to redeliver.",
+            "vi": "Ack sớm đổi một bản trùng lấy một job bị mất: crash sau nó không còn gì để giao lại."
+          },
+          "d": {
+            "en": "A sleep only narrows the gap. A kill can still land in it, and it slows every job.",
+            "vi": "Sleep chỉ thu hẹp khoảng hở. Một lần kill vẫn có thể rơi vào đó, và nó làm chậm mọi job."
+          }
+        },
+        "reread": {
+          "anchor": "6-at-least-once-delivery-means-your-handler-must-be-idempotent",
+          "label": {
+            "en": "6. At-least-once delivery means your handler must be idempotent",
+            "vi": "6. Giao ít nhất một lần (at-least-once) đòi hỏi handler phải idempotent"
+          }
+        },
+        "say": {
+          "en": "For any handler that writes, I look for the key that makes a second run do nothing.",
+          "vi": "Với mọi handler có ghi dữ liệu, tôi tìm cái khoá làm lần chạy thứ hai không làm gì cả."
+        }
+      },
+      "ref": "Post: 6. At-least-once delivery means your handler must be idempotent"
+    },
+    {
+      "id": "s06q3",
+      "level": "apply",
+      "track": "ai",
+      "type": "scenario",
+      "difficulty": 3,
+      "topic": "How much gets charged",
+      "stem": {
+        "en": "A job charges a card 25.00. The worker is killed after the charge and before `ack`, twice in a row, and the third delivery finishes and acks. How much is charged by a handler that always charges, and by one that keys the charge by `job_id`?",
+        "vi": "Một job tính tiền thẻ 25,00. Worker bị giết sau khi tính tiền và trước `ack`, hai lần liên tiếp, và lần giao thứ ba hoàn tất rồi ack. Handler luôn tính tiền sẽ tính bao nhiêu, và handler khoá việc tính tiền theo `job_id` sẽ tính bao nhiêu?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "25.00 for both, because the queue delivers each job exactly once.",
+            "vi": "25,00 cho cả hai, vì queue giao mỗi job đúng một lần."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "50.00 for the plain one, counting only the two restarts.",
+            "vi": "50,00 cho cái thường, chỉ tính hai lần restart."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "75.00 for both, because a key cannot undo a charge that already happened.",
+            "vi": "75,00 cho cả hai, vì một cái khoá không huỷ được khoản đã tính."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "75.00 for the plain one and 25.00 for the keyed one.",
+            "vi": "75,00 cho cái thường và 25,00 cho cái có khoá."
+          }
+        }
+      ],
+      "answer": [
+        "d"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "The job ran three times: two interrupted runs plus the final one, so the plain handler charges 3 × 25.00 = 75.00. The keyed handler finds the `job_id` already recorded on the second and third runs and skips the charge, so only 25.00 leaves the card.",
+          "vi": "Job chạy ba lần: hai lần bị ngắt cộng lần cuối, nên handler thường tính 3 × 25,00 = 75,00. Handler có khoá thấy `job_id` đã được ghi ở lần chạy thứ hai và thứ ba và bỏ qua việc tính tiền, nên chỉ có 25,00 rời khỏi thẻ."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "A reliable queue promises at least once, not exactly once. Each crash before the ack brings another delivery.",
+            "vi": "Queue đáng tin hứa ít nhất một lần, không phải đúng một lần. Mỗi lần crash trước ack kéo theo một lần giao nữa."
+          },
+          "b": {
+            "en": "The first run counts too: it charged before the first kill. Three runs mean three charges.",
+            "vi": "Lần chạy đầu cũng được tính: nó đã tính tiền trước lần kill đầu. Ba lần chạy là ba lần tính tiền."
+          },
+          "c": {
+            "en": "The key does not undo the first charge, but it stops the second and third. Only the first one lands.",
+            "vi": "Khoá không huỷ khoản đầu tiên, nhưng chặn khoản thứ hai và thứ ba. Chỉ khoản đầu tiên xảy ra."
+          }
+        },
+        "reread": {
+          "anchor": "6-at-least-once-delivery-means-your-handler-must-be-idempotent",
+          "label": {
+            "en": "6. At-least-once delivery means your handler must be idempotent",
+            "vi": "6. Giao ít nhất một lần (at-least-once) đòi hỏi handler phải idempotent"
+          }
+        },
+        "say": {
+          "en": "I run the crash twice in my head: a plain handler repeats its effect each time, a keyed one does not.",
+          "vi": "Tôi chạy tình huống crash hai lần trong đầu: handler thường lặp side effect mỗi lần, handler có khoá thì không."
+        }
+      },
+      "ref": "Post: 6. At-least-once delivery means your handler must be idempotent",
+      "verifiedBy": "python3 v08.py  (set06 q3; one job, three deliveries, 25.00 per run)\nnaive, 3 deliveries: 75.0 | idempotent, 3 deliveries: 25.0"
+    },
+    {
+      "id": "s06q4",
+      "level": "analyze",
+      "track": "interview",
+      "type": "multi",
+      "difficulty": 4,
+      "topic": "Making an email job safe",
+      "stem": {
+        "en": "The email job can be killed right after the mail is sent and before `ack`. Which TWO things together make a repeat harmless?",
+        "vi": "Job email có thể bị giết ngay sau khi mail được gửi và trước `ack`. Hai điều NÀO cùng nhau làm một lần lặp trở nên vô hại?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Send the mail, and only afterwards record the job id, as two separate steps.",
+            "vi": "Gửi mail, và chỉ sau đó mới ghi lại job id, thành hai bước riêng."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Pass the job id to the email provider as an idempotency key, if it supports one.",
+            "vi": "Truyền job id cho nhà cung cấp email làm idempotency key, nếu nó hỗ trợ."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Ack before sending, so the job can never be redelivered.",
+            "vi": "Ack trước khi gửi, để job không bao giờ bị giao lại."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Store a dedupe record keyed by job id in the same transaction as your state change.",
+            "vi": "Lưu một bản ghi khử trùng theo khoá job id trong cùng transaction với thay đổi trạng thái của bạn."
+          }
+        },
+        {
+          "id": "e",
+          "text": {
+            "en": "Give the job in `processing` a short TTL, so that it expires by itself.",
+            "vi": "Cho job trong `processing` một TTL ngắn, để nó tự hết hạn."
+          }
+        }
+      ],
+      "answer": [
+        "b",
+        "d"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "The provider can refuse a second send for the same key, and your own record, written atomically with your state, tells the worker that this job already ran. Together they cover both the external effect and the local state. The post warns that a check in Redis alone does not cover a mail API call.",
+          "vi": "Nhà cung cấp có thể từ chối lần gửi thứ hai với cùng khoá, và bản ghi của chính bạn, ghi nguyên tử cùng trạng thái của bạn, cho worker biết job này đã chạy. Cùng nhau chúng phủ cả side effect bên ngoài lẫn trạng thái cục bộ. Bài cảnh báo rằng một phép kiểm tra chỉ trong Redis không phủ được lời gọi mail API."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "A crash between the send and the record leaves a sent mail with no record, so the repeat sends again. The two must be atomic or keyed.",
+            "vi": "Một lần crash giữa lúc gửi và lúc ghi để lại thư đã gửi mà không có bản ghi, nên lần lặp gửi lại. Hai việc phải nguyên tử hoặc có khoá."
+          },
+          "c": {
+            "en": "Acking first removes redelivery but loses the job if the worker dies before sending. That trades a duplicate for a loss.",
+            "vi": "Ack trước loại bỏ việc giao lại nhưng làm mất job nếu worker chết trước khi gửi. Đó là đổi bản trùng lấy việc mất."
+          },
+          "e": {
+            "en": "Redis list entries have no TTL. And an expiring job would be dropped, which is again a lost job rather than a safe repeat.",
+            "vi": "Phần tử của list Redis không có TTL. Và một job tự hết hạn sẽ bị bỏ, lại là một job bị mất chứ không phải một lần lặp an toàn."
+          }
+        },
+        "reread": {
+          "anchor": "6-at-least-once-delivery-means-your-handler-must-be-idempotent",
+          "label": {
+            "en": "6. At-least-once delivery means your handler must be idempotent",
+            "vi": "6. Giao ít nhất một lần (at-least-once) đòi hỏi handler phải idempotent"
+          }
+        },
+        "say": {
+          "en": "Idempotency covers the outside world too: the same job id goes to the provider and to my own transaction.",
+          "vi": "Idempotency phủ cả thế giới bên ngoài: cùng một job id đi tới nhà cung cấp và tới transaction của chính tôi."
+        }
+      },
+      "ref": "Post: 6. At-least-once delivery means your handler must be idempotent"
+    },
+    {
+      "id": "s06q5",
+      "level": "evaluate",
+      "track": "ai",
+      "type": "ai-advice",
+      "difficulty": 5,
+      "topic": "Exactly once, said the AI",
+      "stem": {
+        "en": "An AI assistant says: \"`BLMOVE` plus `ack` gives exactly-once delivery, so the handlers need no idempotency.\" How do you answer?",
+        "vi": "Một AI nói: \"`BLMOVE` cộng `ack` cho giao đúng một lần, nên các handler không cần idempotency.\" Bạn trả lời thế nào?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "It is at-least-once; keep every handler idempotent, keyed by the job id.",
+            "vi": "Đó là at-least-once; giữ mọi handler idempotent, khoá theo job id."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Agree: the atomic move guarantees that a job is never handed out twice.",
+            "vi": "Đồng ý: việc chuyển nguyên tử bảo đảm một job không bao giờ bị giao hai lần."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Agree for the queue, but add a second `ack` call to be extra safe.",
+            "vi": "Đồng ý với queue, nhưng thêm một lời gọi `ack` thứ hai cho chắc chắn hơn."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Switch to `BRPOP`, which delivers at most once, so duplicates disappear.",
+            "vi": "Chuyển sang `BRPOP`, giao nhiều nhất một lần, nên bản trùng biến mất."
+          }
+        }
+      ],
+      "answer": [
+        "a"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "The queue protects the job from being lost, not from being repeated: a crash between the effect and the `ack` redelivers it. So reliability here means at-least-once, and the handler must make a repeat harmless. `BRPOP` would remove duplicates only by sometimes losing the job.",
+          "vi": "Queue bảo vệ job khỏi bị mất, không phải khỏi bị lặp: một lần crash giữa side effect và `ack` làm job bị giao lại. Nên độ tin cậy ở đây nghĩa là at-least-once, và handler phải làm một lần lặp trở nên vô hại. `BRPOP` chỉ loại bản trùng bằng cách đôi khi làm mất job."
+        },
+        "whyWrong": {
+          "b": {
+            "en": "An atomic move is only about the hand-off. A crash after the work and before the ack still produces a second delivery.",
+            "vi": "Chuyển nguyên tử chỉ là về việc bàn giao. Crash sau khi làm việc và trước ack vẫn tạo ra lần giao thứ hai."
+          },
+          "c": {
+            "en": "A second ack removes nothing more. The window is before the first one, so it cannot help.",
+            "vi": "Ack thứ hai không xoá thêm gì. Khoảng hở nằm trước cái đầu, nên nó không giúp được."
+          },
+          "d": {
+            "en": "Fewer duplicates come at the price of silent loss, as in the post's `forget` case. That is usually worse.",
+            "vi": "Ít bản trùng hơn phải trả bằng việc mất thầm lặng, như ca `forget` trong bài. Thường điều đó tệ hơn."
+          }
+        },
+        "reread": {
+          "anchor": "6-at-least-once-delivery-means-your-handler-must-be-idempotent",
+          "label": {
+            "en": "6. At-least-once delivery means your handler must be idempotent",
+            "vi": "6. Giao ít nhất một lần (at-least-once) đòi hỏi handler phải idempotent"
+          }
+        },
+        "say": {
+          "en": "Reliable queue plus idempotent handler: delivery is at least once, and the effect happens once.",
+          "vi": "Reliable queue cộng handler idempotent: giao ít nhất một lần, và side effect xảy ra một lần."
+        }
+      },
+      "ref": "Post: 6. At-least-once delivery means your handler must be idempotent"
+    }
+  ]
+}
