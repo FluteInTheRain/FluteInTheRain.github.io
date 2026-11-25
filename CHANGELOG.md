@@ -11,6 +11,15 @@ Không cần đọc lại toàn bộ chat history — file này là nguồn sự
 - **Lead review:** bắt hook bài 11 ban đầu trùng bài 6 (Cloudflare 2019) → agent đổi sang SoundCloud. Xem dark VI `BeP12Rollout`, `BeP12Errors` (tổng cột = 67, khớp capture). Build 91 trang, `node --test` 71 pass, code trong bài khớp byte với `demo/` (agent chạy).
 - **Chưa chốt:** Knight Capital cũng là hook của bài DDIA `encoding-and-schema-evolution` (góc khác: cờ bị dùng lại) — chờ user quyết giữ hay đổi; chưa chạy humanizer cho VI; số chương sách Lubanovic chưa kiểm; `preStop` không tái hiện được race trên kind 1 node (bài nói thẳng). 2 bài giữ `draft: true`.
 
+## 2026-11-25 — Series backend: vẽ bù hình cho bài 1–10 (+49 sơ đồ)
+
+- **Vấn đề (user phát hiện):** bài backend ít hình. Đo phần EN: khoảng 6 sơ đồ/bài (plan ghi trần "4–6") so với khoảng 15 ở DDIA; 8/10 bài không có hình ở phần hook; khối code/terminal nhiều nhưng không giải thích khái niệm.
+- **Ai quyết:** user chọn "nâng mức + vẽ bù 1–10". Plan backend đổi rule hình thành khoảng 1 sơ đồ mỗi 200–250 chữ (10–12/bài), không đoạn nào quá 4 đoạn văn không hình, hook phải có hình.
+- **Đã làm (nhánh `feat/backend-more-figures`, 10 agent Sonnet, mỗi bài 1 agent):** chỉ thêm hình, không sửa văn, không thêm số liệu ngoài bài. Bài 1: 6→9, bài 2: 6→14, bài 3: 6→11, bài 4: 5→8, bài 5: 6→11, bài 6: 6→11, bài 7: 6→9, bài 8: 6→10, bài 9: 6→13, bài 10: 6→12. Hook nào cũng có hình (dòng thời gian sự cố thật).
+- **Sửa công cụ:** `scripts/figures/figshot.sh` nhận `FIGSHOT_TAG` (trang tạm riêng) vì nhiều agent chung worktree chụp nhầm hình của nhau.
+- **Lead review:** đọc ảnh dark VI của hình mới bài 2 (một phần), 3, 4, 5, 9; sửa `BeP02CaseLifecycle` (201 Created không tô đỏ) và `BeP09E2ESteps` (nhãn bước 5 tràn ô). Build 91 trang, `node --test` 71 pass, `post-check.sh` sạch cả 10 bài (agent chạy).
+- **Chưa chốt:** hình mới bài 1, 6, 7, 8, 10 chỉ do agent tự xem (dark VI có bài chưa xem hết); chưa kiểm 360px.
+
 ## 2026-11-25 — Quiz: câu tính toán không bắt buộc
 
 - Khang quyết: không phải tình huống nào cũng cần câu tính số liệu. Chỉ thêm khi tình huống thật sự xoay quanh một con số; bộ về phán đoán, thiết kế, đạo đức có thể không có câu tính nào.

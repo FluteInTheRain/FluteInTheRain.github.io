@@ -33,6 +33,10 @@ import BeP08Stampede from '../../components/mdx/BeP08Stampede.astro';
 import BeP08QueueLists from '../../components/mdx/BeP08QueueLists.astro';
 import BeP08Backoff from '../../components/mdx/BeP08Backoff.astro';
 import BeP08Redelivery from '../../components/mdx/BeP08Redelivery.astro';
+import BeP08HookLease from '../../components/mdx/BeP08HookLease.astro';
+import BeP08SingleFlight from '../../components/mdx/BeP08SingleFlight.astro';
+import BeP08Accept from '../../components/mdx/BeP08Accept.astro';
+import BeP08JobStates from '../../components/mdx/BeP08JobStates.astro';
 import heroAirmail from '../../assets/blog/backend-caching-queues/airmail-sorting-1920.jpg';
 
 <En>
@@ -42,6 +46,8 @@ import heroAirmail from '../../assets/blog/backend-caching-queues/airmail-sortin
 ### The hook: the fast path that melted the database
 
 When Facebook scaled Memcached across trillions of items, their NSDI 2013 paper documented a pattern every team eventually hits when a cache sits in front of a database. A hot key gets deleted on a write or expires. Before the first miss finishes querying the database and writing the new value back, hundreds of other requests ask for the same key, miss the cache, and pile onto the database together. That wave is a **thundering herd** (or **cache stampede**). With a simple lease mechanism — handing out at most one rebuild token per key every 10 seconds so other clients wait briefly and retry the cache — Facebook dropped peak database queries on stampede-prone keys from **17,000 queries per second down to 1,300 queries per second**.
+
+<BeP08HookLease />
 
 Caching and background queues exist for the same reason: **keep the slow work off the hot request path**. A cache avoids repeating an expensive read; a queue moves an expensive write or side effect out of the HTTP response cycle. Both also share the same trap when AI writes them. An AI-generated FastAPI service will happily add `redis.get` / `redis.set` on your `GET` route without touching your `POST` route — leaving stale data behind — and will tell you to put slow PDF or email work into `BackgroundTasks`, which [post 6](/blog/backend-async-concurrency-workers/) already watched vanish on `kill -9`.
 
@@ -207,6 +213,8 @@ Notice three defensive details inside that loop:
 - **`finally: cache.delete(lock)`:** if `read_case_from_db` raises a 404 or a database error, the lock must be released immediately rather than making everyone wait 5 seconds.
 - **Bounded wait (`100 × 0.02 s ≈ 2 s`) → `503`:** waiting forever creates the exact hanging request pile-up we saw with pools in [post 5](/blog/backend-database-access-layer/).
 
+<BeP08SingleFlight />
+
 Let's fire 20 concurrent `GET` requests right as `case:C-1` expires using `demo/p08_drive.py`:
 
 <TerminalOutput command="python p08_drive.py stampede && python p08_drive.py stampede /guarded" label="Python 3.13.16 · FastAPI 0.165.0 · redis 8.2.0 · ThreadPoolExecutor(20) · captured Nov 2026" caption="Both endpoints answer 20 concurrent requests in ~0.08–0.09 s wall time. Without the lock, the database is hit 20 times; with single-flight, it is hit once.">
@@ -248,6 +256,8 @@ def job_stats(r: redis.Redis = Depends(get_redis)) -> dict:
         "dead": r.llen(jobs.DEAD),
     }
 ```
+
+<BeP08Accept />
 
 Now look at how the **worker** (a completely separate OS process) pulls jobs from Redis. A naive implementation calls `BRPOP jobs:reports`: Redis pops the JSON string off the list and hands it to the worker. **At that instant, the job exists nowhere in Redis** — it sits only in that worker's memory. If the worker hits an OOM kill, a deploy `SIGTERM`, or `kill -9` one second later, the job vanishes silently.
 
@@ -319,6 +329,8 @@ def fail(r: redis.Redis, raw: str, error: str) -> str:
 ```
 
 Notice `r.pipeline(transaction=True)`: wrapping the push (`ZADD` or `LPUSH`) and the `LREM` from `PROCESSING` in Redis `MULTI`/`EXEC` guarantees a job is never stuck in both lists or lost between them. Each loop tick, `promote_due(r)` checks `ZRANGEBYSCORE delayed 0 now` and promotes due retries back onto `QUEUE` (`if r.zrem(DELAYED, raw):` ensures only one worker wins the promotion). In production with many failed jobs waking together, add **random jitter** to `delay` so retries don't synchronize into a second thundering herd.
+
+<BeP08JobStates />
 
 Here is the real worker log running `C-FLAKY` (recovers on attempt 3) followed by `C-BAD` (fails 4 times and lands in `jobs:reports:dead`):
 
@@ -450,6 +462,8 @@ Five quick checks in any code review:
 ### Cú mở đầu: lớp cache cứu tải lại tự tay đánh sập database
 
 Khi Facebook mở rộng Memcached lên hàng nghìn tỷ item, bài báo NSDI 2013 của họ mô tả một kịch bản mà đội nào đặt cache trước database rồi cũng gặp. Một key cực nóng vừa hết hạn hoặc bị xoá sau khi ghi. Trước khi request miss đầu tiên kịp query database và ghi giá trị mới vào cache, hàng trăm request khác hỏi đúng key đó, cùng miss cache và đồng loạt dội thẳng xuống database. Cơn sóng đó gọi là **thundering herd** (hay **cache stampede** — bầy đàn giẫm đạp lên cache). Bằng cơ chế **lease** — chỉ cấp tối đa một token dựng lại cho mỗi key trong cửa sổ 10 giây để các client khác chờ một nhịp rồi đọc lại cache — Facebook kéo lượng query cao điểm trên các key dễ nổ stampede từ **17.000 query/giây xuống còn 1.300 query/giây**.
+
+<BeP08HookLease />
 
 Cache và hàng đợi chạy nền sinh ra vì cùng một mục đích: **gạt phần việc chậm ra khỏi luồng request chính**. Cache giúp tránh lặp lại một lần đọc tốn kém; queue đẩy việc ghi chậm hoặc side effect ra ngoài chu kỳ trả HTTP response. Hai thứ này cũng mắc đúng một bệnh khi AI viết hộ: AI rất hay nhét `redis.get` / `redis.set` vào route `GET` mà quên đụng vào route `POST` (để lại dữ liệu cũ trong cache), rồi đẩy việc gửi mail hay xuất PDF vào `BackgroundTasks` — thứ mà [bài 6](/blog/backend-async-concurrency-workers/) đã thấy bốc hơi sạch khi dính `kill -9`.
 
@@ -615,6 +629,8 @@ Ba chi tiết nhỏ giữ cho vòng lặp này không hở sườn:
 - **`finally: cache.delete(lock)`:** nếu `read_case_from_db` ném lỗi 404 hay lỗi kết nối, phải trả khoá ngay thay vì bắt mọi người chờ đủ 5 giây.
 - **Chờ có giới hạn (`100 × 0,02 s ≈ 2 s`) → `503`:** chờ vô thời hạn sẽ tạo ra đúng cảnh kẹt dây chuyền như pool hết chỗ ở [bài 5](/blog/backend-database-access-layer/).
 
+<BeP08SingleFlight />
+
 Bắn thử 20 request `GET` song song ngay khoảnh khắc `case:C-1` hết hạn bằng `demo/p08_drive.py`:
 
 <TerminalOutput command="python p08_drive.py stampede && python p08_drive.py stampede /guarded" label="Python 3.13.16 · FastAPI 0.165.0 · redis 8.2.0 · ThreadPoolExecutor(20) · capture tháng 11/2026" caption="Cả hai endpoint trả lời xong 20 request trong ~0,08–0,09 s. Không có khoá, database ăn đủ 20 lần đọc; có single-flight, database chỉ đọc đúng 1 lần.">
@@ -656,6 +672,8 @@ def job_stats(r: redis.Redis = Depends(get_redis)) -> dict:
         "dead": r.llen(jobs.DEAD),
     }
 ```
+
+<BeP08Accept />
 
 Giờ nhìn sang **worker** — một process hệ điều hành chạy riêng. Nếu viết ngây thơ bằng `BRPOP jobs:reports`, Redis rút chuỗi JSON ra khỏi list và giao cho worker. **Ngay khoảnh khắc đó, job không còn nằm ở đâu trong Redis nữa** — nó chỉ tồn tại trong biến RAM của worker. Nếu worker hết RAM (OOM kill), bị khởi động lại lúc deploy, hay ăn `kill -9` một giây sau, job biến mất không dấu vết.
 
@@ -727,6 +745,8 @@ def fail(r: redis.Redis, raw: str, error: str) -> str:
 ```
 
 Để ý `r.pipeline(transaction=True)`: gói lệnh ghi sang `DELAYED`/`DEAD` cùng lệnh `LREM` khỏi `PROCESSING` vào một khối `MULTI`/`EXEC` đảm bảo job không bao giờ bị nằm trùng ở cả hai list hoặc lọt mất ở giữa chừng. Mỗi vòng lặp của worker, `promote_due(r)` đọc `ZRANGEBYSCORE delayed 0 now` rồi đẩy các job tới giờ về lại `QUEUE` (dùng `if r.zrem(DELAYED, raw):` để nếu có nhiều worker thì chỉ một worker thắng quyền promote). Ngoài production, khi hàng loạt job cùng lỗi một lúc, nhớ cộng thêm **jitter ngẫu nhiên** vào `delay` để chúng không đồng loạt thức dậy tạo thành một cơn stampede thứ hai.
+
+<BeP08JobStates />
 
 Log chạy thật trên máy cho `C-FLAKY` (thành công ở lần 3) nối tiếp bởi `C-BAD` (lỗi đủ 4 lần rồi vào `jobs:reports:dead`):
 
