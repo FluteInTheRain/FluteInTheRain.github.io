@@ -11,6 +11,19 @@
 import type { QuizDomain } from './types';
 
 export const QUIZ_DOMAIN: Record<string, QuizDomain> = {
+  // Backend series (Python FastAPI): the reader writes and reviews service code
+  'backend-http-request-lifecycle': 'code',
+  'backend-rest-api-design': 'code',
+  'backend-validation-schemas': 'code',
+  'backend-layered-architecture': 'code',
+  'backend-database-access-layer': 'code',
+  'backend-async-concurrency-workers': 'code',
+  'backend-auth-oauth2-jwt': 'code',
+  'backend-caching-queues': 'code',
+  'backend-testing-strategy': 'code',
+  'backend-observability': 'code',
+  'backend-performance-p99': 'code',
+  'backend-production-deploy': 'code',
   // DDIA series
   'stream-processing-event-logs-cdc-windows-joins': 'code',
   'philosophy-of-streaming-systems-unbundling-end-to-end-correctness': 'code',
