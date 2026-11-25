@@ -20,7 +20,7 @@
 
 ## Steps per wave
 
-- [ ] Brief agents (1 per post, read-only on code) write `specs/2026-11-24-ddia-quiz-authoring-brief-<post>.md`: 8 scenarios with a real incident or concrete case, figure names, slot table, allowed `reread.anchor` list. Lead reads them for overlap and invented facts.
+- [ ] Brief agents (1 per post, read-only on code) write `specs/2026-11-24-ddia-quiz-authoring-brief-<post>.md`: 8 scenarios with a real incident or concrete case, figure names, slot table, allowed `reread.anchor` list. Calculations are optional per set: the "Calculations" column may say "none" (Khang, 2026-11-25). Lead reads them for overlap and invented facts.
 - [ ] Author agents (1 per set, parallel) write set + figure, run validator + screenshots, report.
 - [ ] Lead: full `node --test`, `npm run build`, read screenshots (light EN, dark VI), fact-check risky claims, fix.
 - [ ] One commit per post (`content: review quiz for the <post> post (8 cases, 40 questions)`), CHANGELOG entry, push, PR, wait for merge.

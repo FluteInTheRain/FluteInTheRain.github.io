@@ -3,6 +3,11 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-25 — Quiz: câu tính toán không bắt buộc
+
+- Khang quyết: không phải tình huống nào cũng cần câu tính số liệu. Chỉ thêm khi tình huống thật sự xoay quanh một con số; bộ về phán đoán, thiết kế, đạo đức có thể không có câu tính nào.
+- Đã sửa: `specs/2026-11-20-ddia-quiz-design.md`, rule 10 của `specs/2026-11-20-ddia-quiz-authoring-brief.md` (bỏ luôn nhãn "illustrative" cũ), bước brief trong plan các bài còn lại.
+
 ## 2026-11-25 — Quiz DDIA đợt 3: stream, unbundling, ethics (3 bài × 8 bộ × 5 câu) — xong cả series DDIA
 
 - **Đã làm (nhánh `feat/ddia-quiz-wave-3`, cắt từ `main`):** 3 agent Sonnet soạn brief `docs/superpowers/specs/2026-11-25-ddia-quiz-authoring-brief-{stream,unbundling,ethics}.md`; 24 agent Sonnet (mỗi agent 1 bộ + 1 figure), chạy tối đa ~10 cùng lúc. 120 câu, 24 figure mới. Khai báo 3 bài `code` trong `domains.ts` (đặt ngay dưới dòng `// DDIA series` để không đụng dòng của đợt 2 khi merge).

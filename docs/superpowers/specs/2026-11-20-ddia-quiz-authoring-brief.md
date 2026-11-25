@@ -39,9 +39,10 @@ your task lists the slot of each question.
    options, so letters would point at the wrong text. Quote the idea instead.
 9. Ask directly. No "an interviewer asks" or "a recruiter says" in any stem. The `interview` track is about the
    topic, not a staged conversation.
-10. Calculation questions state EVERY formula the reader needs inside the stem. They test applying the
-    formulas, not remembering them. Invented figures are labelled illustrative (`context.illustrative: true`)
-    and must be internally consistent.
+10. Calculation questions are optional: a set needs none unless its scenario really turns on a number. When
+    you do write one, state EVERY formula the reader needs inside the stem; it tests applying the formulas, not
+    remembering them. Invented figures are introduced in the sentence ("Suppose ...", "Giả sử ...") and must be
+    internally consistent; no "illustrative" label.
 11. Every computed answer is verified by running code (Python is fine). Put the command and its output in
     `verifiedBy`. A `code-output` question needs `verifiedBy`.
 12. A question must be answerable from its scenario alone (plus general knowledge it teaches in the
