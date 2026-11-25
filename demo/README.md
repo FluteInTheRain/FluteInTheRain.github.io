@@ -79,3 +79,11 @@ uv run --python 3.13 --with 'fastapi==0.165.0' --with 'uvicorn[standard]' \
 | `p10_cardinality.py` | `backend-observability` | Demonstrates unbounded label cardinality exploding Prometheus time series |
 | `p10_tracing.py`, `p10_spans.py` | `backend-observability` | OpenTelemetry FastAPI/HTTPX/SQLAlchemy tracing (`traceparent`) and span waterfall table printer |
 | `p10_app.py`, `p10_lab.py`, `p10_walk.py` | `backend-observability` | `clue-api` + `evidence-lab` instrumented services and morning traffic driver |
+| `p12_settings.py` | `backend-production-deploy` | `pydantic-settings` `Settings` read from `CLUE_*` env vars; required `database_url`, validated numbers |
+| `p12_app.py` | `backend-production-deploy` | Deploy-ready FastAPI app: lifespan warm-up and shutdown log, `/livez`, `/readyz`, `/work`, `/slow`, and `/debug/*` switches for probe demos |
+| `p12/Dockerfile`, `p12/Dockerfile.fat` | `backend-production-deploy` | Multi-stage, non-root, uv image (258 MB) vs the single-stage root image an assistant tends to write (1.7 GB) |
+| `p12/pyproject.toml`, `p12/uv.lock` | `backend-production-deploy` | Pinned dependency set the image installs with `uv sync --frozen` |
+| `p12/k8s/*.yaml` | `backend-production-deploy` | ConfigMap + Secret, NodePort Service, and three Deployments: naive, readiness only, full (startup/readiness/liveness, `preStop`, grace period) |
+| `p12_load.py`, `p12_rollout.py` | `backend-production-deploy` | Request loop counting failures during a rolling update on a local kind cluster (refuses any context but `kind-p12`) |
+| `p12_drain.py` | `backend-production-deploy` | One in-flight request across `docker stop`, `docker kill`, and a shell-wrapped entrypoint (PID 1 trap) |
+| `p12_check_blocks.py` | `backend-production-deploy` | Checks every code block in the post is a verbatim slice of a demo file |
