@@ -1,0 +1,1220 @@
+---
+title: "Deploying without dropping requests"
+title_vi: "Deploy mà không rớt request nào"
+description: "Knight Capital lost $460 million when one of eight servers kept old code. Env config, a small image, graceful shutdown and probes keep a FastAPI rollout from dropping requests."
+description_vi: "Knight Capital mất 460 triệu USD vì một trong tám server còn code cũ. Config từ môi trường, image nhỏ, thoát êm và probe giữ cho rollout FastAPI không rớt request nào."
+date: 2026-11-25
+category: "backend"
+tags: ["backend", "python", "fastapi", "docker", "kubernetes", "deployment"]
+cover: "../../assets/blog/backend-production-deploy/rollout-watch-cover.png"
+cover_alt: "Terminal on a local kind cluster: kubectl get pods -w during a rolling update, three new pods going from 0/1 to 1/1 one at a time, and below it the load loop's result, 523 requests sent, 523 ok, 0 failed"
+draft: true
+sources:
+  - { title: "FastAPI: Modern Python Web Development", author: "Bill Lubanovic", chapters: "Ch. 13", url: "https://www.oreilly.com/library/view/fastapi/9781098135091/" }
+  - { title: "Order Instituting Administrative and Cease-and-Desist Proceedings: Knight Capital Americas LLC, Release No. 34-70694", author: "U.S. Securities and Exchange Commission", url: "https://www.sec.gov/files/litigation/admin/2013/34-70694.pdf" }
+  - { title: "SEC Charges Knight Capital With Violations of Market Access Rule", author: "U.S. Securities and Exchange Commission", url: "https://www.sec.gov/newsroom/press-releases/2013-222" }
+  - { title: "III. Config (The Twelve-Factor App)", author: "Adam Wiggins", url: "https://12factor.net/config" }
+  - { title: "IX. Disposability (The Twelve-Factor App)", author: "Adam Wiggins", url: "https://12factor.net/disposability" }
+  - { title: "Settings Management (pydantic-settings)", author: "Pydantic docs", url: "https://pydantic.dev/docs/validation/latest/concepts/pydantic_settings/" }
+  - { title: "FastAPI in Containers: Docker", author: "FastAPI docs", url: "https://fastapi.tiangolo.com/deployment/docker/" }
+  - { title: "Using uv in Docker", author: "uv docs", url: "https://docs.astral.sh/uv/guides/integration/docker/" }
+  - { title: "Deployment (workers and process managers)", author: "Uvicorn docs", url: "https://uvicorn.dev/deployment/" }
+  - { title: "Pod Lifecycle (container probes)", author: "Kubernetes docs", url: "https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle/" }
+  - { title: "Termination of Pods", author: "Kubernetes docs", url: "https://kubernetes.io/docs/concepts/workloads/pods/pod-termination/" }
+  - { title: "Configure Liveness, Readiness and Startup Probes", author: "Kubernetes docs", url: "https://kubernetes.io/docs/tasks/configure-pod-container/configure-liveness-readiness-startup-probes/" }
+  - { title: "Explore Termination Behavior for Pods and Their Endpoints", author: "Kubernetes docs", url: "https://kubernetes.io/docs/tutorials/services/pods-and-endpoint-termination-flow/" }
+  - { title: "KC-135 Stratotanker refuels F-16 Fighting Falcon (Public domain)", author: "U.S. Air Force photo by Senior Airman Adriana Jordan-Alcaniz", url: "https://commons.wikimedia.org/wiki/File:KC-135_Stratotanker_refuels_F-16_Fighting_Falcon_(9704266).jpg" }
+  - { title: "Container Stacking, Port Of Onehunga (Public domain)", author: "Ingolfson", url: "https://commons.wikimedia.org/wiki/File:Container_Stacking,_Port_Of_Onehunga.jpg" }
+---
+
+import En from '../../components/mdx/En.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
+import BeP12Knight from '../../components/mdx/BeP12Knight.astro';
+import BeP12Config from '../../components/mdx/BeP12Config.astro';
+import BeP12Stages from '../../components/mdx/BeP12Stages.astro';
+import BeP12Sizes from '../../components/mdx/BeP12Sizes.astro';
+import BeP12Workers from '../../components/mdx/BeP12Workers.astro';
+import BeP12Shutdown from '../../components/mdx/BeP12Shutdown.astro';
+import BeP12Pid1 from '../../components/mdx/BeP12Pid1.astro';
+import BeP12Probes from '../../components/mdx/BeP12Probes.astro';
+import BeP12Rollout from '../../components/mdx/BeP12Rollout.astro';
+import BeP12Errors from '../../components/mdx/BeP12Errors.astro';
+import BeP12Checklist from '../../components/mdx/BeP12Checklist.astro';
+import heroRefuel from '../../assets/blog/backend-production-deploy/aerial-refuel-f16.jpg';
+import heroContainers from '../../assets/blog/backend-production-deploy/containers-onehunga.jpg';
+
+<En>
+
+<Figure src={heroRefuel} alt="An F-16 fighter jet close behind a tanker aircraft, about to take on fuel in flight" caption="Aerial refuelling is a deploy done right: the aircraft never lands, the supply is connected before the old one is let go, and both sides rehearse the hand-over. A rolling update asks the same of a service that is serving traffic the whole time." sourceTitle="Wikimedia Commons: KC-135 Stratotanker refuels F-16 Fighting Falcon (U.S. Air Force photo by Senior Airman Adriana Jordan-Alcaniz, 21 May 2026, public domain)" sourceUrl="https://commons.wikimedia.org/wiki/File:KC-135_Stratotanker_refuels_F-16_Fighting_Falcon_(9704266).jpg" />
+
+### The hook: seven out of eight
+
+On 1 August 2012 the trading firm Knight Capital sent millions of unintended orders into the US stock market in about 45 minutes. The SEC's order says it ended with a realised loss of $460 million. The cause was a deploy. Starting on 27 July the team had been putting new code onto eight servers in stages, and one technician did not copy it to one of them. Seven servers ran the new code. The eighth still held an old routine called Power Peg, and the new code reused the flag that used to switch that routine on.
+
+<BeP12Knight />
+
+Two details from the order stay with me. First, nobody reviewed the deploy: "Knight did not have a second technician review this deployment", and no written procedure required one. Second, when people tried to fix it live, they uninstalled the new code from the seven good servers, and the order says plainly that "this action worsened the problem". The three ingredients are all deploy hygiene: a change you cannot verify per server, a flag whose meaning depends on which build reads it, and a rollback nobody had practised.
+
+Your service will not trade stocks, but an assistant can write its Dockerfile in seconds, and the first draft runs. What it leaves out is what Knight lacked: a deploy that checks itself. This post builds that path on the series' clue.api, in six questions:
+
+1. **Where config comes from**, and what stops the boot when a value is wrong.
+2. **What a small, non-root image** looks like.
+3. **How many processes** one container should run.
+4. **What happens when the platform says stop**: signals, draining, the PID 1 trap.
+5. **What the three probes ask**, and why one of them must stay dumb.
+6. **What a rolling update drops**, with and without all of that, counted by a load loop.
+
+It builds on [post 6](/blog/backend-async-concurrency-workers/) (the worker model) and [post 10](/blog/backend-observability/) (the log lines you will read here). Everything ran on my laptop: Docker 29.8.2 and a throwaway one-node kind cluster running Kubernetes 1.32.2. That is not a production cluster, so treat the absolute numbers as this setup's; the direction is what carries over.
+
+---
+
+## 1. Config comes from the environment
+
+The code in your image is the same in every environment. What changes is small: the database address, the release name, a warm-up time. The twelve-factor rule for it is strict separation of config from code, with config stored in environment variables. Its litmus test is a good one: could the repository be open-sourced right now without leaking a credential?
+
+`pydantic-settings` turns that into a class. A `BaseSettings` subclass reads its fields from the environment, converts the types, and validates them, so a bad value fails at the first line of the program and not on the first request that needs it. `demo/p12_settings.py`, the whole file:
+
+```python
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """Everything that changes between environments comes from the environment."""
+
+    model_config = SettingsConfigDict(env_prefix="CLUE_")
+
+    database_url: str  # required: no default, so a missing value stops the boot
+    release: str = "dev"
+    work_ms: int = Field(default=50, ge=0)
+    slow_ms: int = Field(default=2000, ge=0)
+    startup_delay_s: float = Field(default=0.0, ge=0)
+```
+
+`env_prefix="CLUE_"` means the field `database_url` is read from `CLUE_DATABASE_URL`. The fields with defaults are conveniences. `database_url` has no default on purpose: a secret with a fallback turns "forgot to set it" into "silently wrong". `Field(default=50, ge=0)` adds a rule, so a negative value is rejected too. `p12_app.py` builds `Settings()` at import, which is the point of no return. Two captures of what it says:
+
+<TerminalOutput command="uvicorn p12_app:app, with no CLUE_* variable set (last 4 lines)" label="Python 3.13 · pydantic-settings 2.16.3 · FastAPI 0.165.0 · captured Nov 2026" caption="The process dies before it listens. The message names the missing field, which is what you want to read in a pod's logs at 2 a.m.">
+```text
+pydantic_core._pydantic_core.ValidationError: 1 validation error for Settings
+database_url
+  Field required [type=missing, input_value={}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.14/v/missing
+```
+</TerminalOutput>
+
+<TerminalOutput command="CLUE_DATABASE_URL=sqlite:///x.db CLUE_WORK_MS=-5 uvicorn p12_app:app (last 4 lines)" label="Python 3.13 · pydantic-settings 2.16.3 · captured Nov 2026" caption="A present but invalid value fails the same way, with the rule it broke.">
+```text
+pydantic_core._pydantic_core.ValidationError: 1 validation error for Settings
+work_ms
+  Input should be greater than or equal to 0 [type=greater_than_equal, input_value='-5', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.14/v/greater_than_equal
+```
+</TerminalOutput>
+
+<BeP12Config />
+
+In Kubernetes the values arrive from two objects. A ConfigMap holds plain settings, a Secret holds the sensitive one, and the Deployment injects both as environment variables with `envFrom`. `demo/p12/k8s/config.yaml`, the whole file:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clue-api-config
+data:
+  CLUE_WORK_MS: "50"
+  CLUE_STARTUP_DELAY_S: "3"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: clue-api-secret
+type: Opaque
+stringData:
+  CLUE_DATABASE_URL: "sqlite:///demo-not-a-real-secret.db"
+```
+
+A Secret object is only base64 text in a manifest, not encryption, so the value here is a placeholder and a real one never goes into git. The settings object does not care where the variables came from, which is the benefit: the same image runs on a laptop, in CI and in the cluster.
+
+<Callout type="warning" title="The AI habit to break">
+Ask an assistant for a "production-ready config" and you often get `DATABASE_URL = "postgresql://admin:admin@localhost/app"` in a module, a `.env` committed with real keys, or `os.getenv("SECRET_KEY", "changeme")`. That last one is the quiet killer: a missing variable now boots the service with a known secret. When you review config, search for every default on a value that should never have one.
+</Callout>
+
+---
+
+## 2. A small image
+
+An image is a frozen folder: Python, your dependencies and your code, packed so it runs the same everywhere. Think of the standard shipping container. The ship, the truck and the crane never ask what is inside; they only need the box to be the agreed shape. A good image is a box of the right shape with nothing extra in it.
+
+<Figure src={heroContainers} alt="A reach stacker lifting a shipping container in a stack at the Port of Onehunga, Auckland" caption="The standard box is the whole trick: any crane, any ship, any truck. An image gives your service the same property for any machine that runs containers." sourceTitle="Wikimedia Commons: Container Stacking, Port Of Onehunga (public domain, Ingolfson)" sourceUrl="https://commons.wikimedia.org/wiki/File:Container_Stacking,_Port_Of_Onehunga.jpg" />
+
+The recipe is a Dockerfile. This one uses two stages: the first installs dependencies with `uv`, the second copies only the result. `demo/p12/Dockerfile`, the whole file:
+
+```dockerfile
+# Build the demo from the demo/ folder:  docker build -f p12/Dockerfile -t clue-api:p12 .
+
+# ---- build stage: has uv and the resolver; never ships ----
+FROM python:3.13-slim AS build
+COPY --from=ghcr.io/astral-sh/uv:0.13.0 /uv /usr/local/bin/uv
+ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
+WORKDIR /app
+COPY p12/pyproject.toml p12/uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
+
+# ---- runtime stage: Python, the venv, our two files ----
+FROM python:3.13-slim
+RUN useradd --system --uid 10001 --no-create-home app
+WORKDIR /app
+COPY --from=build /app/.venv /app/.venv
+COPY p12_settings.py p12_app.py ./
+ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1
+USER 10001
+EXPOSE 8000
+# Exec form: uvicorn is PID 1 and receives SIGTERM itself.
+CMD ["uvicorn", "p12_app:app", "--host", "0.0.0.0", "--port", "8000"]
+```
+
+Read it as five decisions. The build stage holds the `uv` binary and runs `uv sync --frozen --no-dev --no-install-project`: install exactly the versions in `uv.lock`, skip dev tools, and skip the project itself so this layer is cached until the lockfile changes. The runtime stage starts again from a clean `python:3.13-slim` and copies one folder, `/app/.venv`. Your two source files come last, so editing code does not invalidate the dependency layer. `useradd` plus `USER 10001` makes the process a non-root user, so a bug in the app cannot write to the system. And `CMD` is in exec form (a JSON list), a detail that decides whether shutdown works; section 4 shows why.
+
+<BeP12Stages />
+
+The size difference is large enough to see:
+
+<TerminalOutput command="docker images; docker run --rm --entrypoint id <image> -u" label="Docker 29.8.2 · python:3.13-slim · captured Nov 2026" caption="258 MB against 1.7 GB for the same app. The last two lines show who the process runs as: 10001, and 0, which is root.">
+```text
+REPOSITORY:TAG                                         SIZE
+clue-api:p12                                           258MB
+clue-api:p12-fat                                       1.7GB
+python:3.13-slim                                       202MB
+clue-api:p12 runs as uid 10001
+clue-api:p12-fat runs as uid 0
+```
+</TerminalOutput>
+
+<BeP12Sizes />
+
+`clue-api:p12-fat` is the Dockerfile an assistant tends to write first. It works, and it is worth reading for what it does not do. `demo/p12/Dockerfile.fat`, the whole file:
+
+```dockerfile
+# The Dockerfile an assistant tends to write first. It works. Do not ship it.
+FROM python:3.13
+WORKDIR /app
+COPY . .
+RUN pip install fastapi==0.165.0 "uvicorn[standard]==0.54.0" pydantic-settings
+CMD uvicorn p12_app:app --host 0.0.0.0 --port 8000
+```
+
+The base is the full `python:3.13` image with compilers nobody needs at runtime. `COPY . .` copies the whole folder, including whatever is lying around next to the code, and puts it before the install so every code edit reinstalls everything. There is no `USER`, so it runs as root. And `CMD` is the shell form, which section 4 shows to be the dangerous one.
+
+<Callout type="note" title="A smaller image is a faster deploy">
+Every pod that starts on a new node pulls the image first. A rollout that waits on a 1.7 GB pull is a rollout where the new pod is not ready for longer, which is time the old pods have to cover.
+</Callout>
+
+---
+
+## 3. One process per pod
+
+Python runs your async code on one thread in one process. To use more than one core you run more than one process, and `uvicorn --workers 2` does that: a parent that starts and watches two worker processes sharing one listening socket. [Post 6](/blog/backend-async-concurrency-workers/) explains why the worker model matters; here the question is only where to put the processes.
+
+The FastAPI docs answer for clusters: handle replication at the cluster level, with a single uvicorn process per container, because a second process manager inside the container adds complexity the orchestrator already provides. They keep `--workers` for a single server or Docker Compose without a cluster. The capture shows the other thing you pay for in-container workers: the split is not yours to control.
+
+<TerminalOutput command="uvicorn p12_app:app --workers 2, then 60 requests, 30 at a time (xargs -P 30), counting the pid in each answer" label="Python 3.13 · uvicorn 0.54.0 · captured Nov 2026" caption="Two worker pids, 22 and 38 of 60 requests. The operating system hands connections to whichever worker accepts first.">
+```text
+  22 "pid":66971
+  38 "pid":66972
+```
+</TerminalOutput>
+
+<BeP12Workers />
+
+Replicas give you the same parallelism with extras: each pod has its own probes and its own restarts, a rolling update replaces them one at a time, and the Service spreads requests across pods. On a plain VM with no orchestrator, a process manager is the tool, and `gunicorn` supervising uvicorn workers is the usual one; I did not measure that setup here.
+
+---
+
+## 4. A shutdown is a budget of seconds
+
+When a platform wants to stop your process it sends `SIGTERM`, a polite "please finish up", waits for a while, and then sends `SIGKILL`, which cannot be caught. Graceful shutdown is what you do between the two: stop taking new work, finish the work in hand, release what you hold, exit. Think of a restaurant at closing time. You lock the door, you serve the tables already seated, and then you turn off the lights.
+
+uvicorn already behaves like this on `SIGTERM`. It closes its listening socket, waits for open requests to finish, and then lets FastAPI run the shutdown half of the `lifespan` function, the code after `yield`. `demo/p12_app.py`, the lifespan:
+
+```python
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: warm things up (pool, caches). uvicorn does not listen until
+    # this block finishes, and /readyz stays 503 until the flag is set.
+    log.info("startup: warming up for %.1fs (release %s)", settings.startup_delay_s, settings.release)
+    await asyncio.sleep(settings.startup_delay_s)
+    app.state.ready = True
+    log.info("startup: ready")
+    yield
+    # Shutdown: uvicorn has stopped accepting and waited for open requests.
+    app.state.ready = False
+    log.info("shutdown: in-flight requests left: %d", inflight)
+```
+
+The startup half warms up (a pool, a cache) and flips `app.state.ready`. The shutdown half runs only once uvicorn has drained, so the log line it writes, in-flight requests left, is evidence of how the drain went. To see it, the demo starts the real image, begins a two-second request, and sends the stop signal half a second later (`demo/p12_drain.py`):
+
+<TerminalOutput command="python p12_drain.py stop (docker stop -t 5 half a second into a 2 s request)" label="Docker 29.8.2 · uvicorn 0.54.0 · captured Nov 2026" caption="The request finishes with 200. The log shows the order: Shutting down, wait for the connection, then the lifespan line with zero left. Exit code 0, in 1.9 s.">
+```text
+stop: in-flight request -> HTTP 200 after 2.0s
+stop: container stopped in 1.9s, exit code 0
+    INFO:     Started server process [1]
+    INFO:     Waiting for application startup.
+    INFO:     startup: warming up for 0.0s (release dev)
+    INFO:     startup: ready
+    INFO:     Application startup complete.
+    INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+    INFO:     192.168.215.1:59604 - "GET /readyz HTTP/1.1" 200 OK
+    INFO:     Shutting down
+    INFO:     Waiting for connections to close. (CTRL+C to force quit)
+    INFO:     192.168.215.1:59606 - "GET /slow HTTP/1.1" 200 OK
+    INFO:     Waiting for application shutdown.
+    INFO:     shutdown: in-flight requests left: 0
+    INFO:     Application shutdown complete.
+    INFO:     Finished server process [1]
+```
+</TerminalOutput>
+
+<TerminalOutput command="python p12_drain.py kill (docker kill: SIGKILL, no warning)" label="Docker 29.8.2 · captured Nov 2026" caption="Same request, same moment, no signal to catch. The client gets a protocol error after 0.6 s, the log has no shutdown lines, the exit code is 137 (128 plus 9, SIGKILL).">
+```text
+kill: in-flight request -> RemoteProtocolError after 0.6s
+kill: container stopped in 0.3s, exit code 137
+    INFO:     Started server process [1]
+    INFO:     Waiting for application startup.
+    INFO:     startup: warming up for 0.0s (release dev)
+    INFO:     startup: ready
+    INFO:     Application startup complete.
+    INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+    INFO:     192.168.215.1:56712 - "GET /readyz HTTP/1.1" 200 OK
+```
+</TerminalOutput>
+
+<BeP12Shutdown />
+
+### The PID 1 trap
+
+In a container the first process is PID 1, and `SIGTERM` is delivered to it. If PID 1 is a shell that then starts uvicorn, the shell is the one that gets the signal, and a shell does not pass it on. This is what a startup script like `migrate && start` looks like to the platform. Same image, started two ways, `docker stop -t 5` on each:
+
+<TerminalOutput command="python p12_drain.py shell (entrypoint: sh -c 'echo migrating && uvicorn ...')" label="Docker 29.8.2 · captured Nov 2026" caption="uvicorn is PID 6 and never hears the signal. There is no Shutting down line; docker waited the full 5 s and killed it, exit code 137. The request only survived because it was shorter than the wait.">
+```text
+shell: in-flight request -> HTTP 200 after 2.0s
+shell: container stopped in 5.3s, exit code 137
+    migrating
+    INFO:     Started server process [6]
+    INFO:     Waiting for application startup.
+    INFO:     startup: warming up for 0.0s (release dev)
+    INFO:     startup: ready
+    INFO:     Application startup complete.
+    INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+    INFO:     192.168.215.1:56742 - "GET /readyz HTTP/1.1" 200 OK
+    INFO:     192.168.215.1:56750 - "GET /slow HTTP/1.1" 200 OK
+```
+</TerminalOutput>
+
+With `exec uvicorn ...` in the same script, uvicorn replaces the shell, becomes PID 1, and the run behaves exactly like the first capture: the request returned 200 and the container exited 0 in 1.8 s (the fourth run, `python p12_drain.py exec`). It is also why the Dockerfile's `CMD` is a JSON list: the shell form runs through `/bin/sh -c`.
+
+<BeP12Pid1 />
+
+### In Kubernetes
+
+The kubelet does three things in order: it runs the container's `preStop` hook, sends `SIGTERM` to PID 1, and after `terminationGracePeriodSeconds` (30 by default) sends `SIGKILL`. At the same moment, the control plane starts removing the pod from the Service's list of endpoints. Those two things run in parallel, so for a short window the Service can still send a request to a pod whose server has already stopped listening. A `preStop` sleep keeps the pod serving through that window. It is the first thing in the Deployment's `lifecycle`, shown in full in section 6.
+
+<TerminalOutput command="kubectl logs -f <pod> in one shell, kubectl delete pod in another" label="kind v0.27.0 · Kubernetes 1.32.2 · captured Nov 2026" caption="The same shutdown from inside a pod: startup lines first, then Shutting down and the lifespan hook reporting zero in-flight requests.">
+```text
+INFO:     Started server process [1]
+INFO:     Waiting for application startup.
+INFO:     startup: warming up for 3.0s (release v4)
+INFO:     startup: ready
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     shutdown: in-flight requests left: 0
+INFO:     Application shutdown complete.
+INFO:     Finished server process [1]
+```
+</TerminalOutput>
+
+<TerminalOutput command="kubectl describe pod (startup probe events), then time kubectl delete pod --wait" label="kind v0.27.0 · Kubernetes 1.32.2 · captured Nov 2026" caption="Deleting a pod with the 5 s preStop sleep took 6.45 s wall time: five seconds of sleep and about a second and a half to drain and exit. The first line is the startup probe from the next section.">
+```text
+$ kubectl describe pod (events about the startup probe)
+ Warning Unhealthy 4m14s (x3 over 4m16s) kubelet Startup probe failed: Get "http://10.244.0.98:8000/livez": dial tcp 10.244.0.98:8000: connect: connection refused
+$ time kubectl delete pod --wait
+pod "clue-api-9c7455867-q2hbx" deleted
+real 6.45
+user 0.03
+sys 0.01
+```
+</TerminalOutput>
+
+---
+
+## 5. Three probes, three questions
+
+A probe is a check the kubelet runs on a container on a schedule. Kubernetes has three, and they are easy to mix up because they look the same in YAML: an HTTP path, a port, a period. What differs is what Kubernetes does when one fails. The startup probe says whether the app has finished booting, and until it succeeds the other two are not run. The readiness probe says whether traffic should come here right now. The liveness probe says whether the container is stuck and should be restarted.
+
+The demo gives them two endpoints, and keeps each answer honest. `demo/p12_app.py`:
+
+```python
+@app.get("/livez")
+async def livez() -> dict:
+    # Liveness: "is this process stuck?" Never check dependencies here.
+    return {"alive": True}
+
+
+@app.get("/readyz")
+async def readyz(response: Response) -> dict:
+    # Readiness: "should traffic come here right now?"
+    if not app.state.ready:
+        response.status_code = 503
+    return {"ready": app.state.ready}
+```
+
+`/livez` answers "the event loop can still run a function", and nothing else. `/readyz` reads the flag the lifespan set after warm-up. The Deployment wires them up (these lines are the end of `demo/p12/k8s/deploy-graceful.yaml`):
+
+```yaml
+          startupProbe:
+            httpGet:
+              path: /livez
+              port: 8000
+            periodSeconds: 1
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8000
+            periodSeconds: 1
+            failureThreshold: 2
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 8000
+            periodSeconds: 10
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 5
+```
+
+The startup probe uses `/livez` with a 30 second budget (`failureThreshold` times `periodSeconds`); it keeps the liveness check from killing a slow-booting pod. The readiness probe runs every second for the whole life of the pod. To see what each does, the demo has two buttons: `/debug/unready` flips the flag (a dependency "went away"), and `/debug/hang` blocks the event loop with a sleep.
+
+<TerminalOutput command="curl -X POST pod-A/debug/unready; curl -X POST pod-B/debug/hang (via kubectl port-forward, one pod each)" label="kind v0.27.0 · Kubernetes 1.32.2 · captured Nov 2026" caption="Pod A: READY 0/1 and RESTARTS 0, and its IP shows ready=false in the EndpointSlice. Pod B stopped answering, so the readiness probe failed too, then the liveness probe failed, the container was restarted, RESTARTS 1.">
+```text
+$ curl -X POST pod-A/debug/unready
+{"ready":false}
+$ kubectl get pods
+NAME                       READY   STATUS    RESTARTS   AGE
+clue-api-9c7455867-2dkmq   0/1     Running   0          26s
+clue-api-9c7455867-h9x2r   1/1     Running   0          21s
+clue-api-9c7455867-hq464   1/1     Running   0          31s
+$ kubectl get endpointslice  (ready flag per pod IP)
+10.244.0.94 ready=true
+10.244.0.95 ready=false
+10.244.0.96 ready=true
+$ curl -X POST pod-B/debug/hang
+(client gave up after 2s)
+$ kubectl get pods
+NAME                       READY   STATUS    RESTARTS     AGE
+clue-api-9c7455867-2dkmq   0/1     Running   0            94s
+clue-api-9c7455867-h9x2r   1/1     Running   1 (8s ago)   89s
+clue-api-9c7455867-hq464   1/1     Running   0            99s
+$ kubectl describe pod pod-B  (Events, trimmed)
+  Warning  Unhealthy  48s (x2 over 58s)   kubelet            Liveness probe failed: Get "http://10.244.0.96:8000/livez": context deadline exceeded (Client.Timeout exceeded while awaiting headers)
+  Warning  Unhealthy  46s (x21 over 67s)  kubelet            Readiness probe failed: Get "http://10.244.0.96:8000/readyz": context deadline exceeded (Client.Timeout exceeded while awaiting headers)
+  Normal   Killing    38s                 kubelet            Container api failed liveness probe, will be restarted
+```
+</TerminalOutput>
+
+<BeP12Probes />
+
+The rule that follows is the one AI-written manifests break. Readiness may look at dependencies, because "not ready" only takes a pod out of rotation. Liveness must not, because "not alive" restarts it. If `/livez` checked the database, a short database outage would restart every pod at once, which turns a blip into an outage with a cold start in the middle.
+
+---
+
+## 6. Roll out and count
+
+A rolling update replaces pods a few at a time. Whether it drops requests depends on when Kubernetes believes a new pod can take traffic, and when it believes an old one is gone. The demo measures it. `demo/p12_load.py` sends 20 requests per second, each on a new connection with a 3 second timeout, and counts what a caller would see. The function that does it:
+
+```python
+async def one(client: httpx.AsyncClient, url: str, t0: float, out: dict) -> None:
+    second = int(time.monotonic() - t0)
+    try:
+        r = await client.get(url)
+        if r.status_code == 200:
+            out["ok"] += 1
+            out["releases"][r.json()["release"]] += 1
+        else:
+            out["errors"][f"HTTP {r.status_code}"] += 1
+            out["by_second"][second] += 1
+    except httpx.HTTPError as exc:
+        out["errors"][type(exc).__name__] += 1
+        out["by_second"][second] += 1
+```
+
+While it runs, `demo/p12_rollout.py` changes the release with `kubectl set env`, which makes Kubernetes replace every pod. It refuses to run unless `KUBECONFIG` is set and the current context is `kind-p12`, so it can never touch another cluster. First the naive Deployment: no probes, no `preStop`, the default strategy.
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clue-api
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: clue-api
+  template:
+    metadata:
+      labels:
+        app: clue-api
+    spec:
+      containers:
+        - name: api
+          image: clue-api:p12
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: clue-api-config
+            - secretRef:
+                name: clue-api-secret
+          env:
+            - name: CLUE_RELEASE
+              value: v1
+```
+
+<TerminalOutput command="python p12_rollout.py deploy-naive.yaml v2 (20 requests per second)" label="kind v0.27.0 · Kubernetes 1.32.2 · httpx 0.28.1 · captured Nov 2026" caption="67 of 351 requests failed, in a burst from second 5 to second 10. I ran this case three times and got 60, 67 and 67 failures; the numbers vary a little, the shape does not.">
+```text
+rolling out v2 with deploy-naive.yaml
+sent=351 ok=284 failed=67
+errors: {'RemoteProtocolError': 67}
+answered by release: {'v1': 123, 'v2': 161}
+failed requests per second: {5: 7, 6: 10, 7: 12, 8: 18, 9: 13, 10: 7}
+```
+</TerminalOutput>
+
+Why: with no readiness probe, Kubernetes treats a pod as ready the moment its container starts. The app then spends 3 seconds in its lifespan warming up, during which uvicorn is not listening at all, and the Service is already sending it its share of the traffic. The old pods are told to stop in the same instant. This is the `Running` that does not mean ready.
+
+<BeP12Rollout />
+
+Add the readiness probe and set `maxUnavailable: 0` explicitly (for three replicas the default works out to the same), and nothing else changes:
+
+<TerminalOutput command="python p12_rollout.py deploy-ready.yaml v3 (20 requests per second)" label="kind v0.27.0 · Kubernetes 1.32.2 · httpx 0.28.1 · captured Nov 2026" caption="0 of 548 failed. A new pod now joins the Service only when /readyz says 200, and the old one leaves only after that.">
+```text
+rolling out v3 with deploy-ready.yaml
+sent=548 ok=548 failed=0
+errors: none
+answered by release: {'v1': 247, 'v3': 301}
+failed requests per second: none
+```
+</TerminalOutput>
+
+Then the full manifest, with the startup and liveness probes, `terminationGracePeriodSeconds`, and the `preStop` sleep. `demo/p12/k8s/deploy-graceful.yaml`, the whole file:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clue-api
+spec:
+  replicas: 3
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: clue-api
+  template:
+    metadata:
+      labels:
+        app: clue-api
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: api
+          image: clue-api:p12
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: clue-api-config
+            - secretRef:
+                name: clue-api-secret
+          env:
+            - name: CLUE_RELEASE
+              value: v1
+          startupProbe:
+            httpGet:
+              path: /livez
+              port: 8000
+            periodSeconds: 1
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8000
+            periodSeconds: 1
+            failureThreshold: 2
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 8000
+            periodSeconds: 10
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 5
+```
+
+<TerminalOutput command="python p12_rollout.py deploy-graceful.yaml v4 (20 requests per second)" label="kind v0.27.0 · Kubernetes 1.32.2 · httpx 0.28.1 · captured Nov 2026" caption="0 of 523 failed. The rollout takes longer, about 14 s of pod changes against about 5 s for the naive one, because each new pod has to be ready before an old one starts leaving.">
+```text
+rolling out v4 with deploy-graceful.yaml
+sent=523 ok=523 failed=0
+errors: none
+answered by release: {'v1': 236, 'v4': 287}
+failed requests per second: none
+```
+</TerminalOutput>
+
+<BeP12Errors />
+
+I want to be straight about what this measures. Readiness is the one that matters here: it took the run from 67 failures to none. The `preStop` sleep did not change the count in this cluster. I also ran readiness-only and the full manifest at 100 requests per second, and both stayed at zero (0 of 2615 and 0 of 2542 failed). A one-node kind cluster updates its routing within a moment, so I could not reproduce the window where the Service still sends traffic to a pod that has stopped listening. On a larger cluster, with an external load balancer in front, that propagation takes longer, and the Kubernetes documentation describes the parallel steps that make it possible. I keep the sleep as insurance, and I would not claim a number for it.
+
+---
+
+## 7. The review habit
+
+Knight's deploy had no check that said "this server is not like the others". Yours can have five, and each one is something this post measured. Run down them when an assistant hands you a Dockerfile and a manifest:
+
+<BeP12Checklist />
+
+| It wrote | Ask | Fix in this post |
+|---|---|---|
+| A default on a secret, or a config module with real values | What happens when the variable is missing? | `Settings` with a required field (section 1) |
+| `FROM python:3.13`, `COPY . .`, no `USER` | How big, who is it running as? | Two stages, `USER 10001` (section 2) |
+| `CMD uvicorn ...` or a shell wrapper | Does SIGTERM reach uvicorn? | Exec form, `exec` in scripts (section 4) |
+| No probes, or one `/health` for everything | What does Kubernetes do when it fails? | `/livez` dumb, `/readyz` honest (section 5) |
+| Default rollout, no `maxUnavailable: 0` | What does a deploy do to capacity? | Readiness + `maxUnavailable: 0` (section 6) |
+
+<Concepts>
+- **12-factor config**: settings that differ per environment live in environment variables, never in code, so one build runs everywhere.
+- **Multi-stage build**: a Dockerfile with several `FROM` stages where only the last one is shipped, so build tools stay out of the image.
+- **PID 1**: the first process in a container. It receives the stop signal, so it has to be the app, not a shell.
+- **`SIGTERM` / `SIGKILL`**: a stop request the process can catch and handle, and a kill that it cannot.
+- **Graceful shutdown**: stop accepting new work, finish the work in hand, release resources, exit.
+- **Lifespan**: FastAPI's startup-and-shutdown function; the code before `yield` runs at boot, the code after it at exit.
+- **Liveness / readiness / startup probe**: restart me if stuck; send me traffic only when ready; wait until I finish booting.
+- **Rolling update**: replace pods a few at a time so some are always serving.
+</Concepts>
+
+## Key takeaways
+
+- Load config from the environment into a validated `Settings` object, give secrets no default, and let a missing value stop the process before it listens.
+- Build the image in two stages, run as a non-root user, and write `CMD` in exec form so the app is PID 1 and hears `SIGTERM`.
+- In a cluster, scale with replicas, one uvicorn process per pod.
+- A rolling update is only zero-downtime if readiness is true: in the demo it took failed requests from 67 to 0.
+- Keep liveness dumb and readiness honest, and check them by breaking them on purpose.
+
+## Review questions
+
+1. Why does `database_url` have no default in `Settings`, and what does the capture in section 1 show happening instead? (section 1)
+2. What breaks if `CMD` is the shell form, even though the app starts fine? (section 4)
+3. Why can a liveness probe that checks the database turn a short outage into a long one? (section 5)
+4. In the rollout captures, which single change took the failures to zero, and what did the preStop sleep change? (section 6)
+5. A pod shows `Running` but `READY 0/1`. Is it receiving traffic, and which probe decides that? (section 5)
+
+</En>
+
+<Vi>
+
+<Figure src={heroRefuel} alt="Một chiếc F-16 bay sát sau máy bay tiếp dầu, chuẩn bị nhận nhiên liệu ngay trên không" caption="Tiếp dầu trên không là một lần deploy làm đúng: máy bay không hạ cánh, nguồn mới được nối trước khi nguồn cũ được thả, và hai bên đã tập trước cú trao tay đó. Rolling update đòi hỏi đúng điều ấy ở một service vẫn đang phục vụ traffic suốt thời gian đó." sourceTitle="Wikimedia Commons: KC-135 Stratotanker refuels F-16 Fighting Falcon (ảnh U.S. Air Force của Senior Airman Adriana Jordan-Alcaniz, 21/5/2026, public domain)" sourceUrl="https://commons.wikimedia.org/wiki/File:KC-135_Stratotanker_refuels_F-16_Fighting_Falcon_(9704266).jpg" />
+
+### Mở đầu: bảy trên tám
+
+Ngày 1/8/2012, công ty giao dịch Knight Capital bắn hàng triệu lệnh ngoài ý muốn vào thị trường chứng khoán Mỹ trong khoảng 45 phút. Lệnh của SEC ghi họ chịu khoản lỗ thực tế 460 triệu USD. Nguyên nhân là một lần deploy. Từ 27/7, đội ngũ đưa code mới lên tám server theo từng đợt, và một kỹ thuật viên đã không copy code đó vào một trong tám server. Bảy server chạy code mới. Server thứ tám vẫn còn một đoạn code cũ tên Power Peg, còn code mới lại dùng lại đúng cái cờ từng bật đoạn code ấy.
+
+<BeP12Knight />
+
+Hai chi tiết trong lệnh của SEC làm mình nhớ mãi. Thứ nhất, không ai kiểm tra lần deploy: "Knight did not have a second technician review this deployment", và cũng không có quy trình bằng văn bản nào yêu cầu việc đó. Thứ hai, khi mọi người sửa trực tiếp trên hệ thống đang chạy, họ gỡ code mới khỏi bảy server đang đúng, và lệnh ghi thẳng rằng "this action worsened the problem". Cả ba yếu tố đều là vệ sinh deploy: một thay đổi không kiểm chứng được từng server, một cái cờ mà ý nghĩa phụ thuộc vào bản build nào đọc nó, và một đường rollback chưa ai tập.
+
+Service của bạn không giao dịch chứng khoán, nhưng AI viết Dockerfile trong vài giây, và bản nháp đầu chạy được. Thứ nó bỏ sót chính là thứ Knight thiếu: một đường deploy tự kiểm tra được mình. Bài này dựng đường đó trên clue.api của series, qua sáu câu hỏi:
+
+1. **Config đến từ đâu**, và cái gì chặn việc khởi động khi một giá trị sai.
+2. **Image nhỏ, non-root** trông thế nào.
+3. **Một container nên chạy bao nhiêu process.**
+4. **Chuyện gì xảy ra khi nền tảng ra lệnh dừng**: signal, xả request, cái bẫy PID 1.
+5. **Ba loại probe hỏi gì**, và vì sao một loại phải giữ cho thật đơn giản.
+6. **Rolling update làm rớt bao nhiêu request** khi có và không có những thứ trên, do một vòng load đếm giúp.
+
+Bài này dựng trên [bài 6](/blog/backend-async-concurrency-workers/) (mô hình worker) và [bài 10](/blog/backend-observability/) (các dòng log bạn sẽ đọc ở đây). Mọi thứ chạy trên laptop của mình: Docker 29.8.2 và một cluster kind một node dùng xong bỏ, chạy Kubernetes 1.32.2. Đó không phải cluster production, nên hãy coi các con số tuyệt đối chỉ đúng với setup này; xu hướng mới là thứ áp dụng được cho nơi khác.
+
+---
+
+## 1. Config đến từ môi trường
+
+Code trong image của bạn giống nhau ở mọi môi trường. Thứ thay đổi chỉ là một ít: địa chỉ database, tên release, thời gian warm-up. Quy tắc twelve-factor cho việc này rất rõ: tách config khỏi code thật sạch, và lưu config trong biến môi trường (environment variable). Phép thử của họ rất hay: ngay lúc này có thể open-source repo mà không lộ credential nào không?
+
+`pydantic-settings` biến quy tắc đó thành một class. Một lớp con của `BaseSettings` đọc field từ môi trường, ép kiểu và kiểm tra hợp lệ, nên giá trị sai sẽ làm chương trình hỏng ngay dòng đầu tiên, chứ không đợi tới request đầu tiên cần nó. `demo/p12_settings.py`, toàn bộ file:
+
+```python
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """Everything that changes between environments comes from the environment."""
+
+    model_config = SettingsConfigDict(env_prefix="CLUE_")
+
+    database_url: str  # required: no default, so a missing value stops the boot
+    release: str = "dev"
+    work_ms: int = Field(default=50, ge=0)
+    slow_ms: int = Field(default=2000, ge=0)
+    startup_delay_s: float = Field(default=0.0, ge=0)
+```
+
+`env_prefix="CLUE_"` nghĩa là field `database_url` được đọc từ `CLUE_DATABASE_URL`. Các field có default chỉ là tiện lợi. `database_url` cố tình không có default: một secret có giá trị dự phòng biến "quên đặt" thành "sai âm thầm". `Field(default=50, ge=0)` thêm một luật, nên giá trị âm cũng bị từ chối. `p12_app.py` tạo `Settings()` ngay lúc import, đó là điểm không quay lại. Hai capture cho thấy nó báo gì:
+
+<TerminalOutput command="uvicorn p12_app:app, không đặt biến CLUE_* nào (4 dòng cuối)" label="Python 3.13 · pydantic-settings 2.16.3 · FastAPI 0.165.0 · captured Nov 2026" caption="Process chết trước khi kịp listen. Thông báo nêu đúng tên field bị thiếu, đúng thứ bạn muốn đọc trong log của pod lúc 2 giờ sáng.">
+```text
+pydantic_core._pydantic_core.ValidationError: 1 validation error for Settings
+database_url
+  Field required [type=missing, input_value={}, input_type=dict]
+    For further information visit https://errors.pydantic.dev/2.14/v/missing
+```
+</TerminalOutput>
+
+<TerminalOutput command="CLUE_DATABASE_URL=sqlite:///x.db CLUE_WORK_MS=-5 uvicorn p12_app:app (4 dòng cuối)" label="Python 3.13 · pydantic-settings 2.16.3 · captured Nov 2026" caption="Giá trị có mặt nhưng không hợp lệ cũng hỏng theo cách đó, kèm luật mà nó vi phạm.">
+```text
+pydantic_core._pydantic_core.ValidationError: 1 validation error for Settings
+work_ms
+  Input should be greater than or equal to 0 [type=greater_than_equal, input_value='-5', input_type=str]
+    For further information visit https://errors.pydantic.dev/2.14/v/greater_than_equal
+```
+</TerminalOutput>
+
+<BeP12Config />
+
+Trong Kubernetes, giá trị đến từ hai object. ConfigMap chứa các setting thường, Secret chứa giá trị nhạy cảm, và Deployment đưa cả hai vào dưới dạng biến môi trường bằng `envFrom`. `demo/p12/k8s/config.yaml`, toàn bộ file:
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: clue-api-config
+data:
+  CLUE_WORK_MS: "50"
+  CLUE_STARTUP_DELAY_S: "3"
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: clue-api-secret
+type: Opaque
+stringData:
+  CLUE_DATABASE_URL: "sqlite:///demo-not-a-real-secret.db"
+```
+
+Một Secret chỉ là chuỗi base64 trong manifest chứ không phải mã hóa, nên giá trị ở đây chỉ là chỗ giữ chỗ và giá trị thật không bao giờ được commit vào git. Object settings không quan tâm biến đến từ đâu, và đó chính là lợi ích: cùng một image chạy trên laptop, trong CI và trong cluster.
+
+<Callout type="warning" title="Thói quen AI cần bỏ">
+Nhờ AI viết "config production-ready", bạn hay nhận được `DATABASE_URL = "postgresql://admin:admin@localhost/app"` nằm trong một module, một file `.env` commit cùng key thật, hoặc `os.getenv("SECRET_KEY", "changeme")`. Dòng cuối là kẻ giết người thầm lặng: biến bị thiếu giờ vẫn khởi động service, với một secret ai cũng biết. Khi review config, hãy tìm mọi default đặt trên giá trị không bao giờ được có default.
+</Callout>
+
+---
+
+## 2. Một image nhỏ
+
+Image là một thư mục đóng băng: Python, dependency và code của bạn, đóng gói để chạy y hệt ở mọi nơi. Hãy nghĩ tới container vận chuyển tiêu chuẩn. Con tàu, chiếc xe tải, cái cần cẩu không bao giờ hỏi bên trong có gì; chúng chỉ cần cái thùng đúng kích cỡ thỏa thuận. Một image tốt là cái thùng đúng kích cỡ, bên trong không có gì thừa.
+
+<Figure src={heroContainers} alt="Một xe nâng container đang nhấc một container trong bãi xếp ở cảng Onehunga, Auckland" caption="Cái thùng tiêu chuẩn là toàn bộ mẹo: cần cẩu nào, tàu nào, xe tải nào cũng dùng được. Image cho service của bạn tính chất tương tự trên mọi máy chạy container." sourceTitle="Wikimedia Commons: Container Stacking, Port Of Onehunga (public domain, Ingolfson)" sourceUrl="https://commons.wikimedia.org/wiki/File:Container_Stacking,_Port_Of_Onehunga.jpg" />
+
+Công thức là một Dockerfile. File này có hai stage: stage đầu cài dependency bằng `uv`, stage sau chỉ copy kết quả. `demo/p12/Dockerfile`, toàn bộ file:
+
+```dockerfile
+# Build the demo from the demo/ folder:  docker build -f p12/Dockerfile -t clue-api:p12 .
+
+# ---- build stage: has uv and the resolver; never ships ----
+FROM python:3.13-slim AS build
+COPY --from=ghcr.io/astral-sh/uv:0.13.0 /uv /usr/local/bin/uv
+ENV UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
+WORKDIR /app
+COPY p12/pyproject.toml p12/uv.lock ./
+RUN uv sync --frozen --no-dev --no-install-project
+
+# ---- runtime stage: Python, the venv, our two files ----
+FROM python:3.13-slim
+RUN useradd --system --uid 10001 --no-create-home app
+WORKDIR /app
+COPY --from=build /app/.venv /app/.venv
+COPY p12_settings.py p12_app.py ./
+ENV PATH="/app/.venv/bin:$PATH" PYTHONUNBUFFERED=1
+USER 10001
+EXPOSE 8000
+# Exec form: uvicorn is PID 1 and receives SIGTERM itself.
+CMD ["uvicorn", "p12_app:app", "--host", "0.0.0.0", "--port", "8000"]
+```
+
+Đọc nó như năm quyết định. Stage build giữ binary `uv` và chạy `uv sync --frozen --no-dev --no-install-project`: cài đúng các phiên bản trong `uv.lock`, bỏ công cụ dev, và bỏ qua chính project để layer này được cache cho tới khi lockfile đổi. Stage runtime bắt đầu lại từ một `python:3.13-slim` sạch và chỉ copy một thư mục, `/app/.venv`. Hai file nguồn của bạn đặt cuối, nên sửa code không làm hỏng layer dependency. `useradd` cùng `USER 10001` biến process thành user không phải root, nên một lỗi trong app không thể ghi vào hệ thống. Còn `CMD` ở dạng exec (một list JSON), một chi tiết quyết định việc shutdown có chạy hay không; mục 4 sẽ cho thấy vì sao.
+
+<BeP12Stages />
+
+Khác biệt về dung lượng đủ lớn để nhìn thấy:
+
+<TerminalOutput command="docker images; docker run --rm --entrypoint id <image> -u" label="Docker 29.8.2 · python:3.13-slim · captured Nov 2026" caption="258 MB so với 1.7 GB cho cùng một app. Hai dòng cuối cho biết process chạy bằng user nào: 10001, và 0, tức root.">
+```text
+REPOSITORY:TAG                                         SIZE
+clue-api:p12                                           258MB
+clue-api:p12-fat                                       1.7GB
+python:3.13-slim                                       202MB
+clue-api:p12 runs as uid 10001
+clue-api:p12-fat runs as uid 0
+```
+</TerminalOutput>
+
+<BeP12Sizes />
+
+`clue-api:p12-fat` là Dockerfile mà AI hay viết đầu tiên. Nó chạy được, và đáng đọc vì những thứ nó không làm. `demo/p12/Dockerfile.fat`, toàn bộ file:
+
+```dockerfile
+# The Dockerfile an assistant tends to write first. It works. Do not ship it.
+FROM python:3.13
+WORKDIR /app
+COPY . .
+RUN pip install fastapi==0.165.0 "uvicorn[standard]==0.54.0" pydantic-settings
+CMD uvicorn p12_app:app --host 0.0.0.0 --port 8000
+```
+
+Base là image `python:3.13` đầy đủ, kèm compiler mà lúc runtime không ai cần. `COPY . .` copy cả thư mục, gồm mọi thứ nằm lăn lóc cạnh code, và đặt trước bước cài nên mỗi lần sửa code là cài lại toàn bộ. Không có `USER`, nên nó chạy bằng root. Và `CMD` ở dạng shell, thứ mà mục 4 sẽ chứng minh là nguy hiểm.
+
+<Callout type="note" title="Image nhỏ hơn là deploy nhanh hơn">
+Mỗi pod khởi động trên một node mới đều phải kéo image về trước. Một lần rollout chờ kéo image 1.7 GB là một lần pod mới lâu sẵn sàng hơn, và quãng thời gian đó các pod cũ phải gánh.
+</Callout>
+
+---
+
+## 3. Mỗi pod một process
+
+Python chạy code async của bạn trên một thread trong một process. Muốn dùng nhiều hơn một core thì chạy nhiều hơn một process, và `uvicorn --workers 2` làm đúng việc đó: một process cha khởi động và canh hai process worker dùng chung một socket đang listen. [Bài 6](/blog/backend-async-concurrency-workers/) giải thích vì sao mô hình worker quan trọng; ở đây câu hỏi chỉ là đặt các process ở đâu.
+
+Tài liệu FastAPI trả lời cho cluster: để cluster lo việc nhân bản, mỗi container một process uvicorn, vì một process manager thứ hai bên trong container chỉ thêm phức tạp mà orchestrator đã có sẵn. Họ để dành `--workers` cho trường hợp một server đơn hoặc Docker Compose không có cluster. Capture dưới đây cho thấy cái giá khác của worker trong container: cách chia việc không do bạn quyết.
+
+<TerminalOutput command="uvicorn p12_app:app --workers 2, rồi 60 request, mỗi lần 30 cái (xargs -P 30), đếm pid trong từng câu trả lời" label="Python 3.13 · uvicorn 0.54.0 · captured Nov 2026" caption="Hai pid worker, nhận 22 và 38 trên 60 request. Hệ điều hành giao connection cho worker nào accept trước.">
+```text
+  22 "pid":66971
+  38 "pid":66972
+```
+</TerminalOutput>
+
+<BeP12Workers />
+
+Replica cho bạn cùng mức song song đó kèm thêm vài thứ: mỗi pod có probe và lần restart riêng, rolling update thay từng pod một, và Service chia request ra các pod. Trên một VM thường, không có orchestrator, process manager mới là công cụ, và `gunicorn` quản lý các worker uvicorn là lựa chọn quen thuộc; mình chưa đo setup đó ở đây.
+
+---
+
+## 4. Shutdown là một ngân sách giây
+
+Khi nền tảng muốn dừng process của bạn, nó gửi `SIGTERM`, một lời nhắc lịch sự "làm nốt rồi dừng đi", chờ một lúc, rồi gửi `SIGKILL`, thứ không thể bắt được. Graceful shutdown (thoát êm) là những gì bạn làm giữa hai mốc đó: ngừng nhận việc mới, làm nốt việc đang cầm, trả lại tài nguyên đang giữ, rồi thoát. Hãy nghĩ tới nhà hàng giờ đóng cửa. Bạn khóa cửa, phục vụ nốt các bàn đã ngồi, rồi mới tắt đèn.
+
+uvicorn đã cư xử như vậy khi nhận `SIGTERM`. Nó đóng socket đang listen, chờ các request đang mở xong, rồi để FastAPI chạy nửa shutdown của hàm `lifespan`, phần code sau `yield`. `demo/p12_app.py`, hàm lifespan:
+
+```python
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # Startup: warm things up (pool, caches). uvicorn does not listen until
+    # this block finishes, and /readyz stays 503 until the flag is set.
+    log.info("startup: warming up for %.1fs (release %s)", settings.startup_delay_s, settings.release)
+    await asyncio.sleep(settings.startup_delay_s)
+    app.state.ready = True
+    log.info("startup: ready")
+    yield
+    # Shutdown: uvicorn has stopped accepting and waited for open requests.
+    app.state.ready = False
+    log.info("shutdown: in-flight requests left: %d", inflight)
+```
+
+Nửa startup làm warm-up (pool, cache) rồi bật `app.state.ready`. Nửa shutdown chỉ chạy khi uvicorn đã xả xong, nên dòng log nó ghi, số request còn dang dở, là bằng chứng cho việc xả diễn ra thế nào. Để xem, demo khởi động image thật, bắt đầu một request kéo dài hai giây, và nửa giây sau gửi lệnh dừng (`demo/p12_drain.py`):
+
+<TerminalOutput command="python p12_drain.py stop (docker stop -t 5, nửa giây sau khi một request 2 giây bắt đầu)" label="Docker 29.8.2 · uvicorn 0.54.0 · captured Nov 2026" caption="Request kết thúc với 200. Log cho thấy thứ tự: Shutting down, chờ connection xong, rồi dòng của lifespan báo còn 0. Exit code 0, sau 1.9 giây.">
+```text
+stop: in-flight request -> HTTP 200 after 2.0s
+stop: container stopped in 1.9s, exit code 0
+    INFO:     Started server process [1]
+    INFO:     Waiting for application startup.
+    INFO:     startup: warming up for 0.0s (release dev)
+    INFO:     startup: ready
+    INFO:     Application startup complete.
+    INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+    INFO:     192.168.215.1:59604 - "GET /readyz HTTP/1.1" 200 OK
+    INFO:     Shutting down
+    INFO:     Waiting for connections to close. (CTRL+C to force quit)
+    INFO:     192.168.215.1:59606 - "GET /slow HTTP/1.1" 200 OK
+    INFO:     Waiting for application shutdown.
+    INFO:     shutdown: in-flight requests left: 0
+    INFO:     Application shutdown complete.
+    INFO:     Finished server process [1]
+```
+</TerminalOutput>
+
+<TerminalOutput command="python p12_drain.py kill (docker kill: SIGKILL, không báo trước)" label="Docker 29.8.2 · captured Nov 2026" caption="Cùng request, cùng thời điểm, nhưng không có signal nào để bắt. Client nhận lỗi giao thức sau 0.6 giây, log không có dòng shutdown nào, exit code 137 (128 cộng 9, SIGKILL).">
+```text
+kill: in-flight request -> RemoteProtocolError after 0.6s
+kill: container stopped in 0.3s, exit code 137
+    INFO:     Started server process [1]
+    INFO:     Waiting for application startup.
+    INFO:     startup: warming up for 0.0s (release dev)
+    INFO:     startup: ready
+    INFO:     Application startup complete.
+    INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+    INFO:     192.168.215.1:56712 - "GET /readyz HTTP/1.1" 200 OK
+```
+</TerminalOutput>
+
+<BeP12Shutdown />
+
+### Cái bẫy PID 1
+
+Trong container, process đầu tiên là PID 1, và `SIGTERM` được gửi cho nó. Nếu PID 1 là một shell rồi shell đó mới khởi động uvicorn, thì shell nhận signal, và shell không chuyển tiếp nó đi. Đó là cách một script khởi động kiểu `migrate && start` hiện ra trước nền tảng. Cùng một image, khởi động hai cách, `docker stop -t 5` cho từng cách:
+
+<TerminalOutput command="python p12_drain.py shell (entrypoint: sh -c 'echo migrating && uvicorn ...')" label="Docker 29.8.2 · captured Nov 2026" caption="uvicorn là PID 6 và không bao giờ nghe thấy signal. Không có dòng Shutting down; docker chờ đủ 5 giây rồi kill, exit code 137. Request chỉ sống sót vì nó ngắn hơn thời gian chờ.">
+```text
+shell: in-flight request -> HTTP 200 after 2.0s
+shell: container stopped in 5.3s, exit code 137
+    migrating
+    INFO:     Started server process [6]
+    INFO:     Waiting for application startup.
+    INFO:     startup: warming up for 0.0s (release dev)
+    INFO:     startup: ready
+    INFO:     Application startup complete.
+    INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+    INFO:     192.168.215.1:56742 - "GET /readyz HTTP/1.1" 200 OK
+    INFO:     192.168.215.1:56750 - "GET /slow HTTP/1.1" 200 OK
+```
+</TerminalOutput>
+
+Với `exec uvicorn ...` trong cùng script đó, uvicorn thay thế shell, trở thành PID 1, và lần chạy hệt như capture đầu: request trả 200 và container thoát với mã 0 sau 1.8 giây (lần chạy thứ tư, `python p12_drain.py exec`). Đó cũng là lý do `CMD` của Dockerfile là list JSON: dạng shell chạy qua `/bin/sh -c`.
+
+<BeP12Pid1 />
+
+### Trong Kubernetes
+
+Kubelet làm ba việc theo thứ tự: chạy hook `preStop` của container, gửi `SIGTERM` cho PID 1, và sau `terminationGracePeriodSeconds` (mặc định 30) thì gửi `SIGKILL`. Cùng lúc đó, control plane bắt đầu gỡ pod khỏi danh sách endpoint của Service. Hai việc này chạy song song, nên có một khoảng ngắn Service vẫn gửi request tới pod mà server của nó đã ngừng listen. Một lệnh `preStop` sleep giữ pod tiếp tục phục vụ qua khoảng đó. Nó nằm đầu phần `lifecycle` của Deployment, xem đầy đủ ở mục 6.
+
+<TerminalOutput command="kubectl logs -f <pod> ở một shell, kubectl delete pod ở shell khác" label="kind v0.27.0 · Kubernetes 1.32.2 · captured Nov 2026" caption="Cùng quá trình shutdown nhìn từ trong pod: các dòng startup trước, rồi Shutting down và hook lifespan báo 0 request đang dở.">
+```text
+INFO:     Started server process [1]
+INFO:     Waiting for application startup.
+INFO:     startup: warming up for 3.0s (release v4)
+INFO:     startup: ready
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     shutdown: in-flight requests left: 0
+INFO:     Application shutdown complete.
+INFO:     Finished server process [1]
+```
+</TerminalOutput>
+
+<TerminalOutput command="kubectl describe pod (event của startup probe), rồi time kubectl delete pod --wait" label="kind v0.27.0 · Kubernetes 1.32.2 · captured Nov 2026" caption="Xóa một pod có preStop sleep 5 giây mất 6.45 giây: năm giây sleep và khoảng một giây rưỡi để xả và thoát. Dòng đầu là startup probe, sẽ nói ở mục sau.">
+```text
+$ kubectl describe pod (events about the startup probe)
+ Warning Unhealthy 4m14s (x3 over 4m16s) kubelet Startup probe failed: Get "http://10.244.0.98:8000/livez": dial tcp 10.244.0.98:8000: connect: connection refused
+$ time kubectl delete pod --wait
+pod "clue-api-9c7455867-q2hbx" deleted
+real 6.45
+user 0.03
+sys 0.01
+```
+</TerminalOutput>
+
+---
+
+## 5. Ba probe, ba câu hỏi
+
+Probe là một phép kiểm tra kubelet chạy lên container theo lịch. Kubernetes có ba loại, và dễ nhầm vì trong YAML chúng trông y hệt: một đường dẫn HTTP, một port, một chu kỳ. Khác nhau ở chỗ Kubernetes làm gì khi một probe fail. Startup probe cho biết app đã boot xong chưa, và chừng nào nó chưa thành công thì hai loại kia chưa chạy. Readiness probe cho biết lúc này có nên gửi traffic vào đây không. Liveness probe cho biết container có đang kẹt và cần restart không.
+
+Demo cho chúng hai endpoint, và giữ mỗi câu trả lời trung thực. `demo/p12_app.py`:
+
+```python
+@app.get("/livez")
+async def livez() -> dict:
+    # Liveness: "is this process stuck?" Never check dependencies here.
+    return {"alive": True}
+
+
+@app.get("/readyz")
+async def readyz(response: Response) -> dict:
+    # Readiness: "should traffic come here right now?"
+    if not app.state.ready:
+        response.status_code = 503
+    return {"ready": app.state.ready}
+```
+
+`/livez` chỉ trả lời "event loop vẫn chạy được một hàm", và không gì hơn. `/readyz` đọc cái cờ mà lifespan bật sau warm-up. Deployment nối chúng lại (các dòng này là phần cuối của `demo/p12/k8s/deploy-graceful.yaml`):
+
+```yaml
+          startupProbe:
+            httpGet:
+              path: /livez
+              port: 8000
+            periodSeconds: 1
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8000
+            periodSeconds: 1
+            failureThreshold: 2
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 8000
+            periodSeconds: 10
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 5
+```
+
+Startup probe dùng `/livez` với ngân sách 30 giây (`failureThreshold` nhân `periodSeconds`); nó giữ cho liveness check không giết một pod boot chậm. Readiness probe chạy mỗi giây trong suốt đời pod. Để xem từng loại làm gì, demo có hai "nút bấm": `/debug/unready` lật cái cờ (một dependency "biến mất"), và `/debug/hang` chặn event loop bằng một lệnh sleep.
+
+<TerminalOutput command="curl -X POST pod-A/debug/unready; curl -X POST pod-B/debug/hang (qua kubectl port-forward, mỗi pod một cái)" label="kind v0.27.0 · Kubernetes 1.32.2 · captured Nov 2026" caption="Pod A: READY 0/1 và RESTARTS 0, IP của nó hiện ready=false trong EndpointSlice. Pod B ngừng trả lời, nên readiness probe fail, rồi liveness probe fail, container bị restart, RESTARTS 1.">
+```text
+$ curl -X POST pod-A/debug/unready
+{"ready":false}
+$ kubectl get pods
+NAME                       READY   STATUS    RESTARTS   AGE
+clue-api-9c7455867-2dkmq   0/1     Running   0          26s
+clue-api-9c7455867-h9x2r   1/1     Running   0          21s
+clue-api-9c7455867-hq464   1/1     Running   0          31s
+$ kubectl get endpointslice  (ready flag per pod IP)
+10.244.0.94 ready=true
+10.244.0.95 ready=false
+10.244.0.96 ready=true
+$ curl -X POST pod-B/debug/hang
+(client gave up after 2s)
+$ kubectl get pods
+NAME                       READY   STATUS    RESTARTS     AGE
+clue-api-9c7455867-2dkmq   0/1     Running   0            94s
+clue-api-9c7455867-h9x2r   1/1     Running   1 (8s ago)   89s
+clue-api-9c7455867-hq464   1/1     Running   0            99s
+$ kubectl describe pod pod-B  (Events, trimmed)
+  Warning  Unhealthy  48s (x2 over 58s)   kubelet            Liveness probe failed: Get "http://10.244.0.96:8000/livez": context deadline exceeded (Client.Timeout exceeded while awaiting headers)
+  Warning  Unhealthy  46s (x21 over 67s)  kubelet            Readiness probe failed: Get "http://10.244.0.96:8000/readyz": context deadline exceeded (Client.Timeout exceeded while awaiting headers)
+  Normal   Killing    38s                 kubelet            Container api failed liveness probe, will be restarted
+```
+</TerminalOutput>
+
+<BeP12Probes />
+
+Quy tắc rút ra là cái mà manifest do AI viết hay phá. Readiness được phép nhìn vào dependency, vì "chưa ready" chỉ đưa pod ra khỏi vòng phục vụ. Liveness thì không, vì "không sống" sẽ restart nó. Nếu `/livez` kiểm tra database, một đợt database chập chờn ngắn sẽ restart mọi pod cùng lúc, biến một cú chớp thành sự cố, lại thêm một lần khởi động nguội ở giữa.
+
+---
+
+## 6. Rollout và đếm
+
+Rolling update thay pod từng ít một. Nó có làm rớt request hay không phụ thuộc vào lúc nào Kubernetes tin rằng pod mới nhận được traffic, và lúc nào tin rằng pod cũ đã đi. Demo đo chính điều đó. `demo/p12_load.py` gửi 20 request mỗi giây, mỗi request một connection mới với timeout 3 giây, và đếm những gì người gọi sẽ thấy. Hàm làm việc đó:
+
+```python
+async def one(client: httpx.AsyncClient, url: str, t0: float, out: dict) -> None:
+    second = int(time.monotonic() - t0)
+    try:
+        r = await client.get(url)
+        if r.status_code == 200:
+            out["ok"] += 1
+            out["releases"][r.json()["release"]] += 1
+        else:
+            out["errors"][f"HTTP {r.status_code}"] += 1
+            out["by_second"][second] += 1
+    except httpx.HTTPError as exc:
+        out["errors"][type(exc).__name__] += 1
+        out["by_second"][second] += 1
+```
+
+Trong lúc nó chạy, `demo/p12_rollout.py` đổi release bằng `kubectl set env`, khiến Kubernetes thay mọi pod. Nó từ chối chạy trừ khi `KUBECONFIG` được đặt và context hiện tại là `kind-p12`, nên không bao giờ chạm vào cluster khác. Đầu tiên là Deployment ngây thơ: không probe, không `preStop`, strategy mặc định.
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clue-api
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: clue-api
+  template:
+    metadata:
+      labels:
+        app: clue-api
+    spec:
+      containers:
+        - name: api
+          image: clue-api:p12
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: clue-api-config
+            - secretRef:
+                name: clue-api-secret
+          env:
+            - name: CLUE_RELEASE
+              value: v1
+```
+
+<TerminalOutput command="python p12_rollout.py deploy-naive.yaml v2 (20 request mỗi giây)" label="kind v0.27.0 · Kubernetes 1.32.2 · httpx 0.28.1 · captured Nov 2026" caption="67 trên 351 request lỗi, dồn thành một cụm từ giây 5 tới giây 10. Mình chạy trường hợp này ba lần và được 60, 67 và 67 lỗi; con số lệch chút, hình dạng thì không.">
+```text
+rolling out v2 with deploy-naive.yaml
+sent=351 ok=284 failed=67
+errors: {'RemoteProtocolError': 67}
+answered by release: {'v1': 123, 'v2': 161}
+failed requests per second: {5: 7, 6: 10, 7: 12, 8: 18, 9: 13, 10: 7}
+```
+</TerminalOutput>
+
+Vì sao: không có readiness probe, Kubernetes coi pod là ready ngay khi container khởi động. App sau đó mất 3 giây trong lifespan để warm-up, suốt lúc ấy uvicorn chưa listen, mà Service đã gửi cho nó phần traffic của nó. Các pod cũ bị bảo dừng ngay cùng khoảnh khắc. Đây là kiểu `Running` không có nghĩa là ready.
+
+<BeP12Rollout />
+
+Thêm readiness probe và đặt `maxUnavailable: 0` một cách tường minh (với ba replica, giá trị mặc định cũng ra đúng bằng vậy), không đổi gì khác:
+
+<TerminalOutput command="python p12_rollout.py deploy-ready.yaml v3 (20 request mỗi giây)" label="kind v0.27.0 · Kubernetes 1.32.2 · httpx 0.28.1 · captured Nov 2026" caption="0 trên 548 lỗi. Pod mới giờ chỉ vào Service khi /readyz trả 200, và pod cũ chỉ rời đi sau đó.">
+```text
+rolling out v3 with deploy-ready.yaml
+sent=548 ok=548 failed=0
+errors: none
+answered by release: {'v1': 247, 'v3': 301}
+failed requests per second: none
+```
+</TerminalOutput>
+
+Rồi tới manifest đầy đủ, có startup và liveness probe, `terminationGracePeriodSeconds`, và lệnh `preStop` sleep. `demo/p12/k8s/deploy-graceful.yaml`, toàn bộ file:
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: clue-api
+spec:
+  replicas: 3
+  strategy:
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: clue-api
+  template:
+    metadata:
+      labels:
+        app: clue-api
+    spec:
+      terminationGracePeriodSeconds: 30
+      containers:
+        - name: api
+          image: clue-api:p12
+          imagePullPolicy: IfNotPresent
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - configMapRef:
+                name: clue-api-config
+            - secretRef:
+                name: clue-api-secret
+          env:
+            - name: CLUE_RELEASE
+              value: v1
+          startupProbe:
+            httpGet:
+              path: /livez
+              port: 8000
+            periodSeconds: 1
+            failureThreshold: 30
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8000
+            periodSeconds: 1
+            failureThreshold: 2
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: 8000
+            periodSeconds: 10
+            failureThreshold: 3
+          lifecycle:
+            preStop:
+              sleep:
+                seconds: 5
+```
+
+<TerminalOutput command="python p12_rollout.py deploy-graceful.yaml v4 (20 request mỗi giây)" label="kind v0.27.0 · Kubernetes 1.32.2 · httpx 0.28.1 · captured Nov 2026" caption="0 trên 523 lỗi. Rollout lâu hơn, khoảng 14 giây thay pod so với khoảng 5 giây của bản ngây thơ, vì mỗi pod mới phải ready thì pod cũ mới bắt đầu rút.">
+```text
+rolling out v4 with deploy-graceful.yaml
+sent=523 ok=523 failed=0
+errors: none
+answered by release: {'v1': 236, 'v4': 287}
+failed requests per second: none
+```
+</TerminalOutput>
+
+<BeP12Errors />
+
+Mình muốn nói thẳng điều này đo được gì. Readiness là thứ quan trọng ở đây: nó đưa lần chạy từ 67 lỗi về không. Lệnh `preStop` sleep không làm đổi con số nào trong cluster này. Mình cũng chạy bản chỉ readiness và bản manifest đầy đủ ở 100 request mỗi giây, cả hai vẫn bằng không (0 trên 2615 và 0 trên 2542 request lỗi). Một cluster kind một node cập nhật routing gần như tức thì, nên mình không tái hiện được cái khoảng mà Service vẫn gửi traffic tới pod đã ngừng listen. Trên cluster lớn hơn, có load balancer bên ngoài, việc lan truyền đó mất lâu hơn, và tài liệu Kubernetes mô tả các bước song song khiến khoảng ấy có thể xảy ra. Mình vẫn giữ lệnh sleep như một lớp bảo hiểm, và sẽ không dám nêu con số cho nó.
+
+---
+
+## 7. Thói quen review
+
+Lần deploy của Knight không có phép kiểm tra nào nói được "server này không giống mấy server kia". Của bạn có thể có năm phép, và mỗi phép là thứ bài này đã đo. Hãy đi qua chúng khi AI đưa bạn một Dockerfile và một manifest:
+
+<BeP12Checklist />
+
+| AI viết | Hãy hỏi | Cách sửa trong bài |
+|---|---|---|
+| Default trên một secret, hoặc module config chứa giá trị thật | Điều gì xảy ra khi biến bị thiếu? | `Settings` với field bắt buộc (mục 1) |
+| `FROM python:3.13`, `COPY . .`, không có `USER` | Nặng bao nhiêu, chạy bằng user nào? | Hai stage, `USER 10001` (mục 2) |
+| `CMD uvicorn ...` hoặc shell wrapper | SIGTERM có tới uvicorn không? | Dạng exec, `exec` trong script (mục 4) |
+| Không có probe, hoặc một `/health` cho mọi thứ | Kubernetes làm gì khi nó fail? | `/livez` đơn giản, `/readyz` trung thực (mục 5) |
+| Rollout mặc định, không có `maxUnavailable: 0` | Một lần deploy làm gì với công suất? | Readiness + `maxUnavailable: 0` (mục 6) |
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+- **12-factor config**: các setting khác nhau theo môi trường nằm trong biến môi trường, không bao giờ trong code, để một bản build chạy ở mọi nơi.
+- **Multi-stage build**: Dockerfile có nhiều stage `FROM` mà chỉ stage cuối được ship, để công cụ build không lọt vào image.
+- **PID 1**: process đầu tiên trong container. Nó nhận signal dừng, nên phải là chính app chứ không phải shell.
+- **`SIGTERM` / `SIGKILL`**: một yêu cầu dừng mà process bắt và xử lý được, và một lệnh kill mà nó không bắt được.
+- **Graceful shutdown (thoát êm)**: ngừng nhận việc mới, làm nốt việc đang cầm, trả tài nguyên, rồi thoát.
+- **Lifespan**: hàm startup-và-shutdown của FastAPI; code trước `yield` chạy lúc boot, code sau nó chạy lúc thoát.
+- **Liveness / readiness / startup probe**: kẹt thì restart tôi; chỉ gửi traffic khi tôi sẵn sàng; chờ tôi boot xong.
+- **Rolling update**: thay pod từng ít một để luôn có pod đang phục vụ.
+</Concepts>
+
+## Điểm rút ra (Key takeaways)
+
+- Nạp config từ môi trường vào một object `Settings` có kiểm tra hợp lệ, không cho secret default nào, và để giá trị thiếu dừng process trước khi nó kịp listen.
+- Build image hai stage, chạy bằng user không phải root, và viết `CMD` ở dạng exec để app là PID 1 và nghe được `SIGTERM`.
+- Trong cluster, mở rộng bằng replica, mỗi pod một process uvicorn.
+- Rolling update chỉ không downtime khi readiness nói thật: trong demo nó đưa số request lỗi từ 67 về 0.
+- Giữ liveness đơn giản, readiness trung thực, và kiểm chứng chúng bằng cách cố tình phá.
+
+## Câu hỏi ôn tập (Review questions)
+
+1. Vì sao `database_url` không có default trong `Settings`, và capture ở mục 1 cho thấy điều gì xảy ra thay vào đó? (mục 1)
+2. Chuyện gì hỏng nếu `CMD` ở dạng shell, dù app vẫn khởi động bình thường? (mục 4)
+3. Vì sao liveness probe kiểm tra database có thể biến một đợt gián đoạn ngắn thành dài? (mục 5)
+4. Trong các capture rollout, thay đổi nào đưa số lỗi về không, và lệnh preStop sleep đã đổi được gì? (mục 6)
+5. Một pod hiện `Running` nhưng `READY 0/1`. Nó có nhận traffic không, và probe nào quyết định điều đó? (mục 5)
+
+</Vi>
