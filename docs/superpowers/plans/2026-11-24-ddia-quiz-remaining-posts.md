@@ -16,7 +16,7 @@
 
 - [x] **Wave 1** `feat/ddia-quiz-wave-1`: `trade-offs-in-data-systems-architecture`, `sharding-keys-ranges-hashes-hot-spots`, `transactions-acid-isolation-anomalies-serializability`
 - [ ] **Wave 2**: `trouble-with-distributed-systems-networks-clocks-fencing`, `consistency-consensus-linearizability-logical-clocks-raft`, `batch-processing-unix-pipes-shuffle-dataflow-lakehouse`
-- [ ] **Wave 3**: `stream-processing-event-logs-cdc-windows-joins`, `philosophy-of-streaming-systems-unbundling-end-to-end-correctness`, `doing-the-right-thing-ethics-privacy-algorithmic-bias`
+- [x] **Wave 3** `feat/ddia-quiz-wave-3`: `stream-processing-event-logs-cdc-windows-joins`, `philosophy-of-streaming-systems-unbundling-end-to-end-correctness`, `doing-the-right-thing-ethics-privacy-algorithmic-bias`
 
 ## Steps per wave
 
