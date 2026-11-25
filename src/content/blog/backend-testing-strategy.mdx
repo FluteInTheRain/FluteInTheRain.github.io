@@ -34,6 +34,13 @@ import BeP09MockLie from '../../components/mdx/BeP09MockLie.astro';
 import BeP09OverrideGap from '../../components/mdx/BeP09OverrideGap.astro';
 import BeP09Contract from '../../components/mdx/BeP09Contract.astro';
 import BeP09P95 from '../../components/mdx/BeP09P95.astro';
+import BeP09Orbiter from '../../components/mdx/BeP09Orbiter.astro';
+import BeP09FakeCopy from '../../components/mdx/BeP09FakeCopy.astro';
+import BeP09OverrideLeak from '../../components/mdx/BeP09OverrideLeak.astro';
+import BeP09DbPerTest from '../../components/mdx/BeP09DbPerTest.astro';
+import BeP09E2ESteps from '../../components/mdx/BeP09E2ESteps.astro';
+import BeP09BurstFlow from '../../components/mdx/BeP09BurstFlow.astro';
+import BeP09Mutate from '../../components/mdx/BeP09Mutate.astro';
 import heroDummies from '../../assets/blog/backend-testing-strategy/crash-test-dummies-1984.jpg';
 
 <En>
@@ -45,6 +52,8 @@ import heroDummies from '../../assets/blog/backend-testing-strategy/crash-test-d
 On 23 September 1999, NASA's Mars Climate Orbiter reached Mars and was lost. The Mishap Investigation Board's report names the root cause in one sentence: "the failure to use metric units in the coding of a ground software file." The thruster data that the ground software produced was in pound-force seconds. The navigation software read the same file as newton-seconds. The software on the spacecraft itself used metric units and was correct, and the trajectory modelers "assumed the data was provided in metric units per the requirements." By the time of Mars insertion the spacecraft was about 170 kilometers lower than planned.
 
 Each half was consistent with its own assumption. The mistake lived in the join between them, and the board says what was missing there: "End-to-end testing to validate the small forces ground software performance and its applicability to the specification did not appear to be accomplished."
+
+<BeP09Orbiter />
 
 Your backend has the same joins: service and database, handler and caller, your code and the token library. A test suite is how you check them cheaply and often. It has to be able to fail when a join is wrong, and AI-written suites are good at the opposite. They go green in seconds, because they were written to match the code beside them. Two habits do most of the damage: **mocking the very thing under test**, and **asserting only that the status was 200**.
 
@@ -121,6 +130,8 @@ class FakeCaseRepository:
 ```
 
 The `replace(...)` calls are the point of the file. A dict that stores the very object you pass in would hide a class of bugs, because the caller and the "database" would share one object. A real database does not do that: it copies on write and hands you a fresh object on read. The fake copies in both directions, so a change you forget to save stays forgotten, exactly as it would in production. (Post 4's `p04_override.py` used a simpler fake that stored the objects themselves; that is fine for showing the seam, and it is the fake that the next section's bug would sail through.)
+
+<BeP09FakeCopy />
 
 Two fixtures in `conftest.py` hand it out: `fake_repo`, and `service`, a `CaseService` built on it. A test then reads like the rule it protects:
 
@@ -300,6 +311,8 @@ def test_open_returns_201_and_the_case(client, fake_repo):
 
 The cleanup line is not optional. `app` is a module-level object that every test in the process shares, so an override that is never cleared leaks into the next test, and you get a failure that depends on test order. Put the cleanup after the `yield` of a fixture and it runs even when the test fails.
 
+<BeP09OverrideLeak />
+
 `TestClient` is synchronous and drives the app from its own thread. When a test itself needs to be `async`, or needs to share an event loop with something else, use `httpx.AsyncClient` with `ASGITransport` instead. It reaches the same app, still without a network:
 
 ```python
@@ -338,6 +351,8 @@ def sql_sessions(tmp_path, monkeypatch):
 ```
 
 `tmp_path` is pytest's own per-test temporary folder, so the file is new for every test, and pytest cleans up old ones. `monkeypatch.setattr` swaps `p05_db.SessionLocal` and puts it back when the test ends. A second, quieter trap sits at the top of `conftest.py`: `p05_db` reads `DATABASE_URL` the moment it is imported, so the environment variable is set *before* any demo module is imported. Without it, merely importing `p05_app` would create a `clue.db` in whatever folder you ran pytest from.
+
+<BeP09DbPerTest />
 
 ```python
 @pytest.fixture
@@ -479,6 +494,8 @@ def test_a_valid_login_still_cannot_read_someone_elses_case(base_url):
 
 `scope="module"` starts the server once for the file, and the `finally` guarantees it is stopped even when a test fails. The second test is the one worth having: a *valid* login for bob still gets a 404 on alice's case. Two tests is the right number. Each extra end-to-end test pays that start-up again or shares state with the others.
 
+<BeP09E2ESteps />
+
 ---
 
 ## 6. Contract: pin what callers see
@@ -577,6 +594,8 @@ async def main(base: str, path: str, n: int, concurrency: int, bound_ms: float) 
 
 `asyncio.Semaphore` caps how many requests are in flight at once, which is what "5 at a time" means. The first request is a warm-up that pays for connection setup and first-call costs, and `sys.exit(1)` when the bound breaks lets any CI step treat it as a plain command. We pointed it at post 5's two endpoints: `/lazy`, which runs 101 queries for 100 cases (the N+1 problem), and `/eager`, the one-line fix that runs 2.
 
+<BeP09BurstFlow />
+
 <TerminalOutput command="uvicorn p05_nplus1:app --port 4339 — curl both endpoints, then python p09_burst.py http://127.0.0.1:4339 '<path>' 200 5 70, three times each" label="Python 3.13.16 · FastAPI 0.165.0 · SQLAlchemy 2.0.58 · uvicorn 0.54.0 · httpx 0.28.1 · captured Nov 2026" caption="Same data, same machine. /eager answers at p95 of 32 to 38 ms and passes the 70 ms bound every time; /lazy sits at 85 to 88 ms and fails it every time (exit 1). The laptop was busy with other jobs, which is why the figures are not pretty and why the check still works.">
 ```text
 {"cases":100,"queries":2,"ms":9.1}
@@ -645,6 +664,8 @@ FAILED tests_p09/test_unit_service.py::test_rulebook[open-None-close-True] - ...
 
 That is the whole review technique, and it is cheap: *mutate, then watch.* Delete a rule, flip a comparison, rename a field, and check that something goes red. A test that cannot fail on a deleted rule is a comment with extra steps.
 
+<BeP09Mutate />
+
 <Callout type="note" title="Do not chase the pyramid for its own sake">
 Seven layers of tests on a weekend project is as much ceremony as seven layers of code. Start with the unit tests of your rules and one or two end-to-end tests of the paths that earn money or hold data. Add API tests where wiring bites you, a contract snapshot when you have a caller you do not control, and a load check when you have a performance promise. The shape follows what has actually broken.
 </Callout>
@@ -662,6 +683,8 @@ The review habit, one line: **for every AI-written test, ask what change to the 
 Ngày 23/09/1999, tàu Mars Climate Orbiter của NASA tới sao Hỏa rồi mất. Báo cáo của hội đồng điều tra nêu nguyên nhân gốc trong một câu: "the failure to use metric units in the coding of a ground software file" (không dùng đơn vị hệ mét khi viết một file phần mềm mặt đất). Dữ liệu lực đẩy do phần mềm mặt đất tạo ra tính bằng pound-force giây. Phần mềm dẫn đường đọc đúng file đó như newton-giây. Phần mềm trên tàu dùng hệ mét và chạy đúng, còn nhóm dựng mô hình quỹ đạo thì "assumed the data was provided in metric units per the requirements" (cứ tin dữ liệu đã theo hệ mét như yêu cầu). Tới lúc vào quỹ đạo sao Hỏa, tàu thấp hơn kế hoạch khoảng 170 km.
 
 Mỗi nửa đều nhất quán với giả định của riêng nó. Lỗi nằm ở chỗ nối giữa hai nửa, và hội đồng nói rõ chỗ đó thiếu gì: "End-to-end testing to validate the small forces ground software performance and its applicability to the specification did not appear to be accomplished." (Có vẻ đã không có end-to-end test để kiểm phần mềm mặt đất khớp với đặc tả.)
+
+<BeP09Orbiter />
 
 Backend của bạn cũng đầy những chỗ nối như vậy: service với database, handler với bên gọi, code của bạn với thư viện token. Bộ test là cách rẻ và thường xuyên để kiểm các chỗ nối đó. Nó phải có khả năng fail khi chỗ nối sai, còn bộ test do AI viết lại giỏi chiều ngược lại: xanh trong vài giây vì được viết để khớp với đoạn code ngay bên cạnh. Hai thói quen gây hại nhiều nhất: **mock chính thứ đang được test**, và **chỉ assert status là 200**.
 
@@ -738,6 +761,8 @@ class FakeCaseRepository:
 ```
 
 Mấy lời gọi `replace(...)` là điểm mấu chốt của file. Một cái dict lưu đúng đối tượng bạn đưa vào sẽ che mất cả một loại bug, vì bên gọi và "database" dùng chung một đối tượng. Database thật không làm vậy: nó copy khi ghi và trả đối tượng mới khi đọc. Fake copy cả hai chiều, nên thay đổi bạn quên save sẽ mất, y như trên production. (Fake trong `p04_override.py` của bài 4 đơn giản hơn, lưu thẳng đối tượng; thế là đủ để chỉ ra chỗ nối, và đó chính là loại fake mà bug ở mục sau sẽ lọt qua.)
+
+<BeP09FakeCopy />
 
 Hai fixture trong `conftest.py` phát nó ra: `fake_repo` và `service`, một `CaseService` dựng trên fake đó. Test đọc lên giống chính cái luật nó bảo vệ:
 
@@ -917,6 +942,8 @@ def test_open_returns_201_and_the_case(client, fake_repo):
 
 Dòng dọn dẹp không phải tùy chọn. `app` là object cấp module mà mọi test trong process dùng chung, nên một override không được xóa sẽ rò sang test kế tiếp, và bạn gặp kiểu fail phụ thuộc thứ tự chạy. Đặt dọn dẹp sau `yield` của fixture thì nó chạy kể cả khi test fail.
 
+<BeP09OverrideLeak />
+
 `TestClient` là đồng bộ và chạy app từ một thread riêng. Khi chính test cần là `async`, hoặc cần dùng chung event loop với thứ khác, hãy dùng `httpx.AsyncClient` với `ASGITransport`. Nó tới cùng app đó, vẫn không qua mạng:
 
 ```python
@@ -955,6 +982,8 @@ def sql_sessions(tmp_path, monkeypatch):
 ```
 
 `tmp_path` là thư mục tạm riêng cho từng test của pytest, nên file mới tinh cho mỗi test, và pytest tự dọn những thư mục cũ. `monkeypatch.setattr` đổi `p05_db.SessionLocal` rồi trả lại khi test kết thúc. Còn một cái bẫy âm thầm hơn ở đầu `conftest.py`: `p05_db` đọc `DATABASE_URL` ngay lúc được import, nên biến môi trường phải đặt *trước* mọi lần import module demo. Không có nó, chỉ riêng việc import `p05_app` cũng đẻ ra một `clue.db` trong thư mục bạn chạy pytest.
+
+<BeP09DbPerTest />
 
 ```python
 @pytest.fixture
@@ -1096,6 +1125,8 @@ def test_a_valid_login_still_cannot_read_someone_elses_case(base_url):
 
 `scope="module"` bật server một lần cho cả file, và `finally` bảo đảm nó được tắt kể cả khi test fail. Test thứ hai là cái đáng có: một lần đăng nhập *hợp lệ* của bob vẫn nhận 404 với case của alice. Hai test là con số hợp lý. Mỗi test end-to-end thêm vào lại phải trả phí khởi động, hoặc chia sẻ trạng thái với các test khác.
 
+<BeP09E2ESteps />
+
 ---
 
 ## 6. Contract: ghim lại thứ bên gọi nhìn thấy
@@ -1194,6 +1225,8 @@ async def main(base: str, path: str, n: int, concurrency: int, bound_ms: float) 
 
 `asyncio.Semaphore` giới hạn số request bay cùng lúc, chính là nghĩa của "5 cái một lúc". Request đầu là lượt khởi động, trả giá cho việc dựng kết nối và chi phí lần gọi đầu, còn `sys.exit(1)` khi vượt ngưỡng cho phép bất kỳ bước CI nào coi nó như một lệnh thường. Mình trỏ nó vào hai endpoint của bài 5: `/lazy`, chạy 101 query cho 100 case (bài toán N+1), và `/eager`, bản sửa một dòng chạy 2 query.
 
+<BeP09BurstFlow />
+
 <TerminalOutput command="uvicorn p05_nplus1:app --port 4339 — curl cả hai endpoint, rồi python p09_burst.py http://127.0.0.1:4339 '<path>' 200 5 70, mỗi endpoint ba lần" label="Python 3.13.16 · FastAPI 0.165.0 · SQLAlchemy 2.0.58 · uvicorn 0.54.0 · httpx 0.28.1 · captured Nov 2026" caption="Cùng dữ liệu, cùng máy. /eager có p95 từ 32 đến 38 ms và lần nào cũng qua ngưỡng 70 ms; /lazy nằm ở 85 đến 88 ms và lần nào cũng trượt (exit 1). Laptop lúc đó đang bận việc khác, nên số không đẹp, và check vẫn chạy được.">
 ```text
 {"cases":100,"queries":2,"ms":9.1}
@@ -1261,6 +1294,8 @@ FAILED tests_p09/test_unit_service.py::test_rulebook[open-None-close-True] - ...
 </TerminalOutput>
 
 Đó là toàn bộ kỹ thuật duyệt, và nó rẻ: *phá rồi nhìn.* Xóa một luật, lật một phép so sánh, đổi tên một trường, rồi xem có thứ gì đỏ không. Một test không fail nổi khi luật bị xóa thì chỉ là một dòng comment tốn thêm công chạy.
+
+<BeP09Mutate />
 
 <Callout type="note" title="Đừng đuổi theo kim tự tháp vì chính nó">
 Bảy tầng test cho một dự án cuối tuần cũng là nghi thức như bảy tầng code. Bắt đầu bằng unit test cho các luật và một hai test end-to-end cho những đường đi sinh ra tiền hoặc giữ dữ liệu. Thêm API test ở chỗ việc nối dây hay cắn bạn, contract snapshot khi có bên gọi bạn không kiểm soát, và load check khi có lời hứa về hiệu năng. Hình dạng đi theo những gì thực sự đã hỏng.

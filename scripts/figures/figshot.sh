@@ -18,7 +18,8 @@ ROOT=$(pwd)
 [ -f "$ROOT/astro.config.mjs" ] || { echo "run from the repo root" >&2; exit 2; }
 CHROME="${CHROME:-/Applications/Google Chrome.app/Contents/MacOS/Google Chrome}"
 HEIGHT="${FIGSHOT_HEIGHT:-1600}"
-PAGE_DIR="$ROOT/src/pages/tmp-figshot"; SHOT_DIR="$ROOT/public/tmp-figshot"
+TAG="${FIGSHOT_TAG:-tmp-figshot}"  # set a unique FIGSHOT_TAG per agent when several share one worktree
+PAGE_DIR="$ROOT/src/pages/$TAG"; SHOT_DIR="$ROOT/public/$TAG"
 PROFILE=$(mktemp -d)
 cleanup() { rm -rf "$PAGE_DIR" "$SHOT_DIR" "$PROFILE"; }
 trap cleanup EXIT
@@ -42,7 +43,7 @@ done
 
 cat > "$SHOT_DIR/dark.html" <<HTML
 <!doctype html><html><head><meta charset="utf-8"></head><body style="margin:0">
-<iframe src="/tmp-figshot/?lang=vi" width="1000" height="$HEIGHT" style="border:0;display:block"
+<iframe src="/$TAG/?lang=vi" width="1000" height="$HEIGHT" style="border:0;display:block"
   onload="this.contentDocument.documentElement.setAttribute('data-theme','dark')"></iframe>
 </body></html>
 HTML
@@ -50,14 +51,14 @@ HTML
 BASE="http://localhost:$PORT"
 # wait for the dev server to pick up the new page
 for _ in $(seq 1 40); do
-  code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/tmp-figshot/" || true)
+  code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/$TAG/" || true)
   [ "$code" = 200 ] && break; sleep 0.5
 done
 [ "${code:-}" = 200 ] || { echo "temp page did not load (HTTP ${code:-none}); is astro dev running on $PORT here?" >&2; exit 1; }
 
 shoot() { "$CHROME" --headless=new --disable-gpu --user-data-dir="$PROFILE" --hide-scrollbars \
   --window-size=1000,"$HEIGHT" --virtual-time-budget=6000 --screenshot="$1" "$2" >/dev/null 2>&1; }
-shoot "$OUT/figs-light-en.png" "$BASE/tmp-figshot/?lang=en"
-shoot "$OUT/figs-light-vi.png" "$BASE/tmp-figshot/?lang=vi"
-shoot "$OUT/figs-dark-vi.png"  "$BASE/tmp-figshot/dark.html"
+shoot "$OUT/figs-light-en.png" "$BASE/$TAG/?lang=en"
+shoot "$OUT/figs-light-vi.png" "$BASE/$TAG/?lang=vi"
+shoot "$OUT/figs-dark-vi.png"  "$BASE/$TAG/dark.html"
 ls "$OUT"/figs-*.png
