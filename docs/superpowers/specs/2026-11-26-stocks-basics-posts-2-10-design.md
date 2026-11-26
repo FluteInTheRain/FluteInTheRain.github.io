@@ -43,3 +43,23 @@ Every post ships together with:
   - VSDC custody fee: 0.27 VND per share per month.
   - Personal Income Tax (PIT): 0.1% of gross sale proceeds on every sell order (win or lose); 5% withheld on cash dividends.
 - **Settlement:** Since 29 Aug 2022, T+2 settlement completes before 13:00 on the second working day after trade `T` (weekends/holidays skipped); shares bought on `T` are sellable in the afternoon session (`13:00–14:45`) of `T+2`. Cash advance (*ứng trước tiền bán*) incurs calendar-day interest until T+2 settlement.
+
+## Market Mechanics Truth Table (Wave B)
+
+- **Dividends & Corporate Actions (Post 5 — HOSE/HNX/UPCoM & Circular 96/111):**
+  - **Par value (*Mệnh giá*):** All listed Vietnamese shares have a statutory par value of **10,000 VND**. A "15% cash dividend" always means `15% × 10,000 = 1,500 VND/share`, never 15% of market price.
+  - **Ex-date (*Ngày GDKHQ*) vs Record date (*Ngày ĐKCC*):** Under T+2 settlement, *Ngày GDKHQ* falls **1 working day before *Ngày ĐKCC*** (`GDKHQ = ĐKCC - 1 working day`). Buying on `GDKHQ - 1` or earlier grants the right; buying on `GDKHQ` or later does NOT.
+  - **Adjusted Reference Price (*Giá tham chiếu điều chỉnh*) on Ex-Date morning:**
+    $$P' = \frac{P_{t-1} + I_1 \cdot P_{r1} + I_2 \cdot P_{r2} - C}{1 + I_1 + I_2}$$
+    where $P_{t-1}$ is prior close, $C$ is cash dividend per share (VND), $I_1$ is rights issue ratio with subscription price $P_{r1}$, and $I_2$ is stock dividend / bonus ratio ($P_{r2} = 0$). Round $P'$ to the venue's valid tick size (10 / 50 / 100 VND on HOSE, 100 VND on HNX/UPCoM).
+  - **Taxes & Delivery:** Cash dividends incur **5% Personal Income Tax (PIT)** withheld at source before payout (2–6 weeks later). Stock dividends / bonus shares pay **0% tax upon receipt** (since Jan 2023 tax timing deferred until eventual sale: 0.1% PIT + 5% par-based tax at sale depending on decree mechanics; note beginners primarily experience 0% deduction on credit date and a 1–3 month VSDC depository lockup before shares become tradable).
+- **Vietnamese Financial Statements (Post 6 — VAS / Circular 200 & 202):**
+  - Read **Consolidated (*Hợp nhất*)** and **Audited / Reviewed** statements (*Báo cáo kiểm toán / soát xét*), starting with the **Auditor's Opinion** (*Unqualified / Chấp nhận toàn phần* vs *Qualified / Ngoại trừ* vs *Disclaimer / Từ chối*).
+  - **Balance Sheet:** Check Cash + Cash Equivalents + Short-term Financial Investments (bank term deposits) against Short-term + Long-term Financial Debt (*Vay và nợ thuê tài chính ngắn/dài hạn*), plus Receivables (*Phải thu*) and Inventory (*Hàng tồn kho*) relative to Total Assets.
+  - **Income Statement:** Separate **Gross Profit** (*Lợi nhuận gộp*) and **Core Operating Profit** from **Financial Income / Other Income** (*Doanh thu tài chính / Thu nhập khác*) so one-off asset/FX gains aren't mistaken for recurring business growth.
+  - **Cash Flow Statement:** Compare Net Profit (*LNST*) against **Operating Cash Flow (*Lưu chuyển tiền thuần từ HĐKD — CFO*)** over multiple quarters (`CFO >= Net Profit` confirms cash collection).
+- **Valuation Ratios in Context (Post 7):**
+  - Core identity: $\text{P/B} = \text{P/E} \times \text{ROE}$ where $\text{P/E} = P / \text{EPS}$, $\text{P/B} = P / \text{BVPS}$, and $\text{ROE} = \text{Net Profit} / \text{Average Equity}$.
+  - **Vietnamese EPS nuance:** Statutory TTM EPS deducts allocations to the **Bonus & Welfare Fund (*Quỹ khen thưởng, phúc lợi*)**, making screen-displayed P/E slightly higher than raw `Market Cap / Net Profit`.
+  - **DuPont 3-factor ROE:** $\text{ROE} = \text{Net Profit Margin} \times \text{Asset Turnover} \times \text{Financial Leverage}$ — distinguishes high-margin / high-turnover operators from debt-heavy ROE.
+  - **Sector & Cycle fit:** Banks/Brokers/Real Estate hinge on `P/B` vs sustainable `ROE`; stable Consumer/Tech use `P/E` & Earnings Yield ($E/P$) vs deposit rate (`5–6%`); heavy Cyclicals (steel, fertilizer, shipping) look "cheapest" (`P/E = 4–6x`) at cycle peaks right before earnings collapse (*nghịch lý P/E chu kỳ*).

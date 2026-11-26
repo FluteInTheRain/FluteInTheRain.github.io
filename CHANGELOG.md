@@ -3,6 +3,29 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-26 — Bổ sung ảnh tài liệu & case thực tế từ VSDC, HOSE và BCTC FPT 2025 cho Bài 2–7
+
+- **Đã làm:** Theo góp ý của user muốn mỗi ví dụ đều bám hình ảnh và số liệu thật ngoài đời để người đọc nắm sát thực tế, trên nhánh `feat/stocks-basics-wave-b` (PR #77) đã thay toàn bộ ảnh minh họa chung (giữ nguyên Hero Visual Metaphor đầu bài) bằng **14 ảnh chụp tài liệu chính thức Việt Nam** (≤ 1400px, đã kiểm tra sắc nét từng ảnh) và viết lại phần phân tích + SVG bám từng dòng thật:
+  - **Bài 2–4 (Wave A):** Nhúng sơ đồ đặt lệnh T→T+2, bảng đơn vị lô 100 / bước giá / biên độ ±7%/±20%, bảng giờ phiên + quy tắc cấm sửa/hủy ATO/ATC & giữ thứ tự khi giảm khối lượng (`HTGD_Quy dinh can biet khi GDCK tren HOSE_T2.2026.pdf`), và thông báo chia cổ tức qua Thành viên lưu ký VSDC (`vsdc.vn/en/ad1/195957`).
+  - **Bài 5 — Cổ tức & quyền:** Nhúng và phân tích từng dòng thông báo thật của VSDC cho `VNM` (18,5% = 1.850 đ/CP trên mệnh giá 10.000, ĐKCC 29/06/2026, trả 17/07/2026), Thuyết minh 24 BCTC kiểm toán FPT 2025 (15% CP thưởng + 2 đợt 10% tiền mặt + 10,26 triệu CP ESOP) và sự kiện kép `ABB` (thưởng 100:12 + quyền mua `MIRABB262` 100:50 giá 10.000 đ hiệu lực 14/12/2026–20/01/2027).
+  - **Bài 6 — Đọc BCTC 5 phút:** Nhúng trực tiếp Báo cáo kiểm toán PwC Việt Nam (`HAN 4324`, 19/03/2026), Cân đối kế toán `Mẫu B 01` (Tiền `110` 10.522B + Tiền gửi `120` 29.631B = 40.153B vs Vay `320+338` 21.074B → +19.080B Tiền ròng), KQKD `Mẫu B 02` (Doanh thu 70.113B, Lãi gộp 25.889B) & Lưu chuyển tiền tệ `Mẫu B 03` (`CFO mã 20` +10.136B năm 2025 / +11.704B năm 2024) của FPT; cập nhật `SbP06BalanceSheetRadar` và `SbP06ProfitWaterfall` dùng số kiểm toán thật của FPT.
+  - **Bài 7 — PE, PB & ROE:** Nhúng Thuyết minh 25 FPT 2025 (trừ 510,2B Quỹ KTPL kéo EPS từ 5.516 về 5.216 đ và điều chỉnh lùi EPS 2024 từ 4.944 xuống 4.292 đ sau đợt thưởng 222,2 triệu CP), bảng điểm nhấn 5 năm 2021–2025 (tính DuPont thật của FPT: biên 13,4% × vòng quay 0,88× × đòn bẩy 2,01× = ~23,6% ROE), và phân tích case thép `HPG` giai đoạn 2021–2023 (34.520B → 8.444B → 6.800B); cập nhật `SbP07EpsWelfareTrap` theo số thật Note 25 của FPT.
+  - Kiểm thử lại đầy đủ: `post-check.sh` sạch trên cả 6 bài (`framing=0 hex=0 http=200 overlay=0 badIslands=0`), `figshot.sh` 3 SVG vừa sửa sạch trên light/dark EN/VI, `node --test src/utils/quiz.test.ts` (92/92 pass) và `npm run build` (108 trang) không lỗi.
+- **Ai quyết:** User yêu cầu ví dụ trong bài dựa trên hình ảnh/case thật để phân tích sát thực tế. AI thu thập tài liệu chính thức, cắt ghép ảnh, viết lại phân tích & kiểm thử.
+- **Chưa chốt:** Chờ user review & merge PR #77 trước khi triển khai Wave C (Bài 8–10, cũng áp dụng chuẩn case & ảnh tài liệu thật ngay từ đầu).
+
+## 2026-11-26 — Merge Wave A (PR #76) & hoàn thành Wave B (Bài 5–7) series Chứng khoán cơ bản + 120 câu quiz
+
+- **Đã làm:**
+  - Merge PR #76 (`feat/stocks-basics-wave-a`) vào `main` và cắt nhánh `feat/stocks-basics-wave-b`, lập plan Wave B (`docs/superpowers/plans/2026-11-26-stocks-basics-wave-b.md`) + truth table Wave B trong spec.
+  - Hoàn thành trọn vẹn 3 bài giữa (`draft: true`) cùng ảnh Wikimedia Commons, sơ đồ SVG, demo React và 120 câu quiz:
+    - **Bài 5 — `shareholder-rights-dividends-corporate-actions`** (quyền cổ đông, ĐHĐCĐ, ngày GDKHQ vs ĐKCC T+2, công thức điều chỉnh giá tham chiếu cổ tức tiền mặt / cổ tức cổ phiếu / thưởng / phát hành thêm, thuế 5% cổ tức tiền mặt & bán CP thưởng): 3 ảnh Wikimedia Commons (`hero.jpg`, `agm-hall.jpg`, `stock-split-cert.jpg`), 6 sơ đồ SVG `SbP05*`, demo React `SbP05ExDateCalculatorDemo`, 3 hình quiz `Sbq05*` và 40 câu quiz (`domain: 'human'`).
+    - **Bài 6 — `reading-financial-statements-investors-5-minutes`** (3 báo cáo BCTC trong 5 phút: KQKD, CĐKT, LCTT; đọc nhanh từ cuối lên ở LCTT trước KQKD; nhận diện 4 điểm đỏ lợi nhuận giấy / CFO âm kéo dài / phải thu & tồn kho phình to / ý kiến kiểm toán): 3 ảnh Wikimedia Commons (`hero.jpg`, `inventory-warehouse.jpg`, `audit-report.jpg`), 6 sơ đồ SVG `SbP06*`, demo React `SbP06StatementScannerDemo`, 3 hình quiz `Sbq06*` và 40 câu quiz (`domain: 'human'`).
+    - **Bài 7 — `pe-pb-roe-valuation-ratios-in-context`** (Vốn hóa vs Giá CP, P/E chuẩn vs EPS pha loãng & bẫy chu kỳ, P/B vs ROE ngân hàng/chu kỳ, phân tách DuPont 3 biến, định giá gắn với tăng trưởng & bối cảnh ngành): 3 ảnh Wikimedia Commons (`hero.jpg`, `steel-mill.png`, `bank-hq.jpg`), 6 sơ đồ SVG `SbP07*`, demo React `SbP07ValuationContextDemo`, 3 hình quiz `Sbq07*` và 40 câu quiz (`domain: 'human'`).
+  - Kiểm tra tự động `post-check.sh` trên cả 3 bài (`framing=0 hex=0 http=200 overlay=0 badIslands=0`) + kiểm tra trực quan toàn bộ 18 SVG qua `figshot.sh` (light EN, light VI, dark VI); sửa tên icon `DiagramIcon` hợp lệ (`ok`, `money`, `stack`) và rút gọn 2 nhãn tiếng Việt ở Bài 5; `node --test src/utils/quiz.test.ts` (92/92 pass) và `npm run build` (108 trang) sạch.
+- **Ai quyết:** User chốt merge PR #76 rồi làm tiếp Wave B theo chuẩn Wave A (`draft: true`, `domain: 'human'`). AI thực hiện nội dung, hình ảnh, demo và kiểm thử.
+- **Chưa chốt:** Chờ user review & merge PR Wave B trước khi triển khai Wave C (Bài 8–10); quyết định thời điểm gỡ `draft: true`.
+
 ## 2026-11-26 — Viết Wave A (Bài 2–4) series Chứng khoán cơ bản + 120 câu quiz ôn tập
 
 - **Đã làm:** Trên nhánh `feat/stocks-basics-wave-a`, viết spec tổng cho Bài 2–10 (`docs/superpowers/specs/2026-11-26-stocks-basics-posts-2-10-design.md`), plan Wave A (`docs/superpowers/plans/2026-11-26-stocks-basics-wave-a.md`) và hoàn thành trọn vẹn 3 bài đầu (`draft: true`):
