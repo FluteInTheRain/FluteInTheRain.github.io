@@ -8,6 +8,8 @@ export type Level = 'remember' | 'understand' | 'apply' | 'analyze' | 'evaluate'
 export type Track = 'interview' | 'ai' | 'case';
 /** `code`: the skill is writing or reviewing code, so AI-output questions fit. `human`: judgement skills (investing, UX), so they do not. */
 export type QuizDomain = 'code' | 'human';
+/** why the question exists, independent of its level: a Why question can sit at Understand, Apply, Analyze or Evaluate */
+export type QKind = 'basic' | 'why' | 'predict' | 'diagnose' | 'whatif';
 export type QType = 'single' | 'scenario' | 'diagram' | 'code-output' | 'ai-review' | 'ai-advice' | 'multi';
 
 export type QuizMedia =
@@ -24,6 +26,8 @@ export interface QuizQuestion {
   track: Track;
   type: QType;
   difficulty: 1 | 2 | 3 | 4 | 5;
+  /** optional purpose tag, required for quiz matrix v2 posts */
+  kind?: QKind;
   /** the post section this question grows from */
   topic: string;
   stem: L10n;

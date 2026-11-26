@@ -3,6 +3,12 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-26 — Ma trận quiz v2 (20 hoặc 40 câu, trục `kind`) cho series mới
+
+- **Đã làm:** nhánh `feat/quiz-matrix-v2`. Thêm `src/data/quiz/matrix.ts` (mục tiêu + bảng slot cho 40 và 20 câu), trường `kind` tùy chọn trong `QuizQuestion`, `QUIZ_MATRIX` trong `domains.ts` (không có mục = v1), test mới trong `quiz.test.ts` (tổng v2 và bảng slot cộng đúng), `npm run check:quiz-mix`, spec `docs/superpowers/specs/2026-11-26-quiz-matrix-v2.md` có phần nghiên cứu và nguồn. Mức độ v2 (40 câu): Remember 5 / Understand 8 / Apply 12 / Analyze 9 / Evaluate 6; loại câu (kind) là trục riêng, một loại nằm ở nhiều mức.
+- **Ai quyết:** user chốt hướng (kết hợp khung trọng số cũ với câu hỏi dài hơn, "vì sao", "nếu thì sao"; bài lớn 40 câu, bài nhẹ 20 câu; áp dụng cho series mới, quiz cũ giữ nguyên). Con số do AI nghiên cứu và đề xuất.
+- **Chưa chốt:** cho phép câu 3 đáp án (nghiên cứu nghiêng về 3 đáp án; cần đổi validator); chưa có quiz v2 nào trong repo này (series mới sẽ dùng).
+
 ## 2026-11-26 — Merge Wave B (PR #77) và xuất bản bài chứng khoán 2–7
 
 - **Đã làm:** merge PR #77; nhánh `content/publish-stocks-2-7` bật `draft: false` cho `vietnam-stock-market-venues-open-account`, `vietnam-order-types-order-book-ato-atc`, `stock-fees-taxes-settlement-t2-vsd`, `shareholder-rights-dividends-corporate-actions`, `reading-financial-statements-investors-5-minutes`, `pe-pb-roe-valuation-ratios-in-context`. Repo không còn bài draft.

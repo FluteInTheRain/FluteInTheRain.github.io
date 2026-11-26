@@ -52,3 +52,9 @@ export const QUIZ_DOMAIN: Record<string, QuizDomain> = {
   'reading-financial-statements-investors-5-minutes': 'human',
   'pe-pb-roe-valuation-ratios-in-context': 'human',
 };
+
+// Which target mix a quiz follows. Absent = 'v1' (the original DDIA mix: 8 sets, Remember 3 / Understand 7 / Apply 14 / Analyze 9 / Evaluate 7).
+// 'v2' = src/data/quiz/matrix.ts: 40 questions (8 sets) for big posts or 20 (4 sets) for light ones, every question tagged with a `kind`.
+// New series use v2. Spec: docs/superpowers/specs/2026-11-26-quiz-matrix-v2.md
+export const QUIZ_MATRIX: Record<string, 'v1' | 'v2'> = {
+};
