@@ -19,7 +19,7 @@
 ## Tasks
 
 - [x] **Step 1:** Branch, plan, brief, `domains.ts` (`human` + `QUIZ_MATRIX` v2 entries).
-- [ ] **Step 2:** Post 8 `macro-industry-what-moves-stock-prices` (act `read`): MDX, `SbP08*` figures, demo, 40-question quiz (`Sbq08*`).
-- [ ] **Step 3:** Post 9 `margin-trading-risks-beginner-psychology` (act `discipline`): MDX, `SbP09*`, demo, 40-question quiz (`Sbq09*`).
-- [ ] **Step 4:** Post 10 `portfolio-dca-first-investment-plan` (act `discipline`): MDX, `SbP10*`, demo, 20-question quiz (`Sbq10*`).
-- [ ] **Step 5:** QA (`post-check.sh`, `figshot.sh`, quiz screenshots, `npm run check:quiz-mix <slug>`, `node --test`, `npm run build`), CHANGELOG, PR; wait for Khang.
+- [x] **Step 2:** Post 8 `macro-industry-what-moves-stock-prices` (act `read`): MDX, `SbP08*` figures, demo, 40-question quiz (`Sbq08*`).
+- [x] **Step 3:** Post 9 `margin-trading-risks-beginner-psychology` (act `discipline`): MDX, `SbP09*`, demo, 40-question quiz (`Sbq09*`).
+- [x] **Step 4:** Post 10 `portfolio-dca-first-investment-plan` (act `discipline`): MDX, `SbP10*`, demo, 20-question quiz (`Sbq10*`).
+- [x] **Step 5:** QA (`post-check.sh`, `figshot.sh`, quiz screenshots, `npm run check:quiz-mix <slug>`, `node --test`, `npm run build`), CHANGELOG, PR; wait for Khang.
