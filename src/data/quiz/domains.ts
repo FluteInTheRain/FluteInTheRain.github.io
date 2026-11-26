@@ -50,4 +50,5 @@ export const QUIZ_DOMAIN: Record<string, QuizDomain> = {
   'stock-fees-taxes-settlement-t2-vsd': 'human',
   'shareholder-rights-dividends-corporate-actions': 'human',
   'reading-financial-statements-investors-5-minutes': 'human',
+  'pe-pb-roe-valuation-ratios-in-context': 'human',
 };
