@@ -3,6 +3,16 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-26 — Wave C: bài 8–10 series Chứng khoán cơ bản (nháp) + quiz v2
+
+- **Đã làm:** nhánh `feat/stocks-basics-wave-c`. Plan `docs/superpowers/plans/2026-11-26-stocks-basics-wave-c.md`, brief `docs/superpowers/specs/2026-11-26-stocks-basics-wave-c-brief.md`, 3 bài `draft: true`, mỗi bài có case và ảnh tài liệu thật, sơ đồ SVG, 1 demo, quiz `human` theo ma trận v2 (`QUIZ_MATRIX` trong `domains.ts`):
+  - **Bài 8 `macro-industry-what-moves-stock-prices`:** lãi suất điều hành NHNN 9–10/2022 (QĐ 1606, 1809), biên độ tỷ giá, VN-Index 2022, luân chuyển ngành 2023; 10 sơ đồ + demo tỷ giá/lãi suất; quiz 40 câu. Công ty xuất/nhập khẩu trong ví dụ là giả định (có nói rõ trong câu).
+  - **Bài 9 `margin-trading-risks-beginner-psychology`:** QĐ 87/QĐ-UBCK, chính sách margin MBS 24/09/2025, phiên 10/11/2022, dư nợ margin 2022; 11 sơ đồ + demo; quiz 40 câu. Bài nói rõ chưa chắc QĐ 87 còn hiệu lực sau Luật Chứng khoán 2024.
+  - **Bài 10 `portfolio-dca-first-investment-plan`:** FLC 2022 (dữ liệu SSI iBoard, quy định HOSE), DCA so với mua một lần trên VN-Index; 11 sơ đồ + demo; quiz 20 câu.
+  - Kiểm: `post-check.sh` sạch cả 3 bài, `npm run check:quiz-mix` đúng mục tiêu, `node --test` 115/115, build 120 trang (bài nháp không build).
+- **Ai quyết:** user chốt làm Wave C và dùng ma trận v2. AI chọn cỡ quiz 40/40/20 theo 5 tiêu chí (bài 10 chấm 3/5 nên theo luật là 40, AI chọn 20 vì là bài tổng kết; user có thể nâng).
+- **Chưa chốt:** user duyệt rồi mới bật `draft: false`. Nguồn QĐ 1606/1809/1747 từ trang sao chép, chưa có bản NHNN chính thức. Bài 4 ghi lãi margin "thường 10%–14%" còn tháng 11/2022 có nguồn 13–15%; chưa chỉnh bài 4. Bài 8 và 9 chưa đối chiếu hết ảnh quiz; bài 10 nói về bài 8, 9 theo khung series.
+
 ## 2026-11-26 — Ma trận quiz v2 (20 hoặc 40 câu, trục `kind`) cho series mới
 
 - **Đã làm:** nhánh `feat/quiz-matrix-v2`. Thêm `src/data/quiz/matrix.ts` (mục tiêu + bảng slot cho 40 và 20 câu), trường `kind` tùy chọn trong `QuizQuestion`, `QUIZ_MATRIX` trong `domains.ts` (không có mục = v1), test mới trong `quiz.test.ts` (tổng v2 và bảng slot cộng đúng), `npm run check:quiz-mix`, spec `docs/superpowers/specs/2026-11-26-quiz-matrix-v2.md` có phần nghiên cứu và nguồn. Mức độ v2 (40 câu): Remember 5 / Understand 8 / Apply 12 / Analyze 9 / Evaluate 6; loại câu (kind) là trục riêng, một loại nằm ở nhiều mức.
