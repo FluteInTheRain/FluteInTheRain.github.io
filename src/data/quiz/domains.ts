@@ -45,4 +45,5 @@ export const QUIZ_DOMAIN: Record<string, QuizDomain> = {
   'ai-trading-signals': 'code',
   // Stocks basics series: investing judgement
   'what-is-a-stock-ownership-dividends': 'human',
+  'vietnam-stock-market-venues-open-account': 'human',
 };
