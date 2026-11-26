@@ -3,6 +3,12 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-26 — Merge Wave B (PR #77) và xuất bản bài chứng khoán 2–7
+
+- **Đã làm:** merge PR #77; nhánh `content/publish-stocks-2-7` bật `draft: false` cho `vietnam-stock-market-venues-open-account`, `vietnam-order-types-order-book-ato-atc`, `stock-fees-taxes-settlement-t2-vsd`, `shareholder-rights-dividends-corporate-actions`, `reading-financial-statements-investors-5-minutes`, `pe-pb-roe-valuation-ratios-in-context`. Repo không còn bài draft.
+- **Ai quyết:** user ("duyệt và merge, tất cả đều publish hết").
+- **Chưa chốt:** Wave C (bài 8–10: vĩ mô & ngành, margin & tâm lý, danh mục & DCA) chưa viết.
+
 ## 2026-11-26 — Bổ sung ảnh tài liệu & case thực tế từ VSDC, HOSE và BCTC FPT 2025 cho Bài 2–7
 
 - **Đã làm:** Theo góp ý của user muốn mỗi ví dụ đều bám hình ảnh và số liệu thật ngoài đời để người đọc nắm sát thực tế, trên nhánh `feat/stocks-basics-wave-b` (PR #77) đã thay toàn bộ ảnh minh họa chung (giữ nguyên Hero Visual Metaphor đầu bài) bằng **14 ảnh chụp tài liệu chính thức Việt Nam** (≤ 1400px, đã kiểm tra sắc nét từng ảnh) và viết lại phần phân tích + SVG bám từng dòng thật:
