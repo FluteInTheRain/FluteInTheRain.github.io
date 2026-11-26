@@ -3,6 +3,18 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-26 — Merge Wave A (PR #76) & hoàn thành Wave B (Bài 5–7) series Chứng khoán cơ bản + 120 câu quiz
+
+- **Đã làm:**
+  - Merge PR #76 (`feat/stocks-basics-wave-a`) vào `main` và cắt nhánh `feat/stocks-basics-wave-b`, lập plan Wave B (`docs/superpowers/plans/2026-11-26-stocks-basics-wave-b.md`) + truth table Wave B trong spec.
+  - Hoàn thành trọn vẹn 3 bài giữa (`draft: true`) cùng ảnh Wikimedia Commons, sơ đồ SVG, demo React và 120 câu quiz:
+    - **Bài 5 — `shareholder-rights-dividends-corporate-actions`** (quyền cổ đông, ĐHĐCĐ, ngày GDKHQ vs ĐKCC T+2, công thức điều chỉnh giá tham chiếu cổ tức tiền mặt / cổ tức cổ phiếu / thưởng / phát hành thêm, thuế 5% cổ tức tiền mặt & bán CP thưởng): 3 ảnh Wikimedia Commons (`hero.jpg`, `agm-hall.jpg`, `stock-split-cert.jpg`), 6 sơ đồ SVG `SbP05*`, demo React `SbP05ExDateCalculatorDemo`, 3 hình quiz `Sbq05*` và 40 câu quiz (`domain: 'human'`).
+    - **Bài 6 — `reading-financial-statements-investors-5-minutes`** (3 báo cáo BCTC trong 5 phút: KQKD, CĐKT, LCTT; đọc nhanh từ cuối lên ở LCTT trước KQKD; nhận diện 4 điểm đỏ lợi nhuận giấy / CFO âm kéo dài / phải thu & tồn kho phình to / ý kiến kiểm toán): 3 ảnh Wikimedia Commons (`hero.jpg`, `inventory-warehouse.jpg`, `audit-report.jpg`), 6 sơ đồ SVG `SbP06*`, demo React `SbP06StatementScannerDemo`, 3 hình quiz `Sbq06*` và 40 câu quiz (`domain: 'human'`).
+    - **Bài 7 — `pe-pb-roe-valuation-ratios-in-context`** (Vốn hóa vs Giá CP, P/E chuẩn vs EPS pha loãng & bẫy chu kỳ, P/B vs ROE ngân hàng/chu kỳ, phân tách DuPont 3 biến, định giá gắn với tăng trưởng & bối cảnh ngành): 3 ảnh Wikimedia Commons (`hero.jpg`, `steel-mill.png`, `bank-hq.jpg`), 6 sơ đồ SVG `SbP07*`, demo React `SbP07ValuationContextDemo`, 3 hình quiz `Sbq07*` và 40 câu quiz (`domain: 'human'`).
+  - Kiểm tra tự động `post-check.sh` trên cả 3 bài (`framing=0 hex=0 http=200 overlay=0 badIslands=0`) + kiểm tra trực quan toàn bộ 18 SVG qua `figshot.sh` (light EN, light VI, dark VI); sửa tên icon `DiagramIcon` hợp lệ (`ok`, `money`, `stack`) và rút gọn 2 nhãn tiếng Việt ở Bài 5; `node --test src/utils/quiz.test.ts` (92/92 pass) và `npm run build` (108 trang) sạch.
+- **Ai quyết:** User chốt merge PR #76 rồi làm tiếp Wave B theo chuẩn Wave A (`draft: true`, `domain: 'human'`). AI thực hiện nội dung, hình ảnh, demo và kiểm thử.
+- **Chưa chốt:** Chờ user review & merge PR Wave B trước khi triển khai Wave C (Bài 8–10); quyết định thời điểm gỡ `draft: true`.
+
 ## 2026-11-26 — Viết Wave A (Bài 2–4) series Chứng khoán cơ bản + 120 câu quiz ôn tập
 
 - **Đã làm:** Trên nhánh `feat/stocks-basics-wave-a`, viết spec tổng cho Bài 2–10 (`docs/superpowers/specs/2026-11-26-stocks-basics-posts-2-10-design.md`), plan Wave A (`docs/superpowers/plans/2026-11-26-stocks-basics-wave-a.md`) và hoàn thành trọn vẹn 3 bài đầu (`draft: true`):
