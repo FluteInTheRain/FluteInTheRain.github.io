@@ -7,7 +7,8 @@ import {
   loadProgress, saveProgress, headingSlugPairs, englishAnchors, type Store,
 } from './quiz.ts';
 import type { QuizSet, QuizQuestion, Level, Track, QuizDomain } from '../data/quiz/types.ts';
-import { QUIZ_DOMAIN } from '../data/quiz/domains.ts';
+import { QUIZ_DOMAIN, QUIZ_MATRIX } from '../data/quiz/domains.ts';
+import { MATRIX_V2 } from '../data/quiz/matrix.ts';
 
 const ROOT = path.resolve(import.meta.dirname, '../..');
 const QUIZ_DIR = path.join(ROOT, 'src/data/quiz');
@@ -236,7 +237,29 @@ for (const slug of contentDirs) {
     }
   });
 
-  if (files.length === 8) {
+  if (QUIZ_MATRIX[slug] === 'v2') {
+    test(`content ${slug}: matrix v2 totals`, () => {
+      const qs = files.flatMap((f) => read(path.join(dir, f)).questions);
+      assert.ok(qs.length === 40 || qs.length === 20, `${slug}: a v2 quiz has 20 or 40 questions, found ${qs.length}`);
+      const want = MATRIX_V2[qs.length as 20 | 40];
+      assert.equal(files.length, want.sets, `${slug}: ${qs.length} questions are ${want.sets} sets`);
+      const count = (get: (q: QuizQuestion) => string) => {
+        const m: Record<string, number> = {};
+        for (const q of qs) m[get(q)] = (m[get(q)] ?? 0) + 1;
+        return m;
+      };
+      const near = (got: Record<string, number>, w: Record<string, number>, label: string) => {
+        for (const [k, n] of Object.entries(w)) assert.ok(Math.abs((got[k] ?? 0) - n) <= 1, `${label} ${k}: ${got[k] ?? 0} questions, target ${n}`);
+      };
+      assert.ok(qs.every((q) => q.kind), `${slug}: every question needs a kind`);
+      near(count((q) => q.level), want.levels, 'level');
+      near(count((q) => q.kind as string), want.kinds, 'kind');
+      const tr = count((q) => q.track);
+      const second = domainOf(slug) === 'human' ? (tr.case ?? 0) : (tr.ai ?? 0);
+      assert.ok(Math.abs((tr.interview ?? 0) - want.perTrack) <= 1 && Math.abs(second - want.perTrack) <= 1, `${slug}: tracks ${JSON.stringify(tr)}, target ${want.perTrack} each`);
+      assert.ok(Math.abs(qs.filter((q) => q.type === 'multi').length - want.multi) <= 1, `${slug}: multi-select count`);
+    });
+  } else if (files.length === 8) {
     test(`content ${slug}: totals across the 8 sets`, () => {
       const qs = files.flatMap((f) => read(path.join(dir, f)).questions);
       const count = <K extends string>(get: (q: QuizQuestion) => K) => {
@@ -257,4 +280,33 @@ for (const slug of contentDirs) {
       assert.deepEqual(multiSets, ['04', '06', '07', '08']);
     });
   }
+}
+
+// ---- quiz matrix v2: the recommended slot tables must add up to the targets exactly
+for (const size of [40, 20] as const) {
+  test(`matrix v2 ${size}: slot tables add up to the targets`, () => {
+    const m = MATRIX_V2[size];
+    const slots = m.slots.flat();
+    assert.equal(m.slots.length, m.sets);
+    assert.ok(m.slots.every((set) => set.length === 5), 'every set has 5 slots');
+    assert.equal(slots.length, size);
+    const tally = (get: (s: (typeof slots)[number]) => string) => slots.reduce<Record<string, number>>((acc, s) => ((acc[get(s)] = (acc[get(s)] ?? 0) + 1), acc), {});
+    assert.deepEqual(tally((s) => s.level), m.levels);
+    assert.deepEqual(tally((s) => s.kind), m.kinds);
+    const tracks = tally((s) => s.track);
+    assert.equal(tracks.interview, m.perTrack);
+    assert.equal(tracks.second, m.perTrack);
+    assert.equal(slots.filter((s) => s.multi).length, m.multi);
+    assert.equal(Object.values(m.levels).reduce((a, b) => a + b, 0), size);
+    // inside a set the levels never go down, and every set mixes at least three kinds
+    const order = ['remember', 'understand', 'apply', 'analyze', 'evaluate'];
+    for (const set of m.slots) {
+      const idx = set.map((s) => order.indexOf(s.level));
+      assert.deepEqual(idx, [...idx].sort((a, b) => a - b), 'levels rise inside a set');
+      assert.ok(new Set(set.map((s) => s.kind)).size >= 3, 'a set mixes at least three kinds');
+    }
+    // sets are sorted by average level, easiest first
+    const avg = m.slots.map((set) => set.reduce((n, s) => n + order.indexOf(s.level), 0) / 5);
+    assert.deepEqual(avg, [...avg].sort((a, b) => a - b), 'sets sorted easy to hard');
+  });
 }
