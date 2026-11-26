@@ -49,4 +49,5 @@ export const QUIZ_DOMAIN: Record<string, QuizDomain> = {
   'vietnam-order-types-order-book-ato-atc': 'human',
   'stock-fees-taxes-settlement-t2-vsd': 'human',
   'shareholder-rights-dividends-corporate-actions': 'human',
+  'reading-financial-statements-investors-5-minutes': 'human',
 };
