@@ -14,7 +14,7 @@ Two other agents work in the same tree on the other posts at the same time.
 
 Do NOT edit anything else (`domains.ts` already declares your post `human` and v2; `series.ts` already lists the slugs),
 do not commit, stage, stash, checkout or reset, do not run `npm run build`, do not start a dev server
-(one runs on port 4430 for this tree). The lead commits.
+(one runs on port 4399 for this tree). The lead commits.
 
 ## Read first
 
@@ -47,8 +47,8 @@ do not commit, stage, stash, checkout or reset, do not run `npm run build`, do n
 - **Figures:** 1 per 200–250 words of English prose (about 8–11), none of them redrawing a document image; tokens not hex,
   light and dark, bilingual `tspan data-lang-en/vi`, `DiagramIcon` (x, y = icon centre) from `src/data/diagram-icons.ts`,
   plain polygon arrowheads, no overlap. A figure may chart numbers from a source you cite. Check every figure with
-  `FIGSHOT_TAG=<your slug-based tag> scripts/figures/figshot.sh <port 4430> <scratch-out> <FigureName>...` in light EN,
-  light VI and dark VI, and `scripts/figures/post-check.sh <slug> main 4430`.
+  `FIGSHOT_TAG=<your slug-based tag> scripts/figures/figshot.sh <port 4399> <scratch-out> <FigureName>...` in light EN,
+  light VI and dark VI, and `scripts/figures/post-check.sh <slug> main 4399`.
 - **Demo:** one React island in `<DemoFrame>` with a static bilingual no-JS fallback; the numbers it computes are checked
   against a Python run you record in the plan notes of your report.
 
@@ -63,10 +63,10 @@ do not commit, stage, stash, checkout or reset, do not run `npm run build`, do n
 - Item rules: every wrong option is a real misconception; the correct option is not the longest; no filler tails; answerable
   from the card plus the post; a *why* has its reason in the post; a *whatif* uses only the post's rules and the explanation names the rule.
 - All maths verified with `python3` and the command + output recorded in `verifiedBy`.
-- `reread.anchor` = a real heading id of your post: `curl -s http://localhost:4430/blog/<slug>/ | grep -o '<h[23] id="[^"]*"' | sed 's/.*id="//;s/"//'`;
+- `reread.anchor` = a real heading id of your post: `curl -s http://localhost:4399/blog/<slug>/ | grep -o '<h[23] id="[^"]*"' | sed 's/.*id="//;s/"//'`;
   `reread.label` copies that heading's EN and VI text.
 - Checks per set: `node scripts/quiz/validate.ts src/data/quiz/<slug>/set-NN.json` prints `ok`; screenshots with
-  `node scripts/quiz/shot.mjs 4430 <slug> set-NN <scratch-out> --questions`. To read screenshots under the Read hook, crop
+  `node scripts/quiz/shot.mjs 4399 <slug> set-NN <scratch-out> --questions`. To read screenshots under the Read hook, crop
   400 px tiles `sips -c 400 1000 --cropOffset <y from 1> 1 <png> --out t.png`, then
   `sips -s format jpeg -s formatOptions 16 -Z 680 t.png --out tile.jpg` (keep `wc -l` under ~330).
   At the end: `npm run check:quiz-mix <slug>` and `node --test src/utils/quiz.test.ts` (report only failures in your slug).
