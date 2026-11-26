@@ -3,6 +3,16 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-26 — Viết Wave A (Bài 2–4) series Chứng khoán cơ bản + 120 câu quiz ôn tập
+
+- **Đã làm:** Trên nhánh `feat/stocks-basics-wave-a`, viết spec tổng cho Bài 2–10 (`docs/superpowers/specs/2026-11-26-stocks-basics-posts-2-10-design.md`), plan Wave A (`docs/superpowers/plans/2026-11-26-stocks-basics-wave-a.md`) và hoàn thành trọn vẹn 3 bài đầu (`draft: true`):
+  - **Bài 2 — `vietnam-stock-market-venues-open-account`** (HOSE / HNX / UPCoM, VSDC lưu ký, tiểu khoản `.1` vs `.6`, mở tài khoản eKYC): 3 ảnh Wikimedia Commons (`hero.png`, `hose-building.jpg`, `hnx-building.jpg`), 6 sơ đồ SVG `SbP02*`, demo React `SbP02VenueExplorerDemo`, 3 hình quiz `Sbq02*` và 40 câu quiz (`domain: 'human'`).
+  - **Bài 3 — `vietnam-order-types-order-book-ato-atc`** (Bảng điện, quy tắc 5 màu, đồng hồ phiên, ưu tiên Giá–Thời gian, khớp định kỳ ATO/ATC/PLO, bẫy lệnh MP): 3 ảnh Wikimedia Commons (`hero.jpg`, `trading-post.jpg`, `led-ticker.jpg`), 6 sơ đồ SVG `SbP03*`, demo React `SbP03OrderBookDemo`, 3 hình quiz `Sbq03*` và 40 câu quiz (`domain: 'human'`).
+  - **Bài 4 — `stock-fees-taxes-settlement-t2-vsd`** (3 khoản phí mua–giữ–bán, thuế bán 0,1% thu cả khi lỗ, giá hòa vốn thật & ma sát xoay vòng, lịch T+2 trước 13:00, bẫy ứng trước tiền bán qua cuối tuần/Tết): 3 ảnh Wikimedia Commons (`hero.jpg`, `clearing-house.jpg`, `kcbot-board.jpg`), 6 sơ đồ SVG `SbP04*`, demo React `SbP04TradeCostDemo`, 3 hình quiz `Sbq04*` và 40 câu quiz (`domain: 'human'`).
+  - Chạy `post-check.sh` (0 lỗi framing/hex/overlay/island) + kiểm tra trực quan 18 SVG qua `figshot.sh` (light EN, light VI, dark VI) và chỉnh 4 điểm chạm chữ tiếng Việt/label bar; `node --test src/utils/quiz.test.ts` (86/86 pass) và `npm run build` sạch.
+- **Ai quyết:** User chốt chia 3 wave (Bài 2–4, 5–7, 8–10), gộp quiz chung từng wave và giữ chuẩn `draft: true` chờ duyệt. AI thực hiện nội dung, hình ảnh, demo và kiểm thử.
+- **Chưa chốt:** Chờ user review & merge PR Wave A rồi triển khai tiếp Wave B (Bài 5–7) và Wave C (Bài 8–10); quyết định thời điểm gỡ `draft: true`.
+
 ## 2026-11-25 — Sửa ý lỏng ở 6 bài DDIA + nút menu bị đẩy khỏi màn hình trên điện thoại
 
 - **Ai quyết:** user ("làm cái 1 và 2").
