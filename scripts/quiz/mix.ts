@@ -1,13 +1,16 @@
 // Reports the question mix of each quiz post against the v2 matrix (src/data/quiz/matrix.ts).
-// Informational: exits 0 unless --strict. usage: node scripts/quiz/mix.ts [post-slug ...] [--strict]
+// Informational: exits 0 unless --strict. Only posts listed as 'v2' in QUIZ_MATRIX are checked; --v2 checks any post anyway.
+// usage: node scripts/quiz/mix.ts [post-slug ...] [--strict] [--v2]
 import fs from 'node:fs';
 import path from 'node:path';
 import { MATRIX_V2 } from '../../src/data/quiz/matrix.ts';
+import { QUIZ_MATRIX } from '../../src/data/quiz/domains.ts';
 
 const ROOT = path.resolve(import.meta.dirname, '../..');
 const DIR = path.join(ROOT, 'src/data/quiz');
 const args = process.argv.slice(2);
 const strict = args.includes('--strict');
+const asV2 = args.includes('--v2'); // also check a post that has not opted in
 const slugs = args.filter((a) => !a.startsWith('--'));
 const posts = slugs.length ? slugs : fs.readdirSync(DIR, { withFileTypes: true }).filter((d) => d.isDirectory() && !d.name.startsWith('_')).map((d) => d.name);
 let bad = 0;
@@ -17,6 +20,7 @@ for (const slug of posts) {
   const tally = (key: string) => qs.reduce((m: Record<string, number>, q) => ((m[q[key] ?? '(none)'] = (m[q[key] ?? '(none)'] ?? 0) + 1), m), {});
   const lv = tally('level'), tr = tally('track'), kd = tally('kind');
   console.log(`${slug}: ${files.length} sets, ${qs.length} questions | level ${JSON.stringify(lv)} | track ${JSON.stringify(tr)} | kind ${JSON.stringify(kd)}`);
+  if (!asV2 && QUIZ_MATRIX[slug] !== 'v2') { console.log('  (v1 mix: not checked against v2; use --v2 to compare anyway)'); continue; }
   const target = (MATRIX_V2 as any)[qs.length];
   if (!target) { console.log('  (not 20 or 40 questions: no v2 target)'); continue; }
   const off: string[] = [];
