@@ -46,4 +46,5 @@ export const QUIZ_DOMAIN: Record<string, QuizDomain> = {
   // Stocks basics series: investing judgement
   'what-is-a-stock-ownership-dividends': 'human',
   'vietnam-stock-market-venues-open-account': 'human',
+  'vietnam-order-types-order-book-ato-atc': 'human',
 };
