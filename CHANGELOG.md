@@ -3,6 +3,12 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-26 — Xuất bản bài chứng khoán 8–10 (series 10/10)
+
+- **Đã làm:** merge PR #80, nhánh `content/publish-stocks-8-10` bật `draft: false` cho `macro-industry-what-moves-stock-prices`, `margin-trading-risks-beginner-psychology`, `portfolio-dca-first-investment-plan`. Series `stocks-basics` đủ 10 bài, mỗi bài có quiz.
+- **Ai quyết:** user ("đăng hết luôn").
+- **Chưa chốt:** nguồn QĐ NHNN 1606/1809/1747 chưa có bản chính thức; lãi margin ở bài 4 (10–14%) lệch nguồn 11/2022 (13–15%) của bài 9; câu 3 đáp án của quiz v2.
+
 ## 2026-11-26 — Wave C: bài 8–10 series Chứng khoán cơ bản (nháp) + quiz v2
 
 - **Đã làm:** nhánh `feat/stocks-basics-wave-c`. Plan `docs/superpowers/plans/2026-11-26-stocks-basics-wave-c.md`, brief `docs/superpowers/specs/2026-11-26-stocks-basics-wave-c-brief.md`, 3 bài `draft: true`, mỗi bài có case và ảnh tài liệu thật, sơ đồ SVG, 1 demo, quiz `human` theo ma trận v2 (`QUIZ_MATRIX` trong `domains.ts`):
