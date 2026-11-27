@@ -8,7 +8,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { englishAnchors, validateSet } from '../../src/utils/quiz.ts';
-import { QUIZ_DOMAIN } from '../../src/data/quiz/domains.ts';
+import { QUIZ_DOMAIN, QUIZ_MATRIX } from '../../src/data/quiz/domains.ts';
 
 const files = process.argv.slice(2);
 if (files.length === 0) {
@@ -23,7 +23,7 @@ for (const f of files) {
   const domain = QUIZ_DOMAIN[slug];
   if (!domain) { console.error(`${f}: add "${slug}" to src/data/quiz/domains.ts (code or human)`); bad++; continue; }
   const set = JSON.parse(fs.readFileSync(f, 'utf8'));
-  const problems = validateSet(set, englishAnchors(fs.readFileSync(post, 'utf8')), domain);
+  const problems = validateSet(set, englishAnchors(fs.readFileSync(post, 'utf8')), domain, QUIZ_MATRIX[slug] === 'v2');
   if (path.basename(f) !== `${set.id}.json`) problems.push(`file name should be ${set.id}.json`);
   if (problems.length) { bad++; console.error(`${f}:\n  - ${problems.join('\n  - ')}`); }
   else console.log(`${f}: ok`);

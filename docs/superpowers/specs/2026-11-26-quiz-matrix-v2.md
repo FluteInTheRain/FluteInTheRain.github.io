@@ -126,5 +126,4 @@ A glossary, an introduction or a short overview post is normally 20. The choice 
 
 ## Open point
 
-The research favours three options. A question with only two plausible wrong ideas currently has to pad a fourth; a validator change could allow 3-option questions
-(`options` of 3 or 4). Not done: it needs Khang's decision.
+The research favours three options. A question with only two plausible wrong ideas should not have to pad a fourth. Since 2026-11-27, `validateSet` takes an `allowThreeOptions` flag, set for posts that opt in through `QUIZ_MATRIX` (v2): a single-answer question there may have 3 or 4 options. v1 posts stay at 4, and multi questions stay at 5. No existing question was changed; use 3 options only when a real third wrong idea does not exist.

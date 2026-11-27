@@ -11,7 +11,12 @@ Không cần đọc lại toàn bộ chat history — file này là nguồn sự
   - **Rà quiz bài 8 và 9:** chạy lại mọi phép tính (đúng hết), sửa 6 lỗi nhỏ. Đáng kể nhất: hình `Sbq08BandRuler` in sẵn đáp án 24.819 của câu s02q4, đã bỏ số biên khỏi nhãn và alt; câu s05q4 của bài 9 ghi "bài nói 1,07%" trong khi đó là số tự tính của quiz.
   - **Quiz bài 10 lên 40 câu:** thêm `set-05..08` (20 câu, đủ `verifiedBy`), `QUIZ_MATRIX` ghi 40 câu, link cuối bài sửa "20" thành "40". Mix đúng ma trận 40; `node --test` 115/115; build 126 trang.
 - **Ai quyết:** user ("sửa lại toàn bộ"). AI chọn cách sửa lãi margin và giữ nguyên câu 3 đáp án.
-- **Chưa chốt:** (1) cho phép câu 3 đáp án (quyết định thiết kế, không đụng); (2) 3 chi tiết quiz bài 8 chưa kiểm được nguồn: "lần nới biên đầu tiên sau 7 năm" (s02q1), tên 4 mã giảm tỷ lệ margin 30% → 20% (s04q1); (3) VI của 20 câu mới bài 10 chưa có người đọc lại.
+- **Làm thêm cùng ngày:**
+  - **Nguồn bài 8:** s02q1 nói "lần nới đầu tiên sau 7 năm theo Vietstock" nhưng bài VietnamPlus trong nguồn không nói vậy; đã sửa thành dẫn VietTimes ("lần đầu tiên sau 7 năm") và nêu QĐ 1747 thay QĐ 1636 (8/2015). Thêm nguồn văn bản QĐ 1747 (hethongphapluat, LuatVietnam EN, VietTimes). Văn bản QĐ 1606 trên LuatVietnam khớp (có hiệu lực 23/9/2022, thay QĐ 1728 ngày 30/9/2020). Tên 4 mã HPX, NBB, AGG, SCR giảm margin 30% → 20% (quiz bài 9, s04q1) đã đối chiếu đúng với VnEconomy.
+  - **Tiếng Việt quiz bài 10:** biên tập lại 34 chuỗi `vi` ở `set-05..08` (khôi phục ý bị rơi, thống nhất "giá vốn bình quân", "phí môi giới", bỏ cách diễn đạt dịch word-by-word).
+  - **Câu 3 đáp án:** `validateSet` có tham số `allowThreeOptions`, bật cho bài v2 trong `QUIZ_MATRIX` (câu một đáp án được 3 hoặc 4 lựa chọn; bài v1 giữ 4, câu multi giữ 5). Có test mới; chưa viết câu 3 đáp án nào.
+- **Ai quyết:** user ("sửa lại toàn bộ", "làm hết"). AI chọn cách sửa lãi margin, phạm vi mở 3 đáp án (chỉ v2).
+- **Chưa chốt:** văn bản gốc QĐ 1606 và 1747 lấy từ trang đăng lại (LuatVietnam, hethongphapluat), chưa có bản trên cổng NHNN; chưa ai đọc lại tiếng Việt 20 câu mới bằng người thật ngoài lượt biên tập của AI.
 
 ## 2026-11-26 — Xuất bản bài chứng khoán 8–10 (series 10/10)
 
