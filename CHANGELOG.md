@@ -3,6 +3,13 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-27 — Nâng quiz bài 1–7 của series Chứng khoán cơ bản lên ma trận v2
+
+- **Đã làm:** nhánh `chore/stocks-quiz-v2-posts-1-7`. Cả 7 bài (`what-is-a-stock-ownership-dividends`, `vietnam-stock-market-venues-open-account`, `vietnam-order-types-order-book-ato-atc`, `stock-fees-taxes-settlement-t2-vsd`, `shareholder-rights-dividends-corporate-actions`, `reading-financial-statements-investors-5-minutes`, `pe-pb-roe-valuation-ratios-in-context`) vào `QUIZ_MATRIX` (`domains.ts`) với 40 câu. Mỗi câu thêm trường `kind`; không viết hay sửa nội dung câu hỏi, đáp án hay giải thích. Mỗi bài đổi đúng 1 câu `level` (apply → remember, riêng bài 1 apply → analyze) để vào ngưỡng ±1 của ma trận. Các bài đều "on target" ở `npm run check:quiz-mix`; `node --test` 116/116; build 126 trang.
+- **Cách gán `kind`:** script (heuristic theo câu hỏi + bảng slot hợp lệ của từng `level`, rồi giải bài toán phân công tối ưu để đúng tổng 7/10/7/9/7). AI chưa đọc duyệt từng câu; có thể có vài câu gán `kind` chưa sát.
+- **Ai quyết:** user ("nâng lên v2 hết đi", không cần agent review).
+- **Chưa chốt:** câu `level` đổi sang remember là các câu hơi nặng so với nhãn (ví dụ `pe-pb-roe-valuation-ratios-in-context` s05q4); nếu muốn sát hơn thì sửa câu thay vì đổi nhãn.
+
 ## 2026-11-27 — Dọn các điểm "chưa chốt" của series Chứng khoán cơ bản
 
 - **Đã làm:** nhánh `fix/stocks-basics-cleanup`.
