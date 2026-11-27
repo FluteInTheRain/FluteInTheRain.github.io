@@ -3,6 +3,21 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-27 — Dọn các điểm "chưa chốt" của series Chứng khoán cơ bản
+
+- **Đã làm:** nhánh `fix/stocks-basics-cleanup`.
+  - **Lãi margin lệch số:** chỗ lệch thật nằm ở bài 2 (`vietnam-stock-market-venues-open-account`, mục tiểu khoản margin, "thường 10%–14%"), không phải bài 4 (11%–14% ở bài 4 là lãi ứng trước tiền bán, sản phẩm khác). Đã đổi cả EN và VI thành "lãi hai chữ số mỗi năm; tháng 11/2022 CTCK được ghi nhận 13–15%, khác nhau theo CTCK và thời điểm", khớp bài 9.
+  - **Nguồn QĐ NHNN:** thêm vào bài 8 ba nguồn chính thức: baochinhphu.vn (QĐ 1606), sbv.gov.vn thông báo QĐ 1809 và thông cáo QĐ 1747. Số liệu đã đối chiếu khớp (5,0/3,5/6,0 → 6,0/4,5/7,0; biên ±3% → ±5%). Chưa tìm được văn bản gốc của chính QĐ 1606 và 1747, chỉ có thông báo/thông cáo của NHNN và cổng Chính phủ.
+  - **Rà quiz bài 8 và 9:** chạy lại mọi phép tính (đúng hết), sửa 6 lỗi nhỏ. Đáng kể nhất: hình `Sbq08BandRuler` in sẵn đáp án 24.819 của câu s02q4, đã bỏ số biên khỏi nhãn và alt; câu s05q4 của bài 9 ghi "bài nói 1,07%" trong khi đó là số tự tính của quiz.
+  - **Quiz bài 10 lên 40 câu:** thêm `set-05..08` (20 câu, đủ `verifiedBy`), `QUIZ_MATRIX` ghi 40 câu, link cuối bài sửa "20" thành "40". Mix đúng ma trận 40; `node --test` 115/115; build 126 trang.
+- **Ai quyết:** user ("sửa lại toàn bộ"). AI chọn cách sửa lãi margin và giữ nguyên câu 3 đáp án.
+- **Làm thêm cùng ngày:**
+  - **Nguồn bài 8:** s02q1 nói "lần nới đầu tiên sau 7 năm theo Vietstock" nhưng bài VietnamPlus trong nguồn không nói vậy; đã sửa thành dẫn VietTimes ("lần đầu tiên sau 7 năm") và nêu QĐ 1747 thay QĐ 1636 (8/2015). Thêm nguồn văn bản QĐ 1747 (hethongphapluat, LuatVietnam EN, VietTimes). Văn bản QĐ 1606 trên LuatVietnam khớp (có hiệu lực 23/9/2022, thay QĐ 1728 ngày 30/9/2020). Tên 4 mã HPX, NBB, AGG, SCR giảm margin 30% → 20% (quiz bài 9, s04q1) đã đối chiếu đúng với VnEconomy.
+  - **Tiếng Việt quiz bài 10:** biên tập lại 34 chuỗi `vi` ở `set-05..08` (khôi phục ý bị rơi, thống nhất "giá vốn bình quân", "phí môi giới", bỏ cách diễn đạt dịch word-by-word).
+  - **Câu 3 đáp án:** `validateSet` có tham số `allowThreeOptions`, bật cho bài v2 trong `QUIZ_MATRIX` (câu một đáp án được 3 hoặc 4 lựa chọn; bài v1 giữ 4, câu multi giữ 5). Có test mới; chưa viết câu 3 đáp án nào.
+- **Ai quyết:** user ("sửa lại toàn bộ", "làm hết"). AI chọn cách sửa lãi margin, phạm vi mở 3 đáp án (chỉ v2).
+- **Chưa chốt:** văn bản gốc QĐ 1606 và 1747 lấy từ trang đăng lại (LuatVietnam, hethongphapluat), chưa có bản trên cổng NHNN; chưa ai đọc lại tiếng Việt 20 câu mới bằng người thật ngoài lượt biên tập của AI.
+
 ## 2026-11-26 — Xuất bản bài chứng khoán 8–10 (series 10/10)
 
 - **Đã làm:** merge PR #80, nhánh `content/publish-stocks-8-10` bật `draft: false` cho `macro-industry-what-moves-stock-prices`, `margin-trading-risks-beginner-psychology`, `portfolio-dca-first-investment-plan`. Series `stocks-basics` đủ 10 bài, mỗi bài có quiz.

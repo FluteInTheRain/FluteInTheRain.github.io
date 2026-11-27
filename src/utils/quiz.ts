@@ -23,7 +23,11 @@ const mentionsAi = (t: string) => AI_ABBR.test(t) || /\b(LLM|ChatGPT|GPT|Claude|
  * `domain` says what the post teaches: in a `human` post (investing, UX, ...) a question must not ask the reader
  * to judge AI output, and the second track is `case` instead of `ai`.
  */
-export function validateSet(set: QuizSet, postAnchors: Set<string>, domain: QuizDomain = 'code'): string[] {
+/**
+ * `allowThreeOptions`: quiz matrix v2 posts may write a single-answer question with 3 options when only two wrong ideas are plausible
+ * (3 options measure as well as 4, see docs/superpowers/specs/2026-11-26-quiz-matrix-v2.md). v1 posts and multi questions keep 4 and 5.
+ */
+export function validateSet(set: QuizSet, postAnchors: Set<string>, domain: QuizDomain = 'code', allowThreeOptions = false): string[] {
   const out: string[] = [];
   const add = (m: string) => out.push(m);
 
@@ -80,8 +84,8 @@ export function validateSet(set: QuizSet, postAnchors: Set<string>, domain: Quiz
     media(w, q.media);
 
     const isMulti = q.type === 'multi';
-    const wantOptions = isMulti ? 5 : 4;
-    if (q.options.length !== wantOptions) add(`${w}: options should number ${wantOptions}, found ${q.options.length}`);
+    const wantOptions = isMulti ? '5' : allowThreeOptions ? '3 or 4' : '4';
+    if (!wantOptions.split(' or ').includes(String(q.options.length))) add(`${w}: options should number ${wantOptions}, found ${q.options.length}`);
     const ids = q.options.map((o) => o.id);
     const wantIds = 'abcde'.slice(0, q.options.length).split('');
     if (ids.join('') !== wantIds.join('')) add(`${w}: option ids should be ${wantIds.join(',')} in order`);

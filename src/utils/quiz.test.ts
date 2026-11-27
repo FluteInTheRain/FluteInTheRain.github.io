@@ -120,6 +120,18 @@ test('the sample case is valid', () => {
   assert.deepEqual(problems(fixture()), []);
 });
 
+test('a 3-option single question is allowed only for matrix v2 posts, and multi questions keep 5 options', () => {
+  const s = clone(fixture());
+  const q = s.questions.find((x) => x.type !== 'multi' && x.answer[0] !== 'd')!;
+  q.options = q.options.filter((o) => o.id !== 'd');
+  assert.ok(has(validateSet(s, anchors()), /options should number 4, found 3/));
+  assert.ok(!has(validateSet(s, anchors(), 'code', true), /options should number/));
+  const m = clone(fixture());
+  const mq = m.questions[0];
+  mq.type = 'multi'; mq.answer = ['a', 'b'];
+  assert.ok(has(validateSet(m, anchors(), 'code', true), /options should number 5/));
+});
+
 test('validateSet reports each kind of problem', () => {
   const cases: [string, (s: QuizSet) => void, RegExp][] = [
     ['4 questions', (s) => { s.questions.pop(); }, /5 questions/],
@@ -233,7 +245,7 @@ for (const slug of contentDirs) {
     for (const f of files) {
       const s = read(path.join(dir, f));
       assert.equal(`${s.id}.json`, f, `${f}: id does not match the file name`);
-      assert.deepEqual(validateSet(s, a, domainOf(slug)), [], f);
+      assert.deepEqual(validateSet(s, a, domainOf(slug), QUIZ_MATRIX[slug] === 'v2'), [], f);
     }
   });
 
