@@ -1,0 +1,446 @@
+{
+  "id": "set-04",
+  "title": {
+    "en": "Leaks and what-ifs",
+    "vi": "Leak và các tình huống \"nếu\""
+  },
+  "context": {
+    "text": {
+      "en": "Suppose a function `lookup` starts a helper goroutine and waits at most 1 ms for the answer.\nAssume the helper needs 10 ms, so a call always times out.\nThe set looks at what stays behind, how the runtime reports it, and how fixes can fail.\nThe numbers in the questions come from real runs on Go 1.27.1.",
+      "vi": "Giả sử hàm `lookup` khởi động một goroutine phụ và chờ tối đa 1 ms để có câu trả lời.\nGiả sử goroutine phụ cần 10 ms, nên mỗi lần gọi đều hết thời gian.\nBộ câu hỏi xem cái gì bị bỏ lại, runtime báo cáo ra sao, và cách sửa có thể hỏng thế nào.\nCác con số trong câu hỏi lấy từ lần chạy thật trên Go 1.27.1."
+    }
+  },
+  "questions": [
+    {
+      "id": "s04q1",
+      "level": "apply",
+      "track": "ai",
+      "type": "ai-review",
+      "difficulty": 3,
+      "kind": "predict",
+      "topic": "Counting leaked goroutines",
+      "stem": {
+        "en": "An AI assistant says the program below prints `goroutines: 1`, because every call to `lookup` returns. What does it print?",
+        "vi": "Một AI assistant nói chương trình bên dưới in `goroutines: 1`, vì mỗi lần gọi `lookup` đều return. Thực tế nó in gì?"
+      },
+      "media": [
+        {
+          "kind": "code",
+          "lang": "go",
+          "code": "package main\n\nimport (\n\t\"fmt\"\n\t\"runtime\"\n\t\"time\"\n)\n\nfunc lookup() int {\n\tch := make(chan int)\n\tgo func() {\n\t\ttime.Sleep(10 * time.Millisecond)\n\t\tch <- 42\n\t}()\n\tselect {\n\tcase v := <-ch:\n\t\treturn v\n\tcase <-time.After(time.Millisecond):\n\t\treturn -1\n\t}\n}\n\nfunc main() {\n\tfor i := 0; i < 100; i++ {\n\t\tlookup()\n\t}\n\ttime.Sleep(100 * time.Millisecond)\n\tfmt.Println(\"goroutines:\", runtime.NumGoroutine())\n}"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "`goroutines: 1`",
+            "vi": "`goroutines: 1`"
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "`goroutines: 0`",
+            "vi": "`goroutines: 0`"
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "`goroutines: 100`",
+            "vi": "`goroutines: 100`"
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "`goroutines: 101`",
+            "vi": "`goroutines: 101`"
+          }
+        }
+      ],
+      "answer": [
+        "d"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "Each call times out after 1 ms and returns, but its helper wakes at 10 ms and blocks on `ch <- 42`, since the unbuffered channel has no receiver. 100 calls leave 100 stuck goroutines, and `main` makes 101.",
+          "vi": "Mỗi lần gọi hết hạn sau 1 ms và return, nhưng goroutine phụ của nó thức dậy lúc 10 ms và bị chặn ở `ch <- 42`, vì channel không buffer không có bên nhận. 100 lần gọi để lại 100 goroutine kẹt, cộng `main` là 101."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "That would need every helper to exit. Here each one is stuck on its send.",
+            "vi": "Muốn vậy thì mọi goroutine phụ phải thoát. Ở đây mỗi cái đều kẹt ở lệnh gửi."
+          },
+          "b": {
+            "en": "`main` is itself a goroutine, so the count is never 0.",
+            "vi": "`main` cũng là một goroutine, nên số đếm không bao giờ là 0."
+          },
+          "c": {
+            "en": "This forgets `main`. `runtime.NumGoroutine` counts it too.",
+            "vi": "Cách đếm này quên `main`. `runtime.NumGoroutine` đếm cả nó."
+          }
+        },
+        "reread": {
+          "anchor": "every-goroutine-needs-a-way-to-stop",
+          "label": {
+            "en": "Every goroutine needs a way to stop",
+            "vi": "Mỗi goroutine cần một đường để dừng"
+          }
+        },
+        "say": {
+          "en": "A timed-out call leaves its helper blocked on the send. I count main as well.",
+          "vi": "Lần gọi hết hạn để lại goroutine phụ bị chặn ở lệnh gửi. Tôi đếm cả main."
+        }
+      },
+      "ref": "Post: Every goroutine needs a way to stop",
+      "verifiedBy": "`go run ./d1` (100 calls, 1 ms timer, helper sleeps 10 ms, unbuffered channel) printed twice in a row:\ngoroutines: 101\ngoroutines: 101"
+    },
+    {
+      "id": "s04q2",
+      "level": "apply",
+      "track": "interview",
+      "type": "single",
+      "difficulty": 3,
+      "kind": "diagnose",
+      "topic": "Silent leaks",
+      "stem": {
+        "en": "In a server, a goroutine is stuck forever on a channel send, but the runtime never prints `all goroutines are asleep`. Why not?",
+        "vi": "Trong một server, có goroutine kẹt mãi ở lệnh gửi vào channel, nhưng runtime không bao giờ in `all goroutines are asleep`. Vì sao?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "The detector only watches goroutines that wait on a buffered channel.",
+            "vi": "Bộ phát hiện chỉ theo dõi các goroutine chờ trên channel có buffer."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "It fires only when every goroutine is blocked, and the others keep running.",
+            "vi": "Nó chỉ kêu khi mọi goroutine đều bị chặn, mà các goroutine khác vẫn chạy."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "A goroutine blocked on a channel counts as running, so it is never reported.",
+            "vi": "Goroutine bị chặn trên channel được tính là đang chạy nên không bao giờ bị báo."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "The detector runs only once, when the program exits.",
+            "vi": "Bộ phát hiện chỉ chạy một lần, khi chương trình thoát."
+          }
+        }
+      ],
+      "answer": [
+        "b"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "The deadlock report needs every goroutine asleep. A server always has some goroutine working, such as an HTTP listener, so a leaked one stays silent while memory grows. The program in the previous question printed 101 goroutines and no error.",
+          "vi": "Báo cáo deadlock cần mọi goroutine đều ngủ. Server luôn có goroutine nào đó đang làm việc, như bộ lắng nghe HTTP, nên goroutine bị leak im lặng trong khi bộ nhớ tăng. Chương trình ở câu trước in 101 goroutine mà không có lỗi."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "The detector does not care whether the channel is buffered.",
+            "vi": "Bộ phát hiện không quan tâm channel có buffer hay không."
+          },
+          "c": {
+            "en": "A goroutine blocked on a channel is waiting, not running, and it is exactly what a leak is.",
+            "vi": "Goroutine bị chặn trên channel là đang chờ, không phải chạy, và đó chính là leak."
+          },
+          "d": {
+            "en": "The check happens while the program runs, when no goroutine can make progress.",
+            "vi": "Việc kiểm tra xảy ra khi chương trình đang chạy, lúc không goroutine nào tiến lên được."
+          }
+        },
+        "reread": {
+          "anchor": "unbuffered-sender-and-receiver-meet",
+          "label": {
+            "en": "Unbuffered: sender and receiver meet",
+            "vi": "Không buffer: bên gửi và bên nhận gặp nhau"
+          }
+        },
+        "say": {
+          "en": "The deadlock detector needs every goroutine blocked. A busy server hides leaks from it.",
+          "vi": "Bộ phát hiện deadlock cần mọi goroutine bị chặn. Server đang bận che các leak khỏi nó."
+        }
+      },
+      "ref": "Post: Unbuffered: sender and receiver meet",
+      "verifiedBy": "`go run ./d1` finished with `goroutines: 101` and no fatal error although 100 goroutines were blocked forever on a send: `main` was still running."
+    },
+    {
+      "id": "s04q3",
+      "level": "analyze",
+      "track": "ai",
+      "type": "ai-review",
+      "difficulty": 4,
+      "kind": "diagnose",
+      "topic": "Told to stop, not stopped",
+      "stem": {
+        "en": "An AI assistant says that after `close(done)` the worker has stopped cleanly and printed `worker: flushed`. What does the program print, and what is wrong?",
+        "vi": "Một AI assistant nói sau `close(done)` worker đã dừng gọn và in `worker: flushed`. Chương trình in gì, và sai ở đâu?"
+      },
+      "media": [
+        {
+          "kind": "code",
+          "lang": "go",
+          "code": "package main\n\nimport (\n\t\"fmt\"\n\t\"time\"\n)\n\nfunc main() {\n\tdone := make(chan struct{})\n\tgo func() {\n\t\tdefer func() {\n\t\t\ttime.Sleep(20 * time.Millisecond) // flush buffered output\n\t\t\tfmt.Println(\"worker: flushed\")\n\t\t}()\n\t\tfor {\n\t\t\tselect {\n\t\t\tcase <-done:\n\t\t\t\treturn\n\t\t\tdefault:\n\t\t\t\ttime.Sleep(5 * time.Millisecond)\n\t\t\t}\n\t\t}\n\t}()\n\ttime.Sleep(30 * time.Millisecond)\n\tclose(done)\n\tfmt.Println(\"main: exiting\")\n}"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "`worker: flushed`, then `main: exiting`; there is no problem.",
+            "vi": "`worker: flushed`, rồi `main: exiting`; không có vấn đề gì."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "`main: exiting`, then `worker: flushed`, since the worker keeps the process alive.",
+            "vi": "`main: exiting`, rồi `worker: flushed`, vì worker giữ tiến trình sống."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Only `main: exiting`: `main` does not wait, so the flush never runs.",
+            "vi": "Chỉ `main: exiting`: `main` không chờ nên bước flush không bao giờ chạy."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Only `main: exiting`: closing `done` never reaches the worker.",
+            "vi": "Chỉ `main: exiting`: việc đóng `done` không tới được worker."
+          }
+        }
+      ],
+      "answer": [
+        "c"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "`close(done)` asks the worker to stop. It does not tell `main` that the worker has finished. `main` prints and returns, the process exits, and the deferred flush in its 20 ms sleep never completes. Close a second `stopped` channel from the worker and wait on it, or use a `WaitGroup`.",
+          "vi": "`close(done)` yêu cầu worker dừng. Nó không báo cho `main` rằng worker đã xong. `main` in rồi return, tiến trình thoát, và bước flush trong `defer` với 20 ms sleep không bao giờ xong. Hãy để worker đóng một channel `stopped` thứ hai và chờ nó, hoặc dùng `WaitGroup`."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "The flush needs 20 ms, and `main` does not wait for it.",
+            "vi": "Bước flush cần 20 ms, và `main` không chờ nó."
+          },
+          "b": {
+            "en": "Goroutines do not keep the process alive. When `main` returns, everything stops.",
+            "vi": "Goroutine không giữ tiến trình sống. Khi `main` return, mọi thứ dừng."
+          },
+          "d": {
+            "en": "The worker does see the close and returns, so the deferred function starts. It is cut off after that.",
+            "vi": "Worker có thấy việc đóng và return, nên hàm `defer` bắt đầu chạy. Nó bị cắt ngang sau đó."
+          }
+        },
+        "reread": {
+          "anchor": "notification-channels",
+          "label": {
+            "en": "Notification channels",
+            "vi": "Notification channel"
+          }
+        },
+        "say": {
+          "en": "Asking a goroutine to stop does not mean it has stopped. I wait on a second channel.",
+          "vi": "Yêu cầu goroutine dừng không có nghĩa nó đã dừng. Tôi chờ trên channel thứ hai."
+        }
+      },
+      "ref": "Post: Notification channels",
+      "verifiedBy": "`go run ./d3` printed:\nmain: exiting"
+    },
+    {
+      "id": "s04q4",
+      "level": "evaluate",
+      "track": "ai",
+      "type": "ai-advice",
+      "difficulty": 5,
+      "kind": "whatif",
+      "topic": "Buffer of 1, two sends",
+      "stem": {
+        "en": "`lookup` now uses `make(chan int, 1)`, and its helper sends the answer and then a done marker. An AI assistant says: \"A buffer of 1 fixes every timeout leak of this kind.\" What if you apply that to this helper?",
+        "vi": "`lookup` giờ dùng `make(chan int, 1)`, và goroutine phụ gửi câu trả lời rồi một dấu hiệu hoàn tất. Một AI assistant nói: \"Buffer 1 sửa mọi leak do timeout kiểu này.\" Nếu áp dụng vào goroutine phụ này thì sao?"
+      },
+      "media": [
+        {
+          "kind": "code",
+          "lang": "go",
+          "code": "package main\n\nimport (\n\t\"fmt\"\n\t\"runtime\"\n\t\"time\"\n)\n\nfunc lookup() int {\n\tch := make(chan int, 1)\n\tgo func() {\n\t\ttime.Sleep(10 * time.Millisecond)\n\t\tch <- 42 // the answer\n\t\tch <- 0  // a done marker\n\t}()\n\tselect {\n\tcase v := <-ch:\n\t\treturn v\n\tcase <-time.After(time.Millisecond):\n\t\treturn -1\n\t}\n}\n\nfunc main() {\n\tfor i := 0; i < 100; i++ {\n\t\tlookup()\n\t}\n\ttime.Sleep(100 * time.Millisecond)\n\tfmt.Println(\"goroutines:\", runtime.NumGoroutine())\n}"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "It still leaks: the answer fills the buffer, so the marker send blocks.",
+            "vi": "Vẫn leak: câu trả lời làm đầy buffer, và lệnh gửi dấu hiệu bị chặn mãi."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "No leak: the buffer of 1 absorbs both sends.",
+            "vi": "Không leak: buffer 1 chứa được cả hai lệnh gửi."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "No leak: the second send is dropped, since nobody receives.",
+            "vi": "Không leak: lệnh gửi thứ hai bị bỏ, vì không ai nhận."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "It panics: a second send on a full buffered channel crashes the program.",
+            "vi": "Nó panic: lệnh gửi thứ hai vào channel có buffer đầy làm crash."
+          }
+        }
+      ],
+      "answer": [
+        "a"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "The buffer needs one slot for every send that can happen after the caller has left. Here that is two, so the second send waits forever, and each timed-out call leaks a goroutine again. Size the buffer to the sends, or give the helper a done channel to select on.",
+          "vi": "Buffer cần một chỗ cho mỗi lệnh gửi có thể xảy ra sau khi bên gọi đã đi. Ở đây là hai, nên lệnh gửi thứ hai chờ mãi, và mỗi lần gọi hết hạn lại leak một goroutine. Hãy chỉnh buffer theo số lệnh gửi, hoặc cho goroutine phụ một channel done để select."
+        },
+        "whyWrong": {
+          "b": {
+            "en": "One slot holds one value. The second send needs a second slot or a receiver.",
+            "vi": "Một chỗ chứa một giá trị. Lệnh gửi thứ hai cần chỗ thứ hai hoặc một bên nhận."
+          },
+          "c": {
+            "en": "A send is never dropped. It waits until it can complete.",
+            "vi": "Lệnh gửi không bao giờ bị bỏ. Nó chờ cho đến khi hoàn tất được."
+          },
+          "d": {
+            "en": "A full buffer makes a send block, not panic.",
+            "vi": "Buffer đầy làm lệnh gửi bị chặn, không phải panic."
+          }
+        },
+        "reread": {
+          "anchor": "every-goroutine-needs-a-way-to-stop",
+          "label": {
+            "en": "Every goroutine needs a way to stop",
+            "vi": "Mỗi goroutine cần một đường để dừng"
+          }
+        },
+        "say": {
+          "en": "The buffer must match the sends that can happen after the caller is gone.",
+          "vi": "Buffer phải khớp với số lệnh gửi có thể xảy ra sau khi bên gọi đã đi."
+        }
+      },
+      "ref": "Post: Every goroutine needs a way to stop",
+      "verifiedBy": "`go run ./d4` (100 calls, `make(chan int, 1)`, two sends in the helper) printed twice in a row:\ngoroutines: 101\ngoroutines: 101"
+    },
+    {
+      "id": "s04q5",
+      "level": "evaluate",
+      "track": "interview",
+      "type": "multi",
+      "difficulty": 5,
+      "kind": "whatif",
+      "topic": "A pool that never closes jobs",
+      "stem": {
+        "en": "What if `main` forgets to `close(jobs)`? Pick the TWO statements that are true about the program below.",
+        "vi": "Nếu `main` quên `close(jobs)` thì sao? Chọn HAI nhận định đúng về chương trình bên dưới."
+      },
+      "media": [
+        {
+          "kind": "code",
+          "lang": "go",
+          "code": "package main\n\nimport (\n\t\"fmt\"\n\t\"sync\"\n)\n\nfunc main() {\n\tjobs := make(chan int)\n\tvar wg sync.WaitGroup\n\tfor w := 1; w <= 3; w++ {\n\t\twg.Add(1)\n\t\tgo func() {\n\t\t\tdefer wg.Done()\n\t\t\tfor j := range jobs {\n\t\t\t\tfmt.Println(\"worker\", w, \"job\", j)\n\t\t\t}\n\t\t}()\n\t}\n\tfor j := 1; j <= 5; j++ {\n\t\tjobs <- j\n\t}\n\twg.Wait()\n}"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "After the five jobs are printed, the workers wait on `jobs` forever.",
+            "vi": "Sau khi in xong năm job, các worker chờ trên `jobs` mãi."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "The runtime stops it with `all goroutines are asleep - deadlock!`, since `main` waits in `wg.Wait()`.",
+            "vi": "Runtime dừng nó với `all goroutines are asleep - deadlock!`, vì `main` đang chờ ở `wg.Wait()`."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Each worker leaves its loop when `jobs` is empty, so the program ends normally.",
+            "vi": "Mỗi worker thoát khỏi vòng lặp khi `jobs` rỗng, nên chương trình kết thúc bình thường."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Giving `jobs` five slots of buffer would fix the hang.",
+            "vi": "Cho `jobs` buffer năm chỗ sẽ sửa được việc treo."
+          }
+        },
+        {
+          "id": "e",
+          "text": {
+            "en": "Closing `jobs` from inside a worker when it sees no more work is the safe fix.",
+            "vi": "Đóng `jobs` từ bên trong một worker khi nó thấy hết việc là cách sửa an toàn."
+          }
+        }
+      ],
+      "answer": [
+        "a",
+        "b"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "`range jobs` ends only when `jobs` is closed and empty. Without a `close`, each worker waits for a sixth job that never comes. `main` waits for the workers, so every goroutine is blocked and the runtime reports the deadlock. In a real server the same bug would leak the workers silently.",
+          "vi": "`range jobs` chỉ kết thúc khi `jobs` đã đóng và rỗng. Không có `close`, mỗi worker chờ một job thứ sáu không bao giờ tới. `main` chờ các worker, nên mọi goroutine đều bị chặn và runtime báo deadlock. Trong server thật, cùng lỗi này làm các worker leak âm thầm."
+        },
+        "whyWrong": {
+          "c": {
+            "en": "A `range` over a channel does not end on an empty channel, only on a closed one.",
+            "vi": "`range` trên channel không kết thúc khi channel rỗng, chỉ khi nó đã đóng."
+          },
+          "d": {
+            "en": "A buffer holds jobs, but the workers still wait for a close after the last one.",
+            "vi": "Buffer chứa được job, nhưng các worker vẫn chờ một lệnh close sau job cuối."
+          },
+          "e": {
+            "en": "Only the sender closes. A worker cannot know the other jobs have all been sent.",
+            "vi": "Chỉ bên gửi đóng. Một worker không biết các job còn lại đã gửi hết chưa."
+          }
+        },
+        "reread": {
+          "anchor": "closing-a-channel-and-ranging-over-it",
+          "label": {
+            "en": "Closing a channel and ranging over it",
+            "vi": "Đóng channel và range qua nó"
+          }
+        },
+        "say": {
+          "en": "Workers that range over a channel need the sender to close it, otherwise they wait forever.",
+          "vi": "Worker dùng range trên channel cần bên gửi đóng nó, nếu không chúng chờ mãi."
+        }
+      },
+      "ref": "Post: Closing a channel and ranging over it",
+      "verifiedBy": "`go run ./d5` printed the five `worker N job M` lines, then:\nfatal error: all goroutines are asleep - deadlock!\n\ngoroutine 1 [sync.WaitGroup.Wait]:"
+    }
+  ]
+}
