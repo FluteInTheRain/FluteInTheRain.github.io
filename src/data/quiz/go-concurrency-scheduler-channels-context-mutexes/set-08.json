@@ -1,0 +1,446 @@
+{
+  "id": "set-08",
+  "title": {
+    "en": "Locks, pools and upgrades",
+    "vi": "Khóa, pool và nâng phiên bản"
+  },
+  "context": {
+    "text": {
+      "en": "A service sizes its workers, shares locks, and upgrades its Go version.\nThe post's real cases are two `etcd` deadlocks: `etcd-io/etcd#11817` and `etcd-io/etcd#10492`.\nThe `go.mod` `go` line decides some of the language behaviour.",
+      "vi": "Một service chỉnh số worker, dùng chung khóa và nâng phiên bản Go.\nCác ca thật trong bài là hai deadlock của `etcd`: `etcd-io/etcd#11817` và `etcd-io/etcd#10492`.\nDòng `go` trong `go.mod` quyết định một phần hành vi của ngôn ngữ."
+    }
+  },
+  "questions": [
+    {
+      "id": "s08q1",
+      "level": "apply",
+      "track": "interview",
+      "type": "scenario",
+      "difficulty": 3,
+      "kind": "why",
+      "topic": "Size concurrency by workload type",
+      "stem": {
+        "en": "You size a pool for CPU-bound hashing in a container. Why does the post prefer `runtime.GOMAXPROCS(0)` over `runtime.NumCPU()`?",
+        "vi": "Bạn chỉnh cỡ pool cho việc hash nặng CPU trong container. Vì sao bài viết thích `runtime.GOMAXPROCS(0)` hơn `runtime.NumCPU()`?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "`NumCPU()` is deprecated, and inside a container it always returns 1 whatever the limit.",
+            "vi": "`NumCPU()` đã bị bỏ, và bên trong container nó luôn trả về 1 bất kể giới hạn đặt ra."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "`GOMAXPROCS` counts hyper-threads separately, so it gives twice the parallelism of cores.",
+            "vi": "`GOMAXPROCS` đếm riêng từng hyper-thread, nên cho gấp đôi độ song song của nhân."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "`GOMAXPROCS(0)` is the number of `P`s, which cap goroutines running at once; it may be lower.",
+            "vi": "`GOMAXPROCS(0)` là số `P`, giới hạn số goroutine chạy cùng lúc; có thể thấp hơn số nhân."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "The runtime ignores `NumCPU()` and always runs exactly 4 workers for any CPU-bound job.",
+            "vi": "Runtime bỏ qua `NumCPU()` và luôn chạy đúng 4 worker cho mọi việc nặng CPU."
+          }
+        }
+      ],
+      "answer": [
+        "c"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "CPU workers beyond the number of `P`s only add switching. `GOMAXPROCS` can be lower than the physical cores because of a container limit or a setting, so size by it, not by the machine's core count.",
+          "vi": "Worker CPU vượt số `P` chỉ thêm chuyển đổi. `GOMAXPROCS` có thể thấp hơn số nhân vật lý vì giới hạn container hoặc thiết lập, nên hãy chỉnh theo nó, không theo số nhân của máy."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "`NumCPU()` is not deprecated and is not 1 in a container. It reports the cores the process can use.",
+            "vi": "`NumCPU()` không bị bỏ và không phải 1 trong container. Nó cho biết số nhân mà process dùng được."
+          },
+          "b": {
+            "en": "`GOMAXPROCS` is the number of `P`s, not a count of hyper-threads.",
+            "vi": "`GOMAXPROCS` là số `P`, không phải số hyper-thread."
+          },
+          "d": {
+            "en": "The runtime has no fixed worker count. Your code decides the pool size.",
+            "vi": "Runtime không có số worker cố định. Code của bạn quyết định cỡ pool."
+          }
+        },
+        "reread": {
+          "anchor": "size-concurrency-by-workload-type",
+          "label": {
+            "en": "Size concurrency by workload type",
+            "vi": "Chỉnh mức concurrency theo loại việc"
+          }
+        },
+        "say": {
+          "en": "Size CPU pools by GOMAXPROCS, because that is the number of goroutines that can run at once.",
+          "vi": "Chỉnh cỡ pool CPU theo GOMAXPROCS, vì đó là số goroutine chạy được cùng lúc."
+        }
+      },
+      "ref": "Post: Size concurrency by workload type"
+    },
+    {
+      "id": "s08q2",
+      "level": "apply",
+      "track": "ai",
+      "type": "ai-review",
+      "difficulty": 3,
+      "kind": "diagnose",
+      "topic": "Repeated broadcasts with `sync.Cond`",
+      "stem": {
+        "en": "An AI assistant says: \"`Broadcast` runs after `ready = true`, so the listener will wake up and print.\" The program hangs. What is wrong?",
+        "vi": "Một AI nói: \"`Broadcast` chạy sau `ready = true`, nên listener sẽ thức dậy và in ra.\" Chương trình bị treo. Sai ở đâu?"
+      },
+      "media": [
+        {
+          "kind": "code",
+          "lang": "go",
+          "code": "var mu sync.Mutex\ncond := sync.NewCond(&mu)\nready := false\nvar wg sync.WaitGroup\n\nwg.Add(1)\ngo func() {\n\tdefer wg.Done()\n\ttime.Sleep(50 * time.Millisecond) // listener starts late\n\tmu.Lock()\n\tcond.Wait() // wait for the update\n\tmu.Unlock()\n\tfmt.Println(\"listener woke up\")\n}()\n\nmu.Lock()\nready = true\nmu.Unlock()\ncond.Broadcast()\nwg.Wait()"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "`Broadcast` must be called while holding `mu`, or no goroutine is ever woken.",
+            "vi": "`Broadcast` phải được gọi khi đang giữ `mu`, nếu không không ai thức dậy."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "`sync.NewCond(&mu)` is wrong, because a `Cond` needs its own private mutex.",
+            "vi": "`sync.NewCond(&mu)` sai, vì `Cond` cần một mutex riêng của nó."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "`time.Sleep` inside a goroutine cancels any wake-ups that are still pending.",
+            "vi": "`time.Sleep` trong goroutine hủy các thông báo đang chờ."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "`Broadcast` is not stored: `Wait` began after it fired, with no check of `ready` first.",
+            "vi": "`Broadcast` không được lưu: `Wait` bắt đầu sau khi nó nổ, không kiểm `ready` trước."
+          }
+        }
+      ],
+      "answer": [
+        "d"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "`Broadcast` and `Signal` wake only goroutines already waiting. This listener was still sleeping when the broadcast fired, so the wake-up is gone and `Wait` blocks forever. The listener should check the state before waiting: `for !ready { cond.Wait() }`.",
+          "vi": "`Broadcast` và `Signal` chỉ đánh thức goroutine đang chờ sẵn. Listener này còn đang ngủ khi broadcast nổ, nên thông báo mất và `Wait` chặn mãi. Listener nên kiểm tra trạng thái trước khi chờ: `for !ready { cond.Wait() }`."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "Calling `Broadcast` with or without the lock is allowed. The lock is not why this hangs.",
+            "vi": "Gọi `Broadcast` có hay không có khóa đều được phép. Khóa không phải lý do treo ở đây."
+          },
+          "b": {
+            "en": "`sync.NewCond(&mu)` with a shared `mu` is the normal pattern.",
+            "vi": "`sync.NewCond(&mu)` với một `mu` dùng chung là mẫu thông thường."
+          },
+          "c": {
+            "en": "Sleeping only delays the listener. It does not touch the `Cond`.",
+            "vi": "Sleep chỉ làm listener trễ. Nó không đụng gì tới `Cond`."
+          }
+        },
+        "reread": {
+          "anchor": "repeated-broadcasts-with-synccond",
+          "label": {
+            "en": "Repeated broadcasts with `sync.Cond`",
+            "vi": "Phát thông báo lặp lại với `sync.Cond`"
+          }
+        },
+        "say": {
+          "en": "A Cond wake-up is not stored. Check the condition before Wait, in a for loop.",
+          "vi": "Thông báo của Cond không được lưu lại. Hãy kiểm điều kiện trước Wait, trong vòng for."
+        }
+      },
+      "ref": "Post: Repeated broadcasts with `sync.Cond`",
+      "verifiedBy": "cd missed && go vet . && go run .\nfatal error: all goroutines are asleep - deadlock!\ngoroutine 1 [sync.WaitGroup.Wait]:"
+    },
+    {
+      "id": "s08q3",
+      "level": "analyze",
+      "track": "ai",
+      "type": "ai-advice",
+      "difficulty": 4,
+      "kind": "why",
+      "topic": "Size concurrency by workload type",
+      "stem": {
+        "en": "Assume each job waits 50 ms on a downstream API that can serve 100 calls at once, on an 8-core machine. An AI assistant says: \"Run 8 workers, equal to `GOMAXPROCS`.\" Why is this advice a poor fit?",
+        "vi": "Giả sử mỗi job chờ 50 ms một API phía sau, API đó phục vụ được 100 lời gọi cùng lúc, trên máy 8 nhân. Một AI nói: \"Chạy 8 worker, bằng `GOMAXPROCS`.\" Vì sao lời khuyên này không hợp?"
+      },
+      "media": [
+        {
+          "kind": "code",
+          "lang": "go",
+          "code": "func run(workers int) time.Duration {\n\tjobs := make(chan int)\n\tvar wg sync.WaitGroup\n\tstart := time.Now()\n\tfor range workers {\n\t\twg.Add(1)\n\t\tgo func() {\n\t\t\tdefer wg.Done()\n\t\t\tfor range jobs {\n\t\t\t\ttime.Sleep(50 * time.Millisecond) // one downstream call\n\t\t\t}\n\t\t}()\n\t}\n\tfor i := range 200 {\n\t\tjobs <- i\n\t}\n\tclose(jobs)\n\twg.Wait()\n\treturn time.Since(start)\n}"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Eight goroutines cannot make network calls, because only the main goroutine may.",
+            "vi": "Tám goroutine không gọi mạng được, vì chỉ goroutine chính mới được."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Waiting goroutines use no `P`, so size the pool to what the downstream can take.",
+            "vi": "Goroutine đang chờ không dùng `P`, nên chỉnh pool theo sức chịu tải phía sau."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "More than 8 workers would crash the scheduler, so the downstream limit does not matter.",
+            "vi": "Hơn 8 worker sẽ làm sập scheduler, nên giới hạn phía sau không quan trọng."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "`GOMAXPROCS` is the right size for any pool, but the jobs should be batched first.",
+            "vi": "`GOMAXPROCS` là cỡ đúng cho mọi pool, nhưng các job nên được gom lô trước."
+          }
+        }
+      ],
+      "answer": [
+        "b"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "I/O-bound workers spend their time parked, so they can far exceed `GOMAXPROCS`. With 8 workers and 50 ms per call, 200 jobs take about 1.25 s; with 100 workers, about 100 ms. Cap the pool by the downstream capacity (here 100) or by its rate limit.",
+          "vi": "Worker nặng I/O dành phần lớn thời gian ở trạng thái đỗ, nên có thể nhiều hơn hẳn `GOMAXPROCS`. Với 8 worker và 50 ms mỗi lời gọi, 200 job mất khoảng 1,25 s; với 100 worker, khoảng 100 ms. Hãy giới hạn pool theo sức chứa phía sau (ở đây là 100) hoặc theo rate limit của nó."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "Any goroutine can make network calls.",
+            "vi": "Goroutine nào cũng gọi mạng được."
+          },
+          "c": {
+            "en": "The scheduler handles tens of thousands of parked goroutines. It does not crash at 100.",
+            "vi": "Scheduler xử lý hàng chục nghìn goroutine đang đỗ. Nó không sập ở 100."
+          },
+          "d": {
+            "en": "`GOMAXPROCS` fits CPU-bound pools. A wait-heavy pool is bounded by what it waits on.",
+            "vi": "`GOMAXPROCS` hợp với pool nặng CPU. Pool nặng chờ thì bị giới hạn bởi thứ nó chờ."
+          }
+        },
+        "reread": {
+          "anchor": "size-concurrency-by-workload-type",
+          "label": {
+            "en": "Size concurrency by workload type",
+            "vi": "Chỉnh mức concurrency theo loại việc"
+          }
+        },
+        "say": {
+          "en": "For I/O-bound work, size the pool by the downstream limit, then measure.",
+          "vi": "Với việc nặng I/O, chỉnh cỡ pool theo giới hạn phía sau, rồi đo."
+        }
+      },
+      "ref": "Post: Size concurrency by workload type",
+      "verifiedBy": "cd iopool && go run .   (200 jobs, 50 ms sleep each, Apple M2, Go 1.27.1)\nGOMAXPROCS: 8\nworkers = GOMAXPROCS: 1.26s\nworkers = 100: 100ms"
+    },
+    {
+      "id": "s08q4",
+      "level": "evaluate",
+      "track": "ai",
+      "type": "ai-advice",
+      "difficulty": 5,
+      "kind": "whatif",
+      "topic": "Lock-ordering deadlocks in `etcd`",
+      "stem": {
+        "en": "Look at the figure and the code. An AI assistant says: \"Fix the `Restore` hang by making `stopc` buffered, so the worker never blocks on it.\" What if you apply this change?",
+        "vi": "Nhìn hình và code. Một AI nói: \"Sửa lỗi treo của `Restore` bằng cách cho `stopc` có buffer, để worker không bao giờ bị chặn vì nó.\" Nếu áp dụng thay đổi này thì sao?"
+      },
+      "media": [
+        {
+          "kind": "figure",
+          "component": "Gq13LockCycle",
+          "alt": {
+            "en": "Two goroutines. Restore holds s.mu, has closed s.stopc and waits in s.fifoSched.Stop. A compaction worker is running compactBarrier, calls s.mu.Lock and reads s.stopc after that. Two arrows show that each one is waiting for the other.",
+            "vi": "Hai goroutine. Restore giữ s.mu, đã đóng s.stopc và chờ trong s.fifoSched.Stop. Một worker compaction đang chạy compactBarrier, gọi s.mu.Lock rồi mới đọc s.stopc. Hai mũi tên cho thấy mỗi bên đang chờ bên kia."
+          }
+        },
+        {
+          "kind": "code",
+          "lang": "go",
+          "code": "func (s *store) Restore() {\n\ts.mu.Lock()\n\tdefer s.mu.Unlock()\n\ts.stopc = make(chan struct{}, 1) // AI: buffer stopc\n\ts.wg.Add(1)\n\tgo s.worker()\n\tclose(s.stopc)\n\ts.wg.Wait() // wait for the worker while holding mu\n}\n\nfunc (s *store) worker() {\n\tdefer s.wg.Done()\n\ts.mu.Lock() // takes the lock before it looks at stopc\n\tdefer s.mu.Unlock()\n\tselect {\n\tcase <-s.stopc:\n\t\treturn\n\tdefault:\n\t}\n}"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "The hang stays: the worker blocks on `s.mu`, not on `stopc`, so the cycle is unchanged.",
+            "vi": "Lỗi treo vẫn còn: worker bị chặn ở `s.mu`, không phải ở `stopc`."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "The hang goes away, because the buffer lets the worker read `stopc` without the lock.",
+            "vi": "Lỗi treo hết, vì buffer cho worker đọc `stopc` mà không cần khóa."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "The hang goes away, because `close` on a buffered channel releases `s.mu`.",
+            "vi": "Lỗi treo hết, vì `close` trên channel có buffer giải phóng `s.mu`."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "The program now panics, because a buffered channel cannot be closed.",
+            "vi": "Chương trình giờ panic, vì channel có buffer không đóng được."
+          }
+        }
+      ],
+      "answer": [
+        "a"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "The cycle is `Restore` holding `s.mu` while waiting for the worker, and the worker waiting for `s.mu` before it reads `stopc`. The channel is never the blocking step. The real fix in `etcd` moved `s.mu.Lock()` into the `default:` branch, so shutdown workers exit without touching `s.mu`.",
+          "vi": "Vòng chờ là `Restore` giữ `s.mu` trong lúc chờ worker, còn worker chờ `s.mu` trước khi đọc `stopc`. Channel không bao giờ là bước bị chặn. Cách sửa thật trong `etcd` chuyển `s.mu.Lock()` vào nhánh `default:`, để worker khi tắt thoát mà không đụng `s.mu`."
+        },
+        "whyWrong": {
+          "b": {
+            "en": "Reading `stopc` is not the problem. The worker is stuck earlier, on the lock.",
+            "vi": "Đọc `stopc` không phải vấn đề. Worker kẹt sớm hơn, ở khóa."
+          },
+          "c": {
+            "en": "Closing a channel does not touch any mutex.",
+            "vi": "Đóng channel không đụng tới mutex nào."
+          },
+          "d": {
+            "en": "Buffered channels can be closed like any other channel.",
+            "vi": "Channel có buffer đóng được như mọi channel khác."
+          }
+        },
+        "reread": {
+          "anchor": "lock-ordering-deadlocks-in-etcd",
+          "label": {
+            "en": "Lock-ordering deadlocks in `etcd`",
+            "vi": "Deadlock do thứ tự khóa trong `etcd`"
+          }
+        },
+        "say": {
+          "en": "Before trusting a deadlock fix, name what each side waits for. A fix must break that cycle.",
+          "vi": "Trước khi tin một cách sửa deadlock, hãy nêu mỗi bên đang chờ gì. Cách sửa phải phá vòng chờ đó."
+        }
+      },
+      "ref": "Post: Lock-ordering deadlocks in `etcd`",
+      "verifiedBy": "cd etcd && go build -o e . && ./e && ./e buffered   (a small model of the same cycle; \"buffered\" gives stopc capacity 1)\nfatal error: all goroutines are asleep - deadlock!   (unbuffered)\nfatal error: all goroutines are asleep - deadlock!   (buffered)\nMoving s.mu.Lock() into the default branch is the fix the post and the etcd PR describe; it was not run here."
+    },
+    {
+      "id": "s08q5",
+      "level": "evaluate",
+      "track": "interview",
+      "type": "multi",
+      "difficulty": 5,
+      "kind": "whatif",
+      "topic": "Size concurrency by workload type",
+      "stem": {
+        "en": "A service is on `go 1.21` in `go.mod` and runs in a container limited to 2 CPUs on a 16-core host. The team bumps `go.mod` to `go 1.25`. Which TWO things change?",
+        "vi": "Một service ghi `go 1.21` trong `go.mod` và chạy trong container giới hạn 2 CPU trên host 16 nhân. Team nâng `go.mod` lên `go 1.25`. Hai điều nào sẽ đổi?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "`GOMAXPROCS` now follows the container CPU limit by default, so it drops from 16 to 2.",
+            "vi": "`GOMAXPROCS` giờ mặc định theo giới hạn CPU của container, nên giảm từ 16 xuống 2."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "`select` stops choosing at random and takes ready cases in source order.",
+            "vi": "`select` thôi chọn ngẫu nhiên và lấy case sẵn sàng theo thứ tự trong code."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Variables declared in `for` headers become per-iteration, so closures stop sharing them.",
+            "vi": "Biến khai báo trong phần đầu `for` thành theo từng vòng, nên closure thôi dùng chung."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "A send on a buffered channel now waits for a receiver, like an unbuffered one.",
+            "vi": "Lệnh gửi vào channel có buffer giờ chờ bên nhận, như channel không buffer."
+          }
+        },
+        {
+          "id": "e",
+          "text": {
+            "en": "`sync.Mutex` becomes reentrant, so formatting a locked value no longer deadlocks.",
+            "vi": "`sync.Mutex` thành reentrant, nên định dạng một giá trị đang bị khóa không còn deadlock."
+          }
+        }
+      ],
+      "answer": [
+        "a",
+        "c"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "Both changes are gated by the `go` line: per-iteration loop variables from 1.22, and container-aware `GOMAXPROCS` from 1.25. The pool-sizing code that uses `GOMAXPROCS(0)` therefore sees 2 instead of 16. The `select`, channel and mutex rules do not depend on the version.",
+          "vi": "Cả hai thay đổi đều được điều khiển bởi dòng `go`: biến vòng lặp theo từng vòng từ 1.22, và `GOMAXPROCS` nhận biết container từ 1.25. Code chỉnh cỡ pool dùng `GOMAXPROCS(0)` vì vậy thấy 2 thay vì 16. Các quy tắc của `select`, channel và mutex không phụ thuộc phiên bản."
+        },
+        "whyWrong": {
+          "b": {
+            "en": "`select` has chosen ready cases at random since the language was designed. No version changes that.",
+            "vi": "`select` chọn ngẫu nhiên giữa các case sẵn sàng từ khi ngôn ngữ ra đời. Không phiên bản nào đổi điều đó."
+          },
+          "d": {
+            "en": "Buffered channels still let a send complete into the buffer at once.",
+            "vi": "Channel có buffer vẫn cho lệnh gửi hoàn tất vào buffer ngay."
+          },
+          "e": {
+            "en": "Go mutexes are not reentrant in any version.",
+            "vi": "Mutex của Go không reentrant ở phiên bản nào."
+          }
+        },
+        "reread": {
+          "anchor": "size-concurrency-by-workload-type",
+          "label": {
+            "en": "Size concurrency by workload type",
+            "vi": "Chỉnh mức concurrency theo loại việc"
+          }
+        },
+        "say": {
+          "en": "When bumping the go line, list what it changes: loop variables and, from 1.25, GOMAXPROCS in containers.",
+          "vi": "Khi nâng dòng go, hãy liệt kê nó đổi gì: biến vòng lặp và, từ 1.25, GOMAXPROCS trong container."
+        }
+      },
+      "ref": "Post: Size concurrency by workload type",
+      "verifiedBy": "The loop-variable change was run: lv121 prints \"true 3 3 3\", lv127 prints \"false 1 2 3\" for the same code. The container GOMAXPROCS rule is taken from the post (\"Since Go 1.25, GOMAXPROCS follows the container's CPU limit by default, but only when the go line in go.mod says 1.25 or newer\") and was not run in a container here."
+    }
+  ]
+}

@@ -1,0 +1,452 @@
+{
+  "id": "set-06",
+  "title": {
+    "en": "Inlining, bounds checks and fewer allocations",
+    "vi": "Inlining, kiểm tra biên và bớt cấp phát"
+  },
+  "context": {
+    "text": {
+      "en": "The compiler and the standard library offer several ways to do the same work with less overhead.\n• Inlining has a cost budget of 80.\n• `-d=ssa/check_bce/debug=1` lists the bounds checks that remain.\n• Pools and caller-supplied buffers cut allocations, each with a catch.",
+      "vi": "Trình biên dịch và thư viện chuẩn có nhiều cách làm cùng một việc với ít chi phí hơn.\n• Inlining có ngân sách chi phí là 80.\n• `-d=ssa/check_bce/debug=1` liệt kê các kiểm tra biên còn lại.\n• Pool và buffer do bên gọi cấp giúp giảm cấp phát, mỗi cách đều có điểm cần lưu ý."
+    }
+  },
+  "questions": [
+    {
+      "id": "s06q1",
+      "level": "understand",
+      "track": "interview",
+      "type": "single",
+      "difficulty": 2,
+      "kind": "whatif",
+      "topic": "Mutex.Lock outlining",
+      "stem": {
+        "en": "`Mutex.Lock` calls `m.lockSlow()` instead of holding the slow path inline. What if the slow path code were written inside `Lock` itself?",
+        "vi": "`Mutex.Lock` gọi `m.lockSlow()` thay vì giữ đường chậm ngay bên trong. Điều gì xảy ra nếu code đường chậm được viết thẳng trong `Lock`?"
+      },
+      "media": [
+        {
+          "kind": "code",
+          "lang": "go",
+          "code": "// internal/sync/mutex.go (Go 1.27.1)\nfunc (m *Mutex) Lock() {\n\t// Fast path: grab unlocked mutex.\n\tif atomic.CompareAndSwapInt32(&m.state, 0, mutexLocked) {\n\t\tif race.Enabled {\n\t\t\trace.Acquire(unsafe.Pointer(m))\n\t\t}\n\t\treturn\n\t}\n\t// Slow path (outlined so that the fast path can be inlined)\n\tm.lockSlow()\n}"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "`Lock` would speed up, since one function is cheaper than two.",
+            "vi": "`Lock` sẽ nhanh hơn, vì một hàm rẻ hơn hai hàm."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "The mutex would stop being safe for concurrent use.",
+            "vi": "Mutex sẽ không còn an toàn khi dùng đồng thời."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Nothing: the inline budget applies only to closures.",
+            "vi": "Không gì cả: ngân sách inline chỉ áp dụng cho closure."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "`Lock` would exceed the inline budget of 80 and stop being inlined.",
+            "vi": "`Lock` sẽ vượt ngân sách inline 80 và không còn được inline."
+          }
+        }
+      ],
+      "answer": [
+        "d"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "A function whose cost is above 80 is not pasted into its caller. Outlining the rare slow path keeps `Lock` small enough that the uncontended fast path (one compare-and-swap) is inlined at every call site.",
+          "vi": "Hàm có chi phí trên 80 không được dán vào nơi gọi. Tách đường chậm hiếm gặp ra ngoài giữ `Lock` đủ nhỏ để đường nhanh không tranh chấp (một compare-and-swap) được inline ở mọi nơi gọi."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "Without inlining every call jumps into `Lock`. Merging the code makes the function bigger, not faster.",
+            "vi": "Không inline thì mỗi lần gọi phải nhảy vào `Lock`. Gộp code làm hàm to hơn chứ không nhanh hơn."
+          },
+          "b": {
+            "en": "Safety comes from the atomic operations and the slow path logic. Where the code sits does not change it.",
+            "vi": "Tính an toàn đến từ các thao tác atomic và logic đường chậm. Vị trí đặt code không đổi điều đó."
+          },
+          "c": {
+            "en": "The budget applies to every function, not only closures. The post cites it in the `-m=2` output for `writeJSON`.",
+            "vi": "Ngân sách áp dụng cho mọi hàm, không chỉ closure. Bài trích nó trong đầu ra `-m=2` của `writeJSON`."
+          }
+        },
+        "reread": {
+          "anchor": "inlining-97-and-bounds-check-elimination-bce",
+          "label": {
+            "en": "Inlining (#97) and Bounds Check Elimination (BCE)",
+            "vi": "Inlining (#97) và khử kiểm tra biên BCE"
+          }
+        },
+        "say": {
+          "en": "Keep the fast path small and outline the slow path so the fast path can be inlined.",
+          "vi": "Giữ đường nhanh nhỏ và tách đường chậm ra để đường nhanh được inline."
+        }
+      },
+      "ref": "Post: Inlining (#97) and Bounds Check Elimination (BCE)"
+    },
+    {
+      "id": "s06q2",
+      "level": "apply",
+      "track": "ai",
+      "type": "ai-review",
+      "difficulty": 3,
+      "kind": "predict",
+      "topic": "sync.Pool of a slice",
+      "stem": {
+        "en": "The assistant says the pooled `render` allocates nothing once the pool is warm. What does `testing.AllocsPerRun` report?",
+        "vi": "Trợ lý nói `render` dùng pool không cấp phát gì sau khi pool đã ấm. `testing.AllocsPerRun` báo bao nhiêu?"
+      },
+      "media": [
+        {
+          "kind": "code",
+          "lang": "go",
+          "code": "// An AI assistant's comment: \"Pooling the buffer makes render allocation free.\"\nvar bufPool = sync.Pool{New: func() any { return make([]byte, 0, 1024) }}\n\nfunc render(name string) int {\n\tbuf := bufPool.Get().([]byte)\n\tbuf = append(buf[:0], \"hello \"...)\n\tbuf = append(buf, name...)\n\tn := len(buf)\n\tbufPool.Put(buf)\n\treturn n\n}\n\n// measured with testing.AllocsPerRun(100, func() { render(\"x\") })"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "0",
+            "vi": "0"
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "1",
+            "vi": "1"
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "2",
+            "vi": "2"
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "1024",
+            "vi": "1024"
+          }
+        }
+      ],
+      "answer": [
+        "b"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "`bufPool.Put(buf)` takes an `any`. Converting a `[]byte` slice header (24 bytes) to `any` allocates a box, so each call allocates once even though the 1 KiB array is reused. Pool pointer types such as `*bytes.Buffer`, which fit in the interface without boxing.",
+          "vi": "`bufPool.Put(buf)` nhận một `any`. Chuyển header slice `[]byte` (24 byte) sang `any` cấp phát một hộp, nên mỗi lần gọi cấp phát một lần dù mảng 1 KiB được dùng lại. Hãy pool kiểu con trỏ như `*bytes.Buffer`, vốn vừa trong interface mà không cần boxing."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "0 would be true for a pooled `*bytes.Buffer`. A bare slice header is boxed on every `Put`.",
+            "vi": "0 chỉ đúng với `*bytes.Buffer` đã pool. Header slice trần bị boxing ở mỗi lần `Put`."
+          },
+          "c": {
+            "en": "There is one boxing allocation per call, not two. `Get` returns the stored value without allocating.",
+            "vi": "Mỗi lần gọi có một lần cấp phát boxing, không phải hai. `Get` trả giá trị đã lưu mà không cấp phát."
+          },
+          "d": {
+            "en": "`AllocsPerRun` counts allocations, not bytes. The 1,024 is the capacity, which is reused.",
+            "vi": "`AllocsPerRun` đếm số lần cấp phát, không đếm byte. 1.024 là capacity, được dùng lại."
+          }
+        },
+        "reread": {
+          "anchor": "three-practical-ways-to-cut-allocations-96",
+          "label": {
+            "en": "Three practical ways to cut allocations (#96)",
+            "vi": "Ba cách thực tế để giảm cấp phát bộ nhớ (#96)"
+          }
+        },
+        "say": {
+          "en": "Put a pointer into `sync.Pool`, not a bare slice, or `Put` allocates the box.",
+          "vi": "Hãy đưa con trỏ vào `sync.Pool`, không đưa slice trần, nếu không `Put` sẽ cấp phát hộp."
+        }
+      },
+      "ref": "Post: Three practical ways to cut allocations (#96)",
+      "verifiedBy": "go test -run=TestPool -v (testing.AllocsPerRun(100, func() { renderSlice(\"x\") }), Go 1.27.1)\nrender allocs: 1"
+    },
+    {
+      "id": "s06q3",
+      "level": "apply",
+      "track": "interview",
+      "type": "single",
+      "difficulty": 3,
+      "kind": "diagnose",
+      "topic": "Four bounds checks",
+      "stem": {
+        "en": "The compiler prints four `Found IsInBounds` lines for the loop body. What is the fix the post uses?",
+        "vi": "Trình biên dịch in bốn dòng `Found IsInBounds` cho thân vòng lặp. Cách sửa mà bài dùng là gì?"
+      },
+      "media": [
+        {
+          "kind": "code",
+          "lang": "go",
+          "code": "func sumEveryFourth(s []int) int {\n\tvar total int\n\tfor i := 0; i+3 < len(s); i += 4 {\n\t\ttotal += s[i] + s[i+1] + s[i+2] + s[i+3]\n\t}\n\treturn total\n}\n// go build -gcflags='-d=ssa/check_bce/debug=1' prints:\n// ./bce.go:6:13: Found IsInBounds\n// ./bce.go:6:20: Found IsInBounds\n// ./bce.go:6:29: Found IsInBounds\n// ./bce.go:6:38: Found IsInBounds"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Add a `//go:nobounds` comment above the function.",
+            "vi": "Thêm comment `//go:nobounds` phía trên hàm."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Reslice a 4-element window and read `_ = win[3]` once.",
+            "vi": "Cắt một cửa sổ 4 phần tử và đọc `_ = win[3]` một lần."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Run the loop in a goroutine so the checks run in parallel.",
+            "vi": "Chạy vòng lặp trong một goroutine để các phép kiểm tra chạy song song."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Raise the inlining budget with a compiler flag.",
+            "vi": "Nâng ngân sách inlining bằng một cờ biên dịch."
+          }
+        }
+      ],
+      "answer": [
+        "b"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "Go checks every `s[i+k]` against `len(s)`. Slicing `win := s[i : i+4]` and touching `win[3]` first lets the compiler prove the length is 4, so the four reads below it need no check. The compiler output for that version has no `Found IsInBounds` line.",
+          "vi": "Go kiểm tra từng `s[i+k]` với `len(s)`. Cắt `win := s[i : i+4]` rồi chạm `win[3]` trước giúp trình biên dịch chứng minh độ dài là 4, nên bốn lần đọc phía dưới không cần kiểm tra. Đầu ra của trình biên dịch cho bản đó không có dòng `Found IsInBounds` nào."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "There is no `//go:nobounds` directive in Go.",
+            "vi": "Go không có chỉ thị `//go:nobounds`."
+          },
+          "c": {
+            "en": "Bounds checks are inline branches, not separate tasks. A goroutine adds cost and removes nothing.",
+            "vi": "Kiểm tra biên là các nhánh nằm ngay trong code, không phải tác vụ riêng. Goroutine chỉ thêm chi phí mà không bỏ được gì."
+          },
+          "d": {
+            "en": "The inline budget and bounds checks are independent. A larger budget removes no check.",
+            "vi": "Ngân sách inline và kiểm tra biên độc lập nhau. Ngân sách lớn hơn không bỏ được kiểm tra nào."
+          }
+        },
+        "reread": {
+          "anchor": "inlining-97-and-bounds-check-elimination-bce",
+          "label": {
+            "en": "Inlining (#97) and Bounds Check Elimination (BCE)",
+            "vi": "Inlining (#97) và khử kiểm tra biên BCE"
+          }
+        },
+        "say": {
+          "en": "Give the compiler a proof of the length once, so it can drop the repeated checks.",
+          "vi": "Cho trình biên dịch một bằng chứng về độ dài một lần, để nó bỏ các lần kiểm tra lặp lại."
+        }
+      },
+      "ref": "Post: Inlining (#97) and Bounds Check Elimination (BCE)",
+      "verifiedBy": "go build -gcflags='-d=ssa/check_bce/debug=1' . (sumEveryFourth as above; sumWithBCEHint from the post in the same file, Go 1.27.1)\n./bce.go:6:13: Found IsInBounds\n./bce.go:6:20: Found IsInBounds\n./bce.go:6:29: Found IsInBounds\n./bce.go:6:38: Found IsInBounds\n(no line for sumWithBCEHint)"
+    },
+    {
+      "id": "s06q4",
+      "level": "analyze",
+      "track": "ai",
+      "type": "multi",
+      "difficulty": 4,
+      "kind": "diagnose",
+      "topic": "Pooled bytes.Buffer",
+      "stem": {
+        "en": "Which two bugs does the assistant's pooled `render` have?",
+        "vi": "Hai lỗi nào có trong `render` dùng pool của trợ lý?"
+      },
+      "media": [
+        {
+          "kind": "code",
+          "lang": "go",
+          "code": "// An AI assistant's pooled renderer.\nvar bufPool = sync.Pool{New: func() any { return new(bytes.Buffer) }}\n\nfunc render(name string) []byte {\n\tbuf := bufPool.Get().(*bytes.Buffer)\n\tbuf.WriteString(\"hello \")\n\tbuf.WriteString(name)\n\tout := buf.Bytes()\n\tbufPool.Put(buf)\n\treturn out\n}"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "It never calls `Reset`, so a reused buffer still holds earlier text.",
+            "vi": "Nó không gọi `Reset`, nên buffer được dùng lại vẫn giữ chữ cũ."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "`sync.Pool` cannot hold a `*bytes.Buffer`.",
+            "vi": "`sync.Pool` không giữ được `*bytes.Buffer`."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "It returns `buf.Bytes()` and then puts the buffer back, so the result can be overwritten later.",
+            "vi": "Nó trả `buf.Bytes()` rồi trả buffer vào pool, nên kết quả có thể bị ghi đè sau đó."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "`bufPool.Get()` blocks until another goroutine calls `Put`.",
+            "vi": "`bufPool.Get()` chặn cho tới khi goroutine khác gọi `Put`."
+          }
+        },
+        {
+          "id": "e",
+          "text": {
+            "en": "`WriteString` allocates a new buffer on every call.",
+            "vi": "`WriteString` cấp phát buffer mới ở mỗi lần gọi."
+          }
+        }
+      ],
+      "answer": [
+        "a",
+        "c"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "Without `Reset`, the second call on the same buffer printed `\"hello Ahello B\"`. With a `Reset` added, the slice returned by `render(\"A\")` read `\"hello B\"` after `render(\"B\")`, because both slices share one pooled array. Copy the bytes out (or finish with the buffer) before `Put`.",
+          "vi": "Không có `Reset`, lần gọi thứ hai trên cùng buffer in ra `\"hello Ahello B\"`. Thêm `Reset` vào thì slice do `render(\"A\")` trả về đọc ra `\"hello B\"` sau khi `render(\"B\")` chạy, vì hai slice dùng chung một mảng của pool. Hãy chép byte ra (hoặc dùng xong) trước khi `Put`."
+        },
+        "whyWrong": {
+          "b": {
+            "en": "`*bytes.Buffer` is the standard thing to pool, and it fits in an `any` without boxing.",
+            "vi": "`*bytes.Buffer` là thứ chuẩn để pool, và nó vừa trong `any` mà không cần boxing."
+          },
+          "d": {
+            "en": "`Get` never blocks. When the pool is empty it calls `New`.",
+            "vi": "`Get` không bao giờ chặn. Khi pool rỗng nó gọi `New`."
+          },
+          "e": {
+            "en": "`WriteString` appends to the existing buffer and grows it only when it is full.",
+            "vi": "`WriteString` nối vào buffer hiện có và chỉ mở rộng khi đã đầy."
+          }
+        },
+        "reread": {
+          "anchor": "three-practical-ways-to-cut-allocations-96",
+          "label": {
+            "en": "Three practical ways to cut allocations (#96)",
+            "vi": "Ba cách thực tế để giảm cấp phát bộ nhớ (#96)"
+          }
+        },
+        "say": {
+          "en": "Pooled objects need a reset on the way in and no references left on the way out.",
+          "vi": "Đối tượng trong pool cần reset lúc lấy ra và không còn tham chiếu nào lúc trả vào."
+        }
+      },
+      "ref": "Post: Three practical ways to cut allocations (#96)",
+      "verifiedBy": "go test -run=TestPool -v (render as above; renderReset is the same with buf.Reset() after Get; Go 1.27.1, no -race)\nno Reset: \"hello A\" \"hello Ahello B\"\nwith Reset: \"hello B\" \"hello B\""
+    },
+    {
+      "id": "s06q5",
+      "level": "evaluate",
+      "track": "ai",
+      "type": "ai-advice",
+      "difficulty": 5,
+      "kind": "whatif",
+      "topic": "Caller-supplied buffer",
+      "stem": {
+        "en": "The assistant proposes `loadInto(dst, src)` so callers reuse one buffer. What does it do, and what is the right response?",
+        "vi": "Trợ lý đề xuất `loadInto(dst, src)` để nơi gọi dùng lại một buffer. Nó có tác dụng gì, và phản hồi đúng là gì?"
+      },
+      "media": [
+        {
+          "kind": "code",
+          "lang": "go",
+          "code": "// An AI assistant's proposal. No profile has flagged this function yet.\nfunc load(src []byte) []byte {\n\tout := make([]byte, 4096)\n\tcopy(out, src)\n\treturn out\n}\n\n// proposed: the caller passes one buffer and reuses it for every call\nfunc loadInto(dst, src []byte) int {\n\treturn copy(dst, src)\n}"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "It cuts one allocation per call, but check the profile first and mind buffer reuse.",
+            "vi": "Nó bớt một lần cấp phát mỗi lần gọi, nhưng nên xem profile trước và để ý việc dùng lại buffer."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "It changes nothing: Go copies the buffer into `dst` on the heap anyway.",
+            "vi": "Không đổi gì: Go vẫn chép buffer vào `dst` trên heap."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Always apply it: every function should take a buffer instead of returning one.",
+            "vi": "Luôn áp dụng: mọi hàm nên nhận buffer thay vì trả buffer."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Reject it: only `sync.Pool` can remove an allocation in Go.",
+            "vi": "Bác bỏ: chỉ `sync.Pool` mới bỏ được cấp phát trong Go."
+          }
+        }
+      ],
+      "answer": [
+        "a"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "`load` allocates a 4 KiB slice per call (1 allocation); `loadInto` into a reused buffer measured 0. This is the `io.Reader` idea from the post. The cost is an API where the caller owns the buffer and must not keep the result across calls, so spend it where a profile shows the allocation matters.",
+          "vi": "`load` cấp phát một slice 4 KiB mỗi lần gọi (1 lần cấp phát); `loadInto` vào buffer dùng lại đo được 0. Đây là ý tưởng `io.Reader` trong bài. Cái giá là một API mà bên gọi sở hữu buffer và không được giữ kết quả qua các lần gọi, nên chỉ dùng ở nơi profile cho thấy việc cấp phát đáng kể."
+        },
+        "whyWrong": {
+          "b": {
+            "en": "`copy` writes into the memory `dst` already points at. No new heap object is created.",
+            "vi": "`copy` ghi vào vùng nhớ mà `dst` đã trỏ tới. Không có đối tượng heap mới nào được tạo."
+          },
+          "c": {
+            "en": "Buffer-passing complicates ownership. The profile decides where it pays.",
+            "vi": "Truyền buffer làm phức tạp quyền sở hữu. Profile quyết định nơi nào đáng làm."
+          },
+          "d": {
+            "en": "A caller-owned buffer removes the allocation without a pool, as the measurement shows.",
+            "vi": "Buffer do bên gọi sở hữu bỏ được cấp phát mà không cần pool, như phép đo cho thấy."
+          }
+        },
+        "reread": {
+          "anchor": "three-practical-ways-to-cut-allocations-96",
+          "label": {
+            "en": "Three practical ways to cut allocations (#96)",
+            "vi": "Ba cách thực tế để giảm cấp phát bộ nhớ (#96)"
+          }
+        },
+        "say": {
+          "en": "Check the profile, then name who owns the buffer and how long the result stays valid.",
+          "vi": "Xem profile trước, rồi nêu rõ ai sở hữu buffer và kết quả hợp lệ trong bao lâu."
+        }
+      },
+      "ref": "Post: Three practical ways to cut allocations (#96)",
+      "verifiedBy": "go test -run=TestLoad -v (testing.AllocsPerRun for gb = load(src) and loadInto(buf, src), Go 1.27.1)\nloadNew: 1 loadInto: 0"
+    }
+  ]
+}

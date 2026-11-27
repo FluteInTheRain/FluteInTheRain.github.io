@@ -1,0 +1,436 @@
+{
+  "id": "set-08",
+  "title": {
+    "en": "Launch review for the Todo service",
+    "vi": "Rà soát trước khi ra mắt service Todo"
+  },
+  "context": {
+    "text": {
+      "en": "The `Todo` service is one hour from its first production deploy.\nIt calls a partner webhook after `createTodo` and reads PostgreSQL through one `*sql.DB`.\nPods have `limits.cpu: \"2\"` on 6-CPU nodes.\nBoth the webhook partner and the database can hang.\nThe review list covers timeouts, closing, time, JSON, the pool and CPU limits.",
+      "vi": "Service `Todo` còn một giờ nữa là deploy production lần đầu.\nNó gọi webhook của đối tác sau `createTodo` và đọc PostgreSQL qua một `*sql.DB`.\nPod có `limits.cpu: \"2\"` trên node 6 CPU.\nCả đối tác webhook lẫn database đều có thể treo.\nDanh sách review gồm timeout, đóng tài nguyên, time, JSON, pool và giới hạn CPU."
+    }
+  },
+  "questions": [
+    {
+      "id": "s08q1",
+      "level": "apply",
+      "track": "interview",
+      "type": "scenario",
+      "difficulty": 3,
+      "kind": "why",
+      "topic": "One shared client",
+      "stem": {
+        "en": "The webhook code builds a new `http.Client` for every call. Why is one client, built at start-up and shared, better?",
+        "vi": "Code webhook tạo một `http.Client` mới cho mỗi lời gọi. Vì sao một client dựng lúc khởi động và dùng chung thì tốt hơn?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "A client is goroutine-safe, and sharing it lets its `Transport` reuse idle connections.",
+            "vi": "Client an toàn cho goroutine, và dùng chung giúp `Transport` của nó tái dùng connection rảnh."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "A client is not safe for concurrent use, so one global makes calls run in turn.",
+            "vi": "Client không an toàn khi dùng đồng thời, nên một cái toàn cục làm các lời gọi chạy lần lượt."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "A new client resets `Timeout` to a safe default, so sharing removes that default.",
+            "vi": "Client mới đặt lại `Timeout` về mặc định an toàn, nên dùng chung làm mất mặc định đó."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Only a shared client may set `ResponseHeaderTimeout` on its `Transport`.",
+            "vi": "Chỉ client dùng chung mới đặt được `ResponseHeaderTimeout` trên `Transport` của nó."
+          }
+        }
+      ],
+      "answer": [
+        "a"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "A client is safe for many goroutines, and its `Transport` owns the pool of idle connections. A new client per call gets a new, empty pool each time, so nothing is reused and every call pays for a new connection.",
+          "vi": "Client an toàn cho nhiều goroutine, và `Transport` của nó sở hữu pool connection rảnh. Mỗi lời gọi một client mới thì mỗi lần có một pool mới rỗng, nên không gì được tái dùng và mọi lời gọi đều trả giá cho một connection mới."
+        },
+        "whyWrong": {
+          "b": {
+            "en": "Clients are safe for many goroutines at once. Sharing one does not serialise calls.",
+            "vi": "Client an toàn cho nhiều goroutine cùng lúc. Dùng chung một cái không làm các lời gọi chạy tuần tự."
+          },
+          "c": {
+            "en": "A new client has `Timeout` zero, which means no limit. There is no safe default to lose.",
+            "vi": "Client mới có `Timeout` bằng 0, nghĩa là không giới hạn. Không có mặc định an toàn nào để mất."
+          },
+          "d": {
+            "en": "Any client can set transport limits. The point of sharing is the connection pool, not a setting.",
+            "vi": "Client nào cũng đặt được giới hạn transport. Mục đích của việc dùng chung là pool connection, không phải một cài đặt."
+          }
+        },
+        "reread": {
+          "anchor": "the-default-client-never-gives-up",
+          "label": {
+            "en": "The default client never gives up",
+            "vi": "Client mặc định không bao giờ bỏ cuộc"
+          }
+        },
+        "say": {
+          "en": "I build one `http.Client` at start-up and share it, so the connection pool is shared too.",
+          "vi": "Mình dựng một `http.Client` lúc khởi động và dùng chung, nên pool connection cũng được dùng chung."
+        }
+      },
+      "ref": "Post: The default client never gives up"
+    },
+    {
+      "id": "s08q2",
+      "level": "apply",
+      "track": "ai",
+      "type": "ai-review",
+      "difficulty": 3,
+      "kind": "diagnose",
+      "topic": "Half-sent headers on the server",
+      "stem": {
+        "en": "In a test, a client opens a connection and sends half a request header. The server does not hang up, and file descriptors climb. An AI assistant says: \"Timeouts are covered, the client has a 5 second `Timeout`.\" Which diagnosis is right?",
+        "vi": "Trong một test, client mở connection và gửi nửa header của request. Server không ngắt, và file descriptor tăng dần. Một AI nói: \"Timeout đã được phủ, client có `Timeout` 5 giây.\" Chẩn đoán nào đúng?"
+      },
+      "media": [
+        {
+          "kind": "code",
+          "lang": "go",
+          "code": "client := &http.Client{Timeout: 5 * time.Second}\nlog.Fatal(http.ListenAndServe(\":8080\", mux))",
+          "caption": {
+            "en": "The AI assistant's set-up",
+            "vi": "Phần dựng của AI"
+          }
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "The 5 second client `Timeout` is too long for this service, so it should be lowered to 1 second.",
+            "vi": "`Timeout` 5 giây của client quá dài với service này, nên cần hạ xuống 1 giây."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "`:8080` binds every network interface, so extra connections can reach the server from anywhere.",
+            "vi": "`:8080` bind mọi network interface, nên các connection thừa có thể tới server từ bất cứ đâu."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "`mux` has no default route, so unfinished requests have nowhere to go and wait for a handler.",
+            "vi": "`mux` không có route mặc định, nên request dở dang không có chỗ đi và chờ một handler."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "`http.ListenAndServe` makes a server with zero timeouts; use `http.Server` with `ReadHeaderTimeout`.",
+            "vi": "`http.ListenAndServe` tạo server không có timeout nào; hãy dùng `http.Server` có `ReadHeaderTimeout`."
+          }
+        }
+      ],
+      "answer": [
+        "d"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "The client timeout and the server timeouts are separate. `http.ListenAndServe` builds a server with every timeout at zero and gives you no way to change it, so a half-sent header keeps the connection, a goroutine and a socket for ever. Build the `http.Server` yourself with `ReadHeaderTimeout`.",
+          "vi": "Timeout của client và timeout của server là hai chuyện riêng. `http.ListenAndServe` dựng server với mọi timeout bằng 0 và không cho bạn đổi, nên một header gửi dở giữ connection, goroutine và socket mãi mãi. Hãy tự dựng `http.Server` với `ReadHeaderTimeout`."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "The client `Timeout` limits calls this service makes. It has no effect on connections coming in to the server.",
+            "vi": "`Timeout` của client giới hạn các lời gọi service này thực hiện. Nó không ảnh hưởng gì tới connection đi vào server."
+          },
+          "b": {
+            "en": "Binding every interface decides who can connect, not how long a half-finished request may be held.",
+            "vi": "Bind mọi interface quyết định ai kết nối được, không quyết định một request dở dang được giữ bao lâu."
+          },
+          "c": {
+            "en": "A missing route gives a `404` for finished requests. It does not explain a request held open for ever.",
+            "vi": "Thiếu route cho ra `404` với request đã xong. Nó không giải thích một request bị giữ mở mãi."
+          }
+        },
+        "reread": {
+          "anchor": "the-server-side-the-same-trap-on-the-other-end",
+          "label": {
+            "en": "The server side: the same trap on the other end",
+            "vi": "Phía server: cùng một cái bẫy ở đầu kia"
+          }
+        },
+        "say": {
+          "en": "Client timeouts and server timeouts are separate checks; I look at both sides before I say \"covered\".",
+          "vi": "Timeout của client và của server là hai kiểm tra riêng; mình xem cả hai phía trước khi nói \"đã phủ\"."
+        }
+      },
+      "ref": "Post: The server side: the same trap on the other end",
+      "verifiedBy": "cd h && go run .  (Go 1.27.1, http.Serve on a bare listener like ListenAndServe, half a header sent, 3 s read deadline)\nwaited 3s then: true"
+    },
+    {
+      "id": "s08q3",
+      "level": "analyze",
+      "track": "ai",
+      "type": "ai-advice",
+      "difficulty": 4,
+      "kind": "why",
+      "topic": "Layered client limits",
+      "stem": {
+        "en": "An AI assistant looks at the figure and says: \"Remove `Dialer.Timeout`, `TLSHandshakeTimeout`, `ResponseHeaderTimeout` and `IdleConnTimeout`. `Client.Timeout` of 5 s already covers the whole call, so they are redundant.\" Is that right?",
+        "vi": "Một AI nhìn hình và nói: \"Bỏ `Dialer.Timeout`, `TLSHandshakeTimeout`, `ResponseHeaderTimeout` và `IdleConnTimeout`. `Client.Timeout` 5 giây đã phủ cả lời gọi, nên chúng thừa.\" Có đúng không?"
+      },
+      "media": [
+        {
+          "kind": "figure",
+          "component": "Gq14ClientPhases",
+          "alt": {
+            "en": "Four limits of one http.Client as bars on a 0 to 5 second axis: Dialer.Timeout 1 s, TLSHandshakeTimeout 1 s, ResponseHeaderTimeout 2 s and Client.Timeout 5 s. A separate note gives IdleConnTimeout as 90 s for unused connections in the pool.",
+            "vi": "Bốn giới hạn của một http.Client dưới dạng thanh trên trục 0 đến 5 giây: Dialer.Timeout 1 giây, TLSHandshakeTimeout 1 giây, ResponseHeaderTimeout 2 giây và Client.Timeout 5 giây. Một ghi chú riêng nêu IdleConnTimeout 90 giây cho connection không dùng trong pool."
+          }
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Wrong: `Client.Timeout` ends when the headers arrive, so only the `Transport` covers the body.",
+            "vi": "Sai: `Client.Timeout` kết thúc khi header tới, nên chỉ `Transport` phủ phần body."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Partly wrong: phase limits cut a stuck step short of 5 s, and `IdleConnTimeout` governs the pool, not a call.",
+            "vi": "Sai một phần: các giới hạn theo giai đoạn cắt một bước bị kẹt sớm hơn 5 giây, và `IdleConnTimeout` quản lý pool, không phải lời gọi."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Right: `Client.Timeout` covers every setting of the `Transport`, the idle pool included, so all are redundant.",
+            "vi": "Đúng: `Client.Timeout` phủ mọi cài đặt của `Transport`, cả pool rảnh, nên tất cả đều thừa."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Wrong: `Client.Timeout` covers only the connect step, so the others are needed to bound the rest.",
+            "vi": "Sai: `Client.Timeout` chỉ phủ bước kết nối, nên cần các cái khác để chặn phần còn lại."
+          }
+        }
+      ],
+      "answer": [
+        "b"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "`Client.Timeout` is one deadline for the whole call, so it does bound everything in a single call. The phase limits are tighter: a dead host fails after 1 s at the dial instead of 5 s, and a silent server fails after 2 s at the header. `IdleConnTimeout` is not about a call at all: it decides how long an unused connection stays in the pool.",
+          "vi": "`Client.Timeout` là một hạn chót cho cả lời gọi, nên nó chặn mọi thứ trong một lời gọi. Các giới hạn theo giai đoạn chặt hơn: một host chết fail sau 1 giây ở bước dial thay vì 5 giây, và một server im lặng fail sau 2 giây ở bước header. `IdleConnTimeout` không liên quan tới một lời gọi: nó quyết định connection không dùng nằm trong pool bao lâu."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "`Client.Timeout` is one deadline for the whole call, from connecting to reading the body.",
+            "vi": "`Client.Timeout` là một hạn chót cho cả lời gọi, từ lúc kết nối tới khi đọc xong body."
+          },
+          "c": {
+            "en": "`Client.Timeout` bounds one call. How long an unused connection stays in the pool is a pool setting it does not touch.",
+            "vi": "`Client.Timeout` chặn một lời gọi. Một connection không dùng nằm trong pool bao lâu là cài đặt của pool mà nó không đụng tới."
+          },
+          "d": {
+            "en": "It covers the whole call, not just the connect step. The phase limits are about failing earlier, not about coverage.",
+            "vi": "Nó phủ cả lời gọi, không chỉ bước kết nối. Các giới hạn theo giai đoạn nhằm fail sớm hơn, không phải để phủ thêm."
+          }
+        },
+        "reread": {
+          "anchor": "1-waiting-for-ever-timeouts",
+          "label": {
+            "en": "1. Waiting for ever: timeouts",
+            "vi": "1. Chờ mãi: timeout"
+          }
+        },
+        "say": {
+          "en": "`Client.Timeout` bounds the call; the `Transport` limits fail faster per phase and manage the pool.",
+          "vi": "`Client.Timeout` chặn cả lời gọi; các giới hạn của `Transport` fail nhanh hơn theo từng giai đoạn và quản lý pool."
+        }
+      },
+      "ref": "Post: 1. Waiting for ever: timeouts"
+    },
+    {
+      "id": "s08q4",
+      "level": "evaluate",
+      "track": "ai",
+      "type": "ai-advice",
+      "difficulty": 5,
+      "kind": "whatif",
+      "topic": "Throttled after a toolchain upgrade",
+      "stem": {
+        "en": "After moving to the Go 1.27.1 toolchain, pods are still throttled. Their `go.mod` says `go 1.24`, the limit is 2 CPUs and nodes have 6. An AI assistant says: \"The upgrade already fixed `GOMAXPROCS`. Raise the CPU limit to 6.\" What is the best response?",
+        "vi": "Sau khi chuyển sang toolchain Go 1.27.1, các pod vẫn bị throttle. `go.mod` của chúng ghi `go 1.24`, giới hạn là 2 CPU và node có 6. Một AI nói: \"Bản nâng cấp đã sửa `GOMAXPROCS`. Tăng giới hạn CPU lên 6.\" Phản hồi tốt nhất là gì?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Accept it: raising the limit to 6 matches the node's CPU count, so throttling stops for good.",
+            "vi": "Chấp nhận: tăng giới hạn lên 6 khớp với số CPU của node, nên throttling dừng hẳn."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Remove the CPU limits altogether, so the kernel has nothing left to throttle in any pod.",
+            "vi": "Bỏ hẳn giới hạn CPU, để kernel không còn gì để throttle ở bất kỳ pod nào."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Raise the `go` line to 1.25 or newer (or set `GOMAXPROCS`), then watch the throttling metric.",
+            "vi": "Nâng dòng `go` lên 1.25 trở lên (hoặc đặt `GOMAXPROCS`), rồi theo dõi metric throttling."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Set `GODEBUG=containermaxprocs=0` in the pod spec, which switches the new behaviour on.",
+            "vi": "Đặt `GODEBUG=containermaxprocs=0` trong pod spec, để bật hành vi mới."
+          }
+        }
+      ],
+      "answer": [
+        "c"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "This is a judgement, and the facts decide it. With a `go` line of 1.24 the runtime keeps `runtime.NumCPU`, so `GOMAXPROCS` was 6 on the same toolchain. Raising the `go` line (or setting `GOMAXPROCS`) makes Go follow the limit. Then check `container_cpu_cfs_throttled_seconds_total`, because a limit can still throttle a little.",
+          "vi": "Đây là một phán đoán, và dữ kiện quyết định. Với dòng `go` 1.24, runtime giữ `runtime.NumCPU`, nên `GOMAXPROCS` là 6 trên cùng toolchain. Nâng dòng `go` (hoặc đặt `GOMAXPROCS`) làm Go theo giới hạn. Sau đó kiểm tra `container_cpu_cfs_throttled_seconds_total`, vì giới hạn vẫn có thể bóp một chút."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "That hands each pod three times the CPU to hide a mismatch: Go still sizes itself to the node, and the pod loses its cap against neighbours.",
+            "vi": "Cách đó cho mỗi pod gấp ba CPU để che một sự lệch: Go vẫn tự chỉnh theo node, và pod mất trần so với hàng xóm."
+          },
+          "b": {
+            "en": "Without a limit there is no throttling, but the pods lose their ceiling and can crowd out neighbours. It dodges the question.",
+            "vi": "Không có giới hạn thì không có throttling, nhưng pod mất trần và có thể chèn ép hàng xóm. Nó né câu hỏi."
+          },
+          "d": {
+            "en": "`containermaxprocs=0` turns the new behaviour off. That is already the default for a `go` line of 1.24.",
+            "vi": "`containermaxprocs=0` tắt hành vi mới. Đó đã là mặc định với dòng `go` 1.24."
+          }
+        },
+        "reread": {
+          "anchor": "the-kubernetes-cfs-throttling-trap-100",
+          "label": {
+            "en": "The Kubernetes CFS throttling trap (`#100`)",
+            "vi": "Cái bẫy CFS Throttling trên Kubernetes (`#100`)"
+          }
+        },
+        "say": {
+          "en": "Before I raise a limit I check which `GOMAXPROCS` Go chose, and the `go` line decides that.",
+          "vi": "Trước khi tăng giới hạn, mình kiểm tra Go đã chọn `GOMAXPROCS` nào, và dòng `go` quyết định điều đó."
+        }
+      },
+      "ref": "Post: The Kubernetes CFS throttling trap (#100)",
+      "verifiedBy": "cd gm && docker run --rm --platform linux/arm64 --cpus=2 -v \"$PWD\":/app ubuntu:24.04 /app/gm-old  (go.mod: go 1.24, Go 1.27.1 toolchain)\nNumCPU: 6 GOMAXPROCS: 6"
+    },
+    {
+      "id": "s08q5",
+      "level": "evaluate",
+      "track": "interview",
+      "type": "multi",
+      "difficulty": 5,
+      "kind": "whatif",
+      "topic": "Bounding a stuck dependency",
+      "stem": {
+        "en": "The first release has one hour left. The webhook partner and PostgreSQL can each hang. Which two changes stop one stuck dependency from holding goroutines for ever?",
+        "vi": "Bản phát hành đầu còn một giờ. Đối tác webhook và PostgreSQL đều có thể treo. Hai thay đổi nào ngăn một dependency bị kẹt giữ goroutine mãi mãi?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "An own `http.Client` with a `Timeout` for the webhook call.",
+            "vi": "Một `http.Client` riêng có `Timeout` cho lời gọi webhook."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "`defer resp.Body.Close()` after the error check on the webhook call.",
+            "vi": "`defer resp.Body.Close()` sau đoạn kiểm tra lỗi ở lời gọi webhook."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "One `db.PingContext` at start-up, with a timeout.",
+            "vi": "Một `db.PingContext` lúc khởi động, có timeout."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "A `context.WithTimeout` on each database call, such as `QueryContext`.",
+            "vi": "Một `context.WithTimeout` cho mỗi lời gọi database, như `QueryContext`."
+          }
+        },
+        {
+          "id": "e",
+          "text": {
+            "en": "A higher `MaxIdleConnsPerHost` for the webhook host.",
+            "vi": "`MaxIdleConnsPerHost` cao hơn cho host webhook."
+          }
+        }
+      ],
+      "answer": [
+        "a",
+        "d"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "Both stuck dependencies share one shape: a call that waits with no deadline. The client `Timeout` bounds the webhook call. A `context` deadline on each database call bounds a caller that queues for a pool connection or waits on a slow query. The other three are cleanup or start-up checks and do not end a wait.",
+          "vi": "Cả hai dependency bị kẹt có chung một dạng: một lời gọi chờ không có hạn chót. `Timeout` của client chặn lời gọi webhook. Hạn chót của `context` trên mỗi lời gọi database chặn một caller đang xếp hàng chờ connection của pool hoặc chờ một query chậm. Ba cái còn lại là dọn dẹp hoặc kiểm tra lúc khởi động và không kết thúc một lần chờ."
+        },
+        "whyWrong": {
+          "b": {
+            "en": "Closing the body is cleanup that runs after the call returns. It does not bound a call that is still waiting.",
+            "vi": "Đóng body là việc dọn dẹp chạy sau khi lời gọi trả về. Nó không chặn một lời gọi còn đang chờ."
+          },
+          "c": {
+            "en": "A ping at start-up checks the database once. A database that hangs later is not covered.",
+            "vi": "Một ping lúc khởi động chỉ kiểm tra database một lần. Database treo sau đó không được phủ."
+          },
+          "e": {
+            "en": "The idle limit decides how many finished connections stay ready. It does not stop a call from waiting.",
+            "vi": "Giới hạn rảnh quyết định giữ sẵn bao nhiêu connection đã xong. Nó không ngăn một lời gọi chờ mãi."
+          }
+        },
+        "reread": {
+          "anchor": "1-waiting-for-ever-timeouts",
+          "label": {
+            "en": "1. Waiting for ever: timeouts",
+            "vi": "1. Chờ mãi: timeout"
+          }
+        },
+        "say": {
+          "en": "With one hour left I put a deadline on every call that waits: client `Timeout` and a `context` on each query.",
+          "vi": "Còn một giờ thì mình đặt hạn chót cho mọi lời gọi có chờ: `Timeout` của client và `context` cho mỗi query."
+        }
+      },
+      "ref": "Post: 1. Waiting for ever: timeouts"
+    }
+  ]
+}
