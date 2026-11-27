@@ -441,7 +441,7 @@ func sumWithBCEHint(s []int) int {
 ### Three practical ways to cut allocations (`#96`)
 
 1. **Share down in APIs:** `io.Reader` accepts `Read(p []byte)` instead of returning a fresh `[]byte`, letting callers reuse one buffer across thousands of reads.
-2. **Watch compiler lookup fast paths:** looking up a map with a `[]byte` longer than 32 bytes via `k := string(key); v = m[k]` allocates a heap string (`26.0 ns/op, 64 B/op, 1 alloc/op` on Go 1.27.1), whereas `v = m[string(key)]` inline triggers Go's zero-copy lookup (`8.1 ns/op, 0 B/op, 0 allocs/op`).
+2. **Watch compiler lookup fast paths:** looking up a map with a `[]byte` longer than 32 bytes via `k := string(key); v = m[k]` allocates a heap string when `k` escapes, for example because it is also stored or returned (`26.0 ns/op, 64 B/op, 1 alloc/op` on Go 1.27.1); if `k` does not escape, the compiler keeps the copy on the stack and the two-step form also shows 0 allocs. Writing `v = m[string(key)]` inline triggers Go's zero-copy lookup (`8.1 ns/op, 0 B/op, 0 allocs/op`).
 3. **Recycle buffers with `sync.Pool`:** pooling `*bytes.Buffer` pointers across calls cut a 1 KiB response build from `147.8 ns/op, 1024 B/op, 1 alloc/op` to `10.7 ns/op, 0 B/op, 0 allocs/op` on Go 1.27.1. Pool pointer types (`*bytes.Buffer`, because boxing a bare 24-byte `[]byte` header into `any` still allocates), reset buffers before `Put`, and keep in mind that GC clears idle pool items on collection. Full pooling and streaming patterns live in [Go optimization patterns](/blog/go-three-rs-optimization-patterns-streaming-pooling/).
 
 <Concepts>
@@ -547,7 +547,7 @@ Reading `gc 4`: `@0.005s` is elapsed runtime, `5%` is cumulative GC CPU fraction
 
 Go exposes two knobs to balance CPU against memory (`#99`):
 
-1. **`GOGC` (default `100`, or `debug.SetGCPercent`):** sets the percentage of **new heap growth** allowed relative to surviving live heap (`HeapTarget = Live × (1 + GOGC/100)`). With `50 MiB` live and `GOGC=100`, Go collects at `100 MiB`. Raising `GOGC=200` raises the trigger to `150 MiB` and roughly halves GC frequency, which is why keeping `GOGC=100` in roomy containers wastes CPU (Uber's 70K-core win). Even with `GOGC=off`, Go forces a collection if two minutes pass without one, the exact two-minute heartbeat that hit Discord's Read States service.
+1. **`GOGC` (default `100`, or `debug.SetGCPercent`):** sets the percentage of **new heap growth** allowed relative to surviving live heap (`HeapTarget = Live × (1 + GOGC/100)`). With `50 MiB` live and `GOGC=100`, Go collects at `100 MiB`. Raising `GOGC=200` raises the trigger to `150 MiB` and roughly halves GC frequency, which is why keeping `GOGC=100` in roomy containers wastes CPU (Uber's 70K-core win). With the default `GOGC`, Go forces a collection if two minutes pass without one, the exact two-minute heartbeat that hit Discord's Read States service. With `GOGC=off` that heartbeat is disabled too: only `GOMEMLIMIT` pressure or an explicit `runtime.GC()` starts a collection.
 2. **`GOMEMLIMIT` (Go 1.19+ soft limit, or `debug.SetMemoryLimit`):** caps total Go-managed runtime memory (`MemStats.Sys - MemStats.HeapReleased`: heap, stacks, and runtime metadata, excluding binary text, `cgo`, or manual `syscall.Mmap`). It lets you raise `GOGC` (even to `off`) without crossing your pod limit, up to a safeguard ceiling.
 
 <QuoteCard author="Michael Knyszek" role="Go Runtime & GC Team" sourceTitle="Go runtime: 4 years later" sourceUrl="https://go.dev/blog/go1.19-runtime">
@@ -999,7 +999,7 @@ func sumWithBCEHint(s []int) int {
 ### Ba cách thực tế để giảm cấp phát bộ nhớ (`#96`)
 
 1. **Thiết kế API truyền đệm từ trên xuống:** `io.Reader` nhận `Read(p []byte)` thay vì tạo và trả `[]byte` mới, giúp bên gọi tái sử dụng một buffer duy nhất qua hàng nghìn lượt đọc.
-2. **Tận dụng tối ưu tra map của trình biên dịch:** tra một map bằng `[]byte` dài hơn 32 byte qua biến trung gian `k := string(key); v = m[k]` sẽ cấp phát chuỗi trên heap (`26,0 ns/op, 64 B/op, 1 alloc/op` trên Go 1.27.1), còn viết gộp `v = m[string(key)]` kích hoạt đường tra map không cấp phát (`8,1 ns/op, 0 B/op, 0 allocs/op`).
+2. **Tận dụng tối ưu tra map của trình biên dịch:** tra một map bằng `[]byte` dài hơn 32 byte qua biến trung gian `k := string(key); v = m[k]` sẽ cấp phát chuỗi trên heap khi `k` thoát ra ngoài (escape), ví dụ còn được lưu hoặc trả về (`26,0 ns/op, 64 B/op, 1 alloc/op` trên Go 1.27.1); nếu `k` không escape, trình biên dịch giữ bản sao trên stack và dạng hai bước cũng cho 0 alloc. Viết `v = m[string(key)]` kích hoạt đường tra map không cấp phát (`8,1 ns/op, 0 B/op, 0 allocs/op`).
 3. **Tái sử dụng buffer qua `sync.Pool`:** dùng pool `*bytes.Buffer` giúp công đoạn dựng buffer 1 KiB giảm từ `147,8 ns/op, 1024 B/op, 1 alloc/op` xuống còn `10,7 ns/op, 0 B/op, 0 allocs/op` trên Go 1.27.1. Nhớ bỏ vào pool kiểu con trỏ (`*bytes.Buffer`, vì đóng hộp header `[]byte` 24 byte vào `any` vẫn phát sinh cấp phát), gọi `Reset()` trước khi `Put`, và hiểu rằng GC sẽ dọn các phần tử rảnh trong pool ở chu kỳ thu gom rác. Phần chuyên sâu về pooling và Three Rs nằm ở [Các mẫu tối ưu Go](/blog/go-three-rs-optimization-patterns-streaming-pooling/).
 
 <Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
@@ -1105,7 +1105,7 @@ Cách đọc dòng `gc 4`: `@0.005s` là thời điểm chạy, `5%` là tổng 
 
 Go chỉ đưa ra hai núm chỉnh chính để đánh đổi giữa CPU và RAM (`#99`):
 
-1. **`GOGC` (mặc định `100`, hoặc `debug.SetGCPercent`):** đặt phần trăm **rác mới được phép sinh thêm** so với lượng heap sống sót sau vòng trước (`Target = Live × (1 + GOGC/100)`). Nếu dữ liệu sống là `50 MiB`, `GOGC=100` sẽ đợi tới `100 MiB`. Tăng `GOGC=200` nâng trần lên `150 MiB` và giảm gần nửa số vòng GC, giải thích vì sao để mặc định `100` trong container dư RAM bị tốn CPU oan (câu chuyện 70K nhân ở Uber). Ngay cả khi tắt bằng `GOGC=off`, runtime vẫn ép chạy GC nếu quá 2 phút chưa quét lần nào, đúng chu kỳ 2 phút từng làm Discord giật p99.
+1. **`GOGC` (mặc định `100`, hoặc `debug.SetGCPercent`):** đặt phần trăm **rác mới được phép sinh thêm** so với lượng heap sống sót sau vòng trước (`Target = Live × (1 + GOGC/100)`). Nếu dữ liệu sống là `50 MiB`, `GOGC=100` sẽ đợi tới `100 MiB`. Tăng `GOGC=200` nâng trần lên `150 MiB` và giảm gần nửa số vòng GC, giải thích vì sao để mặc định `100` trong container dư RAM bị tốn CPU oan (câu chuyện 70K nhân ở Uber). Với `GOGC` mặc định, runtime ép chạy GC nếu quá 2 phút chưa quét lần nào, đúng chu kỳ 2 phút từng làm Discord giật p99. Khi tắt bằng `GOGC=off`, chu kỳ này cũng tắt theo: chỉ áp lực `GOMEMLIMIT` hoặc gọi `runtime.GC()` tường minh mới kích hoạt một vòng GC.
 2. **`GOMEMLIMIT` (trần mềm từ Go 1.19, hoặc `debug.SetMemoryLimit`):** đặt ngưỡng mềm cho tổng bộ nhớ Go quản lý (`MemStats.Sys - MemStats.HeapReleased`: gồm heap, stack và metadata runtime, không tính phần binary, `cgo` hay `syscall.Mmap` ngoài). Nhờ có trần này bạn mới dám tăng `GOGC` (hoặc đặt `off`) mà không lo pod chết OOM khi tải tăng.
 
 <QuoteCard author="Michael Knyszek" role="Đội ngũ Go Runtime & GC" sourceTitle="Go runtime: 4 years later" sourceUrl="https://go.dev/blog/go1.19-runtime">

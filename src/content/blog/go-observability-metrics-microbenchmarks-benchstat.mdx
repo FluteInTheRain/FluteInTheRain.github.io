@@ -295,7 +295,7 @@ BenchmarkLookupBLoop-8        	 2266502	        10.38 ns/op	       0 B/op	      
 
 Look at Run 1 of `BenchmarkLookupNoReset-8`: Go first calls the benchmark with `b.N=1` to guess how many iterations fit in `-benchtime`. Because `buildTodoIndex` ran inside the active timer, Go thought one lookup took milliseconds, picked `b.N=874`, and reported `25,382 ns/op` and `6,736 B/op` instead of `12 ns/op` and `0 B/op`.
 
-What if setup must happen on *every* iteration? You can wrap per-iteration setup with `b.StopTimer()` and `b.StartTimer()`, as long as the measured work takes far longer than the ~30–50 ns timer toggle overhead—otherwise wall-clock runtime stretches well past `-benchtime` while timer overhead swamps fast functions.
+What if setup must happen on *every* iteration? You can wrap per-iteration setup with `b.StopTimer()` and `b.StartTimer()`, but the toggle's own cost never shows up in `ns/op`, because the timer is stopped while it runs. In a 200,000-iteration test of a tiny function on Go 1.27.1, the toggled benchmark reported ~83 ns/op yet took ~20 s of wall time, against ~0.5 s for the same loop without toggling: roughly 100 µs of real cost per toggle, about 40x the wall time (machine dependent). The reported time looks tiny while the benchmark runs far past `-benchtime`, so keep per-iteration toggling for work that is slow anyway.
 
 ### 2. Compiler dead-code elimination vs `for b.Loop()`
 
@@ -366,13 +366,13 @@ Go 1.24's **`for b.Loop()`** replaces both `b.ResetTimer()` and manual sink boil
 ```
 </GitHubCode>
 
-Two details in Go 1.27.1 are worth noticing in the numbers above. First, `b.Loop()` adds ~1.4 ns of stack spill and loop-check overhead compared with `GlobalSink` on sub-nanosecond functions, which vanishes once a benchmarked operation takes tens of nanoseconds or more. Second, `for b.Loop()` blocks dead-code elimination of the call's *result*, yet if you pass a local constant right above the loop (`x := uint64(0xdeadbeef); for b.Loop() { popcnt(x) }`), Go's SSA pass can still constant-fold `popcnt(x)` to `24` before `runtime.KeepAlive` runs; vary the input (`x++`) or read it from a package variable when testing pure arithmetic. (`runtime.KeepAlive(x)` is a standard-library call that marks `x` as still in use at that point, so the compiler cannot delete the work that produced it.)
+Two details in Go 1.27.1 are worth noticing in the numbers above. First, `b.Loop()` adds ~1.4 ns of stack spill and loop-check overhead compared with `GlobalSink` on sub-nanosecond functions, which vanishes once a benchmarked operation takes tens of nanoseconds or more. Second, `for b.Loop()` blocks dead-code elimination of the call's *result*, and in our run a local constant right above the loop (`x := uint64(0xdeadbeef); for b.Loop() { popcnt(x) }`) was not folded away: it measured ~2.1–2.2 ns/op, the same as the `x++` version (~2.0–2.3 ns/op). Still, varying the input (`x++`) or reading it from a package variable is the safer habit when testing pure arithmetic, since a compiler is allowed to fold constant inputs. (`runtime.KeepAlive(x)` is a standard-library call that marks `x` as still in use at that point, so the compiler cannot delete the work that produced it.)
 
 ### 3. Observer effect and CPU cache warming
 
 Observing a function in a tight loop can change the hardware state itself. Suppose you compare summing the first 8 columns of two 1,000-row matrices (`calculateSum512` with `[][512]int64` vs `calculateSum513` with `[][513]int64`, from `#89`). When a benchmark allocates the matrix once and reuses it across thousands of iterations, the active columns stay warm inside CPU L1/L2 cache: Both functions are plain nested loops that add `s[i][j]` for `j < 8` over every row. The `Reuse` benchmarks build the matrix once before the loop; the `Fresh` ones build a new matrix on every iteration (with the timer stopped while building).
 
-<TerminalOutput command="go test -run '^$' -bench 'BenchmarkSum51' -benchtime=200x -count=3 -benchmem" label="Apple M2 · Go 1.27.1" caption="Real Go 1.27.1 matrix stride test: reusing the same matrix keeps active columns warm in cache (~4.1–7.4 µs/op), roughly twice as fast as reading freshly allocated cold matrices (~6.1–12.8 µs/op).">
+<TerminalOutput command="go test -run '^$' -bench 'BenchmarkSum51' -benchtime=200x -count=3 -benchmem" label="Apple M2 · Go 1.27.1" caption="Real Go 1.27.1 matrix stride test: reusing the same matrix keeps active columns warm in cache (~4.1–7.4 µs/op), roughly twice as fast as reading freshly allocated cold matrices (~8.1–12.8 µs/op).">
 ```text
 BenchmarkSum512Reuse-8   	     200	      4149 ns/op	       0 B/op	       0 allocs/op
 BenchmarkSum512Reuse-8   	     200	      4916 ns/op	       1 B/op	       0 allocs/op
@@ -835,7 +835,7 @@ BenchmarkLookupBLoop-8        	 2266502	        10.38 ns/op	       0 B/op	      
 
 Để ý lượt đầu của `BenchmarkLookupNoReset-8`: Go chạy thử `b.N=1` để ước lượng cần bao nhiêu lượt cho đủ `-benchtime`. Vì `buildTodoIndex` nằm khi đồng hồ đang bật, Go tưởng mỗi lần tra map mất cả mili-giây, chốt `b.N=874`, rồi in ra `25.382 ns/op` và `6.736 B/op` thay vì `12 ns/op` và `0 B/op` thật sự.
 
-Nếu đoạn setup bắt buộc phải chạy *trong mỗi vòng lặp* thì sao? Bạn có thể bọc nó bằng `b.StopTimer()` và `b.StartTimer()`, nhưng chỉ làm vậy khi phần code cần đo chậm hơn hẳn chi phí ~30–50 ns của cặp gọi dừng/bật timer — nếu không, toàn bộ bài benchmark sẽ chạy kéo dài vượt xa `-benchtime` và bị nhiễu ngược bởi chính thao tác bật tắt đồng hồ.
+Nếu đoạn setup bắt buộc phải chạy *trong mỗi vòng lặp* thì sao? Bạn có thể bọc nó bằng `b.StopTimer()` và `b.StartTimer()`, nhưng chi phí của chính cặp gọi dừng/bật timer không hiện trong `ns/op`, vì lúc nó chạy thì đồng hồ đang dừng. Khi thử 200.000 vòng với một hàm nhỏ trên Go 1.27.1, benchmark có bật tắt báo ~83 ns/op nhưng chạy mất ~20 s thời gian thật, trong khi cùng vòng lặp không bật tắt chỉ mất ~0,5 s: khoảng 100 µs chi phí thật cho mỗi lần bật tắt, tức thời gian thật lớn gấp khoảng 40 lần (tùy máy). Con số báo cáo trông rất nhỏ nhưng benchmark chạy vượt xa `-benchtime`, nên chỉ bật tắt timer mỗi vòng cho phần việc vốn đã chậm.
 
 ### 2. Trình biên dịch xóa code chết (dead-code elimination) vs `for b.Loop()`
 
@@ -906,13 +906,13 @@ Từ Go 1.24+, **`for b.Loop()`** giải quyết gọn cả hai chuyện `b.Rese
 ```
 </GitHubCode>
 
-Có hai chi tiết nhỏ trên Go 1.27.1 đáng lưu ý từ bảng đo trên. Thứ nhất, `b.Loop()` thêm khoảng ~1,4 ns chi phí spill stack và kiểm tra điều kiện lặp so với `GlobalSink` trên các hàm siêu nhỏ dưới 5 ns — với hàm thực tế vài chục nano-giây trở lên thì mức này không đáng kể. Thứ hai, `for b.Loop()` bảo vệ *kết quả* không bị xóa, nhưng nếu bạn truyền hẳn một hằng số cục bộ ngay trước vòng lặp (`x := uint64(0xdeadbeef); for b.Loop() { popcnt(x) }`), compiler vẫn có thể tính gộp trước `popcnt(x)` thành `24` (constant folding) trước khi `KeepAlive` giữ số `24` đó lại; hãy cho biến đầu vào thay đổi (`x++`) hoặc đọc từ biến package khi đo các hàm số học thuần túy. (`runtime.KeepAlive(x)` là hàm thư viện chuẩn đánh dấu `x` vẫn còn được dùng tại điểm đó, nên trình biên dịch không thể xóa phép tính tạo ra nó.)
+Có hai chi tiết nhỏ trên Go 1.27.1 đáng lưu ý từ bảng đo trên. Thứ nhất, `b.Loop()` thêm khoảng ~1,4 ns chi phí spill stack và kiểm tra điều kiện lặp so với `GlobalSink` trên các hàm siêu nhỏ dưới 5 ns — với hàm thực tế vài chục nano-giây trở lên thì mức này không đáng kể. Thứ hai, `for b.Loop()` bảo vệ *kết quả* không bị xóa, nhưng nếu bạn truyền hẳn một hằng số cục bộ ngay trước vòng lặp (`x := uint64(0xdeadbeef); for b.Loop() { popcnt(x) }`), thì trong lần đo của mình, phép tính không bị xóa: ~2,1–2,2 ns/op, bằng với bản dùng `x++` (~2,0–2,3 ns/op). Dù vậy, cho biến đầu vào thay đổi (`x++`) hoặc đọc từ biến package vẫn là thói quen an toàn hơn khi đo các hàm số học thuần túy, vì compiler được phép tính gộp đầu vào hằng số. (`runtime.KeepAlive(x)` là hàm thư viện chuẩn đánh dấu `x` vẫn còn được dùng tại điểm đó, nên trình biên dịch không thể xóa phép tính tạo ra nó.)
 
 ### 3. Hiệu ứng người quan sát (observer effect) và CPU cache ấm ảo
 
 Đo một hàm lặp đi lặp lại trong vòng kín có thể tự làm thay đổi trạng thái phần cứng. Chẳng hạn bài toán kinh điển từ `#89`: cộng 8 cột đầu tiên của hai ma trận 1.000 hàng (`calculateSum512` dùng `[][512]int64` vs `calculateSum513` dùng `[][513]int64`). Nếu bạn chỉ tạo ma trận một lần rồi dùng lại suốt hàng nghìn lượt, 8 cột đầu sẽ nằm gọn trong L1/L2 cache của CPU: Cả hai hàm đều là vòng lặp lồng nhau thường, cộng `s[i][j]` với `j < 8` trên mọi hàng. Các benchmark `Reuse` dựng ma trận một lần trước vòng lặp; các benchmark `Fresh` dựng ma trận mới ở mỗi vòng (tắt đồng hồ trong lúc dựng).
 
-<TerminalOutput command="go test -run '^$' -bench 'BenchmarkSum51' -benchtime=200x -count=3 -benchmem" label="Apple M2 · Go 1.27.1" caption="Đo thật trên Go 1.27.1: dùng lại cùng một ma trận giữ dữ liệu nóng trong cache (~4,1–7,4 µs/op), nhanh gần gấp đôi so với đọc ma trận mới cấp phát (~6,1–12,8 µs/op).">
+<TerminalOutput command="go test -run '^$' -bench 'BenchmarkSum51' -benchtime=200x -count=3 -benchmem" label="Apple M2 · Go 1.27.1" caption="Đo thật trên Go 1.27.1: dùng lại cùng một ma trận giữ dữ liệu nóng trong cache (~4,1–7,4 µs/op), nhanh gần gấp đôi so với đọc ma trận mới cấp phát (~8,1–12,8 µs/op).">
 ```text
 BenchmarkSum512Reuse-8   	     200	      4149 ns/op	       0 B/op	       0 allocs/op
 BenchmarkSum512Reuse-8   	     200	      4916 ns/op	       1 B/op	       0 allocs/op
