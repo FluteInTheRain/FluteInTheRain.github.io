@@ -43,6 +43,16 @@ export const QUIZ_DOMAIN: Record<string, QuizDomain> = {
   'ai-trading-the-market': 'code',
   'ai-trading-data': 'code',
   'ai-trading-signals': 'code',
+  // UI/UX series (Refactoring UI): design judgement, so no AI-output questions
+  'design-before-you-prompt': 'human',
+  'visual-hierarchy-rank-before-you-style': 'human',
+  'spacing-is-a-system': 'human',
+  'typography-is-a-scale-not-a-slider': 'human',
+  'color-is-a-palette-not-a-picker': 'human',
+  'depth-is-light-not-drop-shadow': 'human',
+  'images-need-containers-not-hope': 'human',
+  'finishing-touches-that-make-ui-feel-real': 'human',
+  'leveling-up-your-design-eye': 'human',
   // Stocks basics series: investing judgement
   'what-is-a-stock-ownership-dividends': 'human',
   'vietnam-stock-market-venues-open-account': 'human',
@@ -60,6 +70,15 @@ export const QUIZ_DOMAIN: Record<string, QuizDomain> = {
 // 'v2' = src/data/quiz/matrix.ts: 40 questions (8 sets) for big posts or 20 (4 sets) for light ones, every question tagged with a `kind`.
 // New series use v2. Spec: docs/superpowers/specs/2026-11-26-quiz-matrix-v2.md
 export const QUIZ_MATRIX: Record<string, 'v1' | 'v2'> = {
+  'design-before-you-prompt': 'v2', // 20 questions
+  'visual-hierarchy-rank-before-you-style': 'v2', // 40 questions
+  'spacing-is-a-system': 'v2', // 40 questions
+  'typography-is-a-scale-not-a-slider': 'v2', // 40 questions
+  'color-is-a-palette-not-a-picker': 'v2', // 40 questions
+  'depth-is-light-not-drop-shadow': 'v2', // 40 questions
+  'images-need-containers-not-hope': 'v2', // 40 questions
+  'finishing-touches-that-make-ui-feel-real': 'v2', // 20 questions
+  'leveling-up-your-design-eye': 'v2', // 20 questions
   'what-is-a-stock-ownership-dividends': 'v2', // 40 questions
   'vietnam-stock-market-venues-open-account': 'v2', // 40 questions
   'vietnam-order-types-order-book-ato-atc': 'v2', // 40 questions
