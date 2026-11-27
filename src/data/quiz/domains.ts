@@ -62,5 +62,5 @@ export const QUIZ_DOMAIN: Record<string, QuizDomain> = {
 export const QUIZ_MATRIX: Record<string, 'v1' | 'v2'> = {
   'macro-industry-what-moves-stock-prices': 'v2', // 40 questions
   'margin-trading-risks-beginner-psychology': 'v2', // 40 questions
-  'portfolio-dca-first-investment-plan': 'v2', // 20 questions
+  'portfolio-dca-first-investment-plan': 'v2', // 40 questions
 };

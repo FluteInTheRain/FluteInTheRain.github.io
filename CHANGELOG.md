@@ -3,6 +3,16 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-27 — Dọn các điểm "chưa chốt" của series Chứng khoán cơ bản
+
+- **Đã làm:** nhánh `fix/stocks-basics-cleanup`.
+  - **Lãi margin lệch số:** chỗ lệch thật nằm ở bài 2 (`vietnam-stock-market-venues-open-account`, mục tiểu khoản margin, "thường 10%–14%"), không phải bài 4 (11%–14% ở bài 4 là lãi ứng trước tiền bán, sản phẩm khác). Đã đổi cả EN và VI thành "lãi hai chữ số mỗi năm; tháng 11/2022 CTCK được ghi nhận 13–15%, khác nhau theo CTCK và thời điểm", khớp bài 9.
+  - **Nguồn QĐ NHNN:** thêm vào bài 8 ba nguồn chính thức: baochinhphu.vn (QĐ 1606), sbv.gov.vn thông báo QĐ 1809 và thông cáo QĐ 1747. Số liệu đã đối chiếu khớp (5,0/3,5/6,0 → 6,0/4,5/7,0; biên ±3% → ±5%). Chưa tìm được văn bản gốc của chính QĐ 1606 và 1747, chỉ có thông báo/thông cáo của NHNN và cổng Chính phủ.
+  - **Rà quiz bài 8 và 9:** chạy lại mọi phép tính (đúng hết), sửa 6 lỗi nhỏ. Đáng kể nhất: hình `Sbq08BandRuler` in sẵn đáp án 24.819 của câu s02q4, đã bỏ số biên khỏi nhãn và alt; câu s05q4 của bài 9 ghi "bài nói 1,07%" trong khi đó là số tự tính của quiz.
+  - **Quiz bài 10 lên 40 câu:** thêm `set-05..08` (20 câu, đủ `verifiedBy`), `QUIZ_MATRIX` ghi 40 câu, link cuối bài sửa "20" thành "40". Mix đúng ma trận 40; `node --test` 115/115; build 126 trang.
+- **Ai quyết:** user ("sửa lại toàn bộ"). AI chọn cách sửa lãi margin và giữ nguyên câu 3 đáp án.
+- **Chưa chốt:** (1) cho phép câu 3 đáp án (quyết định thiết kế, không đụng); (2) 3 chi tiết quiz bài 8 chưa kiểm được nguồn: "lần nới biên đầu tiên sau 7 năm" (s02q1), tên 4 mã giảm tỷ lệ margin 30% → 20% (s04q1); (3) VI của 20 câu mới bài 10 chưa có người đọc lại.
+
 ## 2026-11-26 — Xuất bản bài chứng khoán 8–10 (series 10/10)
 
 - **Đã làm:** merge PR #80, nhánh `content/publish-stocks-8-10` bật `draft: false` cho `macro-industry-what-moves-stock-prices`, `margin-trading-risks-beginner-psychology`, `portfolio-dca-first-investment-plan`. Series `stocks-basics` đủ 10 bài, mỗi bài có quiz.
