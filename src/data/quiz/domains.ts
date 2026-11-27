@@ -64,6 +64,26 @@ export const QUIZ_DOMAIN: Record<string, QuizDomain> = {
   'macro-industry-what-moves-stock-prices': 'human',
   'margin-trading-risks-beginner-psychology': 'human',
   'portfolio-dca-first-investment-plan': 'human',
+  'go-first-program-modules-packages': 'code',
+  'go-variables-types-pointers-functions': 'code',
+  'go-slices-maps-strings': 'code',
+  'go-structs-methods-interfaces': 'code',
+  'go-errors-defer-panic': 'code',
+  'go-testing-table-tests': 'code',
+  'go-goroutines-channels-select': 'code',
+  'go-context-timeouts-mutexes': 'code',
+  'go-concurrency-patterns-worker-pools-pipelines': 'code',
+  'go-http-service-net-http-json-middleware': 'code',
+  'go-memory-data-types-slices-maps-strings': 'code',
+  'go-abstractions-interfaces-generics-errors': 'code',
+  'go-concurrency-scheduler-channels-context-mutexes': 'code',
+  'go-production-stdlib-cpu-cache-gc-kubernetes': 'code',
+  'go-efficiency-workflow-raer-tfbo-hardware-memory': 'code',
+  'go-hardware-cpu-caches-virtual-memory-gc-allocator': 'code',
+  'go-observability-metrics-microbenchmarks-benchstat': 'code',
+  'go-profiling-pprof-flamegraphs-off-cpu-continuous': 'code',
+  'go-three-rs-optimization-patterns-streaming-pooling': 'code',
+  'go-interview-questions-output-live-coding': 'code',
 };
 
 // Which target mix a quiz follows. Absent = 'v1' (the original DDIA mix: 8 sets, Remember 3 / Understand 7 / Apply 14 / Analyze 9 / Evaluate 7).
@@ -89,4 +109,24 @@ export const QUIZ_MATRIX: Record<string, 'v1' | 'v2'> = {
   'macro-industry-what-moves-stock-prices': 'v2', // 40 questions
   'margin-trading-risks-beginner-psychology': 'v2', // 40 questions
   'portfolio-dca-first-investment-plan': 'v2', // 40 questions
+  'go-first-program-modules-packages': 'v2', // 20 questions
+  'go-variables-types-pointers-functions': 'v2', // 20 questions
+  'go-slices-maps-strings': 'v2', // 20 questions
+  'go-structs-methods-interfaces': 'v2', // 20 questions
+  'go-errors-defer-panic': 'v2', // 20 questions
+  'go-testing-table-tests': 'v2', // 20 questions
+  'go-goroutines-channels-select': 'v2', // 20 questions
+  'go-context-timeouts-mutexes': 'v2', // 20 questions
+  'go-concurrency-patterns-worker-pools-pipelines': 'v2', // 20 questions
+  'go-http-service-net-http-json-middleware': 'v2', // 20 questions
+  'go-memory-data-types-slices-maps-strings': 'v2', // 40 questions
+  'go-abstractions-interfaces-generics-errors': 'v2', // 40 questions
+  'go-concurrency-scheduler-channels-context-mutexes': 'v2', // 40 questions
+  'go-production-stdlib-cpu-cache-gc-kubernetes': 'v2', // 40 questions
+  'go-efficiency-workflow-raer-tfbo-hardware-memory': 'v2', // 40 questions
+  'go-hardware-cpu-caches-virtual-memory-gc-allocator': 'v2', // 40 questions
+  'go-observability-metrics-microbenchmarks-benchstat': 'v2', // 40 questions
+  'go-profiling-pprof-flamegraphs-off-cpu-continuous': 'v2', // 40 questions
+  'go-three-rs-optimization-patterns-streaming-pooling': 'v2', // 40 questions
+  'go-interview-questions-output-live-coding': 'v2', // 40 questions
 };
