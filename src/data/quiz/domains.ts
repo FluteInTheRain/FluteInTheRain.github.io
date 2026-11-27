@@ -60,6 +60,13 @@ export const QUIZ_DOMAIN: Record<string, QuizDomain> = {
 // 'v2' = src/data/quiz/matrix.ts: 40 questions (8 sets) for big posts or 20 (4 sets) for light ones, every question tagged with a `kind`.
 // New series use v2. Spec: docs/superpowers/specs/2026-11-26-quiz-matrix-v2.md
 export const QUIZ_MATRIX: Record<string, 'v1' | 'v2'> = {
+  'what-is-a-stock-ownership-dividends': 'v2', // 40 questions
+  'vietnam-stock-market-venues-open-account': 'v2', // 40 questions
+  'vietnam-order-types-order-book-ato-atc': 'v2', // 40 questions
+  'stock-fees-taxes-settlement-t2-vsd': 'v2', // 40 questions
+  'shareholder-rights-dividends-corporate-actions': 'v2', // 40 questions
+  'reading-financial-statements-investors-5-minutes': 'v2', // 40 questions
+  'pe-pb-roe-valuation-ratios-in-context': 'v2', // 40 questions
   'macro-industry-what-moves-stock-prices': 'v2', // 40 questions
   'margin-trading-risks-beginner-psychology': 'v2', // 40 questions
   'portfolio-dca-first-investment-plan': 'v2', // 40 questions
