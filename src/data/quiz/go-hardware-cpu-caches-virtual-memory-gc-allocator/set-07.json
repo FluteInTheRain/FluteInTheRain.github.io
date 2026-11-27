@@ -1,0 +1,446 @@
+{
+  "id": "set-07",
+  "title": {
+    "en": "Virtual memory, the allocator and GC marking",
+    "vi": "Bộ nhớ ảo, bộ cấp phát và đánh dấu của GC"
+  },
+  "context": {
+    "text": {
+      "en": "A Go process reserves address space (VSS) and the kernel attaches physical frames (RSS) on first touch.\n• The allocator has three tiers: `mcache`, `mcentral`, `mheap`.\n• The GC marks Grey and Black objects while goroutines keep running.\n• Real cases from the post: Discord's pointer-heavy cache and the Go 1.12 to 1.15 RSS surprise.",
+      "vi": "Một tiến trình Go đặt chỗ không gian địa chỉ (VSS) và kernel gắn khung vật lý (RSS) khi chạm lần đầu.\n• Bộ cấp phát có ba tầng: `mcache`, `mcentral`, `mheap`.\n• GC đánh dấu đối tượng Xám và Đen trong lúc goroutine vẫn chạy.\n• Các ca thật trong bài: cache nhiều con trỏ của Discord và bẫy RSS từ Go 1.12 đến 1.15."
+    }
+  },
+  "questions": [
+    {
+      "id": "s07q1",
+      "level": "apply",
+      "track": "interview",
+      "type": "single",
+      "difficulty": 3,
+      "kind": "why",
+      "topic": "scan and noscan spans",
+      "stem": {
+        "en": "A cache holds 10 million entries. Version A is a `[]int64` of ids. Version B is a `[]*Entry`, each pointing at its own heap struct. Assume both keep the same number of live bytes. Why does B cost the garbage collector much more per cycle?",
+        "vi": "Một cache giữ 10 triệu mục. Bản A là `[]int64` chứa id. Bản B là `[]*Entry`, mỗi con trỏ trỏ tới một struct heap riêng. Giả sử cả hai giữ cùng số byte sống. Vì sao B tốn bộ gom rác nhiều hơn hẳn mỗi chu kỳ?"
+      },
+      "media": [
+        {
+          "kind": "code",
+          "lang": "go",
+          "code": "// Version A: ids only, no pointers inside\nids := make([]int64, 10_000_000)\n\n// Version B: one heap object per entry, reached through pointers\ntype Entry struct{ ID int64 }\nentries := make([]*Entry, 10_000_000)\nfor i := range entries {\n\tentries[i] = &Entry{ID: int64(i)}\n}"
+        },
+        {
+          "kind": "figure",
+          "component": "Gq16AllocTiers",
+          "alt": {
+            "en": "The three allocator tiers: a per-P mcache, a per-size-class mcentral that holds scan and noscan span sets, and a global mheap with 8 KiB pages inside 64 MiB arenas.",
+            "vi": "Ba tầng của bộ cấp phát: mcache riêng cho từng P, mcentral theo từng size class chứa các tập span scan và noscan, và mheap toàn cục với trang 8 KiB trong các arena 64 MiB."
+          }
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "The GC cost depends only on live bytes, so B is not more costly.",
+            "vi": "Chi phí GC chỉ phụ thuộc số byte sống, nên B không tốn hơn."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "The GC traces every pointer in scan spans, but skips noscan spans.",
+            "vi": "GC phải theo dõi mọi con trỏ trong span scan, còn span noscan thì bỏ qua."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Version A is placed on the stack and B on the heap.",
+            "vi": "Bản A nằm trên stack còn B nằm trên heap."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Pointers make each `Entry` allocation go through `mheap`'s lock.",
+            "vi": "Con trỏ khiến mỗi lần cấp phát `Entry` phải qua lock của `mheap`."
+          }
+        }
+      ],
+      "answer": [
+        "b"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "`mcentral` keeps pointer-bearing objects in scan spans and pointer-free data in noscan spans. A `[]int64` of 10 million values is one noscan block the collector never walks. `[]*Entry` is 10 million pointers to follow plus 10 million separate objects to mark. This is the pointer-heavy cache pattern behind Discord's two-minute latency spikes.",
+          "vi": "`mcentral` giữ đối tượng chứa con trỏ trong span scan và dữ liệu không có con trỏ trong span noscan. Một `[]int64` 10 triệu giá trị là một khối noscan mà bộ gom rác không bao giờ duyệt. `[]*Entry` là 10 triệu con trỏ phải lần theo cộng 10 triệu đối tượng rời để đánh dấu. Đây là mẫu cache nhiều con trỏ đứng sau các cơn giật độ trễ theo chu kỳ hai phút của Discord."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "Marking cost follows the number of pointers and objects to visit, not only the bytes. That is the point of scan and noscan.",
+            "vi": "Chi phí đánh dấu theo số con trỏ và đối tượng phải thăm, không chỉ số byte. Đó là ý nghĩa của scan và noscan."
+          },
+          "c": {
+            "en": "A slice of 10 million values is far too large for a stack and lives on the heap in both versions.",
+            "vi": "Slice 10 triệu giá trị quá lớn cho stack và nằm trên heap ở cả hai bản."
+          },
+          "d": {
+            "en": "Small allocations are served from the per-P `mcache` without a lock. The lock cost is not what scales the GC work.",
+            "vi": "Các lần cấp phát nhỏ được phục vụ từ `mcache` của từng P mà không cần lock. Chi phí lock không phải thứ làm công việc GC tăng."
+          }
+        },
+        "reread": {
+          "anchor": "gos-3-tier-tcmalloc-allocator-mcache--mcentral--mheap",
+          "label": {
+            "en": "Go's 3-tier TCMalloc allocator (mcache / mcentral / mheap)",
+            "vi": "Bộ cấp phát 3 tầng kiểu TCMalloc (mcache / mcentral / mheap)"
+          }
+        },
+        "say": {
+          "en": "GC mark cost follows pointers and objects, so pointer-free layouts are nearly free to scan.",
+          "vi": "Chi phí đánh dấu của GC theo con trỏ và đối tượng, nên layout không con trỏ gần như miễn phí khi quét."
+        }
+      },
+      "ref": "Post: Go's 3-tier TCMalloc allocator (mcache / mcentral / mheap)"
+    },
+    {
+      "id": "s07q2",
+      "level": "apply",
+      "track": "ai",
+      "type": "ai-review",
+      "difficulty": 3,
+      "kind": "predict",
+      "topic": "Mmap and RSS",
+      "stem": {
+        "en": "The assistant's comment predicts RSS. What happens to the process RSS right after `Mmap`, and after the loop touches 64 MiB?",
+        "vi": "Chú thích của trợ lý dự đoán RSS. RSS của tiến trình ra sao ngay sau `Mmap`, và sau khi vòng lặp chạm 64 MiB?"
+      },
+      "media": [
+        {
+          "kind": "code",
+          "lang": "go",
+          "code": "// An AI assistant's comment: \"Mmap of 256 MiB raises RSS by 256 MiB at once,\n// so a 128 MiB container limit is hit immediately.\"\nb, err := syscall.Mmap(-1, 0, 256<<20,\n\tsyscall.PROT_READ|syscall.PROT_WRITE,\n\tsyscall.MAP_ANON|syscall.MAP_PRIVATE)\nif err != nil {\n\tpanic(err)\n}\n\n// later: touch one byte in every 4 KiB page of the first 64 MiB\nfor i := 0; i < 64<<20; i += 4096 {\n\tb[i] = 1\n}"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "RSS grows by 256 MiB at once.",
+            "vi": "RSS tăng 256 MiB ngay lập tức."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "RSS stays nearly flat, then grows by about 64 MiB.",
+            "vi": "RSS gần như không đổi, rồi tăng khoảng 64 MiB."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "RSS grows by 64 MiB at the `Mmap` call, before any write.",
+            "vi": "RSS tăng 64 MiB ngay tại lời gọi `Mmap`, trước khi ghi gì."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "RSS shrinks, because `Mmap` hands heap memory back to the OS.",
+            "vi": "RSS giảm, vì `Mmap` trả bộ nhớ heap về cho hệ điều hành."
+          }
+        }
+      ],
+      "answer": [
+        "b"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "`Mmap` only reserves address space (VSS). The kernel attaches a physical frame when a 4 KiB page is first touched, through a page fault. On the test machine, MaxRSS went 3.7 MiB, 3.7 MiB after `Mmap`, then 67.7 MiB after the loop wrote one byte per page across 64 MiB. A reservation alone cannot hit a container limit.",
+          "vi": "`Mmap` chỉ đặt chỗ dải địa chỉ (VSS). Kernel gắn khung vật lý khi một trang 4 KiB được chạm lần đầu, qua page fault. Trên máy thử, MaxRSS đi từ 3,7 MiB, 3,7 MiB sau `Mmap`, rồi 67,7 MiB sau khi vòng lặp ghi một byte mỗi trang trên 64 MiB. Chỉ đặt chỗ thì không chạm giới hạn container."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "That is the assistant's claim. Nothing is resident until pages are touched.",
+            "vi": "Đó là nhận định của trợ lý. Chưa có gì nằm trong RAM cho tới khi trang bị chạm."
+          },
+          "c": {
+            "en": "No frames are attached at `Mmap` time. They appear page by page during the writes.",
+            "vi": "Không có khung nào được gắn lúc `Mmap`. Chúng xuất hiện từng trang trong lúc ghi."
+          },
+          "d": {
+            "en": "`Mmap` creates a new mapping. It does not release heap memory.",
+            "vi": "`Mmap` tạo một vùng ánh xạ mới. Nó không giải phóng bộ nhớ heap."
+          }
+        },
+        "reread": {
+          "anchor": "4-virtual-memory-vss-vs-rss-madvise-and-gos-allocator",
+          "label": {
+            "en": "4. Virtual memory (VSS vs. RSS), madvise, and Go's allocator",
+            "vi": "4. Bộ nhớ ảo (VSS vs. RSS), madvise và bộ cấp phát 3 tầng"
+          }
+        },
+        "say": {
+          "en": "Reserved is not resident: count the pages that were actually touched.",
+          "vi": "Đặt chỗ không phải là nằm trong RAM: hãy đếm những trang thật sự bị chạm."
+        }
+      },
+      "ref": "Post: 4. Virtual memory (VSS vs. RSS), madvise, and Go's allocator",
+      "verifiedBy": "go run . (program above, printing Getrusage MaxRSS divided by 1<<20, macOS arm64 where Maxrss is in bytes, Go 1.27.1)\nstart: 3.7 MiB\nafter mmap 256 MiB: 3.7 MiB\nafter touching 64 MiB: 67.7 MiB"
+    },
+    {
+      "id": "s07q3",
+      "level": "analyze",
+      "track": "interview",
+      "type": "single",
+      "difficulty": 4,
+      "kind": "predict",
+      "topic": "RSS after a spike",
+      "stem": {
+        "en": "On Linux with Go 1.27, a traffic spike pushes the heap to 420 MiB and the GC brings live data back to 90 MiB. Right after that, Kubernetes shows RSS near 420 MiB. What happens next?",
+        "vi": "Trên Linux với Go 1.27, một đợt tăng tải đẩy heap lên 420 MiB và GC đưa dữ liệu sống về 90 MiB. Ngay sau đó Kubernetes hiện RSS gần 420 MiB. Điều gì xảy ra tiếp theo?"
+      },
+      "media": [
+        {
+          "kind": "figure",
+          "component": "Gq16HeapSpike",
+          "alt": {
+            "en": "Go heap in use over time: it climbs to 420 MiB during a traffic spike, then drops to 90 MiB after a GC cycle, with a marker at the moment Kubernetes reads RSS near 420 MiB.",
+            "vi": "Heap của Go theo thời gian: tăng lên 420 MiB trong đợt tăng tải, rồi giảm về 90 MiB sau một chu kỳ GC, kèm một mốc tại lúc Kubernetes đọc RSS gần 420 MiB."
+          }
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "RSS stays near 420 MiB for as long as the process runs.",
+            "vi": "RSS giữ ở gần 420 MiB chừng nào tiến trình còn chạy."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "The GC calls `munmap` at the end of each cycle, so VSS and RSS drop at once.",
+            "vi": "GC gọi `munmap` ở cuối mỗi chu kỳ nên VSS và RSS cùng giảm ngay."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "The scavenger calls `madvise(MADV_DONTNEED)` and RSS falls; VSS stays.",
+            "vi": "Scavenger gọi `madvise(MADV_DONTNEED)` và RSS giảm; VSS giữ nguyên."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "RSS falls only after someone lowers `GOGC` and restarts the process.",
+            "vi": "RSS chỉ giảm sau khi có người hạ `GOGC` và khởi động lại tiến trình."
+          }
+        }
+      ],
+      "answer": [
+        "c"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "Go keeps freed spans for a short while in case the next burst needs them. A background scavenger then returns idle spans with `madvise(MADV_DONTNEED)` on Linux, the kernel drops the physical frames, and RSS (`container_memory_working_set_bytes`) falls while the reserved address space stays. Between Go 1.12 and 1.15 the lazy `MADV_FREE` default made RSS linger, so Go 1.16 restored `MADV_DONTNEED`.",
+          "vi": "Go giữ các span đã giải phóng một lúc phòng khi đợt tải kế tiếp cần. Sau đó scavenger nền trả các span rảnh bằng `madvise(MADV_DONTNEED)` trên Linux, kernel bỏ các khung vật lý, và RSS (`container_memory_working_set_bytes`) giảm còn không gian địa chỉ đã đặt chỗ giữ nguyên. Từ Go 1.12 đến 1.15 mặc định `MADV_FREE` lười khiến RSS đọng lại, nên Go 1.16 khôi phục `MADV_DONTNEED`."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "A restart is not needed. The scavenger returns idle memory by itself.",
+            "vi": "Không cần khởi động lại. Scavenger tự trả bộ nhớ rảnh."
+          },
+          "b": {
+            "en": "The GC reclaims objects for reuse inside Go's heap. Returning pages to the OS is the scavenger's separate job, and it does not shrink VSS.",
+            "vi": "GC thu hồi đối tượng để dùng lại trong heap của Go. Trả trang về OS là việc riêng của scavenger, và nó không làm VSS nhỏ đi."
+          },
+          "d": {
+            "en": "`GOGC` sets how often the GC runs, not whether idle spans are returned to the OS.",
+            "vi": "`GOGC` quy định tần suất GC chạy, không quy định việc trả span rảnh về OS."
+          }
+        },
+        "reread": {
+          "anchor": "4-virtual-memory-vss-vs-rss-madvise-and-gos-allocator",
+          "label": {
+            "en": "4. Virtual memory (VSS vs. RSS), madvise, and Go's allocator",
+            "vi": "4. Bộ nhớ ảo (VSS vs. RSS), madvise và bộ cấp phát 3 tầng"
+          }
+        },
+        "say": {
+          "en": "A high RSS right after GC is held-for-reuse memory: wait for the scavenger before calling it a leak.",
+          "vi": "RSS cao ngay sau GC là bộ nhớ đang giữ để dùng lại: hãy chờ scavenger trước khi gọi đó là rò rỉ."
+        }
+      },
+      "ref": "Post: 4. Virtual memory (VSS vs. RSS), madvise, and Go's allocator"
+    },
+    {
+      "id": "s07q4",
+      "level": "analyze",
+      "track": "ai",
+      "type": "multi",
+      "difficulty": 4,
+      "kind": "diagnose",
+      "topic": "Memory leak report",
+      "stem": {
+        "en": "A Go service on Linux (Go 1.27) shows a large virtual size. The assistant wrote an incident note with five claims. Which two claims are wrong?",
+        "vi": "Một service Go trên Linux (Go 1.27) có kích thước ảo lớn. Trợ lý viết ghi chú sự cố với năm nhận định. Hai nhận định nào sai?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "VSS is 2.4 GiB, so the service is leaking memory.",
+            "vi": "VSS là 2,4 GiB, nên service đang rò rỉ bộ nhớ."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Right after a spike, RSS can stay high until the scavenger returns freed spans.",
+            "vi": "Ngay sau một đợt tăng tải, RSS có thể còn cao cho tới khi scavenger trả các span đã giải phóng."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Watch `container_memory_working_set_bytes`, which follows resident memory, not VSS.",
+            "vi": "Hãy theo dõi `container_memory_working_set_bytes`, thứ đi theo bộ nhớ thường trú chứ không phải VSS."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Go 1.16 and later release memory with lazy `MADV_FREE` by default on Linux.",
+            "vi": "Go 1.16 trở lên mặc định trả bộ nhớ bằng `MADV_FREE` kiểu lười trên Linux."
+          }
+        },
+        {
+          "id": "e",
+          "text": {
+            "en": "A first write to an untouched 4 KiB page raises a page fault that maps a physical frame.",
+            "vi": "Lần ghi đầu vào một trang 4 KiB chưa chạm gây page fault và ánh xạ một khung vật lý."
+          }
+        }
+      ],
+      "answer": [
+        "a",
+        "d"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "VSS counts reserved address space, and it can exceed physical RAM without using a byte of it, so it says nothing about a leak. And the default is `MADV_DONTNEED` since Go 1.16: Go 1.12 to 1.15 used lazy `MADV_FREE`, which kept freed spans in RSS, and Go 1.16 went back. The other three claims match the post.",
+          "vi": "VSS đếm không gian địa chỉ đã đặt chỗ và có thể vượt RAM vật lý mà không dùng byte nào, nên không nói gì về rò rỉ. Và mặc định là `MADV_DONTNEED` từ Go 1.16: Go 1.12 đến 1.15 dùng `MADV_FREE` lười khiến span đã giải phóng nằm lại trong RSS, và Go 1.16 quay về. Ba nhận định còn lại khớp với bài."
+        },
+        "whyWrong": {
+          "b": {
+            "en": "This claim is true: Go holds freed spans briefly before the scavenger releases them.",
+            "vi": "Nhận định này đúng: Go giữ span đã giải phóng một lúc trước khi scavenger trả chúng."
+          },
+          "c": {
+            "en": "This claim is true: that metric tracks resident memory, which is what a container limit sees.",
+            "vi": "Nhận định này đúng: chỉ số đó theo bộ nhớ thường trú, thứ mà giới hạn container nhìn thấy."
+          },
+          "e": {
+            "en": "This claim is true: that is how demand paging attaches frames.",
+            "vi": "Nhận định này đúng: đó là cách phân trang theo nhu cầu gắn khung nhớ."
+          }
+        },
+        "reread": {
+          "anchor": "4-virtual-memory-vss-vs-rss-madvise-and-gos-allocator",
+          "label": {
+            "en": "4. Virtual memory (VSS vs. RSS), madvise, and Go's allocator",
+            "vi": "4. Bộ nhớ ảo (VSS vs. RSS), madvise và bộ cấp phát 3 tầng"
+          }
+        },
+        "say": {
+          "en": "Judge memory by resident size over time, never by virtual size.",
+          "vi": "Đánh giá bộ nhớ bằng kích thước thường trú theo thời gian, đừng bằng kích thước ảo."
+        }
+      },
+      "ref": "Post: 4. Virtual memory (VSS vs. RSS), madvise, and Go's allocator"
+    },
+    {
+      "id": "s07q5",
+      "level": "evaluate",
+      "track": "interview",
+      "type": "single",
+      "difficulty": 5,
+      "kind": "why",
+      "topic": "Why the write barrier",
+      "stem": {
+        "en": "While marking runs concurrently, a goroutine sets `A.Next = D`, where `A` is already Black and `D` is still White, and then drops its other reference to `D`. Why does Go need its hybrid write barrier?",
+        "vi": "Trong lúc đánh dấu chạy đồng thời, một goroutine gán `A.Next = D`, với `A` đã Đen và `D` còn Trắng, rồi bỏ tham chiếu khác tới `D`. Vì sao Go cần hybrid write barrier?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Black `A` is not rescanned, so live `D` would stay White and be swept.",
+            "vi": "`A` Đen không được quét lại, nên `D` còn sống sẽ ở lại Trắng và bị dọn."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "It stops the world during the whole marking phase of every cycle.",
+            "vi": "Nó dừng toàn bộ thế giới trong suốt pha đánh dấu của mỗi chu kỳ."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "It compacts live objects so that every pointer to them stays valid.",
+            "vi": "Nó nén các đối tượng sống để mọi con trỏ tới chúng vẫn hợp lệ."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "It forces the allocating goroutine to help with the marking work.",
+            "vi": "Nó buộc goroutine đang cấp phát phải giúp làm việc đánh dấu."
+          }
+        }
+      ],
+      "answer": [
+        "a"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "The collector will not revisit a Black object, so a new pointer from `A` to `D` would be missed and live `D` could be swept. While marking runs, the barrier shades the overwritten target and the newly written pointer Grey, so live objects stay reachable. The pauses at Mark Setup and Mark Termination are short; they toggle the barrier.",
+          "vi": "Bộ gom rác không quay lại thăm đối tượng Đen, nên con trỏ mới từ `A` sang `D` sẽ bị bỏ sót và `D` còn sống có thể bị dọn. Khi đánh dấu chạy, barrier tô Xám cả mục tiêu bị ghi đè lẫn con trỏ mới ghi, nên đối tượng sống vẫn truy cập được. Các lần tạm dừng ở Mark Setup và Mark Termination rất ngắn; chúng chỉ bật tắt barrier."
+        },
+        "whyWrong": {
+          "b": {
+            "en": "Go's GC is concurrent: it pauses only briefly at Mark Setup and Mark Termination. The barrier is what makes concurrent marking safe.",
+            "vi": "GC của Go chạy đồng thời: nó chỉ dừng ngắn ở Mark Setup và Mark Termination. Barrier là thứ làm đánh dấu đồng thời an toàn."
+          },
+          "c": {
+            "en": "Go's collector is non-compacting. Live objects keep their addresses.",
+            "vi": "Bộ gom rác của Go không nén. Đối tượng sống giữ nguyên địa chỉ."
+          },
+          "d": {
+            "en": "That is Mark Assist, a separate mechanism that answers fast allocation, not a pointer written into a Black object.",
+            "vi": "Đó là Mark Assist, một cơ chế khác xử lý việc cấp phát nhanh, không phải con trỏ ghi vào đối tượng Đen."
+          }
+        },
+        "reread": {
+          "anchor": "5-tri-color-concurrent-mark-sweep-gc-and-the-hybrid-write-barrier",
+          "label": {
+            "en": "5. Tri-color concurrent mark-sweep GC and the Hybrid Write Barrier",
+            "vi": "5. Thuật toán GC 3 màu đồng thời và Hybrid Write Barrier"
+          }
+        },
+        "say": {
+          "en": "The write barrier keeps concurrent marking correct: new pointers into scanned objects get shaded.",
+          "vi": "Write barrier giữ cho đánh dấu đồng thời đúng: con trỏ mới vào đối tượng đã quét được tô màu."
+        }
+      },
+      "ref": "Post: 5. Tri-color concurrent mark-sweep GC and the Hybrid Write Barrier"
+    }
+  ]
+}

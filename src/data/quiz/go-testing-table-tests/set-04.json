@@ -1,0 +1,453 @@
+{
+  "id": "set-04",
+  "title": {
+    "en": "Order, races and a quick feedback loop",
+    "vi": "Thứ tự, race và vòng phản hồi nhanh"
+  },
+  "context": {
+    "text": {
+      "en": "Suppose a team runs `go test ./...` in CI.\n• Some tests start goroutines.\n• Some tests share package variables.\n• The slow tests make the edit-and-test loop long.\nThe toolchain is Go 1.27.",
+      "vi": "Giả sử một nhóm chạy `go test ./...` trong CI.\n• Một số test tạo goroutine.\n• Một số test dùng chung biến package.\n• Các test chậm làm vòng sửa-rồi-test dài ra.\nToolchain là Go 1.27."
+    }
+  },
+  "questions": [
+    {
+      "id": "s04q1",
+      "level": "apply",
+      "track": "ai",
+      "type": "ai-review",
+      "difficulty": 3,
+      "kind": "predict",
+      "topic": "Race detector output",
+      "stem": {
+        "en": "An AI assistant wrote this test, and plain `go test` prints `ok`. What does `go test -race` print for it?",
+        "vi": "Một AI viết test này, và `go test` thường in `ok`. `go test -race` in ra gì?"
+      },
+      "media": [
+        {
+          "kind": "code",
+          "lang": "go",
+          "code": "func TestCounter(t *testing.T) {\n\tvar n int\n\tvar wg sync.WaitGroup\n\tfor i := 0; i < 2; i++ {\n\t\twg.Add(1)\n\t\tgo func() {\n\t\t\tdefer wg.Done()\n\t\t\tn++\n\t\t}()\n\t}\n\twg.Wait()\n\tif n != 2 {\n\t\tt.Errorf(\"n = %d, want 2\", n)\n\t}\n}",
+          "caption": {
+            "en": "The test the AI assistant wrote",
+            "vi": "Test do AI viết"
+          }
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "`ok`: each goroutine adds only 1, so they cannot collide.",
+            "vi": "`ok`: mỗi goroutine chỉ cộng 1 nên không thể va nhau."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "A compile error, because two goroutines capture `n`.",
+            "vi": "Lỗi biên dịch, vì hai goroutine cùng bắt biến `n`."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "A deadlock panic at `wg.Wait()`.",
+            "vi": "Panic deadlock ở `wg.Wait()`."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "`WARNING: DATA RACE` with both accesses; the test fails.",
+            "vi": "`WARNING: DATA RACE` kèm hai lần truy cập; test fail."
+          }
+        }
+      ],
+      "answer": [
+        "d"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "`-race` watches memory accesses. It sees one goroutine read and write `n` with no ordering against the other, prints the accesses with file and line, and marks the test failed (\"race detected during execution of test\"). A normal run passes almost every time, which is why races escape plain testing.",
+          "vi": "`-race` theo dõi các lần truy cập bộ nhớ. Nó thấy một goroutine đọc và ghi `n` mà không có thứ tự so với goroutine kia, in các truy cập kèm file và dòng, và đánh dấu test fail (\"race detected during execution of test\"). Chạy thường gần như luôn pass, vì thế race lọt qua test thường."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "Two goroutines changing one variable without synchronization is a race even when the final value happens to be right.",
+            "vi": "Hai goroutine cùng sửa một biến mà không đồng bộ là race, kể cả khi giá trị cuối tình cờ đúng."
+          },
+          "b": {
+            "en": "Capturing a variable in a closure is legal Go. The bug is in how it is used, not in whether it compiles.",
+            "vi": "Bắt một biến trong closure là Go hợp lệ. Lỗi nằm ở cách dùng, không ở chuyện có biên dịch được không."
+          },
+          "c": {
+            "en": "`wg.Add` and `wg.Done` are balanced, so `wg.Wait()` returns normally.",
+            "vi": "`wg.Add` và `wg.Done` cân nhau, nên `wg.Wait()` trả về bình thường."
+          }
+        },
+        "reread": {
+          "anchor": "-race-a-first-look",
+          "label": {
+            "en": "`-race`: a first look",
+            "vi": "`-race`: làm quen"
+          }
+        },
+        "say": {
+          "en": "A plain run can pass over a race; `-race` reports it, so CI runs it.",
+          "vi": "Chạy thường có thể bỏ qua race; `-race` báo nó, nên CI chạy cả `-race`."
+        }
+      },
+      "ref": "Post: `-race`: a first look",
+      "verifiedBy": "$ go test -count=1   (five runs)\nok  \texample.com/gq/p7\t2.059s\n$ go test -race -count=1\nWARNING: DATA RACE\nRead at 0x00c000012288 by goroutine 8:\n  example.com/gq/p7.TestCounter.func1()\n      r_test.go:15\nPrevious write at 0x00c000012288 by goroutine 9:\n--- FAIL: TestCounter (0.00s)\n    testing.go:1865: race detected during execution of test\nFAIL"
+    },
+    {
+      "id": "s04q2",
+      "level": "apply",
+      "track": "interview",
+      "type": "single",
+      "difficulty": 3,
+      "kind": "diagnose",
+      "topic": "Tests that depend on each other",
+      "stem": {
+        "en": "Plain `go test` passes, but `go test -shuffle=2` fails `TestDefault` with `Current() = \"admin\"`. What is the likely cause?",
+        "vi": "`go test` thường pass, nhưng `go test -shuffle=2` làm `TestDefault` fail với `Current() = \"admin\"`. Nguyên nhân nhiều khả năng là gì?"
+      },
+      "media": [
+        {
+          "kind": "code",
+          "lang": "go",
+          "code": "// mode.go\nvar current = \"guest\"\n\nfunc Current() string { return current }\nfunc Set(s string)    { current = s }\n\n// mode_test.go\nfunc TestDefault(t *testing.T) {\n\tif got := Current(); got != \"guest\" {\n\t\tt.Errorf(\"Current() = %q, want guest\", got)\n\t}\n}\n\nfunc TestSetAdmin(t *testing.T) {\n\tSet(\"admin\")\n\tif Current() != \"admin\" {\n\t\tt.Errorf(\"Current() = %q, want admin\", Current())\n\t}\n}"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "`-shuffle` has a bug that rewrites package variables during the run.",
+            "vi": "`-shuffle` có lỗi làm ghi đè biến package trong lúc chạy."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "`TestDefault` needs `t.Parallel()` to get its own package variables.",
+            "vi": "`TestDefault` cần `t.Parallel()` để có biến package riêng."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "`TestSetAdmin` leaves `current` changed for the test that runs after it.",
+            "vi": "`TestSetAdmin` để `current` bị đổi cho test chạy sau nó."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "The `TestDefault` result is read from an old test cache entry.",
+            "vi": "Kết quả `TestDefault` được đọc từ một mục cache test cũ."
+          }
+        }
+      ],
+      "answer": [
+        "c"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "In file order `TestDefault` runs before `TestSetAdmin`, so the hidden dependency never shows. `-shuffle=on` can put `TestSetAdmin` first, and the leftover `\"admin\"` breaks the other test. Make each test set up its own state, or reset it with `t.Cleanup`.",
+          "vi": "Theo thứ tự trong file, `TestDefault` chạy trước `TestSetAdmin`, nên sự phụ thuộc ngầm không lộ ra. `-shuffle=on` có thể đưa `TestSetAdmin` lên trước, và giá trị `\"admin\"` còn sót làm hỏng test kia. Hãy cho mỗi test tự dựng trạng thái của mình, hoặc đặt lại bằng `t.Cleanup`."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "`-shuffle` only changes the order of tests. The shared state was already there.",
+            "vi": "`-shuffle` chỉ đổi thứ tự test. Trạng thái dùng chung vốn đã có sẵn."
+          },
+          "b": {
+            "en": "`t.Parallel()` does not copy package variables. Parallel tests share them even more.",
+            "vi": "`t.Parallel()` không sao chép biến package. Test song song còn dùng chung chúng nhiều hơn."
+          },
+          "d": {
+            "en": "A cached result would print `(cached)` and would not show a failure message.",
+            "vi": "Kết quả cache sẽ in `(cached)` và không hiện thông báo lỗi."
+          }
+        },
+        "reread": {
+          "anchor": "running-tests-flags-that-find-bugs",
+          "label": {
+            "en": "Running tests: flags that find bugs",
+            "vi": "Chạy test: những flag giúp tìm bug"
+          }
+        },
+        "say": {
+          "en": "A test that passes alone and fails shuffled shares state with another test.",
+          "vi": "Test pass khi chạy riêng mà fail khi shuffle là đang dùng chung trạng thái với test khác."
+        }
+      },
+      "ref": "Post: Running tests: flags that find bugs",
+      "verifiedBy": "$ go test -count=1\nok  \texample.com/gq/p8\t0.501s\n$ go test -count=1 -shuffle=2\n-test.shuffle 2\n--- FAIL: TestDefault (0.00s)\n    mode_test.go:7: Current() = \"admin\", want guest"
+    },
+    {
+      "id": "s04q3",
+      "level": "analyze",
+      "track": "ai",
+      "type": "ai-review",
+      "difficulty": 4,
+      "kind": "diagnose",
+      "topic": "Parallel subtests and the loop variable",
+      "stem": {
+        "en": "The toolchain is Go 1.27, but `go.mod` says `go 1.21`. The rows `lower` and `mixed` expect `\"XX\"` and `\"YY\"`, which `Upper` never returns, yet `go test` prints `ok`. Why?",
+        "vi": "Toolchain là Go 1.27, nhưng `go.mod` ghi `go 1.21`. Các dòng `lower` và `mixed` mong đợi `\"XX\"` và `\"YY\"`, thứ `Upper` không bao giờ trả, vậy mà `go test` in `ok`. Vì sao?"
+      },
+      "media": [
+        {
+          "kind": "code",
+          "lang": "go",
+          "code": "// go.mod\nmodule example.com/old\n\ngo 1.21\n\n// p_test.go\nfunc TestUpper(t *testing.T) {\n\ttests := []struct {\n\t\tname, in, want string\n\t}{\n\t\t{\"lower\", \"go\", \"XX\"},\n\t\t{\"mixed\", \"Go\", \"YY\"},\n\t\t{\"upper\", \"GO\", \"GO\"},\n\t}\n\tfor _, tc := range tests {\n\t\tt.Run(tc.name, func(t *testing.T) {\n\t\t\tt.Parallel()\n\t\t\tif got := Upper(tc.in); got != tc.want {\n\t\t\t\tt.Errorf(\"Upper(%q) = %q, want %q\", tc.in, got, tc.want)\n\t\t\t}\n\t\t})\n\t}\n}",
+          "caption": {
+            "en": "The go.mod and the test an AI assistant wrote",
+            "vi": "go.mod và test do AI viết"
+          }
+        },
+        {
+          "kind": "figure",
+          "component": "Gq06ParallelTimeline",
+          "alt": {
+            "en": "Timeline of a parent test and three subtests that each call t.Parallel, from the loop to the moment the subtests run.",
+            "vi": "Dòng thời gian của một test cha và ba subtest đều gọi t.Parallel, từ vòng lặp đến lúc các subtest chạy."
+          }
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Parallel subtests never report failures from `t.Errorf` to the parent.",
+            "vi": "Subtest song song không bao giờ báo lỗi từ `t.Errorf` lên test cha."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Go caches the result of `Upper` and does not call it again for the same input.",
+            "vi": "Go cache kết quả của `Upper` và không gọi lại với cùng đầu vào."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "With `go 1.21`, `tc` is shared by all rows and each subtest sees the last row.",
+            "vi": "Với `go 1.21`, `tc` dùng chung cho mọi dòng và mỗi subtest thấy dòng cuối."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "A failure inside a paused subtest is dropped until the parent returns.",
+            "vi": "Lỗi trong subtest bị tạm dừng bị bỏ cho tới khi test cha trả về."
+          }
+        }
+      ],
+      "answer": [
+        "c"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "Before Go 1.22 the loop variable was one variable for the whole loop, and the language version in `go.mod` decides which rule applies. `t.Parallel()` pauses each subtest until the loop has finished, so all three read the last row, `upper`, which passes. With `go 1.22` or newer each iteration has its own `tc` and the two bad rows fail.",
+          "vi": "Trước Go 1.22 biến vòng lặp là một biến cho cả vòng, và phiên bản ngôn ngữ trong `go.mod` quyết định quy tắc nào áp dụng. `t.Parallel()` tạm dừng mỗi subtest tới khi vòng lặp xong, nên cả ba đọc dòng cuối là `upper`, và nó pass. Với `go 1.22` trở lên mỗi vòng có `tc` riêng và hai dòng sai sẽ fail."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "Parallel subtests report failures like any others; a different test in the same file would show them.",
+            "vi": "Subtest song song báo lỗi như mọi subtest khác; một test khác trong file vẫn sẽ hiện chúng."
+          },
+          "b": {
+            "en": "Go does not cache function results. It caches whole test runs, and this was a fresh run.",
+            "vi": "Go không cache kết quả hàm. Nó cache cả lần chạy test, và đây là lần chạy mới."
+          },
+          "d": {
+            "en": "Nothing is dropped. The parent waits for its parallel subtests and prints their failures.",
+            "vi": "Không có gì bị bỏ. Test cha chờ các subtest song song và in lỗi của chúng."
+          }
+        },
+        "reread": {
+          "anchor": "table-driven-tests",
+          "label": {
+            "en": "Table-driven tests",
+            "vi": "Table-driven test"
+          }
+        },
+        "say": {
+          "en": "A green parallel table test needs a failing row to prove it works; I also check the `go` line in `go.mod`.",
+          "vi": "Một table test song song xanh cần thử một dòng cố ý sai để chứng minh nó hoạt động; tôi cũng xem dòng `go` trong `go.mod`."
+        }
+      },
+      "ref": "https://go.dev/blog/loopvar-preview",
+      "verifiedBy": "$ go test -count=1 -v   (go.mod: go 1.21)\n--- PASS: TestUpper (0.00s)\n    --- PASS: TestUpper/lower (0.00s)\n    --- PASS: TestUpper/upper (0.00s)\n    --- PASS: TestUpper/mixed (0.00s)\nPASS\n$ go test -count=1   (go.mod: go 1.22)\n        p_test.go:17: Upper(\"go\") = \"GO\", want \"XX\"\n    --- FAIL: TestUpper/mixed (0.00s)\n        p_test.go:17: Upper(\"Go\") = \"GO\", want \"YY\"\nFAIL"
+    },
+    {
+      "id": "s04q4",
+      "level": "evaluate",
+      "track": "ai",
+      "type": "ai-advice",
+      "difficulty": 4,
+      "kind": "whatif",
+      "topic": "Dropping -race from CI",
+      "stem": {
+        "en": "Assume `go test ./...` takes 4 minutes in CI and `go test -race ./...` takes three times as long. An AI assistant advises dropping `-race` from CI and running it by hand before releases, since the tests pass without it. What happens if the team follows this?",
+        "vi": "Giả sử `go test ./...` mất 4 phút trong CI và `go test -race ./...` lâu gấp ba. Một AI khuyên bỏ `-race` khỏi CI và chạy tay trước mỗi lần release, vì test đã pass khi không có nó. Chuyện gì xảy ra nếu nhóm làm theo?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Nothing is lost: if tests pass without `-race`, no race exists.",
+            "vi": "Không mất gì: test pass khi không có `-race` thì không có race."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Races stay unseen until production, so keep `-race` in CI as its own job.",
+            "vi": "Race không bị thấy cho tới production, nên giữ `-race` trong CI thành một job riêng."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "`go vet` finds the same races at no extra cost, since it reads the same code.",
+            "vi": "`go vet` tìm cùng các race đó mà không tốn thêm, vì nó đọc cùng code."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "`-race` reports only when combined with `-v`, so it adds little.",
+            "vi": "`-race` chỉ báo khi đi kèm `-v`, nên giá trị của nó thấp."
+          }
+        }
+      ],
+      "answer": [
+        "b"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "The slowdown is real, and the answer is to run it somewhere cheap to wait, such as a parallel job, not to stop. The Go team put the detector in its own continuous build for the same reason: the bugs come back later in production if nobody runs it routinely.",
+          "vi": "Việc chậm đi là thật, và cách xử lý là chạy nó ở chỗ chờ không tốn kém, như một job song song, chứ không phải bỏ. Nhóm Go đưa race detector vào bản build liên tục của họ vì cùng lý do: nếu không ai chạy thường xuyên thì lỗi sẽ quay lại ở production."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "A race can pass most runs, so a green plain run says little about races.",
+            "vi": "Race có thể pass hầu hết các lần chạy, nên một lần chạy thường xanh nói rất ít về race."
+          },
+          "c": {
+            "en": "`go vet` reads code for suspicious patterns. It does not watch real memory accesses at run time.",
+            "vi": "`go vet` đọc code tìm mẫu đáng ngờ. Nó không theo dõi truy cập bộ nhớ thật lúc chạy."
+          },
+          "d": {
+            "en": "`-race` prints its report without `-v`, as the output of a race failure shows.",
+            "vi": "`-race` in báo cáo mà không cần `-v`, như kết quả khi test dính race cho thấy."
+          }
+        },
+        "reread": {
+          "anchor": "-race-a-first-look",
+          "label": {
+            "en": "`-race`: a first look",
+            "vi": "`-race`: làm quen"
+          }
+        },
+        "say": {
+          "en": "I keep `-race` in CI as its own job: slower, but races do not show up in plain runs.",
+          "vi": "Tôi giữ `-race` trong CI thành một job riêng: chậm hơn, nhưng race không lộ ra khi chạy thường."
+        }
+      },
+      "ref": "Post: `-race`: a first look"
+    },
+    {
+      "id": "s04q5",
+      "level": "evaluate",
+      "track": "interview",
+      "type": "multi",
+      "difficulty": 5,
+      "kind": "whatif",
+      "topic": "Keeping the quick loop fast",
+      "stem": {
+        "en": "Assume the database tests in `session` take two minutes in total, and everyone runs `go test` after each edit. Which two changes keep the quick loop fast without deleting those tests?",
+        "vi": "Giả sử các test database trong `session` mất tổng cộng hai phút, và ai cũng chạy `go test` sau mỗi lần sửa. Hai thay đổi nào giữ vòng lặp nhanh mà không xóa các test đó?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Add `-count=1` to every run so Go skips the slow ones.",
+            "vi": "Thêm `-count=1` vào mọi lần chạy để Go bỏ qua các test chậm."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Start them with `if testing.Short() { t.Skip(...) }` and use `go test -short` while editing.",
+            "vi": "Bắt đầu chúng bằng `if testing.Short() { t.Skip(...) }` và dùng `go test -short` khi đang sửa."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Lower the coverage target so fewer tests are needed.",
+            "vi": "Hạ mục tiêu coverage để cần ít test hơn."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Run with `-parallel 1` so the slow tests stop blocking others.",
+            "vi": "Chạy với `-parallel 1` để các test chậm không chặn test khác."
+          }
+        },
+        {
+          "id": "e",
+          "text": {
+            "en": "Move them to a file tagged `//go:build integration` and run it with `-tags=integration` in CI.",
+            "vi": "Chuyển chúng sang file gắn `//go:build integration` và chạy bằng `-tags=integration` trong CI."
+          }
+        }
+      ],
+      "answer": [
+        "b",
+        "e"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "Both choices split the suite by speed without losing a test. `testing.Short()` plus `t.Skip` lets the same file serve both loops, and a build tag keeps the file out of the default run until CI asks for it. An environment variable check works the same way.",
+          "vi": "Cả hai cách chia bộ test theo tốc độ mà không mất test nào. `testing.Short()` kèm `t.Skip` cho cùng một file phục vụ cả hai vòng lặp, và build tag giữ file ngoài lần chạy mặc định cho tới khi CI yêu cầu. Kiểm tra biến môi trường cũng hoạt động tương tự."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "`-count=1` turns off the cache and skips nothing. Every test, slow ones included, runs again.",
+            "vi": "`-count=1` tắt cache và không bỏ qua gì. Mọi test, kể cả test chậm, chạy lại."
+          },
+          "c": {
+            "en": "A coverage target says nothing about which tests run, and fewer tests would just hide gaps.",
+            "vi": "Mục tiêu coverage không nói gì về việc test nào chạy, và ít test hơn chỉ che các khoảng trống."
+          },
+          "d": {
+            "en": "`-parallel 1` limits parallel tests to one at a time, which can only make the run longer.",
+            "vi": "`-parallel 1` giới hạn mỗi lần một test song song, chỉ có thể làm lần chạy lâu hơn."
+          }
+        },
+        "reread": {
+          "anchor": "slow-tests--short-build-tags-environment",
+          "label": {
+            "en": "Slow tests: `-short`, build tags, environment",
+            "vi": "Test chậm: `-short`, build tag, biến môi trường"
+          }
+        },
+        "say": {
+          "en": "I split slow tests with `-short` or a build tag, so the edit loop stays fast and CI still runs everything.",
+          "vi": "Tôi tách test chậm bằng `-short` hoặc build tag, để vòng sửa vẫn nhanh và CI vẫn chạy đủ."
+        }
+      },
+      "ref": "Post: Slow tests: `-short`, build tags, environment"
+    }
+  ]
+}

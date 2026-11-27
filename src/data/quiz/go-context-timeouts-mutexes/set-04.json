@@ -1,0 +1,446 @@
+{
+  "id": "set-04",
+  "title": {
+    "en": "WaitGroup, background work and design calls",
+    "vi": "WaitGroup, việc chạy nền và các quyết định thiết kế"
+  },
+  "context": {
+    "text": {
+      "en": "Suppose a batch tool starts goroutines and waits for them with `sync.WaitGroup`.\nSuppose an HTTP handler also starts background work after it answers.\nThese questions are about what `go vet` and `-race` can see, and what to do when an AI suggests a fix.",
+      "vi": "Giả sử một công cụ batch chạy các goroutine và chờ chúng bằng `sync.WaitGroup`.\nGiả sử một HTTP handler còn chạy việc nền sau khi đã trả lời.\nCác câu hỏi nói về thứ `go vet` và `-race` thấy được, và việc cần làm khi một AI đề xuất cách sửa."
+    }
+  },
+  "questions": [
+    {
+      "id": "s04q1",
+      "level": "apply",
+      "track": "ai",
+      "type": "ai-review",
+      "difficulty": 3,
+      "kind": "predict",
+      "topic": "WaitGroup: Add before go, not inside",
+      "stem": {
+        "en": "An AI assistant wrote this and says: \"`Wait` waits for all three goroutines, so it always prints `3`.\" What can the program print?",
+        "vi": "Một AI viết đoạn này và nói: \"`Wait` chờ cả ba goroutine, nên luôn in `3`.\" Chương trình có thể in gì?"
+      },
+      "media": [
+        {
+          "kind": "code",
+          "lang": "go",
+          "code": "package main\n\nimport (\n\t\"fmt\"\n\t\"sync\"\n\t\"sync/atomic\"\n)\n\nfunc main() {\n\tvar wg sync.WaitGroup\n\tvar v atomic.Int64\n\n\tfor i := 0; i < 3; i++ {\n\t\tgo func() {\n\t\t\twg.Add(1)\n\t\t\tv.Add(1)\n\t\t\twg.Done()\n\t\t}()\n\t}\n\n\twg.Wait()\n\tfmt.Println(v.Load())\n}",
+          "caption": {
+            "en": "The AI assistant's code.",
+            "vi": "Code của AI."
+          }
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Always `3`, because `Wait` blocks until every goroutine has finished.",
+            "vi": "Luôn là `3`, vì `Wait` chặn đến khi mọi goroutine xong."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "It panics with a negative `WaitGroup` counter.",
+            "vi": "Nó panic vì bộ đếm `WaitGroup` âm."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "`0` to `3`, usually `0`, and `go vet` reports `Add` inside the goroutine.",
+            "vi": "Từ `0` đến `3`, thường là `0`, và `go vet` báo `Add` trong goroutine."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "It deadlocks, because the counter never reaches zero.",
+            "vi": "Nó deadlock, vì bộ đếm không bao giờ về không."
+          }
+        }
+      ],
+      "answer": [
+        "c"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "`wg.Add(1)` runs inside the goroutine, and the `go` statement does not wait for it. `Wait` can run first, see `0`, and return before any goroutine has added itself. The result depends on timing, anything from `0` to `3`, and `go vet` flags the `Add` call. Calling `wg.Add(3)` before the loop fixes it.",
+          "vi": "`wg.Add(1)` chạy bên trong goroutine, và câu lệnh `go` không chờ nó. `Wait` có thể chạy trước, thấy `0` và return khi chưa goroutine nào kịp tự cộng. Kết quả phụ thuộc thời điểm, từ `0` đến `3`, và `go vet` báo lời gọi `Add`. Gọi `wg.Add(3)` trước vòng lặp là sửa được."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "`Wait` can run before any goroutine has called `Add`. It then sees `0` and returns at once.",
+            "vi": "`Wait` có thể chạy trước khi goroutine nào kịp gọi `Add`. Khi đó nó thấy `0` và return ngay."
+          },
+          "b": {
+            "en": "Every `Done` is matched by an `Add` in the same goroutine, so the counter never goes below zero.",
+            "vi": "Mỗi `Done` có một `Add` đi cùng trong cùng goroutine, nên bộ đếm không bao giờ xuống dưới không."
+          },
+          "d": {
+            "en": "The counter is `0` when `Wait` runs, so `Wait` does not block. That is the bug.",
+            "vi": "Bộ đếm là `0` lúc `Wait` chạy, nên `Wait` không chặn. Đó chính là lỗi."
+          }
+        },
+        "reread": {
+          "anchor": "waitgroup-add-before-go-not-inside",
+          "label": {
+            "en": "WaitGroup: Add before go, not inside",
+            "vi": "WaitGroup: Add trước go, không phải bên trong"
+          }
+        },
+        "say": {
+          "en": "Call `wg.Add` before the `go` statement; `go vet` flags the other order.",
+          "vi": "Gọi `wg.Add` trước câu lệnh `go`; `go vet` báo thứ tự ngược lại."
+        }
+      },
+      "ref": "Post: WaitGroup: Add before go, not inside",
+      "verifiedBy": "`cd q08/h && go vet main.go` printed `main.go:15:10: WaitGroup.Add called from inside new goroutine`; ten runs of the built binary printed `0 0 0 0 0 0 0 0 0 0`."
+    },
+    {
+      "id": "s04q2",
+      "level": "apply",
+      "track": "interview",
+      "type": "scenario",
+      "difficulty": 3,
+      "kind": "diagnose",
+      "topic": "WaitGroup: Add before go, not inside",
+      "stem": {
+        "en": "This program prints `job 1 failed`, and then the runtime stops it with `fatal error: all goroutines are asleep - deadlock!`. Why?",
+        "vi": "Chương trình này in `job 1 failed`, rồi runtime dừng nó với `fatal error: all goroutines are asleep - deadlock!`. Vì sao?"
+      },
+      "media": [
+        {
+          "kind": "code",
+          "lang": "go",
+          "code": "package main\n\nimport (\n\t\"fmt\"\n\t\"sync\"\n)\n\nfunc work(id int) error {\n\tif id == 1 {\n\t\treturn fmt.Errorf(\"job %d failed\", id)\n\t}\n\treturn nil\n}\n\nfunc main() {\n\tvar wg sync.WaitGroup\n\tfor i := 0; i < 3; i++ {\n\t\twg.Add(1)\n\t\tgo func() {\n\t\t\tif err := work(i); err != nil {\n\t\t\t\tfmt.Println(err)\n\t\t\t\treturn\n\t\t\t}\n\t\t\tdefer wg.Done()\n\t\t}()\n\t}\n\twg.Wait()\n\tfmt.Println(\"all jobs finished\")\n}"
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "`wg.Add(1)` runs in the loop and not once before it, so a count is lost.",
+            "vi": "`wg.Add(1)` chạy trong vòng lặp thay vì một lần trước nó, nên mất một lượt đếm."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Job `1` returns before `defer wg.Done()` runs, so the counter never reaches zero.",
+            "vi": "Goroutine job `1` return trước khi `defer wg.Done()` chạy, nên bộ đếm không về không."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "`Wait` runs before the goroutines start, so it blocks until they do.",
+            "vi": "`Wait` chạy trước khi các goroutine bắt đầu, nên nó chặn đến khi chúng bắt đầu."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "`fmt.Println` takes a lock that the goroutine never releases.",
+            "vi": "`fmt.Println` giữ một khóa mà goroutine không bao giờ nhả."
+          }
+        }
+      ],
+      "answer": [
+        "b"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "`defer` only takes effect once the line with it has run. For job `1`, the function returns on the error path before reaching `defer wg.Done()`, so the counter stays at `1`. `Wait` blocks, no other goroutine can ever wake it, and the runtime reports a deadlock. Put `defer wg.Done()` on the first line of the goroutine.",
+          "vi": "`defer` chỉ có tác dụng khi dòng chứa nó đã chạy. Với job `1`, hàm return ở nhánh lỗi trước khi tới `defer wg.Done()`, nên bộ đếm vẫn là `1`. `Wait` bị chặn, không goroutine nào còn đánh thức được nó, và runtime báo deadlock. Hãy đặt `defer wg.Done()` ở dòng đầu của goroutine."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "Calling `Add(1)` once per goroutine, before its `go` statement, is correct. Three adds, three goroutines.",
+            "vi": "Gọi `Add(1)` một lần cho mỗi goroutine, trước câu lệnh `go`, là đúng. Ba lần add, ba goroutine."
+          },
+          "c": {
+            "en": "Every `Add` ran before `Wait`. The counter is `3`, and the wait is for the three `Done` calls.",
+            "vi": "Mọi `Add` đã chạy trước `Wait`. Bộ đếm là `3`, và việc chờ là chờ ba lần `Done`."
+          },
+          "d": {
+            "en": "`fmt.Println` releases its own lock when it returns. The goroutine finished; it just never called `Done`.",
+            "vi": "`fmt.Println` tự nhả khóa khi return. Goroutine đã kết thúc; chỉ là nó chưa bao giờ gọi `Done`."
+          }
+        },
+        "reread": {
+          "anchor": "waitgroup-add-before-go-not-inside",
+          "label": {
+            "en": "WaitGroup: Add before go, not inside",
+            "vi": "WaitGroup: Add trước go, không phải bên trong"
+          }
+        },
+        "say": {
+          "en": "Put `defer wg.Done()` first in the goroutine so every exit path counts down.",
+          "vi": "Đặt `defer wg.Done()` ở đầu goroutine để mọi đường thoát đều đếm lùi."
+        }
+      },
+      "ref": "Post: WaitGroup: Add before go, not inside",
+      "verifiedBy": "`cd q08/i && go run main.go` printed `job 1 failed` and then `fatal error: all goroutines are asleep - deadlock!` with the main goroutine in `sync.WaitGroup.Wait`."
+    },
+    {
+      "id": "s04q3",
+      "level": "analyze",
+      "track": "ai",
+      "type": "ai-review",
+      "difficulty": 4,
+      "kind": "diagnose",
+      "topic": "The wrong context: background work that dies with the request",
+      "stem": {
+        "en": "An AI assistant fixed the early-cancel bug with the handler below and says the work is now safe. If the broker stops answering, what happens?",
+        "vi": "Một AI sửa lỗi bị hủy sớm bằng handler dưới đây và nói giờ đã an toàn. Nếu broker ngừng trả lời thì chuyện gì xảy ra?"
+      },
+      "media": [
+        {
+          "kind": "code",
+          "lang": "go",
+          "code": "func handler(w http.ResponseWriter, r *http.Request) {\n\tctx := context.WithoutCancel(r.Context())\n\tgo publish(ctx, \"order.created\")\n\tfmt.Fprintln(w, \"ok\")\n}\n\nfunc publish(ctx context.Context, topic string) error {\n\tselect {\n\tcase <-brokerReply(topic): // a broker that sometimes never answers\n\t\treturn nil\n\tcase <-ctx.Done():\n\t\treturn ctx.Err()\n\t}\n}",
+          "caption": {
+            "en": "The AI assistant's code.",
+            "vi": "Code của AI."
+          }
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "The goroutine stops when the client disconnects.",
+            "vi": "Goroutine dừng khi client ngắt kết nối."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "`publish` returns `context deadline exceeded` once the request deadline passes.",
+            "vi": "`publish` trả `context deadline exceeded` khi deadline của request qua."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Each request leaves a goroutine waiting forever, because the context has no deadline.",
+            "vi": "Mỗi request để lại một goroutine chờ mãi, vì context không có deadline."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "The goroutine stops after the default 30 s `net/http` timeout.",
+            "vi": "Goroutine dừng sau timeout mặc định 30 s của `net/http`."
+          }
+        }
+      ],
+      "answer": [
+        "c"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "`context.WithoutCancel` drops cancellation and the deadline. Its `Done()` is `nil`, and a `select` on a `nil` channel never fires. So if `brokerReply` never answers, `publish` waits for ever and one goroutine piles up per request. Wrap the context in `context.WithTimeout` with its own `cancel`.",
+          "vi": "`context.WithoutCancel` bỏ cả việc hủy lẫn deadline. `Done()` của nó là `nil`, và `select` trên channel `nil` không bao giờ chạy. Nên nếu `brokerReply` không bao giờ trả lời, `publish` chờ mãi và cứ mỗi request lại dồn thêm một goroutine. Hãy bọc context bằng `context.WithTimeout` kèm `cancel` riêng."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "`WithoutCancel` cut the link to the request, so a disconnect no longer reaches the goroutine.",
+            "vi": "`WithoutCancel` đã cắt liên kết với request, nên việc client ngắt kết nối không còn tới được goroutine."
+          },
+          "b": {
+            "en": "The new context has no deadline at all, even if the request had one.",
+            "vi": "Context mới không có deadline nào, kể cả khi request có."
+          },
+          "d": {
+            "en": "`net/http` has no such default for this goroutine, which holds no connection or request context.",
+            "vi": "`net/http` không có mặc định đó cho goroutine này, vì nó không giữ kết nối hay context của request."
+          }
+        },
+        "reread": {
+          "anchor": "the-wrong-context-background-work-that-dies-with-the-request",
+          "label": {
+            "en": "The wrong context: background work that dies with the request",
+            "vi": "Sai context: việc chạy nền chết cùng request"
+          }
+        },
+        "say": {
+          "en": "`WithoutCancel` also removes the deadline; give background work its own timeout.",
+          "vi": "`WithoutCancel` cũng bỏ luôn deadline; hãy cho việc chạy nền timeout riêng."
+        }
+      },
+      "ref": "Post: The wrong context: background work that dies with the request",
+      "verifiedBy": "`cd q08/j && go run main.go` printed `has deadline: false done channel nil: true` for `context.WithoutCancel(context.Background())`. (`brokerReply` is a stand-in that returns a channel nobody ever sends on.)"
+    },
+    {
+      "id": "s04q4",
+      "level": "evaluate",
+      "track": "ai",
+      "type": "ai-advice",
+      "difficulty": 4,
+      "kind": "whatif",
+      "topic": "Values: use sparingly",
+      "stem": {
+        "en": "To avoid passing `db` and `logger` through every function, an AI assistant suggests putting both into the context with `WithValue` and reading them with `ctx.Value`. How should you judge this?",
+        "vi": "Để khỏi truyền `db` và `logger` qua mọi hàm, một AI gợi ý nhét cả hai vào context bằng `WithValue` rồi đọc bằng `ctx.Value`. Bạn đánh giá thế nào?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Accept it: `WithValue` is meant for any dependency a function needs.",
+            "vi": "Chấp nhận: `WithValue` dành cho mọi dependency mà hàm cần."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Reject it: `WithValue` is only allowed for a request ID, and the compiler enforces it.",
+            "vi": "Từ chối: `WithValue` chỉ được dùng cho request ID, và compiler bắt buộc điều đó."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Accept it, but use plain string keys so every package can find the values.",
+            "vi": "Chấp nhận, nhưng dùng key string thường để package nào cũng tìm thấy giá trị."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Keep them as parameters or struct fields, because `Value` returns `any` and nothing is checked.",
+            "vi": "Giữ làm tham số hoặc field của struct, vì `Value` trả `any` và không gì được kiểm tra."
+          }
+        }
+      ],
+      "answer": [
+        "d"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "`ctx.Value` returns an `any`, and a missing key returns `nil` with no error. So a missing `db` shows up as a panic far from the cause, and the function's needs are hidden from its signature. Dependencies should be parameters or struct fields, where the compiler checks them.",
+          "vi": "`ctx.Value` trả `any`, và key không có thì trả `nil` mà không báo lỗi. Nên thiếu `db` sẽ lộ ra thành panic ở nơi xa nguyên nhân, và những thứ hàm cần bị giấu khỏi chữ ký của nó. Dependency nên là tham số hoặc field của struct, nơi compiler kiểm tra được."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "The docs limit values to request-scoped data, and say they are not for optional parameters.",
+            "vi": "Tài liệu giới hạn values cho dữ liệu theo request và nói chúng không dành cho tham số tùy chọn."
+          },
+          "b": {
+            "en": "The compiler does not limit what a context carries. The reason to avoid it is that nothing gets checked.",
+            "vi": "Compiler không giới hạn thứ context mang theo. Lý do nên tránh là chẳng có gì được kiểm tra."
+          },
+          "c": {
+            "en": "Plain string keys can collide between packages. A private key type exists to prevent that.",
+            "vi": "Key string thường có thể va nhau giữa các package. Kiểu key riêng sinh ra để ngăn việc đó."
+          }
+        },
+        "reread": {
+          "anchor": "values-use-sparingly",
+          "label": {
+            "en": "Values: use sparingly",
+            "vi": "Values: dùng ít thôi"
+          }
+        },
+        "say": {
+          "en": "Values are a last resort; things a function needs belong in its parameters.",
+          "vi": "Values là phương án cuối; thứ hàm cần thuộc về tham số của nó."
+        }
+      },
+      "ref": "Post: Values: use sparingly"
+    },
+    {
+      "id": "s04q5",
+      "level": "evaluate",
+      "track": "interview",
+      "type": "multi",
+      "difficulty": 5,
+      "kind": "whatif",
+      "topic": "The wrong context: background work that dies with the request",
+      "stem": {
+        "en": "A handler must publish an event after it answers. Which two designs are sound?",
+        "vi": "Một handler phải publish event sau khi trả lời. Hai thiết kế nào đúng?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Pass `r.Context()` unchanged, and raise the server's write timeout so the handler returns later.",
+            "vi": "Truyền nguyên `r.Context()`, và tăng write timeout của server để handler return muộn hơn."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Use `context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)` and `defer cancel()` in the goroutine.",
+            "vi": "Dùng `context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)` và `defer cancel()` trong goroutine."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Use `context.WithTimeout(r.Context(), 5*time.Second)`, so the new deadline replaces the cancel on return.",
+            "vi": "Dùng `context.WithTimeout(r.Context(), 5*time.Second)`, để deadline mới thay thế việc hủy khi return."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Keep `r.Context()` in a package variable and read it later in the goroutine.",
+            "vi": "Lưu `r.Context()` vào biến package và đọc lại trong goroutine sau."
+          }
+        },
+        {
+          "id": "e",
+          "text": {
+            "en": "Use `context.WithTimeout(context.Background(), 5*time.Second)` when the event needs nothing from the request.",
+            "vi": "Dùng `context.WithTimeout(context.Background(), 5*time.Second)` khi event không cần gì từ request."
+          }
+        }
+      ],
+      "answer": [
+        "b",
+        "e"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "Both sound designs start from a context that the request cannot cancel and give the work its own deadline. `WithoutCancel` keeps request values such as the request ID, and `Background` is enough when the event needs none. Anything that derives from `r.Context()` itself still dies with the handler.",
+          "vi": "Cả hai thiết kế đúng đều bắt đầu từ một context mà request không hủy được và cho việc đó deadline riêng. `WithoutCancel` giữ value của request như request ID, còn `Background` là đủ khi event không cần gì. Mọi thứ dẫn xuất từ chính `r.Context()` vẫn chết cùng handler."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "The context still ends when the handler returns. A later return only moves the problem.",
+            "vi": "Context vẫn kết thúc khi handler return. Return muộn hơn chỉ dời vấn đề đi chỗ khác."
+          },
+          "c": {
+            "en": "A child of a canceled parent is canceled as well. In the check, a child with a 30 s timeout reported `context canceled`.",
+            "vi": "Context con của một cha đã bị hủy cũng bị hủy. Trong lần kiểm tra, con có timeout 30 s báo `context canceled`."
+          },
+          "d": {
+            "en": "Where the context is stored does not matter. It is the same object, and it is canceled when the handler returns.",
+            "vi": "Lưu ở đâu không quan trọng. Nó vẫn là cùng một đối tượng, và bị hủy khi handler return."
+          }
+        },
+        "reread": {
+          "anchor": "the-wrong-context-background-work-that-dies-with-the-request",
+          "label": {
+            "en": "The wrong context: background work that dies with the request",
+            "vi": "Sai context: việc chạy nền chết cùng request"
+          }
+        },
+        "say": {
+          "en": "Detach from the request context, then give the background work its own timeout.",
+          "vi": "Tách khỏi context của request, rồi cho việc chạy nền timeout riêng."
+        }
+      },
+      "ref": "Post: The wrong context: background work that dies with the request",
+      "verifiedBy": "`cd q08/d && go run main.go` printed `child of canceled parent: context canceled` for `context.WithTimeout(parent, 30*time.Second)` where `parent` was already canceled."
+    }
+  ]
+}

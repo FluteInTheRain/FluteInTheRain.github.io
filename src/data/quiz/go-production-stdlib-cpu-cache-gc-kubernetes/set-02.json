@@ -1,0 +1,430 @@
+{
+  "id": "set-02",
+  "title": {
+    "en": "Bodies, connections and the idle pool",
+    "vi": "Body, connection và idle pool"
+  },
+  "context": {
+    "text": {
+      "en": "The `Todo` service calls a partner API that returns a large report.\nAssume each answer is 5,000,000 bytes.\nThe service shares one `http.Client` and reuses its connections.\nOps watch how many TCP connections the partner sees.\nBelow are code you read in review and a small experiment.",
+      "vi": "Service `Todo` gọi một API của đối tác trả về một báo cáo lớn.\nGiả sử mỗi câu trả lời dài 5.000.000 byte.\nService dùng chung một `http.Client` và tái dùng connection của nó.\nOps theo dõi đối tác thấy bao nhiêu connection TCP.\nBên dưới là code đọc trong review và một thí nghiệm nhỏ."
+    }
+  },
+  "questions": [
+    {
+      "id": "s02q1",
+      "level": "remember",
+      "track": "interview",
+      "type": "single",
+      "difficulty": 1,
+      "kind": "basic",
+      "topic": "resp is nil on error",
+      "stem": {
+        "en": "When `client.Get(url)` returns a non-nil error, what is `resp`?",
+        "vi": "Khi `client.Get(url)` trả về error khác nil, `resp` là gì?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "A response with status 0 whose body is already closed.",
+            "vi": "Một response có status 0 và body đã được đóng."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "The previous response from the idle pool.",
+            "vi": "Response trước đó lấy từ pool rảnh."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "`nil`, so there is nothing to close.",
+            "vi": "`nil`, nên không có gì để đóng."
+          }
+        }
+      ],
+      "answer": [
+        "c"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "On error `resp` is `nil`. That is why `defer resp.Body.Close()` goes right after the `err != nil` check and not before it.",
+          "vi": "Khi lỗi, `resp` là `nil`. Vì vậy `defer resp.Body.Close()` đặt ngay sau đoạn kiểm tra `err != nil`, không đặt trước."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "There is no response object at all when `Get` fails, so there is no body to be closed.",
+            "vi": "Khi `Get` lỗi thì không có đối tượng response nào, nên cũng không có body nào đã đóng."
+          },
+          "b": {
+            "en": "`Get` never hands back an older response. A failed call returns `nil` and the error.",
+            "vi": "`Get` không bao giờ trả lại response cũ. Lời gọi lỗi trả `nil` và error."
+          }
+        },
+        "reread": {
+          "anchor": "response-bodies-close-and-read-to-the-end",
+          "label": {
+            "en": "Response bodies: close, and read to the end",
+            "vi": "Response body: đóng, và đọc đến hết"
+          }
+        },
+        "say": {
+          "en": "`resp` is `nil` when `err` is not, so the `defer` goes after the error check.",
+          "vi": "`resp` là `nil` khi `err` khác nil, nên `defer` đặt sau đoạn kiểm tra lỗi."
+        }
+      },
+      "ref": "Post: Response bodies: close, and read to the end"
+    },
+    {
+      "id": "s02q2",
+      "level": "understand",
+      "track": "interview",
+      "type": "single",
+      "difficulty": 2,
+      "kind": "basic",
+      "topic": "Keep-alive and the idle pool",
+      "stem": {
+        "en": "For the client to put a finished connection back in the idle pool, what must be true about the response body?",
+        "vi": "Để client đưa connection đã xong về lại pool rảnh, điều gì phải đúng với response body?"
+      },
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Only `Close` was called. Reading is optional.",
+            "vi": "Chỉ cần gọi `Close`. Đọc là tuỳ chọn."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "The server sent a `Connection: close` header.",
+            "vi": "Server gửi header `Connection: close`."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "The request used `http.DefaultClient` and not a custom client.",
+            "vi": "Request dùng `http.DefaultClient`, không dùng client tự tạo."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "The whole body was read before `Close`.",
+            "vi": "Toàn bộ body đã được đọc trước khi `Close`."
+          }
+        }
+      ],
+      "answer": [
+        "d"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "A connection goes back to the idle pool only if the whole body was read. If you close early the client throws the connection away, and the next request pays for a new TCP connection and a TLS handshake.",
+          "vi": "Connection chỉ quay về pool rảnh nếu body đã được đọc hết. Đóng sớm thì client vứt connection đi, và request sau phải trả giá cho một connection TCP mới cùng một lần bắt tay TLS."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "Closing alone makes the client drop the connection when the body was not read to the end.",
+            "vi": "Chỉ đóng thì client vứt connection đi khi body chưa đọc hết."
+          },
+          "b": {
+            "en": "That header does the opposite: it asks for the connection to be closed after the response.",
+            "vi": "Header đó làm điều ngược lại: nó yêu cầu đóng connection sau response."
+          },
+          "c": {
+            "en": "Both kinds of client use the same rule. Reuse depends on the body being read, not on which client it is.",
+            "vi": "Cả hai loại client dùng cùng một quy tắc. Việc tái dùng phụ thuộc body đã đọc hết chưa, không phụ thuộc loại client."
+          }
+        },
+        "reread": {
+          "anchor": "response-bodies-close-and-read-to-the-end",
+          "label": {
+            "en": "Response bodies: close, and read to the end",
+            "vi": "Response body: đóng, và đọc đến hết"
+          }
+        },
+        "say": {
+          "en": "Read the body to the end, then close it, so the connection can be reused.",
+          "vi": "Đọc body đến hết rồi mới đóng, để connection được tái dùng."
+        }
+      },
+      "ref": "Post: Response bodies: close, and read to the end"
+    },
+    {
+      "id": "s02q3",
+      "level": "understand",
+      "track": "ai",
+      "type": "ai-advice",
+      "difficulty": 2,
+      "kind": "why",
+      "topic": "Draining the body",
+      "stem": {
+        "en": "An AI assistant reviews this function and says: \"The `io.Copy` reads data nobody uses. Delete it. `Close` alone is enough.\" What is the right reply?",
+        "vi": "Một AI review hàm này và nói: \"`io.Copy` đọc dữ liệu không ai dùng. Xoá nó đi. Chỉ cần `Close` là đủ.\" Trả lời đúng là gì?"
+      },
+      "media": [
+        {
+          "kind": "code",
+          "lang": "go",
+          "code": "func fetch(client *http.Client, url string) error {\n\tresp, err := client.Get(url)\n\tif err != nil {\n\t\treturn err\n\t}\n\tdefer resp.Body.Close()\n\t// ... decode the body here ...\n\t_, err = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))\n\treturn err\n}",
+          "caption": {
+            "en": "The function under review",
+            "vi": "Hàm đang được review"
+          }
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "Delete it, because `defer` already runs the copy for you when the function returns.",
+            "vi": "Xoá đi, vì `defer` đã chạy việc copy giúp bạn khi hàm return."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "Keep it only to free the response buffer, which the garbage collector would otherwise never free.",
+            "vi": "Giữ lại chỉ để giải phóng buffer của response, thứ mà bộ gom rác nếu không sẽ không bao giờ giải phóng."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "Keep it: an unread body makes the client drop the connection, so the next call pays for a new one.",
+            "vi": "Giữ lại: body chưa đọc khiến client vứt connection, nên lời gọi sau phải trả giá cho một connection mới."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "Delete it, because `Close` already reads the rest and returns the connection to the idle pool.",
+            "vi": "Xoá đi, vì `Close` đã đọc nốt phần còn lại và trả connection về pool rảnh."
+          }
+        }
+      ],
+      "answer": [
+        "c"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "The copy is there on purpose. Reading the rest lets the connection return to the idle pool; `io.LimitReader` stops a huge answer from running the call on for ever. Without it, large bodies cost a new connection per request.",
+          "vi": "Đoạn copy ở đó có chủ đích. Đọc nốt phần còn lại cho connection quay về pool rảnh; `io.LimitReader` ngăn một câu trả lời khổng lồ kéo lời gọi chạy mãi. Thiếu nó, body lớn tốn một connection mới cho mỗi request."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "`defer` only runs `Close`. It does not read anything.",
+            "vi": "`defer` chỉ chạy `Close`. Nó không đọc gì cả."
+          },
+          "b": {
+            "en": "Reading the rest is about the connection, not about memory. The garbage collector frees the buffer either way.",
+            "vi": "Đọc nốt phần còn lại là chuyện của connection, không phải của bộ nhớ. Bộ gom rác giải phóng buffer trong cả hai trường hợp."
+          },
+          "d": {
+            "en": "`Close` does not read the rest. With 5,000,000-byte bodies, five requests that were only closed used five connections.",
+            "vi": "`Close` không đọc phần còn lại. Với body 5.000.000 byte, năm request chỉ đóng mà không đọc đã dùng năm connection."
+          }
+        },
+        "reread": {
+          "anchor": "response-bodies-close-and-read-to-the-end",
+          "label": {
+            "en": "Response bodies: close, and read to the end",
+            "vi": "Response body: đóng, và đọc đến hết"
+          }
+        },
+        "say": {
+          "en": "Before I delete code an AI calls useless, I ask what it protects; this protects connection reuse.",
+          "vi": "Trước khi xoá đoạn code mà AI gọi là vô ích, mình hỏi nó bảo vệ điều gì; đoạn này bảo vệ việc tái dùng connection."
+        }
+      },
+      "ref": "Post: Response bodies: close, and read to the end",
+      "verifiedBy": "cd b && go run .  (Go 1.27.1, 5 requests, server answers 5,000,000 bytes, client{Transport: &http.Transport{}})\nno drain: 5 connections\ndrain:    1 connection"
+    },
+    {
+      "id": "s02q4",
+      "level": "apply",
+      "track": "interview",
+      "type": "code-output",
+      "difficulty": 3,
+      "kind": "predict",
+      "topic": "Connections used with and without a drain",
+      "stem": {
+        "en": "What does this program print? The server answers every request with 5,000,000 bytes and counts new connections.",
+        "vi": "Chương trình này in ra gì? Server trả mỗi request 5.000.000 byte và đếm số connection mới."
+      },
+      "media": [
+        {
+          "kind": "code",
+          "lang": "go",
+          "code": "func run(drain bool) int32 {\n\tvar conns atomic.Int32\n\tsrv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {\n\t\tio.WriteString(w, strings.Repeat(\"x\", 5_000_000))\n\t}))\n\tsrv.Config.ConnState = func(_ net.Conn, s http.ConnState) {\n\t\tif s == http.StateNew {\n\t\t\tconns.Add(1)\n\t\t}\n\t}\n\tsrv.Start()\n\tdefer srv.Close()\n\tclient := &http.Client{Transport: &http.Transport{}}\n\tfor i := 0; i < 5; i++ {\n\t\tresp, _ := client.Get(srv.URL)\n\t\tif drain {\n\t\t\tio.Copy(io.Discard, resp.Body)\n\t\t}\n\t\tresp.Body.Close()\n\t}\n\treturn conns.Load()\n}\n\nfunc main() {\n\tfmt.Println(\"no drain:\", run(false), \"connections\")\n\tfmt.Println(\"drain:   \", run(true), \"connection\")\n}",
+          "caption": {
+            "en": "Five requests with and without reading the body",
+            "vi": "Năm request, có và không đọc body"
+          }
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "`no drain: 1 connections` and `drain: 1 connection`",
+            "vi": "`no drain: 1 connections` và `drain: 1 connection`"
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "`no drain: 1 connections` and `drain: 5 connection`",
+            "vi": "`no drain: 1 connections` và `drain: 5 connection`"
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "`no drain: 5 connections` and `drain: 5 connection`",
+            "vi": "`no drain: 5 connections` và `drain: 5 connection`"
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "`no drain: 5 connections` and `drain: 1 connection`",
+            "vi": "`no drain: 5 connections` và `drain: 1 connection`"
+          }
+        }
+      ],
+      "answer": [
+        "d"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "Without a drain the client drops the connection after every close, so five requests open five connections. With a drain the one connection returns to the idle pool and serves all five.",
+          "vi": "Không drain thì client vứt connection sau mỗi lần đóng, nên năm request mở năm connection. Có drain thì một connection quay về pool rảnh và phục vụ cả năm."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "That would mean the unread bodies cost nothing. A 5,000,000-byte body is too big for the client to throw away cheaply, so it drops the connection.",
+            "vi": "Như vậy nghĩa là body không đọc chẳng tốn gì. Body 5.000.000 byte quá lớn để client bỏ qua rẻ, nên nó vứt connection."
+          },
+          "b": {
+            "en": "This has the two cases swapped. Reading the rest is what lets one connection serve all five requests.",
+            "vi": "Hai trường hợp bị đảo. Đọc nốt phần còn lại mới là thứ cho một connection phục vụ cả năm request."
+          },
+          "c": {
+            "en": "Reading to the end lets the connection return to the pool, so the drained run reuses one connection.",
+            "vi": "Đọc đến hết cho connection quay về pool, nên lần chạy có drain tái dùng một connection."
+          }
+        },
+        "reread": {
+          "anchor": "response-bodies-close-and-read-to-the-end",
+          "label": {
+            "en": "Response bodies: close, and read to the end",
+            "vi": "Response body: đóng, và đọc đến hết"
+          }
+        },
+        "say": {
+          "en": "A drained body lets five requests share one connection; an undrained large body costs one each.",
+          "vi": "Body đã đọc hết cho năm request dùng chung một connection; body lớn chưa đọc tốn một connection mỗi request."
+        }
+      },
+      "ref": "Post: Response bodies: close, and read to the end",
+      "verifiedBy": "cd b && go run .  (Go 1.27.1, Apple M2)\nno drain: 5 connections\ndrain:    1 connection"
+    },
+    {
+      "id": "s02q5",
+      "level": "analyze",
+      "track": "ai",
+      "type": "ai-review",
+      "difficulty": 4,
+      "kind": "diagnose",
+      "topic": "Panic when the partner is down",
+      "stem": {
+        "en": "The service panics only when the partner is unreachable. An AI assistant says: \"`Body.Close` panics when called twice. Wrap it in `recover`.\" Which diagnosis is right?",
+        "vi": "Service chỉ panic khi không với tới đối tác. Một AI nói: \"`Body.Close` panic khi gọi hai lần. Bọc nó trong `recover`.\" Chẩn đoán nào đúng?"
+      },
+      "media": [
+        {
+          "kind": "code",
+          "lang": "go",
+          "code": "func fetch(client *http.Client, url string) {\n\tresp, err := client.Get(url)\n\tdefer resp.Body.Close()\n\tif err != nil {\n\t\tfmt.Println(\"get failed:\", err)\n\t\treturn\n\t}\n\tfmt.Println(resp.Status)\n}",
+          "caption": {
+            "en": "The function that panics",
+            "vi": "Hàm bị panic"
+          }
+        }
+      ],
+      "options": [
+        {
+          "id": "a",
+          "text": {
+            "en": "The `Timeout` is too short, so `resp` is only half filled in when the call fails, and the body is empty.",
+            "vi": "`Timeout` quá ngắn, nên `resp` mới được điền một nửa khi lời gọi lỗi, và body trống."
+          }
+        },
+        {
+          "id": "b",
+          "text": {
+            "en": "The `defer` runs before the error check, so a failed `Get` leaves `resp` nil and `resp.Body` panics.",
+            "vi": "`defer` chạy trước đoạn kiểm tra lỗi, nên `Get` lỗi để `resp` là nil và `resp.Body` panic."
+          }
+        },
+        {
+          "id": "c",
+          "text": {
+            "en": "The idle pool hands back an already closed connection, so `resp.Body` is nil when it is reused.",
+            "vi": "Pool rảnh trả lại một connection đã đóng sẵn, nên `resp.Body` là nil khi nó được tái dùng."
+          }
+        },
+        {
+          "id": "d",
+          "text": {
+            "en": "`Body.Close` is called twice, once by the `defer` and once more by the `return` statement.",
+            "vi": "`Body.Close` bị gọi hai lần, một lần bởi `defer` và một lần nữa bởi câu lệnh `return`."
+          }
+        }
+      ],
+      "answer": [
+        "b"
+      ],
+      "explanation": {
+        "whyRight": {
+          "en": "The `defer` statement evaluates `resp.Body` where it stands. When `Get` fails, `resp` is nil, so the panic happens on that line, only when the partner is down. The `defer` belongs right after the `err != nil` check. `go vet` flags it as \"using resp before checking for errors\".",
+          "vi": "Câu lệnh `defer` tính `resp.Body` ngay tại chỗ nó đứng. Khi `Get` lỗi, `resp` là nil, nên panic xảy ra ở chính dòng đó, và chỉ khi đối tác chết. `defer` phải đặt ngay sau đoạn kiểm tra `err != nil`. `go vet` báo nó là \"using resp before checking for errors\"."
+        },
+        "whyWrong": {
+          "a": {
+            "en": "A failed `Get` returns a `nil` response, not a half-filled one.",
+            "vi": "`Get` lỗi trả response `nil`, không phải response điền một nửa."
+          },
+          "c": {
+            "en": "A reused connection is not involved: `Get` failed before any response existed.",
+            "vi": "Không liên quan đến connection tái dùng: `Get` đã lỗi trước khi có response nào."
+          },
+          "d": {
+            "en": "`return` does not call `Close`, and the `defer` runs once. The panic comes from the `defer` line itself.",
+            "vi": "`return` không gọi `Close`, và `defer` chạy một lần. Panic đến từ chính dòng `defer`."
+          }
+        },
+        "reread": {
+          "anchor": "response-bodies-close-and-read-to-the-end",
+          "label": {
+            "en": "Response bodies: close, and read to the end",
+            "vi": "Response body: đóng, và đọc đến hết"
+          }
+        },
+        "say": {
+          "en": "A panic that appears only when the dependency is down points at code using a result before its error check.",
+          "vi": "Panic chỉ xuất hiện khi dependency chết thì thường là code dùng kết quả trước khi kiểm tra lỗi."
+        }
+      },
+      "ref": "Post: Response bodies: close, and read to the end",
+      "verifiedBy": "cd c && go vet . ; go run .  (Go 1.27.1, nothing listens on port 1)\nmain.go:10:8: using resp before checking for errors\npanic: runtime error: invalid memory address or nil pointer dereference\n... main.fetch ... main.go:10"
+    }
+  ]
+}
