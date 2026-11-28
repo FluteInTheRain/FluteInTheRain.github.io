@@ -3,6 +3,13 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-28 — Xuất bản bài 20 series Go (phỏng vấn)
+
+- **Đã làm (nhánh `content/publish-go-interview`):** `draft: true` → `false` cho `go-interview-questions-output-live-coding`. Bài đã đủ 19 câu khái niệm, 6 thẻ đoán output, 3 bài live-coding có `go test -race` thật và đã qua fact-check đợt 5 (23/11). Series Go giờ 20/20 bài đã xuất bản.
+- **Ai quyết:** user ("làm xong bài phỏng vấn đi rồi publish").
+- **Kiểm tra:** build 75 trang, `node --test` 59 pass.
+- **Chưa chốt:** series Go chưa có quiz (0/20).
+
 ## 2026-11-24 — Dọn nhãn "minh họa" khỏi hình và bài blog; sửa nút Next; thay 2 câu quiz trùng
 
 - **Đã làm (3 PR, mỗi việc một nhánh):** (1) `fix/quiz-next-button` (#64): nút Next trên trang quiz không còn `sticky`, hết đè lên dòng "Correct answer". (2) `fix/quiz-duplicate-cases` (#65): thay s02q4 (giờ hỏi vốn hóa không phải tiền mặt công ty đang giữ) và s08q3 (tiền đi từ người mua sang người bán, lợi nhuận FPT không đổi) vì trùng s03q5 và s03q3. (3) `chore/drop-illustrative-labels`: bỏ các nhãn "illustrative / minh họa / số bịa / made-up" trong chữ hiển thị của ~115 file (hình SVG, demo, 6 bài blog); số bịa thì nêu giả định trong câu ("Giả sử ..."). Không sửa comment code, không đụng AnimatedFlow / DemoFrame / DiagramIcon, giữ EN và VI đồng bộ. Hai hình bị xóa phần tử chú thích (`StorageBVectorSpace`, `MarketLimitQueue`; `StorageBitcask` bỏ nhãn "example values"); `MarketLimitQueue` thu viewBox 430 → 400.
