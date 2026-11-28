@@ -3,6 +3,13 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-28 — Xuất bản bài 4–22 series AI trading
+
+- **Đã làm (nhánh `content/publish-ai-trading-4-22`):** `draft: true` → `false` cho 19 bài `ai-trading-statistics` … `ai-trading-investment-os`. Series AI trading giờ 22/22 bài đã xuất bản, mỗi bài có quiz 40 câu.
+- **Ai quyết:** user ("public hết"), sau khi tự đọc trên server dev.
+- **Kiểm tra:** build 155 → 193 trang (+19 bài, +19 trang quiz), `node --test` 212 pass.
+- **Chưa chốt:** các việc "Chưa kiểm" của entry bên dưới vẫn còn (360px, `humanizer` như một lượt riêng, vài hình chưa chụp lại).
+
 ## 2026-11-28 — Series AI trading: viết bài 4–22 (19 bài draft, mỗi bài 40 câu quiz)
 
 - **Đã làm (nhánh `feat/ai-trading-batch-2`, plan `docs/superpowers/plans/2026-11-28-ai-trading-batch-2.md`, brief `2026-11-28-ai-trading-batch-{2,3,4}-brief.md`):** 19 agent Sonnet chạy song song, mỗi agent một bài, cùng một thư mục làm việc, mỗi agent chỉ ghi file của bài mình. Mỗi bài: MDX song ngữ (`draft: true`, 2.100–2.900 từ EN), ảnh hero thật (Wikimedia Commons, đã kiểm giấy phép), 9–11 hình vẽ trên trang, 1 demo (số kiểm bằng Python), 8 bộ quiz v2 (20 `interview` + 20 `ai`, `code`) và 4–5 hình quiz. Ba commit: bài 4–11, 12–19, 20–22; mỗi đợt đăng ký sẵn trong `domains.ts`.
