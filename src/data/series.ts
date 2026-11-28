@@ -1468,8 +1468,8 @@ const aiTrading: Series = {
     },
   ],
   credit: {
-    en: 'Built on the public curriculum and research of 51labs (Machine Learning for Financial Market), extended with public papers and Vietnamese market cases.',
-    vi: 'Dựa trên chương trình và nghiên cứu công khai của 51labs (Machine Learning for Financial Market), bổ sung paper công khai và case thị trường Việt Nam.',
+    en: 'Built on public papers, exchange rules and Vietnamese market cases.',
+    vi: 'Dựa trên paper công khai, quy định của sở giao dịch và case thị trường Việt Nam.',
   },
   cover: {
     title: { accent: 'AI', rest: ' for Market Systems' },
