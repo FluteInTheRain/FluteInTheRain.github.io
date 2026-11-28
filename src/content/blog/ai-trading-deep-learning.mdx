@@ -1,0 +1,515 @@
+---
+title: "Deep Learning"
+title_vi: "Học sâu"
+description: "Neural networks on market data: how a net learns, why it memorises noise faster than it finds signal, and which loss and checks keep it honest. Post 14 of the AI-trading series."
+description_vi: "Mạng nơ-ron trên dữ liệu thị trường: mạng học ra sao, vì sao nó học thuộc nhiễu nhanh hơn tìm ra tín hiệu, và hàm loss cùng các phép kiểm tra nào giữ nó trung thực. Bài 14 của series AI trong chứng khoán."
+date: 2026-11-28
+category: "ai"
+tags: ["ai", "ai-trading", "deep-learning"]
+cover: "../../assets/blog/ai-trading-deep-learning/mark-i-perceptron.jpg"
+cover_alt: "The Mark I Perceptron at Cornell Aeronautical Laboratory: a wall of racks and patch cables with a grid of photocells in front"
+draft: true
+sources:
+  - { title: "Empirical Asset Pricing via Machine Learning (Review of Financial Studies 33(5), 2020)", author: "Shihao Gu, Bryan Kelly & Dacheng Xiu", url: "https://doi.org/10.1093/rfs/hhaa009" }
+  - { title: "Empirical Asset Pricing via Machine Learning (NBER Working Paper 25398)", author: "Shihao Gu, Bryan Kelly & Dacheng Xiu", url: "https://www.nber.org/papers/w25398" }
+  - { title: "Understanding deep learning requires rethinking generalization (ICLR 2017)", author: "Chiyuan Zhang, Samy Bengio, Moritz Hardt, Benjamin Recht & Oriol Vinyals", url: "https://arxiv.org/abs/1611.03530" }
+  - { title: "Enhancing Time Series Momentum Strategies Using Deep Neural Networks", author: "Bryan Lim, Stefan Zohren & Stephen Roberts", url: "https://arxiv.org/abs/1904.04912" }
+  - { title: "Why do tree-based models still outperform deep learning on tabular data?", author: "Léo Grinsztajn, Edouard Oyallon & Gaël Varoquaux", url: "https://arxiv.org/abs/2207.08815" }
+  - { title: "Adam: A Method for Stochastic Optimization", author: "Diederik P. Kingma & Jimmy Ba", url: "https://arxiv.org/abs/1412.6980" }
+  - { title: "Năm 2024 khởi sắc của chứng khoán (HoSE có 393 mã cổ phiếu cuối 2024)", author: "Đông Vệ, VnExpress", url: "https://vnexpress.net/nam-2024-khoi-sac-cua-chung-khoan-4834265.html" }
+  - { title: "330-PSA-80-60 (USN 710739): Mark I Perceptron (photo, public domain)", author: "National Museum of the U.S. Navy, via Wikimedia Commons", url: "https://commons.wikimedia.org/wiki/File:330-PSA-80-60_(USN_710739)_(20897323365).jpg" }
+---
+
+import En from '../../components/mdx/En.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
+import AtP14GkxDepth from '../../components/mdx/AtP14GkxDepth.astro';
+import AtP14Neuron from '../../components/mdx/AtP14Neuron.astro';
+import AtP14Mlp from '../../components/mdx/AtP14Mlp.astro';
+import AtP14Descent from '../../components/mdx/AtP14Descent.astro';
+import AtP14Capacity from '../../components/mdx/AtP14Capacity.astro';
+import AtP14RandomLabels from '../../components/mdx/AtP14RandomLabels.astro';
+import AtP14FitDemo from '../../components/mdx/AtP14FitDemo.astro';
+import AtP14EarlyStop from '../../components/mdx/AtP14EarlyStop.astro';
+import AtP14SharpeLoss from '../../components/mdx/AtP14SharpeLoss.astro';
+import AtP14Choice from '../../components/mdx/AtP14Choice.astro';
+import heroPerceptron from '../../assets/blog/ai-trading-deep-learning/mark-i-perceptron.jpg';
+
+<En>
+
+<Figure src={heroPerceptron} alt="The Mark I Perceptron at Cornell Aeronautical Laboratory: a wall of racks and patch cables with a grid of photocells in front" caption="The Mark I Perceptron, announced by the US Navy in 1960. Trained on letters in one typeface, it was right 85 percent of the time once a second typeface was added. A learning machine and its generalisation problem, both on the first day." sourceTitle="Wikimedia Commons: Mark I Perceptron (National Museum of the U.S. Navy, public domain)" sourceUrl="https://commons.wikimedia.org/wiki/File:330-PSA-80-60_(USN_710739)_(20897323365).jpg" />
+
+> "The benefits of 'deep' learning are limited, as four- and five-layer models fail to improve over NN3."
+> &mdash; *Gu, Kelly and Xiu*, "Empirical Asset Pricing via Machine Learning" (2020)
+
+### The best neural net on Wall Street had three layers
+
+Gu, Kelly and Xiu gave neural networks the biggest equity data set academics have: nearly 30,000 US stocks over 60 years, 1957 to 2016, with 94 characteristics per stock. They tested networks with one to five hidden layers against linear models and trees, always on months the model had never seen.
+
+The result is modest. Linear regression on all 920 inputs scored a monthly out-of-sample R² of -3.46%, which means it did worse than forecasting zero for every stock. The best network, with three hidden layers, scored 0.40%. The one-layer network scored 0.33%. Four and five layers did not help.
+
+<AtP14GkxDepth />
+
+So this post is about a tool that works, barely, in the one place where data is plentiful, and fails quietly almost everywhere else. Five questions carry it:
+
+1. **What a neural network is**: neurons, layers and the weights inside them.
+2. **How the weights get chosen**: loss, gradient descent and the learning rate.
+3. **Why nets overfit**: more weights than rows, and a skill for memorising anything.
+4. **How to keep a net honest**: held-out rows, early stopping, small size.
+5. **Which loss to train on**, and when to leave deep learning out.
+
+<Callout type="note" title="TL;DR">
+
+A neural network is a stack of weighted sums with a floor, trained by walking downhill on a loss. It can fit almost anything, including pure noise (Zhang et al. got zero training error on random labels), and a market is mostly noise. A net with 30,145 weights meets 2,520 daily rows of one stock. In the largest study of US stocks, the best net had three hidden layers and explained 0.40% of monthly variation. What helps: a validation set, early stopping, small nets, more rows, and a loss that matches the goal (the Sharpe loss lifted one LSTM's backtest Sharpe from 0.79 to 2.91 in a futures study). Nothing here is investment advice or a recommendation to trade.
+
+</Callout>
+
+<Concepts>
+
+- **Neural network**: a function built from many small adjustable steps, each a weighted sum followed by a simple bend.
+- **Weight**: a number inside the network that training sets. A network is its weights.
+- **Out of sample**: tested on data the model never saw during fitting. The only score that counts.
+- **R²**: the share of variation the forecast explains. Zero means no better than a flat guess; 0.40% is four parts in a thousand.
+
+</Concepts>
+
+---
+
+## 1. What a neural network is
+
+A neuron is the smallest piece. It takes some numbers, multiplies each by a weight, adds them up with a bias, and then clips anything below zero. That clip is called ReLU. Without it, stacking steps would still be one straight line; with it, a stack can bend.
+
+<AtP14Neuron />
+
+A layer is a row of neurons that all read the same inputs. A multilayer perceptron (MLP) is layers in a chain: the output of one is the input of the next. Gu, Kelly and Xiu's NN3 has hidden layers of 32, 16 and 8 neurons. Fed all 920 features, it has 30,145 weights, and 29,472 of them sit between the inputs and the first layer.
+
+<AtP14Mlp />
+
+The idea is older than finance. Frank Rosenblatt's Mark I Perceptron, the machine in the photo, learned to tell letters apart from a grid of photocells. Modern networks have the same ingredients at a larger scale. What changed is the amount of data and computing power, not the principle. On a market, though, the data stays small. HOSE had 393 listed codes at the end of 2024, and a decade of monthly rows for all of them is at most 47,160 lines.
+
+<Concepts>
+
+- **Neuron**: weighted sum of inputs plus a bias, passed through an activation.
+- **ReLU**: the activation max(0, x). Negative sums become 0.
+- **Layer / MLP**: a row of neurons / layers chained one after another, every neuron reading the whole layer below.
+- **Parameters**: all weights and biases. Their count is the network's capacity to fit.
+
+</Concepts>
+
+## 2. How the weights get chosen
+
+Start with random weights and a way to score a forecast. The score is the loss: for a return forecast, usually the mean of squared errors. Training nudges every weight in the direction that lowers the loss. The slope that says which direction comes from backpropagation, and the walk is gradient descent.
+
+The one setting that matters first is the learning rate, the size of each nudge. The figure walks on the simplest loss, f(w) = w² with a start at 4. With a rate of 0.1 the walk is too timid: six steps leave w at 1.049. With 0.45 it lands on the bottom in two. With 1.05 it jumps over the bottom each time, farther each time, and ends at 7.086.
+
+<AtP14Descent />
+
+Real training adds two things. It uses small random batches of rows for each step, which is cheaper and noisier. And it uses an optimizer such as Adam (Kingma and Ba, 2014), which keeps running averages of each weight's slope and its square to scale the step weight by weight. Lim, Zohren and Roberts trained their trading networks with Adam, and so did most of the finance papers since.
+
+<Concepts>
+
+- **Loss**: one number scoring how wrong the network is. Training lowers it.
+- **Gradient descent**: repeat "move each weight a little against its slope".
+- **Learning rate**: how big the little is.
+- **Optimizer (Adam)**: a version of gradient descent that adapts the step for each weight.
+
+</Concepts>
+
+## 3. Why nets overfit
+
+Zhang and colleagues ran a plain test. Take image classifiers, keep everything the same, and replace every label with a random one. The networks still reached zero training error. The test error was no better than chance, 90% on CIFAR10's ten classes, because there was nothing to learn. A net with enough weights can memorise a table of arbitrary answers.
+
+<AtP14RandomLabels />
+
+Markets sit close to the right-hand panel. Next-month returns are mostly noise, so a flexible net finds a pattern in the noise of the rows it trains on and carries nothing to the next month. The count makes this concrete. One stock over ten years has 2,520 daily rows, and NN3 on 920 features has about 12 weights per row. Even the whole HOSE panel is at most 47,160 monthly rows against 30,145 weights.
+
+<AtP14Capacity />
+
+Try it below. Say the next return depends on one feature through a gentle curve, plus noise as large as the curve, and the net also gets five inputs that are pure noise. With 60 rows and 64 hidden units, training error drops to 0.0001 while the error on 1,000 unseen rows climbs to 0.758. Always predicting zero scores 0.362.
+
+<AtP14FitDemo />
+
+<Concepts>
+
+- **Overfitting**: the model memorises noise in the training rows and loses accuracy on new ones.
+- **Generalisation**: how well a model does on rows it has not seen.
+- **Capacity**: how much a model could fit. More weights, more capacity.
+- **Baseline**: the dumbest forecast worth beating, here "predict zero".
+
+</Concepts>
+
+## 4. Keeping a net honest
+
+The fix starts with a rule for the data: never judge a net on rows that touched its weights. Split off a validation set, rows the weights never see, and watch its error while training. When it stops falling, stop. That is early stopping. Lim and colleagues did exactly this: 90% of each training block for fitting, the latest 10% for validation, and a stop when validation error had not improved for 25 epochs.
+
+The figure uses one run of the demo. Training error keeps falling to 0.032, while validation error bottoms out at 0.357 around epoch 37. Stopping there gives 0.383 on unseen rows. Training on to epoch 3000 gives 1.044.
+
+<AtP14EarlyStop />
+
+Gu, Kelly and Xiu used a short kit: a shrinking learning rate, early stopping, batch normalisation and an ensemble of several networks trained from different starting weights. Other common tools are weight decay (a penalty on big weights) and dropout (switching neurons off at random during training). None of them replaces the cheapest remedies: a smaller net and more rows. In the demo, 600 rows and 8 hidden units reach 0.308 on unseen rows, against 0.343 for always predicting zero. The 512-unit net on the same rows ends at 0.503.
+
+Time adds a rule of its own. Validation rows must come after the training rows in time, the way Lim et al. recalibrated every five years and tested on the next five. Shuffled rows leak the future into the past; the next posts on backtests and sequence models return to this.
+
+<Concepts>
+
+- **Validation set**: rows held out of the weight updates, used to decide when to stop and which size to keep.
+- **Early stopping**: halt training at the lowest validation error.
+- **Weight decay / dropout**: penalties that make memorising harder.
+- **Ensemble**: average several networks to smooth their individual quirks.
+
+</Concepts>
+
+## 5. Choosing the loss
+
+The loss is where you tell the network what you want. Mean squared error asks for forecasts close to every return. A trader cares about something else: profit for the risk taken. Lim, Zohren and Roberts trained position-sizing networks directly on the Sharpe ratio, with a loss of minus the annualised mean of the strategy's daily returns divided by their standard deviation. Their test used 88 futures contracts from 1995 to 2015, retrained every five years.
+
+With the volatility of each strategy scaled to the same level, the same LSTM scored a Sharpe ratio of 0.791 trained on squared error and 2.907 trained on the Sharpe loss. The MLP went from 1.017 to 2.017, the linear model from 1.211 to 1.496. A plain long-only position scored 0.759. These are backtest results before costs; the paper reports the edge holds up to about 2 to 3 basis points of cost.
+
+<AtP14SharpeLoss />
+
+You can see the mechanism in a small simulation. Say 2,520 daily returns have a 1% daily volatility and a tiny hidden signal. Forecaster A always predicts the average return, so it just holds the asset. Forecaster B outputs a loud, noisy version of the signal. A Python run (seed 7) gave these results:
+
+| | Squared error | Sharpe of the position | 
+|---|---|---|
+| A: constant forecast | 1.020e-4 | 0.309 |
+| B: loud signal, hit rate 54.0% | 1.908e-4 | 1.666 |
+
+B has 1.87 times the squared error and more than five times the Sharpe. Squared error punishes B's loud, wrong-sized forecasts; the Sharpe cares only that its direction beats a coin a little more than half the time. Which one is better depends on the goal, and the loss must say so. The Sharpe loss is no cure for overfitting, though: a net can fit the Sharpe of its training years as easily as their squared error. It needs the same validation habits.
+
+<Concepts>
+
+- **Sharpe ratio**: average return divided by the standard deviation of returns, annualised. Profit per unit of risk.
+- **Hit rate**: the share of days the position's direction was right.
+- **Loss choice**: the number training lowers is the number the network ends up good at.
+
+</Concepts>
+
+## 6. When a net is the wrong tool
+
+Most stock data comes as a table: one row per stock and month, many columns. On tables, deep nets are not the default winner. In Gu, Kelly and Xiu, trees and neural networks led and the NBER abstract names both; Grinsztajn, Oyallon and Varoquaux benchmarked 45 tabular data sets and found tree-based models still state of the art at about 10,000 rows. For a table of a few thousand rows, a linear model or a shallow tree is the honest first try, and the net is the challenger.
+
+<AtP14Choice />
+
+Nets earn their cost on inputs a table cannot hold: long streams of prices, the order book itself, text. The next posts take them in turn: sequence models for prices and books, then order flow.
+
+<Concepts>
+
+- **Tabular data**: rows of features with one target per row, like a spreadsheet.
+- **Tree-based model**: a model that splits the data by yes/no questions, such as gradient boosted trees.
+- **Challenger**: a model you try against the simple one you already trust.
+
+</Concepts>
+
+## 7. Worked case: 513 weights, 60 rows
+
+Say a colleague shows you a small net for next-month returns. It has six inputs, 64 hidden units and one output, which is 6 × 64 + 64 + 64 + 1 = 513 weights, and it was trained on 60 rows. Its training error is 0.0000. She asks whether to trust it.
+
+I would check the ratio of weights to rows first, because it costs nothing: 513 / 60 is 8.6 weights per row, enough room to memorise. Second, the baseline: the error of always predicting zero on rows the net never saw. Third, a validation split, since training error tells you nothing here. Only then do I look at the architecture.
+
+The snippet uses one simulated market. The signal is 0.5 sin(2.5 x₁), the noise has a standard deviation of 0.5, and five of the six inputs are pure noise. Each run trains with Adam for 3,000 epochs, keeps the weights from the lowest validation error, and scores them on 1,000 fresh rows. The helper functions `make`, `MLP` and `mse` are in the full script.
+
+```python
+def run(n_rows, hidden, seed=14, epochs=3000):
+    rng = np.random.default_rng(seed)
+    xtr, ytr = make(n_rows, rng); xva, yva = make(n_rows // 5 + 20, rng); xte, yte = make(1000, rng)
+    net = MLP(hidden, rng)
+    best = (1e9, 0, None, 0.0)
+    for ep in range(1, epochs + 1):
+        net.step(xtr, ytr)
+        v = mse(net.predict(xva), yva)
+        if v < best[0]:
+            best = (v, ep, [p.copy() for p in net.p], net.b2)
+    last = mse(net.predict(xte), yte)
+    train = mse(net.predict(xtr), ytr)
+    net.w1, net.b1, net.w2 = best[2]; net.b2 = best[3]
+    stop = mse(net.predict(xte), yte)
+    print(f"{n_rows:4d} rows, {hidden:2d} units, {net.n_weights():3d} weights | "
+          f"train {train:.4f} | unseen at epoch {epochs}: {last:.3f} | "
+          f"early stop (epoch {best[1]}): {stop:.3f} | always 0: {mse(0, yte):.3f}")
+
+run(60, 64)
+run(600, 8)
+```
+
+<TerminalOutput command={"uv run --with numpy python demo/ai-trading/p14_overfit_earlystop.py"} label="Python 3.13 · numpy 2.3 · captured Nov 2026" caption="Two nets on the same process. The 513-weight net on 60 rows reaches zero training error and 0.671 on unseen rows; stopping at epoch 36 gives 0.424, still no better than always predicting zero (0.411). The 65-weight net on 600 rows ends at 0.290 against 0.386.">
+```text
+  60 rows, 64 units, 513 weights | train 0.0000 | unseen at epoch 3000: 0.671 | early stop (epoch 36): 0.424 | always 0: 0.411
+ 600 rows,  8 units,  65 weights | train 0.2118 | unseen at epoch 3000: 0.316 | early stop (epoch 329): 0.290 | always 0: 0.386
+```
+</TerminalOutput>
+
+On 60 rows the net has learned its training rows and nothing else. Early stopping repairs most of the damage, from 0.671 to 0.424, but it only gets back to the zero baseline, so there is no evidence of skill. The small net on ten times the rows beats the baseline by about a quarter (0.290 against 0.386). This draw differs from the widget in Section 3, so the exact numbers differ; the ordering is the same.
+
+What would change my mind: a 60-row net that beat always-zero on a long out-of-time test, or a bigger net that kept winning once the rows grew. I would still rerun with other seeds before believing either, because one draw leaves noise of a few hundredths.
+
+## Key takeaways
+
+- **A net is weighted sums with a floor, stacked**: most of the weights sit between the inputs and the first layer, so depth is cheap and width at the start is costly. *(Section 1)*
+- **Training is walking downhill on a loss**: the learning rate decides whether the walk crawls, lands or blows up. *(Section 2)*
+- **Nets memorise noise as readily as signal**: zero training error on random labels, and 30,145 weights meeting 2,520 rows. *(Section 3)*
+- **Judge on rows the weights never saw**: stop at the lowest validation error; a smaller net with more rows often beats a bigger one. *(Section 4)*
+- **The loss is the goal in code**: the same LSTM scored 0.791 on squared error and 2.907 on the Sharpe loss, before costs. *(Section 5)*
+- **Look at the rows first**: tables of a few thousand rows go to linear models and trees; streams and order books are where nets earn their keep. *(Section 6)*
+- **Count weights per row before trusting a small-sample net**: 513 weights on 60 rows reached zero training error and no edge over always predicting zero. *(Section 7)*
+
+## Review questions
+
+1. A neuron gets inputs -0.5, 0.6 and 0.9 with weights 0.9, 0.4 and -0.7 and bias 0.1. What does it output, and why? *(See Section 1)*
+2. Why does adding a fourth and fifth layer to a 32-16-8 network on 920 features add so few weights? *(See Section 1)*
+3. On f(w) = w² starting at 4, what happens with learning rates 0.1, 0.45 and 1.05? *(See Section 2)*
+4. Zhang et al. got zero training error on random labels. What does that say about training error as evidence? *(See Section 3)*
+5. NN3 has 30,145 weights. Compare that with one stock's ten years of daily rows and with the HOSE monthly panel. *(See Section 3)*
+6. In the demo, why can 600 rows with 8 units beat 60 rows with 64 units, and what does "always predict zero" show? *(See Section 3)*
+7. Training error falls while validation error rises. Which weights do you keep, and why? *(See Section 4)*
+8. Forecaster A has half the squared error of B but a Sharpe of 0.309 against 1.666. Which loss would pick B, and what is its remaining risk? *(See Section 5)*
+9. You have 3,000 rows of monthly features. What do you try first, and what do Gu-Kelly-Xiu and Grinsztajn say about it? *(See Section 6)*
+10. A net has 513 weights and 60 training rows. List the three checks you run before reading its architecture. *(See Section 7)*
+
+## Go deeper
+
+- **[Gu, Kelly and Xiu: Empirical Asset Pricing via Machine Learning](https://doi.org/10.1093/rfs/hhaa009)**: the 920-feature study; the table with NN1 to NN5 is the evidence for Section 1 and the hook.
+- **[Zhang et al.: Understanding deep learning requires rethinking generalization](https://arxiv.org/abs/1611.03530)**: the random-label experiments behind Section 3.
+- **[Lim, Zohren and Roberts: Enhancing Time Series Momentum Strategies Using Deep Neural Networks](https://arxiv.org/abs/1904.04912)**: the Sharpe loss and its backtest, Section 5.
+
+</En>
+
+<Vi>
+
+<Figure src={heroPerceptron} alt="Máy Mark I Perceptron tại Phòng thí nghiệm Hàng không Cornell: một bức tường giá đỡ và dây nối, phía trước là lưới tế bào quang điện" caption="Mark I Perceptron, do Hải quân Mỹ công bố năm 1960. Huấn luyện trên chữ cái một kiểu chữ, máy đúng 85% khi thêm kiểu chữ thứ hai. Một cỗ máy biết học và bài toán khái quát hoá của nó, có mặt từ ngày đầu." sourceTitle="Wikimedia Commons: Mark I Perceptron (National Museum of the U.S. Navy, public domain)" sourceUrl="https://commons.wikimedia.org/wiki/File:330-PSA-80-60_(USN_710739)_(20897323365).jpg" />
+
+> "The benefits of 'deep' learning are limited, as four- and five-layer models fail to improve over NN3."
+> &mdash; *Gu, Kelly and Xiu*, "Empirical Asset Pricing via Machine Learning" (2020)
+
+### Mạng nơ-ron tốt nhất ở Phố Wall chỉ có ba layer
+
+Gu, Kelly và Xiu đưa cho mạng nơ-ron bộ dữ liệu cổ phiếu lớn nhất mà giới học thuật có: gần 30.000 cổ phiếu Mỹ trong 60 năm, 1957 đến 2016, mỗi cổ phiếu 94 đặc trưng. Họ so mạng có từ một đến năm layer ẩn với mô hình tuyến tính và cây, và luôn chấm trên những tháng mà mô hình chưa từng thấy.
+
+Kết quả khá khiêm tốn. Hồi quy tuyến tính trên cả 920 đầu vào có R² ngoài mẫu hằng tháng là -3,46%, nghĩa là tệ hơn việc đoán 0 cho mọi cổ phiếu. Mạng tốt nhất, ba layer ẩn, đạt 0,40%. Mạng một layer đạt 0,33%. Bốn và năm layer không giúp thêm.
+
+<AtP14GkxDepth />
+
+Vậy bài này nói về một công cụ chạy được, ở mức nhỏ xíu, đúng nơi dữ liệu dồi dào, và lặng lẽ thất bại gần như ở mọi nơi khác. Năm câu hỏi dẫn dắt bài:
+
+1. **Mạng nơ-ron là gì**: nơ-ron, layer và các trọng số bên trong.
+2. **Trọng số được chọn ra sao**: loss, gradient descent và learning rate.
+3. **Vì sao mạng overfit**: trọng số nhiều hơn số dòng, và khả năng học thuộc bất cứ thứ gì.
+4. **Giữ mạng trung thực thế nào**: tập giữ lại, early stopping, mạng nhỏ.
+5. **Huấn luyện bằng loss nào**, và khi nào bỏ qua học sâu.
+
+<Callout type="note" title="Tóm tắt nhanh">
+
+Mạng nơ-ron là chồng các tổng có trọng số kèm một cái sàn, được huấn luyện bằng cách đi xuống dốc của một hàm loss. Nó fit được gần như mọi thứ, kể cả nhiễu thuần (Zhang và cộng sự đạt sai số huấn luyện bằng 0 trên nhãn ngẫu nhiên), mà thị trường phần lớn là nhiễu. Một mạng 30.145 trọng số gặp 2.520 dòng dữ liệu ngày của một cổ phiếu. Trong nghiên cứu lớn nhất về cổ phiếu Mỹ, mạng tốt nhất có ba layer ẩn và giải thích 0,40% biến động hằng tháng. Cái giúp được: tập validation, early stopping, mạng nhỏ, nhiều dòng hơn, và hàm loss khớp với mục tiêu (Sharpe loss nâng Sharpe backtest của một LSTM từ 0,79 lên 2,91 trong nghiên cứu hợp đồng tương lai). Không phần nào ở đây là lời khuyên đầu tư hay khuyến nghị giao dịch.
+
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Mạng nơ-ron (neural network)**: hàm dựng từ nhiều bước nhỏ chỉnh được, mỗi bước là một tổng có trọng số rồi uốn nhẹ.
+- **Trọng số (weight)**: con số bên trong mạng do huấn luyện đặt. Mạng chính là các trọng số của nó.
+- **Ngoài mẫu (out of sample)**: chấm trên dữ liệu mô hình chưa từng thấy khi fit. Điểm duy nhất đáng tin.
+- **R²**: phần biến động mà dự báo giải thích được. Bằng 0 là không hơn một cú đoán phẳng; 0,40% là bốn phần nghìn.
+
+</Concepts>
+
+---
+
+## 1. Mạng nơ-ron là gì
+
+Nơ-ron là mảnh nhỏ nhất. Nó nhận vài con số, nhân mỗi số với một trọng số, cộng lại cùng một bias, rồi cắt mọi giá trị dưới 0. Phép cắt đó gọi là ReLU. Không có nó, xếp chồng nhiều bước vẫn chỉ là một đường thẳng; có nó, cả chồng uốn cong được.
+
+<AtP14Neuron />
+
+Một layer là một hàng nơ-ron cùng đọc các đầu vào. Perceptron nhiều tầng (MLP) là các layer nối chuỗi: đầu ra của layer này là đầu vào của layer kế. NN3 của Gu, Kelly và Xiu có các layer ẩn 32, 16 và 8 nơ-ron. Nạp đủ 920 feature thì nó có 30.145 trọng số, trong đó 29.472 nằm giữa đầu vào và layer đầu tiên.
+
+<AtP14Mlp />
+
+Ý tưởng này lâu đời hơn tài chính. Mark I Perceptron của Frank Rosenblatt, cỗ máy trong ảnh, học phân biệt chữ cái từ một lưới tế bào quang điện. Mạng hiện đại có cùng nguyên liệu ở quy mô lớn hơn. Thứ thay đổi là lượng dữ liệu và sức tính, không phải nguyên lý. Nhưng với thị trường, dữ liệu vẫn nhỏ. HOSE có 393 mã niêm yết cuối 2024, và một thập kỷ dữ liệu tháng của tất cả chỉ tối đa 47.160 dòng.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Nơ-ron (neuron)**: tổng có trọng số của các đầu vào cộng bias, đi qua một hàm kích hoạt.
+- **ReLU**: hàm kích hoạt max(0, x). Tổng âm thành 0.
+- **Layer / MLP**: một hàng nơ-ron / các layer nối tiếp nhau, mỗi nơ-ron đọc toàn bộ layer bên dưới.
+- **Tham số (parameters)**: mọi trọng số và bias. Số lượng của chúng là sức fit của mạng.
+
+</Concepts>
+
+## 2. Trọng số được chọn ra sao
+
+Bắt đầu với trọng số ngẫu nhiên và một cách chấm điểm dự báo. Điểm đó là loss: với dự báo lợi suất, thường là trung bình bình phương sai số. Huấn luyện đẩy từng trọng số về hướng làm loss giảm. Độ dốc cho biết hướng nào đến từ backpropagation, còn cú đi xuống là gradient descent.
+
+Thiết lập đầu tiên cần quan tâm là learning rate, độ lớn của mỗi cú đẩy. Hình đi trên loss đơn giản nhất, f(w) = w² với điểm xuất phát 4. Với rate 0,1 bước quá rụt rè: sáu bước vẫn còn w = 1,049. Với 0,45 nó chạm đáy sau hai bước. Với 1,05 mỗi bước vọt qua đáy, lần sau xa hơn lần trước, và kết thúc ở 7,086.
+
+<AtP14Descent />
+
+Huấn luyện thật có thêm hai thứ. Mỗi bước dùng một batch nhỏ các dòng ngẫu nhiên, rẻ hơn và nhiễu hơn. Và dùng optimizer như Adam (Kingma và Ba, 2014), giữ trung bình trượt của độ dốc và bình phương độ dốc của từng trọng số để chỉnh bước cho từng trọng số. Lim, Zohren và Roberts huấn luyện mạng giao dịch của họ bằng Adam.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Loss**: một con số chấm mức sai của mạng. Huấn luyện làm nó giảm.
+- **Gradient descent**: lặp lại "đẩy mỗi trọng số một chút ngược chiều độ dốc".
+- **Learning rate**: "một chút" đó dài bao nhiêu.
+- **Optimizer (Adam)**: bản gradient descent tự chỉnh bước cho từng trọng số.
+
+</Concepts>
+
+## 3. Vì sao mạng overfit
+
+Zhang và cộng sự chạy một thử nghiệm đơn giản. Lấy các bộ phân loại ảnh, giữ nguyên mọi thứ, rồi thay mọi nhãn bằng nhãn ngẫu nhiên. Mạng vẫn đạt sai số huấn luyện bằng 0. Sai số test không hơn đoán mò, 90% với 10 lớp của CIFAR10, vì chẳng có gì để học. Mạng đủ nhiều trọng số có thể học thuộc một bảng đáp án tuỳ ý.
+
+<AtP14RandomLabels />
+
+Thị trường nằm gần panel bên phải. Lợi suất tháng sau phần lớn là nhiễu, nên một mạng linh hoạt tìm ra quy luật trong nhiễu của các dòng nó huấn luyện và không mang được gì sang tháng sau. Con số làm điều này cụ thể: một cổ phiếu trong mười năm có 2.520 dòng ngày, và NN3 trên 920 feature có khoảng 12 trọng số cho mỗi dòng. Ngay cả cả bảng HOSE cũng chỉ tối đa 47.160 dòng tháng so với 30.145 trọng số.
+
+<AtP14Capacity />
+
+Bạn thử ngay bên dưới. Giả sử lợi suất kỳ sau phụ thuộc vào một feature qua một đường cong mềm, cộng nhiễu lớn bằng đường cong, và mạng còn nhận năm đầu vào toàn nhiễu. Với 60 dòng và 64 nơ-ron ẩn, sai số huấn luyện rơi xuống 0,0001 trong khi sai số trên 1.000 dòng chưa thấy leo lên 0,758. Luôn đoán 0 được 0,362.
+
+<AtP14FitDemo />
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Overfitting**: mô hình học thuộc nhiễu của dòng huấn luyện và mất độ chính xác trên dòng mới.
+- **Khái quát hoá (generalisation)**: mô hình làm tốt đến đâu trên dòng chưa từng thấy.
+- **Sức chứa (capacity)**: mô hình có thể fit được nhiều đến đâu. Trọng số càng nhiều, sức chứa càng lớn.
+- **Baseline**: dự báo ngớ ngẩn nhất mà vẫn đáng để vượt, ở đây là "đoán 0".
+
+</Concepts>
+
+## 4. Giữ mạng trung thực
+
+Cách chữa bắt đầu bằng một quy tắc cho dữ liệu: đừng bao giờ chấm mạng trên những dòng đã chạm vào trọng số của nó. Tách một tập validation, các dòng mà trọng số không bao giờ thấy, và theo dõi sai số của nó khi huấn luyện. Khi nó ngừng giảm thì dừng. Đó là early stopping. Lim và cộng sự làm đúng như vậy: 90% mỗi khối huấn luyện để fit, 10% mới nhất để validation, và dừng khi sai số validation không cải thiện suốt 25 epoch.
+
+Hình dùng một lượt chạy của demo. Sai số huấn luyện cứ giảm tới 0,032, trong khi sai số validation chạm đáy 0,357 quanh epoch 37. Dừng ở đó cho 0,383 trên dòng chưa thấy. Huấn luyện tiếp tới epoch 3000 cho 1,044.
+
+<AtP14EarlyStop />
+
+Gu, Kelly và Xiu dùng một bộ đồ nghề ngắn: learning rate giảm dần, early stopping, batch normalisation và một ensemble nhiều mạng huấn luyện từ các trọng số khởi đầu khác nhau. Các công cụ phổ biến khác là weight decay (phạt trọng số lớn) và dropout (tắt nơ-ron ngẫu nhiên khi huấn luyện). Không cái nào thay được hai cách rẻ nhất: mạng nhỏ hơn và nhiều dòng hơn. Trong demo, 600 dòng với 8 nơ-ron ẩn cho 0,308 trên dòng chưa thấy, so với 0,343 khi luôn đoán 0. Mạng 512 nơ-ron trên cùng các dòng đó kết thúc ở 0,503.
+
+Thời gian thêm một quy tắc riêng. Dòng validation phải đứng sau dòng huấn luyện theo thời gian, như Lim và cộng sự huấn luyện lại mỗi năm năm và test trên năm năm kế. Các dòng bị xáo trộn làm rò tương lai vào quá khứ; các bài về backtest và mô hình chuỗi sẽ quay lại chuyện này.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Tập validation**: các dòng bị giữ ngoài việc cập nhật trọng số, dùng để quyết định khi nào dừng và giữ cỡ mạng nào.
+- **Early stopping**: dừng huấn luyện ở sai số validation thấp nhất.
+- **Weight decay / dropout**: các hình phạt làm việc học thuộc khó hơn.
+- **Ensemble**: lấy trung bình nhiều mạng để làm mượt các tật riêng của từng mạng.
+
+</Concepts>
+
+## 5. Chọn hàm loss
+
+Loss là nơi bạn nói cho mạng biết bạn muốn gì. Sai số bình phương trung bình đòi dự báo gần mọi mức lợi suất. Nhà giao dịch quan tâm cái khác: lợi nhuận trên rủi ro đã chịu. Lim, Zohren và Roberts huấn luyện mạng đặt vị thế trực tiếp trên Sharpe ratio, với loss bằng trừ trung bình lợi suất ngày của chiến lược, quy năm, chia cho độ lệch chuẩn của chúng. Bài test của họ dùng 88 hợp đồng tương lai từ 1995 đến 2015, huấn luyện lại mỗi năm năm.
+
+Khi độ biến động mỗi chiến lược được quy về cùng một mức, cùng một LSTM có Sharpe 0,791 khi huấn luyện bằng sai số bình phương và 2,907 khi huấn luyện bằng Sharpe loss. MLP đi từ 1,017 lên 2,017, mô hình tuyến tính từ 1,211 lên 1,496. Một vị thế chỉ mua giữ được 0,759. Đây là kết quả backtest trước phí; bài báo ghi lợi thế còn giữ khi phí tới khoảng 2 đến 3 điểm cơ bản.
+
+<AtP14SharpeLoss />
+
+Cơ chế hiện ra trong một mô phỏng nhỏ. Giả sử 2.520 lợi suất ngày có biến động 1% mỗi ngày và một tín hiệu ẩn rất nhỏ. Người dự báo A luôn đoán lợi suất trung bình, tức là chỉ nắm giữ tài sản. Người dự báo B xuất ra một bản ồn ào, nhiễu của tín hiệu. Một lần chạy Python (seed 7) cho kết quả:
+
+| | Sai số bình phương | Sharpe của vị thế |
+|---|---|---|
+| A: dự báo hằng số | 1,020e-4 | 0,309 |
+| B: tín hiệu ồn ào, tỉ lệ đúng hướng 54,0% | 1,908e-4 | 1,666 |
+
+B có sai số bình phương gấp 1,87 lần và Sharpe cao hơn năm lần. Sai số bình phương phạt những dự báo ồn ào, sai cỡ của B; Sharpe chỉ để ý hướng của B thắng đồng xu hơn một chút. Cái nào tốt hơn tuỳ mục tiêu, và loss phải nói ra mục tiêu đó. Nhưng Sharpe loss không chữa được overfitting: mạng có thể fit Sharpe của những năm huấn luyện dễ như fit sai số bình phương của chúng. Nó cần chính những thói quen validation đó.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Sharpe ratio**: lợi suất trung bình chia độ lệch chuẩn của lợi suất, quy năm. Lợi nhuận trên mỗi đơn vị rủi ro.
+- **Tỉ lệ đúng hướng (hit rate)**: phần trăm số ngày hướng của vị thế là đúng.
+- **Chọn loss**: con số mà huấn luyện làm giảm là con số mà mạng cuối cùng giỏi nhất.
+
+</Concepts>
+
+## 6. Khi mạng là công cụ sai
+
+Phần lớn dữ liệu cổ phiếu là một cái bảng: mỗi dòng một cổ phiếu và một tháng, nhiều cột. Trên bảng, mạng sâu không mặc định thắng. Ở Gu, Kelly và Xiu, cây và mạng nơ-ron dẫn đầu, và tóm tắt NBER nêu tên cả hai; Grinsztajn, Oyallon và Varoquaux chạy 45 bộ dữ liệu dạng bảng và thấy mô hình cây vẫn dẫn đầu ở cỡ khoảng 10.000 dòng. Với bảng vài nghìn dòng, mô hình tuyến tính hoặc cây nông là lần thử đầu trung thực, còn mạng nơ-ron là đối thủ.
+
+<AtP14Choice />
+
+Mạng xứng đáng với chi phí ở những đầu vào mà một cái bảng không chứa nổi: chuỗi giá dài, chính sổ lệnh, văn bản. Các bài kế tiếp lần lượt đi vào chúng: mô hình chuỗi cho giá và sổ lệnh, rồi dòng lệnh.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Dữ liệu dạng bảng (tabular)**: các dòng feature, mỗi dòng một nhãn, như bảng tính.
+- **Mô hình cây (tree-based)**: mô hình chia dữ liệu bằng các câu hỏi có/không, ví dụ gradient boosted trees.
+- **Đối thủ (challenger)**: mô hình bạn thử đối đầu với cái đơn giản mà bạn đã tin.
+
+</Concepts>
+
+## 7. Ca thực hành: 513 trọng số, 60 dòng
+
+Giả sử một đồng nghiệp đưa bạn xem một mạng nhỏ dự báo lợi suất tháng sau. Nó có sáu đầu vào, 64 nơ-ron ẩn và một đầu ra, tức 6 × 64 + 64 + 64 + 1 = 513 trọng số, huấn luyện trên 60 dòng. Sai số huấn luyện là 0,0000. Chị hỏi có nên tin nó không.
+
+Tôi kiểm tra trước tỉ lệ trọng số trên dòng, vì nó không tốn gì: 513 / 60 là 8,6 trọng số mỗi dòng, đủ chỗ để học thuộc. Thứ hai là mốc so sánh: sai số của việc luôn đoán 0 trên các dòng mạng chưa từng thấy. Thứ ba là một tập validation, vì sai số huấn luyện ở đây không nói lên điều gì. Sau đó mới nhìn đến kiến trúc.
+
+Đoạn mã dùng một thị trường mô phỏng. Tín hiệu là 0,5 sin(2,5 x₁), nhiễu có độ lệch chuẩn 0,5, và năm trong sáu đầu vào là nhiễu thuần. Mỗi lần chạy huấn luyện bằng Adam 3.000 epoch, giữ bộ trọng số có sai số validation thấp nhất, rồi chấm trên 1.000 dòng mới. Các hàm phụ `make`, `MLP` và `mse` nằm trong script đầy đủ.
+
+```python
+def run(n_rows, hidden, seed=14, epochs=3000):
+    rng = np.random.default_rng(seed)
+    xtr, ytr = make(n_rows, rng); xva, yva = make(n_rows // 5 + 20, rng); xte, yte = make(1000, rng)
+    net = MLP(hidden, rng)
+    best = (1e9, 0, None, 0.0)
+    for ep in range(1, epochs + 1):
+        net.step(xtr, ytr)
+        v = mse(net.predict(xva), yva)
+        if v < best[0]:
+            best = (v, ep, [p.copy() for p in net.p], net.b2)
+    last = mse(net.predict(xte), yte)
+    train = mse(net.predict(xtr), ytr)
+    net.w1, net.b1, net.w2 = best[2]; net.b2 = best[3]
+    stop = mse(net.predict(xte), yte)
+    print(f"{n_rows:4d} rows, {hidden:2d} units, {net.n_weights():3d} weights | "
+          f"train {train:.4f} | unseen at epoch {epochs}: {last:.3f} | "
+          f"early stop (epoch {best[1]}): {stop:.3f} | always 0: {mse(0, yte):.3f}")
+
+run(60, 64)
+run(600, 8)
+```
+
+<TerminalOutput command={"uv run --with numpy python demo/ai-trading/p14_overfit_earlystop.py"} label="Python 3.13 · numpy 2.3 · captured Nov 2026" caption="Hai mạng trên cùng một quá trình sinh dữ liệu. Mạng 513 trọng số trên 60 dòng đạt sai số huấn luyện bằng 0 và 0,671 trên dòng chưa thấy; dừng ở epoch 36 còn 0,424, vẫn chưa hơn việc luôn đoán 0 (0,411). Mạng 65 trọng số trên 600 dòng đạt 0,290 so với 0,386.">
+```text
+  60 rows, 64 units, 513 weights | train 0.0000 | unseen at epoch 3000: 0.671 | early stop (epoch 36): 0.424 | always 0: 0.411
+ 600 rows,  8 units,  65 weights | train 0.2118 | unseen at epoch 3000: 0.316 | early stop (epoch 329): 0.290 | always 0: 0.386
+```
+</TerminalOutput>
+
+Trên 60 dòng, mạng chỉ học thuộc chính các dòng đó. Dừng sớm cứu được phần lớn, từ 0,671 xuống 0,424, nhưng chỉ về lại ngang mốc đoán 0, nên chưa có bằng chứng nào cho thấy nó có kỹ năng. Mạng nhỏ với số dòng gấp mười lần hơn mốc khoảng một phần tư (0,290 so với 0,386). Lần bốc dữ liệu này khác với widget ở Mục 3 nên số cụ thể khác; thứ tự thì giống.
+
+Điều sẽ làm tôi đổi ý: một mạng 60 dòng thắng được mốc đoán 0 trên một đợt kiểm tra ngoài mẫu đủ dài, hoặc một mạng lớn hơn vẫn thắng khi số dòng tăng. Tôi vẫn chạy lại với vài seed khác trước khi tin cả hai, vì một lần bốc còn để lại sai lệch vài phần trăm.
+
+## Điểm rút ra (Key takeaways)
+
+- **Mạng là các tổng có trọng số kèm cái sàn, xếp chồng**: phần lớn trọng số nằm giữa đầu vào và layer đầu, nên độ sâu rẻ còn độ rộng ở đầu vào thì đắt. *(Mục 1)*
+- **Huấn luyện là đi xuống dốc của một loss**: learning rate quyết định bước đi bò, chạm đáy hay nổ tung. *(Mục 2)*
+- **Mạng học thuộc nhiễu dễ như học tín hiệu**: sai số huấn luyện 0 trên nhãn ngẫu nhiên, và 30.145 trọng số gặp 2.520 dòng. *(Mục 3)*
+- **Chấm trên dòng mà trọng số chưa từng thấy**: dừng ở sai số validation thấp nhất; mạng nhỏ hơn với nhiều dòng hơn thường thắng mạng lớn. *(Mục 4)*
+- **Loss là mục tiêu viết thành code**: cùng một LSTM đạt 0,791 với sai số bình phương và 2,907 với Sharpe loss, trước phí. *(Mục 5)*
+- **Nhìn các dòng dữ liệu trước**: bảng vài nghìn dòng dành cho mô hình tuyến tính và cây; chuỗi liên tục và sổ lệnh là nơi mạng đáng giá. *(Mục 6)*
+- **Đếm trọng số trên mỗi dòng trước khi tin mạng mẫu nhỏ**: 513 trọng số trên 60 dòng đạt sai số huấn luyện bằng 0 mà không hơn việc luôn đoán 0. *(Mục 7)*
+
+## Câu hỏi ôn tập (Review questions)
+
+1. Một nơ-ron nhận đầu vào -0,5, 0,6 và 0,9 với trọng số 0,9, 0,4 và -0,7 và bias 0,1. Nó xuất ra gì, và vì sao? *(Xem Mục 1)*
+2. Vì sao thêm layer thứ tư và thứ năm vào mạng 32-16-8 trên 920 feature chỉ thêm rất ít trọng số? *(Xem Mục 1)*
+3. Với f(w) = w² bắt đầu ở 4, chuyện gì xảy ra khi learning rate là 0,1, 0,45 và 1,05? *(Xem Mục 2)*
+4. Zhang và cộng sự đạt sai số huấn luyện bằng 0 trên nhãn ngẫu nhiên. Điều đó nói gì về sai số huấn luyện như một bằng chứng? *(Xem Mục 3)*
+5. NN3 có 30.145 trọng số. So với mười năm dữ liệu ngày của một cổ phiếu và với bảng tháng của HOSE thì thế nào? *(Xem Mục 3)*
+6. Trong demo, vì sao 600 dòng với 8 nơ-ron có thể thắng 60 dòng với 64 nơ-ron, và "luôn đoán 0" cho thấy điều gì? *(Xem Mục 3)*
+7. Sai số huấn luyện giảm còn sai số validation tăng. Bạn giữ trọng số nào, và vì sao? *(Xem Mục 4)*
+8. Người dự báo A có sai số bình phương bằng nửa B nhưng Sharpe 0,309 so với 1,666. Loss nào sẽ chọn B, và rủi ro còn lại của nó là gì? *(Xem Mục 5)*
+9. Bạn có 3.000 dòng feature theo tháng. Thử gì trước, và Gu-Kelly-Xiu cùng Grinsztajn nói gì về nó? *(Xem Mục 6)*
+10. Một mạng có 513 trọng số và 60 dòng huấn luyện. Nêu ba phép kiểm tra bạn làm trước khi đọc kiến trúc. *(Xem Mục 7)*
+
+## Đi sâu hơn (Go deeper)
+
+- **[Gu, Kelly và Xiu: Empirical Asset Pricing via Machine Learning](https://doi.org/10.1093/rfs/hhaa009)**: nghiên cứu 920 feature; bảng NN1 đến NN5 là bằng chứng cho Mục 1 và phần mở đầu.
+- **[Zhang và cộng sự: Understanding deep learning requires rethinking generalization](https://arxiv.org/abs/1611.03530)**: các thí nghiệm nhãn ngẫu nhiên đằng sau Mục 3.
+- **[Lim, Zohren và Roberts: Enhancing Time Series Momentum Strategies Using Deep Neural Networks](https://arxiv.org/abs/1904.04912)**: Sharpe loss và backtest của nó, Mục 5.
+
+</Vi>

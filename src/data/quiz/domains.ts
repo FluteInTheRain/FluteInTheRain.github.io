@@ -43,6 +43,25 @@ export const QUIZ_DOMAIN: Record<string, QuizDomain> = {
   'ai-trading-the-market': 'code',
   'ai-trading-data': 'code',
   'ai-trading-signals': 'code',
+  'ai-trading-statistics': 'code',
+  'ai-trading-regime': 'code',
+  'ai-trading-factors': 'code',
+  'ai-trading-portfolio': 'code',
+  'ai-trading-prediction': 'code',
+  'ai-trading-explainable-ai': 'code',
+  'ai-trading-clustering': 'code',
+  'ai-trading-graphs': 'code',
+  'ai-trading-backtest': 'code',
+  'ai-trading-production': 'code',
+  'ai-trading-deep-learning': 'code',
+  'ai-trading-sequence-models': 'code',
+  'ai-trading-order-flow': 'code',
+  'ai-trading-financial-nlp': 'code',
+  'ai-trading-gnn': 'code',
+  'ai-trading-reinforcement-learning': 'code',
+  'ai-trading-alpha': 'code',
+  'ai-trading-agents': 'code',
+  'ai-trading-investment-os': 'code',
   // UI/UX series (Refactoring UI): design judgement, so no AI-output questions
   'design-before-you-prompt': 'human',
   'visual-hierarchy-rank-before-you-style': 'human',
@@ -129,4 +148,23 @@ export const QUIZ_MATRIX: Record<string, 'v1' | 'v2'> = {
   'go-profiling-pprof-flamegraphs-off-cpu-continuous': 'v2', // 40 questions
   'go-three-rs-optimization-patterns-streaming-pooling': 'v2', // 40 questions
   'go-interview-questions-output-live-coding': 'v2', // 40 questions
+  'ai-trading-statistics': 'v2', // 40 questions
+  'ai-trading-regime': 'v2', // 40 questions
+  'ai-trading-factors': 'v2', // 40 questions
+  'ai-trading-portfolio': 'v2', // 40 questions
+  'ai-trading-prediction': 'v2', // 40 questions
+  'ai-trading-explainable-ai': 'v2', // 40 questions
+  'ai-trading-clustering': 'v2', // 40 questions
+  'ai-trading-graphs': 'v2', // 40 questions
+  'ai-trading-backtest': 'v2', // 40 questions
+  'ai-trading-production': 'v2', // 40 questions
+  'ai-trading-deep-learning': 'v2', // 40 questions
+  'ai-trading-sequence-models': 'v2', // 40 questions
+  'ai-trading-order-flow': 'v2', // 40 questions
+  'ai-trading-financial-nlp': 'v2', // 40 questions
+  'ai-trading-gnn': 'v2', // 40 questions
+  'ai-trading-reinforcement-learning': 'v2', // 40 questions
+  'ai-trading-alpha': 'v2', // 40 questions
+  'ai-trading-agents': 'v2', // 40 questions
+  'ai-trading-investment-os': 'v2', // 40 questions
 };

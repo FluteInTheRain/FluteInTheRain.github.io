@@ -1,0 +1,627 @@
+---
+title: "Graphs"
+title_vi: "Đồ thị"
+description: "Stocks as a network: turn a correlation matrix into a graph, keep the links that matter, find communities and spot a stress regime. Post 11 of the AI-trading series."
+description_vi: "Cổ phiếu như một mạng lưới: biến ma trận tương quan thành đồ thị, giữ cạnh quan trọng, tìm cộng đồng và nhận ra chế độ căng thẳng. Bài 11 của series AI trong chứng khoán."
+date: 2026-11-28
+category: "ai"
+tags: ["ai", "ai-trading", "graphs", "networks"]
+cover: "../../assets/blog/ai-trading-graphs/koenigsberg-merian-1652.jpg"
+cover_alt: "A 1652 engraved bird's-eye map of Königsberg: dense blocks of houses cut by a river, with the city name at the top"
+draft: true
+sources:
+  - { title: "Hierarchical Structure in Financial Markets (arXiv cond-mat/9802256)", author: "Rosario N. Mantegna", url: "https://arxiv.org/abs/cond-mat/9802256" }
+  - { title: "Dynamics of market correlations: Taxonomy and portfolio analysis (Physical Review E 68, 056110, 2003)", author: "J.-P. Onnela, A. Chakraborti, K. Kaski, J. Kertesz, A. Kanto", url: "https://arxiv.org/abs/cond-mat/0302546" }
+  - { title: "Fast unfolding of communities in large networks (Journal of Statistical Mechanics, 2008)", author: "V. D. Blondel, J.-L. Guillaume, R. Lambiotte, E. Lefebvre", url: "https://arxiv.org/abs/0803.0476" }
+  - { title: "A network approach to portfolio selection (Journal of Empirical Finance 38, 2016)", author: "Gustavo Peralta & Abalfazl Zareei", url: "https://econpapers.repec.org/RePEc:eee:empfin:v:38:y:2016:i:pa:p:157-180" }
+  - { title: "A tool for filtering information in complex systems (PNAS 102, 10421-10426, 2005)", author: "M. Tumminello, T. Aste, T. Di Matteo, R. N. Mantegna", url: "https://arxiv.org/abs/cond-mat/0501335" }
+  - { title: "From time series to complex networks: The visibility graph (PNAS 105, 4972-4975, 2008)", author: "L. Lacasa, B. Luque, F. Ballesteros, J. Luque, J. C. Nuno", url: "https://www.pnas.org/doi/10.1073/pnas.0709247105" }
+  - { title: "Ground rules for management of the HOSE-Index series", author: "Ho Chi Minh City Stock Exchange", url: "https://staticfile.hsx.vn/Uploads/LocalFiles/ef15ff11e799483abd11677ad0443887/20250114_20241230_QD%20747%20HOSE%20Index%20Ground%20Rules.pdf" }
+  - { title: "Seven Bridges of Königsberg", author: "Wikipedia", url: "https://en.wikipedia.org/wiki/Seven_Bridges_of_K%C3%B6nigsberg" }
+  - { title: "A review of two decades of correlations, hierarchies, networks and clustering in financial markets", author: "Gautier Marti, Frank Nielsen, Mikołaj Bińkowski, Philippe Donnat", url: "https://arxiv.org/abs/1703.00485" }
+  - { title: "Königsberg, map by Merian-Erben, 1652 (Public domain)", author: "Merian-Erben", url: "https://commons.wikimedia.org/wiki/File:Image-Koenigsberg,_Map_by_Merian-Erben_1652.jpg" }
+---
+
+import En from '../../components/mdx/En.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import AtP11Bridges from '../../components/mdx/AtP11Bridges.astro';
+import AtP11Pipeline from '../../components/mdx/AtP11Pipeline.astro';
+import AtP11Distance from '../../components/mdx/AtP11Distance.astro';
+import AtP11Pairs from '../../components/mdx/AtP11Pairs.astro';
+import AtP11Kruskal from '../../components/mdx/AtP11Kruskal.astro';
+import AtP11Spurious from '../../components/mdx/AtP11Spurious.astro';
+import AtP11Mantegna from '../../components/mdx/AtP11Mantegna.astro';
+import AtP11TreeShrink from '../../components/mdx/AtP11TreeShrink.astro';
+import AtP11GraphDemo from '../../components/mdx/AtP11GraphDemo.astro';
+import AtP11Communities from '../../components/mdx/AtP11Communities.astro';
+import AtP11Visibility from '../../components/mdx/AtP11Visibility.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
+import heroKonigsberg from '../../assets/blog/ai-trading-graphs/koenigsberg-merian-1652.jpg';
+
+<En>
+
+<Figure src={heroKonigsberg} alt="A 1652 engraved bird's-eye map of Königsberg: dense blocks of houses cut by a river, with the city name at the top" caption="Königsberg in 1652. Euler solved the city's bridge puzzle by throwing this map away and keeping only which land mass touches which: the first graph." sourceTitle="Wikimedia Commons: Königsberg, map by Merian-Erben, 1652 (public domain)" sourceUrl="https://commons.wikimedia.org/wiki/File:Image-Koenigsberg,_Map_by_Merian-Erben_1652.jpg" />
+
+> "The topological space is a graph connecting the stocks of the portfolio analyzed."
+> &mdash; *Rosario N. Mantegna*, "Hierarchical Structure in Financial Markets" (1998)
+
+### A matrix with 4,950 numbers
+
+Say two steel makers have a weekly correlation of about 0.8, and a steel maker and a water utility sit near 0.2. Those two numbers are easy to read. The VN100 has 100 stocks, though, and 100 stocks make 4,950 pairs. Nobody reads a table that long, and a table that long is noisy and dense.
+
+The way out is old. Put each stock on a page as a dot, draw a line between two dots when their returns move together, and look at the shape. That is a graph, and graph methods have been used on stock markets since the late 1990s. This post builds one from scratch, shows what it reveals (sectors, crashes, communities), and then shows where it fools you.
+
+<Callout type="note" title="TL;DR">
+
+A graph turns a correlation matrix into a picture: stocks are nodes, strong relationships are links. Correlation is first converted to a distance, d = √(2(1−ρ)), then the 4,950 links of 100 stocks are cut down to a minimum spanning tree with 99 links. Such trees group stocks by industry (Mantegna, 443 US stocks), and they shrink when a crash makes everything move together (Onnela and co-authors, 477 NYSE stocks). Community detection finds the groups: on a simulated market of 30 stocks in 5 sectors, Louvain put 88% of same-sector pairs together from 60 days of data and all of them from 250. Short windows invent links: 100 unrelated random series over 60 days produce 615 "related" pairs. Nothing here is investment advice.
+
+</Callout>
+
+<Concepts>
+
+- **Graph**: a set of nodes (here, stocks) and links, also called edges, between some pairs of them.
+- **Degree**: how many links touch one node.
+- **Distance**: a number that is small for similar stocks and large for different ones.
+
+</Concepts>
+
+---
+
+## 1. A graph is nodes and links
+
+Leonhard Euler's 1735 answer to the Königsberg puzzle is the first graph on record. Seven bridges join four land masses, and the question was whether a walk can cross each bridge exactly once. Euler dropped the map and kept two things: each land mass is a node, each bridge is a link. A walk that crosses every bridge once can only start and end at nodes with an odd number of bridges, and Königsberg has four such nodes, so no such walk exists.
+
+<AtP11Bridges />
+
+The lesson for markets is the move itself. A messy object (a city, a table of returns) becomes a short list of nodes and links, and questions about it become counting questions: how many links touch this node, which nodes are cut off from the rest.
+
+For stocks the recipe has five steps, and the rest of the post takes them in turn. Take returns, compute the correlation of every pair, turn it into a distance, filter the links down to the ones worth keeping, and read the result.
+
+<AtP11Pipeline />
+
+For the Vietnamese market the natural universe is the VN100. HOSE's ground rules define it as the 100 stocks made of the VN30 (the 30 largest by market capitalisation and liquidity) and the VNMidcap (the next 70 by market capitalisation).
+
+<Concepts>
+
+- **Correlation (ρ)**: a number from −1 to 1 saying how much two return series move together. 0 means no linear relationship.
+- **VN100**: HOSE's index of 100 stocks, the VN30 plus the VNMidcap.
+
+</Concepts>
+
+## 2. Correlation becomes distance
+
+Why not use correlation directly as the link strength? Because correlation is not a distance. It can be negative, and distances cannot, and it breaks the triangle rule (the trip from A to C should never be longer than A to B plus B to C). The standard fix, introduced by Mantegna, is
+
+d = √(2 × (1 − ρ))
+
+Two stocks that move in lockstep (ρ = 1) are 0 apart. Unrelated stocks (ρ = 0) are about 1.41 apart. Stocks that mirror each other (ρ = −1) are 2 apart. Python gives d = 0.63 at ρ = 0.8, the steel pair above, and d = 1.27 at ρ = 0.2.
+
+<AtP11Distance />
+
+<Concepts>
+
+- **Triangle rule**: a distance from A to C is never longer than going through B. The raw correlation does not obey it; this transformed distance does.
+
+</Concepts>
+
+## 3. Keep the links that matter
+
+With the distances in hand you have a complete graph: every stock linked to every other. For 100 stocks that is 4,950 links. Eight stocks already give 28 links and a tangle.
+
+<AtP11Pairs />
+
+There are three common ways to thin it out.
+
+The simplest is a threshold: keep a link when the correlation is at least some number, say 0.3. It is easy to explain and easy to break. Move the threshold a little and the graph falls into pieces or glues itself into one blob, and the right threshold for a calm month is wrong for a panicked one. The demo in section 5 lets you watch that happen.
+
+The second is the minimum spanning tree (MST): the set of links that connects all N stocks with the smallest possible total distance. It always has N−1 links, 99 for the VN100. Kruskal's algorithm builds it by sorting every pair from closest to farthest and keeping a link only when it joins two stocks that are not yet connected.
+
+<AtP11Kruskal />
+
+The third, the planar maximally filtered graph (PMFG) of Tumminello and co-authors, keeps more: a planar graph on N nodes can have at most 3(N−2) links, 294 for 100 stocks. That is about 17 times fewer than 4,950 and three times as many as the tree, so it shows some loops where the tree shows none.
+
+<Concepts>
+
+- **Minimum spanning tree (MST)**: the cheapest set of links that connects every node, with no loops. N nodes always need N−1 links.
+- **Threshold graph**: keep a link when the correlation passes a cut-off. Simple, and sensitive to the cut-off.
+
+</Concepts>
+
+## 4. Short windows invent links
+
+Every correlation is estimated from a window of days, and a short window produces correlations between stocks that have nothing in common. Say you take 100 independent random series, so every true correlation is exactly zero, and compute all 4,950 correlations. With 60 days of data, 615 pairs (12.4%) have a correlation above 0.2 in size, and the largest is 0.43. With 250 days, only 8 pairs pass 0.2, and the largest is 0.22.
+
+<AtP11Spurious />
+
+A threshold graph built from the 60-day window would show hundreds of links with no meaning. The cure is more data per estimate, and suspicion toward any single strong pair when you looked at thousands of them. The cost is that a long window mixes calm and stormy periods. Onnela and co-authors tested window widths and called the choice a trade-off between noisy and over-smoothed results.
+
+## 5. Trees reveal sectors and crashes
+
+Rosario Mantegna built the first tree of this kind in 1998. He took the stocks in the Dow Jones index and 443 stocks of the S&P 500 that stayed listed from July 1989 to October 1995, computed correlations of daily returns, and extracted the MST. He used no sector labels. The groups appeared on their own: oil companies together, communication and electrical utilities together, raw materials together, and a cluster of gold miners far from everything else. Ores, aluminium and copper all count as "metals" in the usual classification, yet the tree put ores in the group farthest from the rest and aluminium and copper inside the raw-materials group, so the data refined the label.
+
+<AtP11Mantegna />
+
+Onnela and co-authors then ran the same construction on 477 NYSE stocks from 1980 to 1999, with four-year windows moved forward month by month. Around the October 1987 crash two things moved together. The mean correlation rose, and the normalised length of the tree came out considerably shorter than average. In a crash the whole market moves as one, every stock is closer to every other stock, and the tree is packed more tightly.
+
+The demo below reproduces the effect on a made-up market. Say there are 12 stocks in 3 sectors and 250 days of returns, each return built from a market factor, a sector factor and the stock's own noise. The calm run has a mean correlation of 0.19 and a tree length of 12.16. In the crash run only the market factor's weight is raised, the mean correlation becomes 0.54 and the tree length 9.22, about 24% shorter. Try the threshold slider on both runs. In the calm market, 0.30 splits the graph into three groups, which are the three sectors. In the crash market, the same 0.30 keeps 66 of 66 possible links, a single blob.
+
+<AtP11TreeShrink />
+
+<AtP11GraphDemo />
+
+The tree, by contrast, behaves in both regimes: a Louvain community search (next section) on the MST recovers the three sectors in the calm run and in the crash run.
+
+<Concepts>
+
+- **Mean correlation**: the average of ρ over all pairs. It climbs in a crash.
+- **Tree length**: the sum of the distances along the tree's N−1 links. A shorter tree means a more tightly bound market.
+
+</Concepts>
+
+## 6. Communities on the VN100
+
+A community is a group of nodes with more links inside the group than you would expect by chance. Blondel and co-authors' Louvain method finds them by greedily improving a score called modularity. The authors tested it on a Belgian mobile-phone network of 2.6 million customers and on a web graph with 118 million nodes and more than a billion links, so 100 stocks is a small job for it.
+
+On the VN100 you would expect steel makers and banks to show up as groups; a simulated market lets you check.
+
+Say there are 30 stocks in 5 sectors of 6, built like the demo above (a market factor, a sector factor and the stock's own noise). Keep the strongest 3(N−2) = 84 links and run Louvain. Over 100 seeded markets, the median share of same-sector pairs that end up in the same community is 0.88 with 60 days of data, and 1.00 with 250 and with 1,000. Communities are easier to recover than single links, because a group only needs most of its links to be right.
+
+Now a rule built on them. Every 60 days, inside each community, buy the stock with the best Sharpe ratio over the previous 300 days, equal weights. Give it a market where no stock has any edge, so any profit is luck, and run it on 200 seeds:
+
+<TerminalOutput command={"uv run --with numpy --with networkx python demo/ai-trading/p11_community_noise.py"} label="Python 3.12 · numpy 2.5 · networkx 3.7 · captured Nov 2026" caption="The full script is demo/ai-trading/p11_community_noise.py. In a market with no edge anywhere, the rule shows a Sharpe above 0.5 in 32 runs out of 200.">
+```text
+  60 days: median share of same-sector pairs together 0.88
+ 250 days: median share of same-sector pairs together 1.00
+1000 days: median share of same-sector pairs together 1.00
+200 seeds, no edge anywhere. Annualised Sharpe of the community rule vs equal weight of all 30:
+  median    rule -0.01   equal weight  0.02
+  90th pct  rule  0.61   equal weight  0.67
+  best      rule  1.52   equal weight  1.54
+median max drawdown: rule -16.1%, equal weight -12.3%
+seeds where the rule's Sharpe is above 0.5: 32 of 200
+```
+</TerminalOutput>
+
+
+<AtP11Communities />
+
+Read the table with the series' habits. A rule that holds five stocks gets a Sharpe of 1.52 in its best run when nothing is there to find, and 16% of runs are above 0.5. So one backtest of one rule says little: the community method, 60 days, 300 days and one stock per group are all choices, and each multiplies the number of runs you could have shown. The rule also holds far fewer stocks than equal weight, which is why its median drawdown is deeper (−16.1% against −12.3%). The real value of the communities is the map: it shows which stocks are one bet and which are different bets.
+
+<Concepts>
+
+- **Community**: a group of nodes more densely linked to each other than to the rest.
+- **Modularity**: a score that rises when a split puts more links inside groups than a random wiring would. Louvain climbs it step by step.
+- **Louvain**: a community-detection algorithm that climbs modularity step by step, merging small groups into larger ones.
+
+</Concepts>
+
+## 7. Central stocks, peripheral stocks
+
+A tree or graph also tells you which stocks sit at the middle and which at the edge. Centrality measures that: the simplest version is the degree, the number of links a node has, and richer versions count how many shortest paths pass through a node.
+
+Peralta and Zareei connected centrality to portfolio weights in a 2016 paper. They show that, in Markowitz's framework, a stock's centrality in the correlation network is negatively related to its optimal weight: highly central stocks bring large variances, so optimal portfolios overweight low-central ones. In their data, central nodes tend to be older, larger, cheaper and financially riskier companies. The authors report that a network-based strategy beat standard benchmarks with positive Carhart alphas, a claim to treat as one paper's backtest. The Portfolio post comes back to weights; for now the point is that a graph hands you a number per stock that a plain correlation table hides.
+
+<Concepts>
+
+- **Centrality**: how central a node is in the network, by degree or by how many paths pass through it.
+- **Periphery**: nodes at the edge of the tree, with few links. Their moves are less tied to the rest of the market.
+
+</Concepts>
+
+## 8. A price path as a graph
+
+Graphs also describe one stock, not just many. In a natural visibility graph, each day is a node, and two days are linked when the straight line between their prices is not blocked by any price in between. Peaks see far and have many links. Valleys see little.
+
+<AtP11Visibility />
+
+Graphs also describe one stock, not just many. Lacasa and co-authors showed in 2008 how to turn a price series into a graph: each day is a node, and two days are linked when the straight line between their prices is not blocked by any price in between. Peaks see far and have many links. Valleys see little. One thing always holds: neighbouring days see each other, so a series of 250 prices has at least 249 links and the graph is connected. A seeded random walk of 250 days gave 1,003 to 1,555 links over 20 runs.
+
+<AtP11Visibility />
+
+From such a graph you can read statistics. The diameter (the longest shortest path) is high when the graph is stretched out, and the variance of betweenness centrality is high when a few days carry most of the connections. Louvain on the graph can split the series into regimes. Whether a z-score of either statistic is a useful brake on a momentum position is an empirical question, and one this post does not test: the idea is cheap to build and easy to overfit, because the window, the threshold and the cut size are all knobs.
+
+## 9. Where graphs mislead
+
+- **The window decides the graph.** A graph from 60 days is not the same graph as one from 250, and Section 4 showed why the short one is mostly noise.
+- **The graph describes the past.** A tree built on last year's correlations is a picture of last year. Section 5 showed correlations jumping in a crash, so the tree you trade on is the calm-market tree, and the moment you need it is the moment it stops being true.
+- **Communities depend on the method.** Different algorithms disagree on how large a group is. A community is a modelling output, not a fact about companies.
+- **A backtest of a graph rule is still a backtest.** Every choice (window, threshold, algorithm, rebalance day) is a knob, and the Backtest post shows how fast knobs produce a good-looking curve.
+- **A survey exists.** Marti and co-authors survey two decades of correlation, hierarchy, network and clustering work in finance and are a good map of what was tried.
+
+None of this is advice to buy or avoid anything.
+
+## 10. Worked case: spotting a stress regime
+
+**The problem.** Say you watch 20 stocks in 4 sectors over 900 days. Between day 600 and day 660 a market-wide shock hits: every stock's weight on the market factor goes from 0.4 to 1.2. You do not know this; you only see returns. Can a rolling correlation network tell you? The market is simulated, so the right answer is known.
+
+**What I would check first.** The false alarms, before the hits. A detector that fires in calm weeks is useless however well it catches the shock. So the order is: calibrate on a calm stretch only (the first 500 days, so the shock cannot leak into the baseline), count alarms on stretches with no shock, and only then count the alarms inside the shock.
+
+**The steps.**
+
+1. Roll a 60-day window. In each window compute the correlations, turn them into distances, build the minimum spanning tree and take its length per link.
+2. Freeze the mean and the standard deviation of that length over the first 500 days. Flag a window when its z-score is below −3.
+3. Count flags in the 119 windows that overlap the shock and in the 160 windows that contain no shock days.
+4. Repeat with a milder shock (weight 0.8) to see how fast the detector fades.
+
+```python
+N, SECTORS, T, WIN = 20, 4, 900, 60
+SHOCK = range(600, 660)                       # days with a market-wide shock
+sector = np.repeat(np.arange(SECTORS), N // SECTORS)
+
+def simulate(w_stress, seed=11):
+    rng = np.random.default_rng(seed)
+    w = np.full(T, 0.4)                       # market-factor weight: 0.4 in calm days
+    w[list(SHOCK)] = w_stress
+    market = rng.standard_normal(T)
+    sect = rng.standard_normal((T, SECTORS))
+    return w[:, None] * market[:, None] + 0.6 * sect[:, sector] + rng.standard_normal((T, N))
+
+def tree_length(window):
+    rho = np.corrcoef(window.T)
+    dist = np.sqrt(2 * (1 - rho))
+    return minimum_spanning_tree(dist).sum() / (N - 1), rho[np.triu_indices(N, 1)].mean()
+
+def run(w_stress):
+    r = simulate(w_stress)
+    ends = np.arange(WIN, T + 1)              # window = days [end - 60, end)
+    length, rho = map(np.array, zip(*(tree_length(r[e - WIN:e]) for e in ends)))
+    base = ends <= 500                        # calibrate on the first 500 days only
+    z = (length - length[base].mean()) / length[base].std()
+    flag = z < -3                             # a tree much shorter than usual
+    hit = (ends >= 601) & (ends <= 719)       # windows that overlap the shock
+    free = ((ends > 500) & (ends <= 540)) | (ends > 780)
+    first = ends[flag & (ends > 600)]
+    print(f"shock weight {w_stress}: tree/link {length[base].mean():.3f} calm -> "
+          f"{length[(ends > 640) & (ends <= 660)].mean():.3f} in shock; "
+          f"mean rho {rho[base].mean():.2f} -> {rho[(ends > 640) & (ends <= 660)].mean():.2f}")
+    print(f"  flagged {flag[hit].sum()} of {hit.sum()} shock windows, "
+          f"{flag[free].sum()} of {free.sum()} shock-free windows, "
+          f"first flag {first[0] - 600 if first.size else 'never'} days in")
+
+for w_stress in (1.2, 0.8):
+    run(w_stress)
+```
+
+<TerminalOutput command={"uv run --with numpy --with scipy python demo/ai-trading/p11_stress_mst.py"} label="Python 3.12 · numpy 2.5 · scipy 1.18 · captured Nov 2026" caption="Strong shock: the tree shrinks from 1.074 to 0.779 per link, 110 of 119 shock windows are flagged and none of the 160 calm ones. Milder shock: 92 of 119 flagged, first flag 18 days in.">
+```text
+shock weight 1.2: tree/link 1.074 calm -> 0.779 in shock; mean rho 0.15 -> 0.53
+  flagged 110 of 119 shock windows, 0 of 160 shock-free windows, first flag 7 days in
+shock weight 0.8: tree/link 1.074 calm -> 0.924 in shock; mean rho 0.15 -> 0.35
+  flagged 92 of 119 shock windows, 0 of 160 shock-free windows, first flag 18 days in
+```
+</TerminalOutput>
+
+**What the result tells you.** When the only thing that changes is how hard the market factor pulls, the tree shortens and the mean correlation climbs together (0.15 to 0.53), and the alarm fires a week into the shock with no false alarms in the calm stretches. That is Onnela's effect, found without knowing the date. The milder shock still gets caught, but 18 days late and in 92 of 119 windows, because a 60-day window averages the shock with calm days around it.
+
+**What would change my mind.** Three things. First, false alarms on real returns: fat tails and volatility clusters make the calm-period spread wider than in this simulation, so the −3 cut-off must be checked on years of real calm data before anyone trusts it. Second, the alarm only says that everything is moving together; it does not say why, and a shock that raises each stock's own noise instead of the common factor would not shorten the tree at all. Third, a lag of one to three weeks is a cost: by the time the alarm fires, part of the move is over. If a plain average correlation fires just as early and as cleanly, the tree adds nothing for this job, and I would use the simpler number.
+
+## Key takeaways
+
+- **A graph turns 4,950 numbers into a shape**: stocks are nodes, links carry distance, and the question becomes which links to keep. *(Sections 1 and 3)*
+- **Correlation is converted to distance first**: d = √(2(1−ρ)), so lockstep stocks are 0 apart and unrelated ones about 1.41. *(Section 2)*
+- **The MST keeps N−1 links**: 99 for the VN100, found by Kruskal's rule of taking the shortest link that joins two unconnected stocks. *(Section 3)*
+- **Short windows invent links**: 615 of 4,950 unrelated pairs passed 0.2 with 60 days, 8 with 250. *(Section 4)*
+- **Trees recover sectors and shrink in crashes**: Mantegna's groups appeared without sector labels, and Onnela's tree was shorter around Black Monday. *(Section 5)*
+- **Communities give a map, not a signal**: Louvain recovers planted sectors from 60 to 250 days of data, but a best-Sharpe-per-community rule showed a Sharpe of 1.52 in its best run on a market with no edge. *(Section 6)*
+- **Centrality and visibility add numbers per stock or per day**: useful inputs, with modest and caveated evidence in the sources we read, and a visibility graph of N prices has at least N−1 links. *(Sections 7 and 8)*
+- **A stress alarm needs its false alarms counted first**: a rolling tree-length z-score below −3 flagged 110 of 119 shock windows and 0 of 160 calm ones in the simulation. *(Section 10)*
+
+## Review questions
+
+1. Why did Euler throw the map away, and what two things did he keep? *(See Section 1)*
+2. Why is the raw correlation not used as a distance, and what is d for ρ = 0, 0.5 and 0.8? *(See Section 2)*
+3. A graph of 100 stocks has 4,950 possible links. How many does the MST keep, and how many does the PMFG keep? *(See Section 3)*
+4. In Kruskal's algorithm, why was the link C–E skipped even though it is shorter than B–C? *(See Section 3)*
+5. With 100 unrelated random series, how many pairs look related (|ρ| above 0.2) at 60 days and at 250 days? *(See Section 4)*
+6. What did Mantegna's tree do with ores, aluminium and copper? *(See Section 5)*
+7. What happened to the mean correlation and the tree length around the 1987 crash? *(See Section 5)*
+8. In the demo, why does a threshold of 0.30 work in the calm run and fail in the crash run? *(See Section 5)*
+9. Why did a best-Sharpe-per-community rule reach a Sharpe of 1.52 in a market with no edge, and what does that say about one backtest? *(See Section 6)*
+10. According to Peralta and Zareei, how are a stock's centrality and its optimal weight related? *(See Section 7)*
+11. Why does a visibility graph of 250 daily prices have at least 249 links? *(See Section 8)*
+12. In the worked case, why count false alarms before counting hits, and what would make the −3 cut-off wrong on real data? *(See Section 10)*
+
+Quiz: [Take the 40-question quiz](/blog/ai-trading-graphs/quiz/).
+
+## Go deeper
+
+- **[Mantegna: Hierarchical Structure in Financial Markets](https://arxiv.org/abs/cond-mat/9802256)** and **[Onnela et al.: Dynamics of market correlations](https://arxiv.org/abs/cond-mat/0302546)**: the two papers behind Section 5.
+- **[Marti et al.: A review of two decades of correlations, hierarchies, networks and clustering](https://arxiv.org/abs/1703.00485)**: the survey.
+- **[Tumminello et al.: A tool for filtering information in complex systems](https://arxiv.org/abs/cond-mat/0501335)** and **[Lacasa et al.: From time series to complex networks, the visibility graph](https://www.pnas.org/doi/10.1073/pnas.0709247105)**: the PMFG of Section 3 and the visibility graph of Section 8.
+
+</En>
+
+<Vi>
+
+<Figure src={heroKonigsberg} alt="Bản đồ Königsberg khắc năm 1652 nhìn từ trên cao: những dãy nhà dày đặc bị dòng sông cắt ngang, tên thành phố ở phía trên" caption="Königsberg năm 1652. Euler giải câu đố cầu của thành phố này bằng cách vứt bản đồ đi và chỉ giữ lại việc mảnh đất nào chạm mảnh đất nào: đồ thị đầu tiên." sourceTitle="Wikimedia Commons: Königsberg, map by Merian-Erben, 1652 (public domain)" sourceUrl="https://commons.wikimedia.org/wiki/File:Image-Koenigsberg,_Map_by_Merian-Erben_1652.jpg" />
+
+> "The topological space is a graph connecting the stocks of the portfolio analyzed."
+> &mdash; *Rosario N. Mantegna*, "Hierarchical Structure in Financial Markets" (1998)
+
+### Một ma trận 4.950 con số
+
+Giả sử hai hãng thép có tương quan tuần khoảng 0,8, còn một hãng thép và một công ty cấp nước nằm quanh 0,2. Hai con số đó dễ đọc. Nhưng VN100 có 100 mã, và 100 mã cho ra 4.950 cặp. Không ai đọc nổi bảng dài thế, mà bảng dài như vậy còn nhiễu và dày đặc.
+
+Lối ra đã có từ lâu. Đặt mỗi mã thành một chấm trên trang giấy, nối hai chấm khi lợi suất của chúng đi cùng nhau, rồi nhìn hình dạng. Đó là một đồ thị (graph), và phương pháp đồ thị đã được dùng trên thị trường chứng khoán từ cuối thập niên 1990. Bài này dựng một đồ thị từ đầu, xem nó cho thấy gì (ngành, cú sụp đổ, cộng đồng), rồi xem nó đánh lừa bạn ở đâu.
+
+<Callout type="note" title="TL;DR">
+
+Đồ thị biến ma trận tương quan thành một bức tranh: mã là nút (node), quan hệ mạnh là cạnh (link). Tương quan được đổi thành khoảng cách trước, d = √(2(1−ρ)), rồi 4.950 cạnh của 100 mã được cắt xuống còn cây khung nhỏ nhất (minimum spanning tree) với 99 cạnh. Những cây như vậy gom các mã theo ngành (Mantegna, 443 mã Mỹ), và co lại khi một cú sụp đổ khiến mọi thứ đi cùng nhau (Onnela và cộng sự, 477 mã NYSE). Phát hiện cộng đồng tìm ra các nhóm: trên thị trường mô phỏng 30 mã trong 5 ngành, Louvain xếp 88% số cặp cùng ngành vào chung nhóm từ 60 ngày dữ liệu, và toàn bộ từ 250 ngày. Cửa sổ ngắn sinh ra cạnh giả: 100 chuỗi ngẫu nhiên không liên quan, qua 60 ngày, cho 615 cặp "có liên hệ". Không có gì ở đây là lời khuyên đầu tư.
+
+</Callout>
+
+<Concepts>
+
+- **Đồ thị (graph)**: một tập nút (ở đây là các mã) và các cạnh nối một số cặp nút.
+- **Bậc (degree)**: số cạnh chạm vào một nút.
+- **Khoảng cách (distance)**: con số nhỏ với hai mã giống nhau, lớn với hai mã khác nhau.
+
+</Concepts>
+
+---
+
+## 1. Đồ thị là nút và cạnh
+
+Lời giải năm 1735 của Leonhard Euler cho câu đố Königsberg là đồ thị đầu tiên còn ghi lại được. Bảy cây cầu nối bốn mảnh đất, và câu hỏi là có đi được một vòng qua mỗi cây cầu đúng một lần hay không. Euler bỏ bản đồ và giữ hai thứ: mỗi mảnh đất là một nút, mỗi cây cầu là một cạnh. Một lối đi qua mọi cầu đúng một lần chỉ có thể bắt đầu và kết thúc ở những nút có số cầu lẻ, mà Königsberg có tới bốn nút như vậy, nên lối đi đó không tồn tại.
+
+<AtP11Bridges />
+
+Bài học cho thị trường nằm ở chính động tác đó. Một vật rối rắm (một thành phố, một bảng lợi suất) thành một danh sách ngắn các nút và cạnh, và câu hỏi về nó thành bài toán đếm: bao nhiêu cạnh chạm vào nút này, nút nào bị tách khỏi phần còn lại.
+
+Với cổ phiếu, công thức có năm bước, và phần còn lại của bài đi qua từng bước. Lấy lợi suất, tính tương quan của mọi cặp, đổi thành khoảng cách, lọc bớt cạnh còn những cạnh đáng giữ, rồi đọc kết quả.
+
+<AtP11Pipeline />
+
+Với thị trường Việt Nam, tập mã tự nhiên là VN100. Quy tắc chỉ số của HOSE định nghĩa nó gồm 100 mã: VN30 (30 mã vốn hóa và thanh khoản lớn nhất) cộng VNMidcap (70 mã vốn hóa lớn kế tiếp).
+
+<Concepts>
+
+- **Tương quan (ρ)**: số từ −1 đến 1 cho biết hai chuỗi lợi suất đi cùng nhau tới mức nào. 0 nghĩa là không có quan hệ tuyến tính.
+- **VN100**: chỉ số 100 mã của HOSE, gồm VN30 và VNMidcap.
+
+</Concepts>
+
+## 2. Tương quan thành khoảng cách
+
+Sao không dùng thẳng tương quan làm độ mạnh của cạnh? Vì tương quan không phải khoảng cách. Nó có thể âm, còn khoảng cách thì không, và nó phá luật tam giác (đi từ A tới C không bao giờ dài hơn đi A tới B rồi B tới C). Cách sửa chuẩn, do Mantegna đưa ra, là
+
+d = √(2 × (1 − ρ))
+
+Hai mã đi sát nhau (ρ = 1) cách nhau 0. Hai mã không liên quan (ρ = 0) cách nhau khoảng 1,41. Hai mã phản chiếu nhau (ρ = −1) cách nhau 2. Python cho d = 0,63 tại ρ = 0,8, cặp thép ở trên, và d = 1,27 tại ρ = 0,2.
+
+<AtP11Distance />
+
+<Concepts>
+
+- **Luật tam giác**: khoảng cách từ A tới C không bao giờ dài hơn đường đi qua B. Tương quan thô không tuân theo luật này; khoảng cách đã biến đổi thì có.
+
+</Concepts>
+
+## 3. Giữ những cạnh quan trọng
+
+Có khoảng cách trong tay, bạn có một đồ thị đầy đủ: mã nào cũng nối với mã nào. Với 100 mã đó là 4.950 cạnh. Chỉ 8 mã đã cho 28 cạnh và một mớ rối.
+
+<AtP11Pairs />
+
+Có ba cách thường dùng để thưa bớt.
+
+Đơn giản nhất là ngưỡng (threshold): giữ cạnh khi tương quan từ một mức nào đó trở lên, chẳng hạn 0,3. Dễ giải thích và dễ vỡ. Xê dịch ngưỡng một chút, đồ thị vỡ thành mảnh hoặc dính thành một khối, và ngưỡng đúng cho một tháng yên ả sẽ sai cho một tháng hoảng loạn. Demo ở mục 5 cho bạn tự thấy điều đó.
+
+Cách thứ hai là cây khung nhỏ nhất (MST): tập cạnh nối được cả N mã với tổng khoảng cách nhỏ nhất có thể. Nó luôn có N−1 cạnh, tức 99 cạnh với VN100. Thuật toán Kruskal dựng nó bằng cách sắp mọi cặp từ gần tới xa, rồi chỉ giữ một cạnh khi nó nối hai mã chưa liên thông.
+
+<AtP11Kruskal />
+
+Cách thứ ba, đồ thị lọc phẳng cực đại (PMFG) của Tumminello và cộng sự, giữ nhiều hơn: đồ thị phẳng trên N nút có tối đa 3(N−2) cạnh, tức 294 cạnh cho 100 mã. Con số đó ít hơn 4.950 khoảng 17 lần và gấp ba lần cây khung, nên có vài vòng mà cây khung không có.
+
+<Concepts>
+
+- **Cây khung nhỏ nhất (MST)**: tập cạnh rẻ nhất nối được mọi nút, không có vòng. N nút luôn cần N−1 cạnh.
+- **Đồ thị ngưỡng (threshold graph)**: giữ cạnh khi tương quan vượt một mức cắt. Đơn giản, và nhạy với mức cắt.
+
+</Concepts>
+
+## 4. Cửa sổ ngắn sinh ra cạnh giả
+
+Mỗi tương quan được ước lượng từ một cửa sổ ngày, và cửa sổ ngắn tạo ra tương quan giữa những mã chẳng có gì chung. Giả sử bạn lấy 100 chuỗi ngẫu nhiên độc lập, nên mọi tương quan thật đều đúng bằng không, rồi tính cả 4.950 tương quan. Với 60 ngày dữ liệu, 615 cặp (12,4%) có tương quan lớn hơn 0,2 về độ lớn, và cặp lớn nhất là 0,43. Với 250 ngày, chỉ 8 cặp vượt 0,2, và cặp lớn nhất là 0,22.
+
+<AtP11Spurious />
+
+Một đồ thị ngưỡng dựng từ cửa sổ 60 ngày sẽ hiện hàng trăm cạnh vô nghĩa. Cách chữa là nhiều dữ liệu hơn cho mỗi ước lượng, và nghi ngờ bất kỳ cặp mạnh nào khi bạn đã nhìn qua hàng nghìn cặp. Cái giá là cửa sổ dài trộn lẫn quãng êm và quãng bão. Onnela và cộng sự đã thử nhiều độ rộng cửa sổ và gọi việc chọn là sự đánh đổi giữa kết quả nhiễu và kết quả bị làm mượt quá.
+
+## 5. Cây cho thấy ngành và những cú sụp đổ
+
+Rosario Mantegna dựng cây đầu tiên kiểu này năm 1998. Ông lấy các mã trong chỉ số Dow Jones và 443 mã của S&P 500 niêm yết liên tục từ tháng 7/1989 đến tháng 10/1995, tính tương quan lợi suất hằng ngày, rồi trích MST. Ông không dùng nhãn ngành nào. Các nhóm tự hiện ra: công ty dầu khí đứng cùng nhau, viễn thông và điện lực đứng cùng nhau, nguyên vật liệu đứng cùng nhau, và một cụm khai thác vàng nằm xa mọi thứ khác. Quặng, nhôm và đồng đều được xếp là "kim loại" theo cách phân loại thông thường, nhưng cây đặt quặng vào nhóm xa nhất còn nhôm và đồng vào trong nhóm nguyên vật liệu, nên dữ liệu đã tinh chỉnh cái nhãn.
+
+<AtP11Mantegna />
+
+Onnela và cộng sự sau đó chạy đúng cách dựng ấy trên 477 mã NYSE từ 1980 đến 1999, với cửa sổ bốn năm trượt từng tháng. Quanh cú sụp đổ tháng 10/1987, hai thứ cùng chuyển động. Tương quan trung bình tăng, và độ dài chuẩn hóa của cây ngắn hơn hẳn mức trung bình. Khi sụp đổ, cả thị trường đi như một khối, mã nào cũng gần mọi mã khác, và cây bị nén chặt hơn.
+
+Demo bên dưới tái hiện hiệu ứng đó trên một thị trường dựng sẵn. Giả sử có 12 mã trong 3 ngành và 250 ngày lợi suất, mỗi lợi suất gồm một nhân tố thị trường, một nhân tố ngành và nhiễu riêng của mã. Lần chạy êm có tương quan trung bình 0,19 và độ dài cây 12,16. Ở lần chạy sụp đổ, chỉ trọng số của nhân tố thị trường được nâng lên, tương quan trung bình thành 0,54 và độ dài cây 9,22, ngắn hơn khoảng 24%. Thử thanh trượt ngưỡng trên cả hai lần chạy. Ở thị trường êm, 0,30 tách đồ thị thành ba nhóm, chính là ba ngành. Ở thị trường sụp đổ, cùng mức 0,30 giữ cả 66 trên 66 cạnh có thể có, thành một khối duy nhất.
+
+<AtP11TreeShrink />
+
+<AtP11GraphDemo />
+
+Ngược lại, cây khung xử sự ổn ở cả hai chế độ: tìm cộng đồng bằng Louvain (mục sau) trên MST khôi phục đúng ba ngành ở lần chạy êm lẫn lần chạy sụp đổ.
+
+<Concepts>
+
+- **Tương quan trung bình**: trung bình của ρ trên mọi cặp. Nó leo lên khi sụp đổ.
+- **Độ dài cây**: tổng khoảng cách dọc N−1 cạnh của cây. Cây ngắn hơn nghĩa là thị trường bị buộc chặt hơn.
+
+</Concepts>
+
+## 6. Cộng đồng trên VN100
+
+Cộng đồng (community) là một nhóm nút có nhiều cạnh bên trong hơn mức bạn kỳ vọng nếu cạnh mọc ngẫu nhiên. Phương pháp Louvain của Blondel và cộng sự tìm chúng bằng cách cải thiện dần một điểm số gọi là modularity. Nhóm tác giả đã thử nó trên mạng điện thoại di động Bỉ với 2,6 triệu khách hàng và trên một đồ thị web có 118 triệu nút cùng hơn một tỷ cạnh, nên 100 mã chỉ là việc nhỏ với nó.
+
+Trên VN100, bạn sẽ kỳ vọng các hãng thép và ngân hàng hiện ra thành nhóm; một thị trường mô phỏng cho bạn kiểm tra được.
+
+Giả sử có 30 mã trong 5 ngành, mỗi ngành 6 mã, dựng như demo ở trên (một nhân tố thị trường, một nhân tố ngành và nhiễu riêng của mã). Giữ 3(N−2) = 84 cạnh mạnh nhất rồi chạy Louvain. Qua 100 thị trường có seed, trung vị tỷ lệ cặp cùng ngành rơi vào cùng cộng đồng là 0,88 với 60 ngày dữ liệu, và 1,00 với 250 ngày cũng như 1.000 ngày. Cộng đồng dễ khôi phục hơn từng cạnh lẻ, vì một nhóm chỉ cần phần lớn cạnh của nó đúng.
+
+Giờ tới một quy tắc dựa trên chúng. Mỗi 60 ngày, trong từng cộng đồng, mua mã có Sharpe tốt nhất trong 300 ngày trước đó, tỷ trọng đều. Cho nó chạy trên thị trường mà không mã nào có lợi thế, nên mọi khoản lãi đều là may, với 200 seed:
+
+<TerminalOutput command={"uv run --with numpy --with networkx python demo/ai-trading/p11_community_noise.py"} label="Python 3.12 · numpy 2.5 · networkx 3.7 · captured Nov 2026" caption="Toàn bộ script nằm ở demo/ai-trading/p11_community_noise.py. Trên thị trường không có lợi thế ở đâu cả, quy tắc vẫn cho Sharpe trên 0,5 ở 32 lần chạy trong 200.">
+```text
+  60 days: median share of same-sector pairs together 0.88
+ 250 days: median share of same-sector pairs together 1.00
+1000 days: median share of same-sector pairs together 1.00
+200 seeds, no edge anywhere. Annualised Sharpe of the community rule vs equal weight of all 30:
+  median    rule -0.01   equal weight  0.02
+  90th pct  rule  0.61   equal weight  0.67
+  best      rule  1.52   equal weight  1.54
+median max drawdown: rule -16.1%, equal weight -12.3%
+seeds where the rule's Sharpe is above 0.5: 32 of 200
+```
+</TerminalOutput>
+
+<AtP11Communities />
+
+Hãy đọc bảng theo thói quen của series. Một quy tắc chỉ nắm năm mã đạt Sharpe 1,52 ở lần chạy tốt nhất khi chẳng có gì để tìm, và 16% số lần chạy vượt 0,5. Vậy một backtest của một quy tắc nói rất ít: phương pháp cộng đồng, 60 ngày, 300 ngày và một mã mỗi nhóm đều là lựa chọn, và mỗi lựa chọn nhân thêm số lần chạy mà bạn có thể đã chọn để khoe. Quy tắc cũng nắm ít mã hơn nhiều so với tỷ trọng đều, nên mức sụt trung vị sâu hơn (−16,1% so với −12,3%). Giá trị thật của các cộng đồng là tấm bản đồ: cho thấy mã nào là một ván cược và mã nào là những ván khác nhau.
+
+<Concepts>
+
+- **Cộng đồng (community)**: nhóm nút nối với nhau dày hơn so với phần còn lại.
+- **Modularity**: điểm số tăng khi một cách chia đặt nhiều cạnh vào bên trong nhóm hơn so với nối ngẫu nhiên. Louvain leo điểm này từng bước.
+- **Louvain**: thuật toán phát hiện cộng đồng, leo modularity từng bước và gộp các nhóm nhỏ thành nhóm lớn hơn.
+
+</Concepts>
+
+## 7. Mã trung tâm, mã ngoại vi
+
+Cây hay đồ thị cũng cho biết mã nào ở giữa, mã nào ở rìa. Độ trung tâm (centrality) đo điều đó: bản đơn giản nhất là bậc, số cạnh của một nút, còn các bản phức tạp hơn đếm có bao nhiêu đường đi ngắn nhất đi qua nút.
+
+Peralta và Zareei nối độ trung tâm với tỷ trọng danh mục trong một bài báo năm 2016. Họ chứng minh rằng, trong khung Markowitz, độ trung tâm của một mã trong mạng tương quan có quan hệ nghịch với tỷ trọng tối ưu của nó: mã rất trung tâm kéo theo phương sai lớn, nên danh mục tối ưu nghiêng về các mã ít trung tâm. Trong dữ liệu của họ, các nút trung tâm có xu hướng là công ty lâu đời hơn, lớn hơn, rẻ hơn và rủi ro tài chính cao hơn. Các tác giả báo cáo một chiến lược dựa trên mạng thắng các chuẩn thông dụng với alpha Carhart dương, một tuyên bố nên coi là backtest của riêng một bài báo. Bài Danh mục sẽ quay lại chuyện tỷ trọng; còn lúc này, điểm cần nhớ là đồ thị cho bạn một con số cho mỗi mã mà bảng tương quan thường giấu đi.
+
+<Concepts>
+
+- **Độ trung tâm (centrality)**: một nút ở trung tâm mạng tới mức nào, tính theo bậc hoặc theo số đường đi qua nó.
+- **Ngoại vi (periphery)**: các nút ở rìa cây, ít cạnh. Biến động của chúng ít gắn với phần còn lại của thị trường.
+
+</Concepts>
+
+## 8. Đường giá thành đồ thị
+
+Đồ thị cũng mô tả được một mã, không chỉ nhiều mã. Trong đồ thị tầm nhìn tự nhiên (natural visibility graph), mỗi ngày là một nút, và hai ngày được nối khi đường thẳng giữa hai mức giá không bị mức giá nào ở giữa chắn. Đỉnh nhìn xa nên có nhiều cạnh. Đáy nhìn được ít.
+
+<AtP11Visibility />
+
+Đồ thị cũng mô tả được một mã, không chỉ nhiều mã. Năm 2008, Lacasa và cộng sự chỉ ra cách biến một chuỗi giá thành đồ thị: mỗi ngày là một nút, và hai ngày được nối khi đường thẳng giữa hai mức giá không bị mức giá nào ở giữa chắn. Đỉnh nhìn xa nên có nhiều cạnh. Đáy nhìn được ít. Có một điều luôn đúng: hai ngày liền kề thấy nhau, nên chuỗi 250 giá có ít nhất 249 cạnh và đồ thị liên thông. Một bước đi ngẫu nhiên 250 ngày có seed cho 1.003 đến 1.555 cạnh qua 20 lần chạy.
+
+<AtP11Visibility />
+
+Từ đồ thị như vậy bạn đọc được các thống kê. Đường kính (đường đi ngắn nhất dài nhất) cao khi đồ thị bị kéo dài, còn phương sai của độ trung tâm betweenness cao khi vài ngày gánh phần lớn kết nối. Louvain trên đồ thị có thể chia chuỗi thành các chế độ. Z-score của một trong hai thống kê có phải cái phanh hữu ích cho vị thế động lượng hay không là câu hỏi thực nghiệm, và bài này không kiểm tra nó: ý tưởng rẻ để dựng và dễ khớp nhiễu, vì cửa sổ, ngưỡng và mức cắt đều là núm vặn.
+
+## 9. Chỗ đồ thị đánh lừa
+
+- **Cửa sổ quyết định đồ thị.** Đồ thị từ 60 ngày khác đồ thị từ 250 ngày, và mục 4 đã cho thấy vì sao đồ thị ngắn phần lớn là nhiễu.
+- **Đồ thị mô tả quá khứ.** Cây dựng trên tương quan năm ngoái là bức ảnh của năm ngoái. Mục 5 cho thấy tương quan nhảy vọt khi sụp đổ, nên cây bạn đang giao dịch là cây của thị trường êm, và đúng lúc bạn cần nó thì nó hết đúng.
+- **Cộng đồng phụ thuộc phương pháp.** Các thuật toán bất đồng về độ lớn của một nhóm. Cộng đồng là đầu ra của mô hình, không phải sự thật về các công ty.
+- **Backtest một quy tắc đồ thị vẫn là backtest.** Mỗi lựa chọn (cửa sổ, ngưỡng, thuật toán, ngày tái cân bằng) là một núm vặn, và bài Backtest sẽ cho thấy các núm vặn nhanh thế nào tạo ra một đường cong đẹp.
+- **Đã có bài tổng quan.** Marti và cộng sự khảo sát hai thập niên nghiên cứu về tương quan, phân cấp, mạng và phân cụm trong tài chính, là tấm bản đồ tốt cho những gì đã được thử.
+
+Không điều nào ở trên là lời khuyên mua hay tránh thứ gì.
+
+## 10. Ca thực hành: nhận ra chế độ căng thẳng
+
+**Vấn đề.** Giả sử bạn theo dõi 20 mã trong 4 ngành suốt 900 ngày. Từ ngày 600 đến ngày 660 một cú sốc toàn thị trường ập tới: trọng số của mỗi mã lên nhân tố thị trường tăng từ 0,4 lên 1,2. Bạn không biết điều này; bạn chỉ thấy lợi suất. Mạng tương quan trượt có báo cho bạn được không? Thị trường là mô phỏng, nên đáp án đúng đã biết.
+
+**Tôi sẽ kiểm tra gì trước.** Báo động giả, trước khi đếm báo động trúng. Một bộ phát hiện kêu cả trong tuần êm thì vô dụng, dù bắt cú sốc giỏi tới đâu. Nên thứ tự là: hiệu chỉnh chỉ trên quãng êm (500 ngày đầu, để cú sốc không lọt vào mức nền), đếm báo động trên các quãng không có sốc, rồi mới đếm báo động trong cú sốc.
+
+**Các bước.**
+
+1. Trượt cửa sổ 60 ngày. Trong mỗi cửa sổ tính tương quan, đổi thành khoảng cách, dựng cây khung nhỏ nhất và lấy độ dài cây chia cho số cạnh.
+2. Cố định trung bình và độ lệch chuẩn của độ dài đó trên 500 ngày đầu. Đánh dấu cửa sổ khi z-score của nó dưới −3.
+3. Đếm số cờ trong 119 cửa sổ chồng lên cú sốc và trong 160 cửa sổ không chứa ngày sốc nào.
+4. Lặp lại với cú sốc nhẹ hơn (trọng số 0,8) để xem bộ phát hiện yếu đi nhanh cỡ nào.
+
+```python
+N, SECTORS, T, WIN = 20, 4, 900, 60
+SHOCK = range(600, 660)                       # days with a market-wide shock
+sector = np.repeat(np.arange(SECTORS), N // SECTORS)
+
+def simulate(w_stress, seed=11):
+    rng = np.random.default_rng(seed)
+    w = np.full(T, 0.4)                       # market-factor weight: 0.4 in calm days
+    w[list(SHOCK)] = w_stress
+    market = rng.standard_normal(T)
+    sect = rng.standard_normal((T, SECTORS))
+    return w[:, None] * market[:, None] + 0.6 * sect[:, sector] + rng.standard_normal((T, N))
+
+def tree_length(window):
+    rho = np.corrcoef(window.T)
+    dist = np.sqrt(2 * (1 - rho))
+    return minimum_spanning_tree(dist).sum() / (N - 1), rho[np.triu_indices(N, 1)].mean()
+
+def run(w_stress):
+    r = simulate(w_stress)
+    ends = np.arange(WIN, T + 1)              # window = days [end - 60, end)
+    length, rho = map(np.array, zip(*(tree_length(r[e - WIN:e]) for e in ends)))
+    base = ends <= 500                        # calibrate on the first 500 days only
+    z = (length - length[base].mean()) / length[base].std()
+    flag = z < -3                             # a tree much shorter than usual
+    hit = (ends >= 601) & (ends <= 719)       # windows that overlap the shock
+    free = ((ends > 500) & (ends <= 540)) | (ends > 780)
+    first = ends[flag & (ends > 600)]
+    print(f"shock weight {w_stress}: tree/link {length[base].mean():.3f} calm -> "
+          f"{length[(ends > 640) & (ends <= 660)].mean():.3f} in shock; "
+          f"mean rho {rho[base].mean():.2f} -> {rho[(ends > 640) & (ends <= 660)].mean():.2f}")
+    print(f"  flagged {flag[hit].sum()} of {hit.sum()} shock windows, "
+          f"{flag[free].sum()} of {free.sum()} shock-free windows, "
+          f"first flag {first[0] - 600 if first.size else 'never'} days in")
+
+for w_stress in (1.2, 0.8):
+    run(w_stress)
+```
+
+<TerminalOutput command={"uv run --with numpy --with scipy python demo/ai-trading/p11_stress_mst.py"} label="Python 3.12 · numpy 2.5 · scipy 1.18 · captured Nov 2026" caption="Sốc mạnh: cây co từ 1,074 xuống 0,779 mỗi cạnh, 110 trong 119 cửa sổ sốc bị đánh dấu và 0 trong 160 cửa sổ êm. Sốc nhẹ: 92 trong 119 bị đánh dấu, cờ đầu tiên sau 18 ngày.">
+```text
+shock weight 1.2: tree/link 1.074 calm -> 0.779 in shock; mean rho 0.15 -> 0.53
+  flagged 110 of 119 shock windows, 0 of 160 shock-free windows, first flag 7 days in
+shock weight 0.8: tree/link 1.074 calm -> 0.924 in shock; mean rho 0.15 -> 0.35
+  flagged 92 of 119 shock windows, 0 of 160 shock-free windows, first flag 18 days in
+```
+</TerminalOutput>
+
+**Kết quả cho biết gì.** Khi thứ duy nhất đổi là sức kéo của nhân tố thị trường, cây ngắn lại và tương quan trung bình leo lên cùng lúc (0,15 lên 0,53), và báo động kêu sau cú sốc một tuần mà không báo giả ở các quãng êm. Đó là hiệu ứng của Onnela, tìm ra mà không cần biết ngày. Cú sốc nhẹ vẫn bị bắt, nhưng trễ 18 ngày và chỉ 92 trong 119 cửa sổ, vì cửa sổ 60 ngày lấy trung bình cú sốc với những ngày êm xung quanh.
+
+**Điều gì sẽ làm tôi đổi ý.** Ba điều. Thứ nhất, báo động giả trên lợi suất thật: đuôi dày và cụm biến động làm độ rộng của quãng êm lớn hơn trong mô phỏng này, nên ngưỡng −3 phải được kiểm trên nhiều năm dữ liệu êm thật trước khi ai tin nó. Thứ hai, báo động chỉ nói rằng mọi thứ đang đi cùng nhau chứ không nói vì sao, và một cú sốc làm tăng nhiễu riêng của từng mã thay vì nhân tố chung sẽ chẳng làm cây ngắn đi chút nào. Thứ ba, độ trễ một đến ba tuần là một cái giá: khi báo động kêu, một phần cú chuyển động đã qua. Nếu tương quan trung bình thường cũng kêu sớm và sạch như vậy, cái cây không thêm gì cho việc này, và tôi sẽ dùng con số đơn giản hơn.
+
+## Key takeaways
+
+- **Đồ thị biến 4.950 con số thành một hình dạng**: mã là nút, cạnh mang khoảng cách, và câu hỏi thành giữ cạnh nào. *(Mục 1 và 3)*
+- **Tương quan được đổi thành khoảng cách trước**: d = √(2(1−ρ)), nên hai mã sát nhau cách 0 và hai mã không liên quan cách khoảng 1,41. *(Mục 2)*
+- **MST giữ N−1 cạnh**: 99 với VN100, tìm bằng luật Kruskal là lấy cạnh ngắn nhất nối hai mã chưa liên thông. *(Mục 3)*
+- **Cửa sổ ngắn sinh cạnh giả**: 615 trong 4.950 cặp không liên quan vượt 0,2 với 60 ngày, chỉ 8 với 250 ngày. *(Mục 4)*
+- **Cây khôi phục ngành và co lại khi sụp đổ**: các nhóm của Mantegna hiện ra mà không cần nhãn ngành, và cây của Onnela ngắn hơn quanh Black Monday. *(Mục 5)*
+- **Cộng đồng cho bản đồ, không cho tín hiệu**: Louvain khôi phục các ngành đã gài sẵn từ 60 đến 250 ngày dữ liệu, nhưng một quy tắc chọn mã Sharpe tốt nhất mỗi cộng đồng vẫn cho Sharpe 1,52 ở lần chạy tốt nhất trên thị trường không có lợi thế. *(Mục 6)*
+- **Độ trung tâm và tầm nhìn thêm số liệu cho mỗi mã hoặc mỗi ngày**: đầu vào hữu ích, với bằng chứng khiêm tốn và có kèm cảnh báo trong các nguồn đã đọc, và đồ thị tầm nhìn của N giá có ít nhất N−1 cạnh. *(Mục 7 và 8)*
+- **Báo động căng thẳng phải đếm báo động giả trước**: z-score độ dài cây trượt dưới −3 đánh dấu 110 trong 119 cửa sổ sốc và 0 trong 160 cửa sổ êm ở mô phỏng. *(Mục 10)*
+
+## Review questions
+
+1. Vì sao Euler vứt bản đồ đi, và ông giữ lại hai thứ nào? *(Xem Mục 1)*
+2. Vì sao không dùng tương quan thô làm khoảng cách, và d bằng bao nhiêu khi ρ = 0, 0,5 và 0,8? *(Xem Mục 2)*
+3. Đồ thị 100 mã có 4.950 cạnh khả dĩ. MST giữ bao nhiêu cạnh, PMFG giữ bao nhiêu? *(Xem Mục 3)*
+4. Trong thuật toán Kruskal, vì sao cạnh C–E bị bỏ dù nó ngắn hơn B–C? *(Xem Mục 3)*
+5. Với 100 chuỗi ngẫu nhiên không liên quan, có bao nhiêu cặp trông như có liên hệ (|ρ| trên 0,2) ở 60 ngày và ở 250 ngày? *(Xem Mục 4)*
+6. Cây của Mantegna xử lý quặng, nhôm và đồng thế nào? *(Xem Mục 5)*
+7. Tương quan trung bình và độ dài cây thay đổi ra sao quanh cú sụp đổ 1987? *(Xem Mục 5)*
+8. Trong demo, vì sao ngưỡng 0,30 chạy được ở lần chạy êm và hỏng ở lần chạy sụp đổ? *(Xem Mục 5)*
+9. Vì sao một quy tắc chọn mã Sharpe tốt nhất mỗi cộng đồng đạt Sharpe 1,52 trên thị trường không có lợi thế, và điều đó nói gì về một backtest đơn lẻ? *(Xem Mục 6)*
+10. Theo Peralta và Zareei, độ trung tâm của một mã liên hệ thế nào với tỷ trọng tối ưu của nó? *(Xem Mục 7)*
+11. Vì sao đồ thị tầm nhìn của 250 giá ngày có ít nhất 249 cạnh? *(Xem Mục 8)*
+12. Trong ca thực hành, vì sao đếm báo động giả trước báo động trúng, và điều gì làm ngưỡng −3 sai trên dữ liệu thật? *(Xem Mục 10)*
+
+Quiz: [Làm quiz 40 câu](/blog/ai-trading-graphs/quiz/).
+
+## Go deeper
+
+- **[Mantegna: Hierarchical Structure in Financial Markets](https://arxiv.org/abs/cond-mat/9802256)** và **[Onnela và cộng sự: Dynamics of market correlations](https://arxiv.org/abs/cond-mat/0302546)**: hai bài báo nằm sau mục 5.
+- **[Marti và cộng sự: A review of two decades of correlations, hierarchies, networks and clustering](https://arxiv.org/abs/1703.00485)**: bài tổng quan.
+- **[Tumminello và cộng sự: A tool for filtering information in complex systems](https://arxiv.org/abs/cond-mat/0501335)** và **[Lacasa và cộng sự: From time series to complex networks, the visibility graph](https://www.pnas.org/doi/10.1073/pnas.0709247105)**: PMFG của mục 3 và đồ thị tầm nhìn của mục 8.
+
+</Vi>

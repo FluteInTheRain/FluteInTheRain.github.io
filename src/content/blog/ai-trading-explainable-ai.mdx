@@ -1,0 +1,536 @@
+---
+title: "Explainable AI"
+title_vi: "AI giải thích được"
+description: "Why did the model rank this stock first? Shapley values, baselines, twin features, a leak an importance chart exposed, and what no explanation proves. Post 9 of the series."
+description_vi: "Vì sao mô hình xếp mã này lên đầu? Shapley value, mốc so sánh, feature song sinh, một vụ rò rỉ bị biểu đồ importance phát hiện, và điều mà lời giải thích không chứng minh được."
+date: 2026-11-28
+category: "ai"
+tags: ["ai", "ai-trading", "explainable-ai"]
+cover: "../../assets/blog/ai-trading-explainable-ai/husky-in-snow.jpg"
+cover_alt: "A Siberian husky curled up asleep in deep snow, frost on its grey and black fur"
+draft: true
+sources:
+  - { title: "\"Why Should I Trust You?\": Explaining the Predictions of Any Classifier", author: "Marco Tulio Ribeiro, Sameer Singh & Carlos Guestrin (arXiv 1602.04938, 2016)", chapters: "Section 6.4, husky-versus-wolf experiment, Table 2", url: "https://arxiv.org/abs/1602.04938" }
+  - { title: "A Value for N-Person Games (RAND P-295, 1952)", author: "Lloyd S. Shapley", url: "https://www.rand.org/pubs/papers/P295.html" }
+  - { title: "A Unified Approach to Interpreting Model Predictions (NIPS 2017)", author: "Scott Lundberg & Su-In Lee", url: "https://arxiv.org/abs/1705.07874" }
+  - { title: "Consistent Individualized Feature Attribution for Tree Ensembles", author: "Scott M. Lundberg, Gabriel G. Erion & Su-In Lee", url: "https://arxiv.org/abs/1802.03888" }
+  - { title: "Empirical Asset Pricing via Machine Learning (Review of Financial Studies 33(5), 2020; NBER Working Paper 25398)", author: "Shihao Gu, Bryan Kelly & Dacheng Xiu", url: "https://www.nber.org/papers/w25398" }
+  - { title: "Fooling LIME and SHAP: Adversarial Attacks on Post hoc Explanation Methods", author: "Dylan Slack, Sophie Hilgard, Emily Jia, Sameer Singh & Himabindu Lakkaraju", url: "https://arxiv.org/abs/1911.02508" }
+  - { title: "Problems with Shapley-value-based explanations as feature importance measures (ICML 2020)", author: "I. Elizabeth Kumar, Suresh Venkatasubramanian, Carlos Scheidegger & Sorelle Friedler", url: "https://arxiv.org/abs/2002.11097" }
+  - { title: "Stop Explaining Black Box Machine Learning Models for High Stakes Decisions and Use Interpretable Models Instead (Nature Machine Intelligence, 2019)", author: "Cynthia Rudin", url: "https://arxiv.org/abs/1811.10154" }
+  - { title: "Circular 2022-03: Adverse action notification requirements in connection with credit decisions based on complex algorithms", author: "Consumer Financial Protection Bureau, 26 May 2022", url: "https://www.consumerfinance.gov/compliance/circulars/circular-2022-03-adverse-action-notification-requirements-in-connection-with-credit-decisions-based-on-complex-algorithms/" }
+  - { title: "A Siberian husky sled dog curled up in the snow in Long Lake (photo, CC BY 2.0)", author: "Lorie Shaull", url: "https://commons.wikimedia.org/wiki/File:A_Siberian_husky_sled_dog_curled_up_in_the_snow_in_Long_Lake.jpg" }
+---
+
+import En from '../../components/mdx/En.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import AtP09TwoQuestions from '../../components/mdx/AtP09TwoQuestions.astro';
+import AtP09ShapleyOrders from '../../components/mdx/AtP09ShapleyOrders.astro';
+import AtP09Waterfall from '../../components/mdx/AtP09Waterfall.astro';
+import AtP09Baseline from '../../components/mdx/AtP09Baseline.astro';
+import AtP09ExplainDemo from '../../components/mdx/AtP09ExplainDemo.astro';
+import AtP09Twins from '../../components/mdx/AtP09Twins.astro';
+import AtP09LeakCheck from '../../components/mdx/AtP09LeakCheck.astro';
+import AtP09Limits from '../../components/mdx/AtP09Limits.astro';
+import AtP09Review from '../../components/mdx/AtP09Review.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
+import heroHusky from '../../assets/blog/ai-trading-explainable-ai/husky-in-snow.jpg';
+
+<En>
+
+<Figure src={heroHusky} alt="A Siberian husky curled up asleep in deep snow, frost on its grey and black fur" caption="A husky in snow. The classifier in the story below would have called this one a wolf, because it only looked at the snow." sourceTitle="Wikimedia Commons: A Siberian husky sled dog curled up in the snow in Long Lake (photo by Lorie Shaull, CC BY 2.0)" sourceUrl="https://commons.wikimedia.org/wiki/File:A_Siberian_husky_sled_dog_curled_up_in_the_snow_in_Long_Lake.jpg" />
+
+> "Why Should I Trust You?"
+> &mdash; title of Ribeiro, Singh and Guestrin (2016)
+
+### The wolf detector that only saw snow
+
+In 2016 Marco Ribeiro, Sameer Singh and Carlos Guestrin built a bad classifier on purpose. They trained it on 20 photos, hand-picked so that every wolf stood on snow and no husky did. On 60 more photos it answered "wolf" whenever it saw snow, or a light background at the bottom of the frame, and "husky" otherwise, whatever the animal looked like.
+
+Then they showed 27 graduate students ten of its predictions. Eight were right. One wolf on bare ground was called a husky, and one husky in snow was called a wolf. Before any explanation, 10 of the 27 said they trusted the model, and 12 of 27 had guessed that snow might be involved. After the students saw which pixels the model had used, only 3 of 27 still trusted it, and 25 of 27 named the snow. The authors say plainly that the sample is small. Even so, it shows well what an explanation is for: the model was right for a reason that would not survive a change of scenery, and the explanation exposed that.
+
+A stock-ranking model can fail the same way with a column instead of a background. Say a model ranks the VN30 names every month, and the top of its list keeps being the stocks that had a big move last week. Is that a real tendency, or a quirk of how the data was cut? The ranking alone cannot tell you. This post is about the tools that can, and about how far to trust them.
+
+<Callout type="note" title="TL;DR">
+
+A ranking model gives each stock a score. Two questions follow: what does the model lean on overall (global), and why did it score this stock this way (local)? A SHAP value answers the second by splitting the gap between one stock's score and the average score among the features, with a fair rule borrowed from game theory, and the pieces always add back to the score. The answer depends on which stocks you call "average", it splits credit between near-duplicate features, and it describes the model, not the market. Used well, it catches things like a leaked column: on a simulated set, one such column took the test R² from 0.025 to 0.589 and took almost all the importance. Used badly, it is a nice-looking chart that proves nothing. Nothing here is investment advice.
+
+</Callout>
+
+<Concepts>
+
+- **Feature**: one input column of the model, for example 12-month momentum, value or volatility.
+- **Attribution**: a number per feature saying how much it pushed one prediction up or down.
+- **Baseline (background)**: the comparison group, usually a sample of stocks. "Pushed up" always means up from what this group would score on average.
+- **SHAP**: SHapley Additive exPlanations, an attribution method built on the Shapley value from game theory.
+- **Permutation importance**: shuffle one column on held-out data and see how much the model's score drops. A big drop means the model leaned on that column.
+
+</Concepts>
+
+---
+
+## 1. Two questions about a ranking
+
+Plain version first: a predict-then-rank pipeline gives every stock a score and then sorts. The sorted list is what you trade on, so the questions people ask are about the list.
+
+One kind of question is about the model as a whole. Gu, Kelly and Xiu compared machine-learning methods for measuring asset risk premia, in a study later published in the Review of Financial Studies. Tree-based models and neural networks did best, and the authors trace the gain to nonlinear interactions among predictors that simpler methods miss. All the methods agreed on the leading signals: variations of momentum, liquidity and volatility. That is a global answer: across thousands of stock-months, here is what the model leans on.
+
+The other kind is about one pick. Why is this stock third on the list this month? A global chart cannot say. A stock can sit near the top because of momentum, or because of value, and the average importance of each says nothing about this one.
+
+<AtP09TwoQuestions />
+
+The two answers also catch different mistakes. A global chart shows that the model leans on a column nobody expected. A local explanation shows that one particular pick is odd, even when the global picture looks fine.
+
+<Concepts>
+
+- **Global explanation**: what the model relies on across all its predictions.
+- **Local explanation**: why the model gave one particular prediction.
+- **Predict-then-rank**: predict a score for each stock, then sort and trade the top of the list.
+
+</Concepts>
+
+## 2. A score is a sum of reasons
+
+The tool most people reach for is a Shapley value. Lloyd Shapley worked out in 1952 how to share a joint payout among players: imagine the players joining one at a time, give each the amount they add when they arrive, then average over every possible order of arrival. Lundberg and Lee brought the idea to machine learning in 2017 under the name SHAP. The features are the players, and the "payout" is the gap between this stock's score and the average score.
+
+Start with the smallest case. Say the score is 0.2 times momentum times value, so only a stock that has both gets anything. Stock D has momentum 1.41 and value 0.51, and an average stock sits at 0 on both. Together they are worth 0.2 × 1.41 × 0.51 = 0.1438. If momentum joins first it adds nothing, and value then adds 0.1438. If value joins first, it is the other way round. Average the two orders and each feature gets 0.0719.
+
+<AtP09ShapleyOrders />
+
+Now the real thing. Say we have eight simulated stocks as the background, and a hand-written scoring model with five inputs: 12-month momentum, 6-month momentum, value, volatility and size. A Python script computes the exact Shapley value of each input for stock D by brute force. D scores 1.540. The average score of the eight background stocks is -0.066, so there is a gap of 1.606 to explain.
+
+<AtP09Waterfall />
+
+Momentum, split over its two versions, supplies 0.727 of the gap, which is 45%. Value gives 0.446 and size 0.417. Volatility gives 0.016 and barely matters for D. The five pieces and the average add back to the score exactly, which makes a good habit: always check that they do.
+
+Brute force is fine for five features. For 30 features, each one needs the value of 2^29 = 536,870,912 subsets of the others, which is why Lundberg, Erion and Lee published Tree SHAP, a fast exact algorithm for tree ensembles, one of the two model families that did best in the study above.
+
+<Concepts>
+
+- **Shapley value**: a feature's average added contribution over every order in which the features could be added.
+- **Efficiency**: the attributions plus the baseline score add up to the model's score for that stock.
+- **Tree SHAP**: a fast way to compute SHAP values for tree ensembles such as random forests and gradient boosting.
+
+</Concepts>
+
+## 3. The baseline decides what "high" means
+
+Look at the waterfall again. The first bar says the average is -0.066. Where did that come from? From the eight stocks we picked as the comparison group. Pick a different group and every bar can change.
+
+Take only the four calmest of the eight, the ones with the lowest volatility. Their average score is 0.376, higher than before, because low volatility earns points in this model. Against this group D's volatility counts against it, at -0.159, and its value contribution falls from 0.446 to 0.249. D's score is the same 1.540 in both views. Only the question changed: "better than the market" or "better than the calm part of the market".
+
+<AtP09Baseline />
+
+A Shapley value is a statement relative to a baseline, and the baseline is a choice you make and should write down. Try it yourself below. Pick D, then switch the comparison group, then drop 6-month momentum, and watch which numbers move.
+
+<AtP09ExplainDemo />
+
+<Concepts>
+
+- **Baseline (background)**: the stocks the explained stock is compared with. A different baseline gives a different, equally valid, explanation.
+
+</Concepts>
+
+## 4. Near-twins share the credit
+
+Momentum comes in many lookbacks, and a model can easily be given the 6-month and the 12-month return side by side. They are two views of one idea, and they move together.
+
+When two features carry the same information, a Shapley value splits the credit between them. In our simulated model the weights are 0.35 on 12-month momentum and 0.25 on 6-month momentum. For D that gives 0.549 and 0.178. Now drop the 6-month feature and give its weight to the 12-month one (0.60). The new model scores D at 1.625, about the same, but the 12-month feature now gets 0.908 and the 6-month feature gets 0.
+
+<AtP09Twins />
+
+Read the 12-month number alone and it falls from 0.908 to 0.549, although both models lean on momentum. A ranking of features by single numbers can push a real driver down the list because its twin sits just above it. The cure is simple to say: group features that are variations of one idea, and add their attributions before you judge.
+
+## 5. Using attributions to catch a leak
+
+Section 3 of the Data post was about information that did not yet exist on the date of the decision. Attributions are one of the better ways to notice that it got in anyway.
+
+Say we simulate 3,000 stock-months with four honest features and a monthly return that depends weakly on three of them, plus a lot of noise. A gradient-boosting model trained on the first 2,000 rows scores a test R² of 0.0248 on the last 1,000, and the Spearman correlation between its predictions and the outcomes is 0.187. Permutation importance says 12-month momentum matters most, with a drop of 0.0634, then value and volatility. That is a faint, believable signal.
+
+Now add one column: a price that is only known after the prediction date, so it carries part of the answer. The test R² jumps to 0.5888 and the correlation to 0.768. A result that good should make you suspicious. The importance chart shows why in one line: the leaked column accounts for a drop of 1.1046, and every honest feature falls below 0.016.
+
+<AtP09LeakCheck />
+
+Nothing in the explanation says "leak". It says "this one column does nearly all the work", and a person who knows what the column is can see the problem. The tool points, and you check the date on the data.
+
+<Concepts>
+
+- **Leakage**: information from after the prediction date getting into the features, so the backtest looks better than anything you could trade.
+- **Test R²**: the share of variation in outcomes the model explains on data it never saw. Near zero is normal for returns.
+
+</Concepts>
+
+## 6. When someone has the right to ask why
+
+Explanations are not only a debugging aid. In lending, a regulator has asked for them. On 26 May 2022 the US Consumer Financial Protection Bureau issued Circular 2022-03. It says that under the Equal Credit Opportunity Act and Regulation B, a creditor that denies credit must give a notice with the specific principal reasons, and that using a complex algorithm does not excuse it. The circular names "uninterpretable or black-box" models as the case where this gets hard.
+
+That circular is about lending, not trading, and I cite it for one reason: it is a public, concrete statement of what "explain the decision" can mean. A reason has to be specific. "The model said so" does not count, and neither does a long list of every feature in the model.
+
+A different school of thought goes further. Cynthia Rudin argues in a 2019 Nature Machine Intelligence paper that for high-stakes decisions you should not explain a black box after the fact. You should use a model that is interpretable from the start. A cheap way to act on that: fit a plain model with a handful of terms next to the complex one. If the plain one ranks nearly as well, you may not need the black box at all, and then the explanation is just the model.
+
+## 7. What an explanation cannot tell you
+
+An attribution is a precise number, and that makes it easy to over-read. The figure below lists five things a SHAP bar does not say, three of which you have already seen on simulated data in this post.
+
+<AtP09Limits />
+
+Two published results are worth keeping in mind. Kumar and colleagues argue that Shapley-based feature importance has mathematical problems, that fixing them brings in causal reasoning, and that Shapley explanations do not meet the human-centred goals people want from them. Slack and colleagues show that LIME and SHAP, which work by perturbing inputs, can be fooled: they built classifiers on datasets such as COMPAS that stayed biased on real data while their explanations looked innocent. If a model could have been built to look innocent, a clean explanation is not an audit.
+
+The explanation step sits between ranking and trading, as a review step.
+
+<AtP09Review />
+
+## 8. Worked case: why is B ranked above A?
+
+Say your ranking model puts stock B one place above stock A, and a colleague asks why, since A has the stronger momentum. Say the model is a small hand-written formula over three standardised features, with a momentum-times-value term in it: score = 0.5 × momentum + 0.3 × value − 0.4 × volatility + 0.4 × momentum × value. Say A has momentum 1.0, value 0.0 and volatility 0.5; B has momentum 0.6, value 1.2 and volatility 0.3. These are assumed numbers, small enough to check by hand.
+
+What I would check first is that the score itself is right: A gets 0.300 and B gets 0.828, so B leads by 0.528. Only then is it worth asking where the 0.528 comes from. The second check is the baseline. "Pushed up" means up from some reference, and the colleague's question has a natural one: A, not the average stock.
+
+The steps, with the exact Shapley value of each feature (three features, so six orders of arrival):
+
+```python
+from itertools import permutations
+import numpy as np
+
+names = ["momentum", "value", "volatility"]
+
+def score(x):
+    mom, val, vol = x
+    return 0.5 * mom + 0.3 * val - 0.4 * vol + 0.4 * mom * val
+
+def shapley(f, x, base):
+    """Exact Shapley values: average marginal gain over every order of arrival."""
+    n = len(x)
+    phi = np.zeros(n)
+    orders = list(permutations(range(n)))
+    for order in orders:
+        cur = np.array(base, dtype=float)
+        prev = f(cur)
+        for i in order:
+            cur[i] = x[i]
+            now = f(cur)
+            phi[i] += now - prev
+            prev = now
+    return phi / len(orders)
+
+A = np.array([1.0, 0.0, 0.5])    # strong momentum, no value edge, medium volatility
+B = np.array([0.6, 1.2, 0.3])    # milder momentum, cheap, calm
+market = np.zeros(3)             # "average stock" = 0 on every feature
+
+print(f"score A = {score(A):.3f}   score B = {score(B):.3f}   gap = {score(B) - score(A):.3f}")
+for label, base in [("vs market average", market), ("vs stock A", A)]:
+    phi = shapley(score, B, base)
+    gap = score(B) - score(base)
+    print(f"\nB {label}: gap to explain = {gap:.3f}")
+    for n, p in zip(names, phi):
+        print(f"  {n:<11}{p:+.3f}")
+    print(f"  sum        {phi.sum():+.3f}")
+```
+
+<TerminalOutput command={"uv run --with numpy python demo/ai-trading/p09_shapley_pair.py"} label="Python 3.12 · numpy 2.5 · captured Nov 2026" caption="The same stock B explained twice. Against the average stock, momentum is a plus; against stock A, it is a minus.">
+```text
+score A = 0.300   score B = 0.828   gap = 0.528
+
+B vs market average: gap to explain = 0.828
+  momentum   +0.444
+  value      +0.504
+  volatility -0.120
+  sum        +0.828
+
+B vs stock A: gap to explain = 0.528
+  momentum   -0.296
+  value      +0.744
+  volatility +0.080
+  sum        +0.528
+```
+</TerminalOutput>
+
+1. Against the market average, B's 0.828 splits into momentum +0.444, value +0.504 and volatility −0.120. The pieces sum to 0.828, as they must.
+2. Against A, the gap to explain is 0.528. Value gives +0.744, volatility gives +0.080, and momentum gives −0.296.
+3. The sign of momentum flipped, and the model did nothing different. B has less momentum than A, so relative to A it loses points there. Relative to the average stock it still has some.
+
+What the result tells you: B is above A because of value, and the interaction term makes the cheap, calm stock's value count for more. Momentum is working against B in this pair. A report that quoted only the "versus market" bars would have told the colleague that momentum helps B, which answers a different question from the one asked.
+
+What would change my mind: if the pieces did not add up to the gap, the code is wrong before anything else is. If the colleague really meant "why is B in the top 10", the market-average baseline is the right one and the first table is the answer. And if the model is a tree ensemble trained on real data instead of a formula I wrote, I would not read −0.296 as a fact about momentum in the market, only as a fact about this model.
+
+## Key takeaways
+
+- **Two questions, two tools**: global importance says what the model leans on overall; a local explanation says why this stock got this score. *(Section 1)*
+- **A score is a sum**: baseline plus one push per feature, and the pieces must add back to the score exactly. Check it every time. *(Section 2)*
+- **No baseline, no explanation**: the same stock with the same score gets different credit against a different comparison group, so state the group. *(Section 3)*
+- **Twins split credit**: two features that say the same thing each look weaker than the idea behind them; add them up before you rank features. *(Section 4)*
+- **Importance charts catch leaks**: a sudden jump in test score with one column taking nearly all the credit means check the dates on that column first. *(Section 5)*
+- **Reasons have to be specific**: the clearest public standard comes from lending, where "the model said so" is not enough. *(Section 6)*
+- **An explanation describes the model**: it is not causal, it can be fooled, and it does not prove the model is right. *(Section 7)*
+- **Say who the comparison is with**: B against the average stock and B against A gave opposite signs for momentum from the same model. *(Section 8)*
+
+## Review questions
+
+1. Gu, Kelly and Xiu found one set of leading signals across methods. Is that a global or a local explanation, and what does it not tell you about one stock? *(See Section 1)*
+2. In the waterfall for stock D, which numbers must add up to 1.540, and what does it mean if they do not? *(See Section 2)*
+3. Why does Shapley's rule give 0.0719 to each of momentum and value when only the pair is worth anything? *(See Section 2)*
+4. D's volatility gets +0.016 against all eight stocks and -0.159 against the four calmest. Why does the sign change when the score does not? *(See Section 3)*
+5. What does dropping the 6-month feature do to the 12-month attribution for D, and what should you do before ranking features? *(See Section 4)*
+6. A test R² goes from 0.025 to 0.589 after one column is added. What should you open first, and what would you look for? *(See Section 5)*
+7. What did the CFPB require of a creditor using a complex algorithm, and why is the example about lending and not trading? *(See Section 6)*
+8. Name two reasons a clean-looking SHAP chart is not proof that a model is fair or right. *(See Section 7)*
+9. Stock B beats stock A in the worked case. Why does momentum get +0.444 against the average stock and −0.296 against A? *(See Section 8)*
+
+## Go deeper
+
+- **[Ribeiro, Singh, Guestrin: "Why Should I Trust You?"](https://arxiv.org/abs/1602.04938)**: the husky experiment of the opening, with the LIME method behind it.
+- **[Lundberg and Lee: A Unified Approach to Interpreting Model Predictions](https://arxiv.org/abs/1705.07874)**: the SHAP paper; the Tree SHAP follow-up is linked in the sources.
+- **[Gu, Kelly, Xiu: Empirical Asset Pricing via Machine Learning](https://www.nber.org/papers/w25398)**: the study behind the global answer of Section 1.
+
+</En>
+
+<Vi>
+
+<Figure src={heroHusky} alt="Một con husky Siberia cuộn tròn ngủ trong tuyết dày, sương giá phủ trên bộ lông xám đen" caption="Một con husky trong tuyết. Bộ phân loại trong câu chuyện bên dưới sẽ gọi con này là sói, vì nó chỉ nhìn tuyết." sourceTitle="Wikimedia Commons: A Siberian husky sled dog curled up in the snow in Long Lake (ảnh của Lorie Shaull, CC BY 2.0)" sourceUrl="https://commons.wikimedia.org/wiki/File:A_Siberian_husky_sled_dog_curled_up_in_the_snow_in_Long_Lake.jpg" />
+
+> "Why Should I Trust You?"
+> &mdash; tựa bài của Ribeiro, Singh và Guestrin (2016)
+
+### Bộ nhận diện sói chỉ nhìn tuyết
+
+Năm 2016, Marco Ribeiro, Sameer Singh và Carlos Guestrin cố tình dựng một bộ phân loại tồi. Họ huấn luyện nó trên 20 tấm ảnh, chọn tay sao cho con sói nào cũng đứng trên tuyết còn con husky nào cũng không. Trên 60 tấm ảnh khác, nó trả lời "sói" hễ thấy tuyết (hoặc nền sáng ở cạnh dưới khung hình), còn lại là "husky", bất kể con vật trông ra sao.
+
+Rồi họ cho 27 sinh viên cao học xem mười dự đoán của nó. Tám cái đúng. Một con sói trên đất trống bị gọi là husky, và một con husky trong tuyết bị gọi là sói. Trước khi có lời giải thích nào, 10 trong 27 người nói họ tin mô hình, và 12 trong 27 người đã đoán là tuyết có liên quan. Sau khi thấy mô hình đã dùng những điểm ảnh nào, chỉ còn 3 trong 27 người còn tin nó, và 25 trong 27 người gọi đúng tên tuyết. Các tác giả nói thẳng là mẫu nhỏ. Dù vậy, nó cho thấy khá rõ lời giải thích để làm gì: mô hình đúng vì một lý do không sống nổi khi đổi bối cảnh, và lời giải thích đã phơi lý do đó ra.
+
+Một mô hình xếp hạng cổ phiếu có thể hỏng đúng kiểu đó, chỉ khác là bằng một cột dữ liệu thay vì một phông nền. Giả sử mô hình xếp các mã VN30 mỗi tháng, và đầu danh sách cứ là những mã vừa có một cú chạy mạnh tuần trước. Đó là xu hướng thật, hay chỉ là hệ quả của cách cắt dữ liệu? Riêng bảng xếp hạng thì không trả lời được. Bài này nói về những công cụ trả lời được, và về việc nên tin chúng tới đâu.
+
+<Callout type="note" title="Tóm tắt nhanh">
+
+Mô hình xếp hạng cho mỗi cổ phiếu một điểm. Từ đó có hai câu hỏi: nhìn chung mô hình dựa vào gì (toàn cục), và vì sao nó chấm mã này như vậy (cục bộ)? Giá trị SHAP trả lời câu thứ hai bằng cách chia khoảng cách giữa điểm của một mã và điểm trung bình cho các feature, theo một luật chia công bằng mượn từ lý thuyết trò chơi, và các phần luôn cộng lại đúng bằng điểm. Câu trả lời phụ thuộc vào việc bạn gọi nhóm nào là "trung bình", nó chia công giữa các feature gần như trùng nhau, và nó mô tả mô hình chứ không mô tả thị trường. Dùng đúng, nó bắt được những thứ như một cột rò rỉ: trên một bộ dữ liệu mô phỏng, một cột như vậy đẩy R² kiểm tra từ 0,025 lên 0,589 và hút gần hết importance. Dùng sai, nó chỉ là biểu đồ đẹp mà chẳng chứng minh gì. Không có gì ở đây là lời khuyên đầu tư.
+
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Feature**: một cột đầu vào của mô hình, ví dụ momentum 12 tháng, value hay biến động.
+- **Attribution (phần đóng góp)**: một con số cho mỗi feature, nói nó đẩy một dự đoán lên hay xuống bao nhiêu.
+- **Mốc so sánh (baseline, background)**: nhóm đối chứng, thường là một mẫu cổ phiếu. "Đẩy lên" luôn có nghĩa là lên so với điểm trung bình của nhóm này.
+- **SHAP**: SHapley Additive exPlanations, phương pháp attribution dựng trên Shapley value của lý thuyết trò chơi.
+- **Permutation importance**: xáo trộn một cột trên dữ liệu giữ lại rồi xem điểm của mô hình tụt bao nhiêu. Tụt nhiều nghĩa là mô hình dựa nhiều vào cột đó.
+
+</Concepts>
+
+---
+
+## 1. Hai câu hỏi về một bảng xếp hạng
+
+Nói thẳng trước: pipeline predict-then-rank chấm điểm từng cổ phiếu rồi sắp xếp. Danh sách đã sắp là thứ bạn giao dịch theo, nên các câu hỏi người ta đặt ra đều nhắm vào danh sách đó.
+
+Một loại câu hỏi nhắm vào cả mô hình. Gu, Kelly và Xiu so sánh các phương pháp machine learning khi đo phần bù rủi ro của tài sản, trong một nghiên cứu sau đó đăng ở Review of Financial Studies. Mô hình dạng cây và mạng nơ-ron tốt nhất, và các tác giả truy nguồn lợi thế đó về những tương tác phi tuyến giữa các biến dự báo mà phương pháp đơn giản bỏ sót. Mọi phương pháp đều đồng ý về các tín hiệu dẫn đầu: những biến thể của momentum, thanh khoản và biến động. Đó là một câu trả lời toàn cục: qua hàng nghìn mã-tháng, mô hình dựa vào những thứ này.
+
+Loại kia nhắm vào một mã được chọn. Tháng này vì sao mã này đứng thứ ba? Biểu đồ toàn cục không nói được. Một mã có thể đứng cao vì momentum, hoặc vì value, còn importance trung bình của mỗi thứ chẳng nói gì về riêng mã này.
+
+<AtP09TwoQuestions />
+
+Hai câu trả lời cũng bắt hai loại lỗi khác nhau. Biểu đồ toàn cục cho thấy mô hình dựa vào một cột không ai ngờ tới. Lời giải thích cục bộ cho thấy một mã cụ thể có gì lạ, kể cả khi bức tranh toàn cục trông ổn.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Giải thích toàn cục**: mô hình dựa vào gì trên toàn bộ các dự đoán của nó.
+- **Giải thích cục bộ**: vì sao mô hình đưa ra đúng dự đoán này.
+- **Predict-then-rank**: dự đoán điểm cho từng cổ phiếu, rồi sắp xếp và giao dịch phần đầu danh sách.
+
+</Concepts>
+
+## 2. Điểm số là tổng của các lý do
+
+Công cụ mà phần đông người ta với tới là Shapley value. Năm 1952, Lloyd Shapley tìm ra cách chia một khoản thưởng chung cho nhiều người chơi: hình dung các người chơi vào cuộc lần lượt từng người, mỗi người nhận phần họ thêm vào khi bước vào, rồi lấy trung bình qua mọi thứ tự vào cuộc có thể. Lundberg và Lee đưa ý tưởng đó vào machine learning năm 2017 với tên SHAP. Các feature là người chơi, còn "khoản thưởng" là khoảng cách giữa điểm của mã này và điểm trung bình.
+
+Bắt đầu từ ca nhỏ nhất. Giả sử điểm bằng 0,2 nhân momentum nhân value, nên chỉ mã nào có cả hai mới được gì. Cổ phiếu D có momentum 1,41 và value 0,51, còn mã trung bình nằm ở 0 cả hai. Cùng nhau, chúng đáng giá 0,2 × 1,41 × 0,51 = 0,1438. Nếu momentum vào trước thì nó thêm được 0, rồi value thêm 0,1438. Nếu value vào trước thì ngược lại. Lấy trung bình hai thứ tự, mỗi feature nhận 0,0719.
+
+<AtP09ShapleyOrders />
+
+Giờ tới ca thật. Giả sử có tám cổ phiếu mô phỏng làm nền, và một mô hình chấm điểm viết tay với năm đầu vào: momentum 12 tháng, momentum 6 tháng, value, biến động và quy mô. Một đoạn Python tính Shapley value chính xác của từng đầu vào cho cổ phiếu D bằng vét cạn. D được 1,540 điểm. Điểm trung bình của tám mã nền là -0,066, nên có một khoảng cách 1,606 cần giải thích.
+
+<AtP09Waterfall />
+
+Momentum, chia qua hai phiên bản của nó, đóng góp 0,727 trong khoảng cách đó, tức 45%. Value cho 0,446 và quy mô 0,417. Biến động cho 0,016, gần như không đáng kể với D. Năm phần cộng với mức trung bình lại đúng bằng điểm, và đây là một thói quen tốt: lần nào cũng kiểm tra xem chúng có cộng khớp không.
+
+Vét cạn thì ổn với năm feature. Với 30 feature, mỗi feature cần giá trị của 2^29 = 536.870.912 tập con của các feature còn lại, và đó là lý do Lundberg, Erion và Lee công bố Tree SHAP, một thuật toán nhanh mà vẫn chính xác cho các mô hình cây, một trong hai họ mô hình tốt nhất trong nghiên cứu ở trên.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Shapley value**: đóng góp thêm vào trung bình của một feature, lấy qua mọi thứ tự có thể khi thêm các feature vào.
+- **Tính cộng khớp (efficiency)**: các attribution cộng với điểm nền bằng đúng điểm của mô hình cho mã đó.
+- **Tree SHAP**: cách nhanh để tính SHAP cho các mô hình cây như random forest và gradient boosting.
+
+</Concepts>
+
+## 3. Mốc so sánh quyết định "cao" nghĩa là gì
+
+Nhìn lại biểu đồ thác nước. Thanh đầu nói mức trung bình là -0,066. Con số này từ đâu ra? Từ tám mã mà ta chọn làm nhóm đối chứng. Chọn nhóm khác, mọi thanh đều có thể đổi.
+
+Lấy riêng bốn mã êm nhất trong tám mã, những mã có biến động thấp nhất. Điểm trung bình của chúng là 0,376, cao hơn trước, vì mô hình này thưởng điểm cho biến động thấp. So với nhóm này, biến động của D bị tính là điểm trừ, -0,159, và phần đóng góp của value tụt từ 0,446 xuống 0,249. Điểm của D vẫn là 1,540 ở cả hai cách nhìn. Chỉ có câu hỏi đổi: "hơn thị trường" hay "hơn phần êm ả của thị trường".
+
+<AtP09Baseline />
+
+Shapley value là một phát biểu so với một mốc, và mốc là lựa chọn của bạn, nên hãy ghi lại. Bạn thử ngay bên dưới. Chọn D, rồi đổi nhóm đối chứng, rồi bỏ momentum 6 tháng, và xem những số nào dịch chuyển.
+
+<AtP09ExplainDemo />
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Mốc so sánh (baseline, background)**: nhóm cổ phiếu mà mã đang được giải thích bị đem ra so. Mốc khác cho một lời giải thích khác, và cả hai đều hợp lệ.
+
+</Concepts>
+
+## 4. Feature song sinh chia nhau phần công
+
+Momentum có nhiều chu kỳ nhìn lại, và một mô hình rất dễ được đưa cả lợi suất 6 tháng lẫn 12 tháng đặt cạnh nhau. Chúng là hai góc nhìn của một ý tưởng, và chúng cùng nhau di chuyển.
+
+Khi hai feature mang cùng một thông tin, Shapley value chia phần công giữa chúng. Trong mô hình mô phỏng của ta, trọng số là 0,35 cho momentum 12 tháng và 0,25 cho momentum 6 tháng. Với D, điều đó cho 0,549 và 0,178. Giờ bỏ feature 6 tháng và dồn trọng số của nó sang feature 12 tháng (0,60). Mô hình mới chấm D ở 1,625, gần bằng, nhưng feature 12 tháng giờ nhận 0,908 còn feature 6 tháng nhận 0.
+
+<AtP09Twins />
+
+Đọc riêng số của 12 tháng thì nó tụt từ 0,908 xuống 0,549, dù cả hai mô hình đều dựa vào momentum. Xếp hạng các feature theo từng con số riêng lẻ có thể đẩy một động lực thật xuống thấp chỉ vì anh em song sinh của nó đứng ngay trên. Cách chữa nói thì dễ: gom các feature là biến thể của cùng một ý tưởng, rồi cộng attribution của chúng lại trước khi kết luận.
+
+## 5. Dùng attribution để bắt rò rỉ
+
+Mục 3 của bài Dữ liệu nói về thông tin chưa tồn tại vào ngày ra quyết định. Attribution là một trong những cách tốt để nhận ra rằng nó vẫn lọt vào.
+
+Giả sử ta mô phỏng 3.000 mã-tháng với bốn feature trung thực và lợi suất tháng phụ thuộc yếu vào ba trong số đó, cộng rất nhiều nhiễu. Một mô hình gradient boosting huấn luyện trên 2.000 dòng đầu đạt R² kiểm tra 0,0248 trên 1.000 dòng cuối, và tương quan Spearman giữa dự đoán và kết quả là 0,187. Permutation importance nói momentum 12 tháng quan trọng nhất, với mức tụt 0,0634, rồi tới value và biến động. Đó là một tín hiệu mỏng nhưng đáng tin.
+
+Giờ thêm một cột: một mức giá chỉ biết được sau ngày dự đoán, nên nó mang theo một phần đáp án. R² kiểm tra nhảy lên 0,5888 và tương quan lên 0,768. Kết quả tốt tới vậy nên khiến bạn nghi ngờ. Biểu đồ importance cho thấy lý do chỉ trong một dòng: cột rò rỉ chiếm mức tụt 1,1046, còn mọi feature trung thực đều dưới 0,016.
+
+<AtP09LeakCheck />
+
+Lời giải thích không hề nói "rò rỉ". Nó nói "một cột này làm gần hết việc", và người biết cột đó là gì sẽ thấy vấn đề. Công cụ chỉ tay, còn bạn kiểm tra ngày tháng của dữ liệu.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Rò rỉ (leakage)**: thông tin từ sau ngày dự đoán lọt vào các feature, khiến backtest trông tốt hơn mọi thứ bạn có thể giao dịch.
+- **R² kiểm tra**: phần biến thiên của kết quả mà mô hình giải thích được trên dữ liệu nó chưa từng thấy. Với lợi suất, gần 0 là bình thường.
+
+</Concepts>
+
+## 6. Khi có người có quyền hỏi vì sao
+
+Lời giải thích không chỉ để gỡ lỗi. Trong cho vay, cơ quan quản lý đã đòi nó. Ngày 26/5/2022, Cục Bảo vệ Tài chính Người tiêu dùng Mỹ (CFPB) ban hành Circular 2022-03. Văn bản nói rằng theo Equal Credit Opportunity Act và Regulation B, bên cho vay từ chối tín dụng phải gửi thông báo nêu các lý do chính cụ thể, và dùng thuật toán phức tạp không phải là cái cớ. Circular gọi tên các mô hình "không thể diễn giải hay black-box" là trường hợp việc này trở nên khó.
+
+Circular đó nói về cho vay, không phải giao dịch, và mình dẫn nó vì một lý do: nó là một phát biểu công khai, cụ thể về việc "giải thích quyết định" có thể nghĩa là gì. Lý do phải cụ thể. "Mô hình bảo vậy" không tính, và một danh sách dài mọi feature trong mô hình cũng không.
+
+Một trường phái khác đi xa hơn. Cynthia Rudin lập luận trong bài báo 2019 ở Nature Machine Intelligence rằng với các quyết định hệ trọng, đừng giải thích hộp đen sau khi đã xong; hãy dùng mô hình có thể diễn giải ngay từ đầu. Một cách rẻ để làm theo: dựng một mô hình trơn với vài số hạng cạnh mô hình phức tạp. Nếu mô hình trơn xếp hạng gần bằng, có thể bạn không cần hộp đen, và khi đó lời giải thích chính là mô hình.
+
+## 7. Điều lời giải thích không nói được
+
+Attribution là con số chính xác, và điều đó dễ khiến người ta đọc quá mức. Hình dưới liệt kê năm điều mà một thanh SHAP không nói, trong đó ba điều bạn đã thấy trên dữ liệu mô phỏng ở bài này.
+
+<AtP09Limits />
+
+Có hai kết quả đã công bố đáng nhớ. Kumar và cộng sự lập luận rằng feature importance dựa trên Shapley có vấn đề về toán học, sửa chúng thì phải kéo theo suy luận nhân quả, và lời giải thích kiểu Shapley không đạt những mục tiêu hướng tới con người mà người ta muốn từ chúng. Slack và cộng sự cho thấy LIME và SHAP, vốn hoạt động bằng cách làm nhiễu đầu vào, có thể bị đánh lừa: họ dựng các bộ phân loại trên những bộ dữ liệu như COMPAS vẫn thiên lệch trên dữ liệu thật trong khi lời giải thích trông vô hại. Nếu một mô hình có thể được dựng để trông vô hại, thì một lời giải thích sạch sẽ không phải là một cuộc kiểm toán.
+
+Bước giải thích nằm giữa xếp hạng và giao dịch, như một lần duyệt.
+
+<AtP09Review />
+
+## 8. Ca thực hành: vì sao B xếp trên A?
+
+Giả sử mô hình xếp hạng đặt cổ phiếu B ngay trên cổ phiếu A, và một đồng nghiệp hỏi vì sao, trong khi A có momentum mạnh hơn. Giả sử mô hình là một công thức viết tay trên ba feature đã chuẩn hóa, có một số hạng momentum nhân value: điểm = 0,5 × momentum + 0,3 × value − 0,4 × biến động + 0,4 × momentum × value. Giả sử A có momentum 1,0, value 0,0, biến động 0,5; B có momentum 0,6, value 1,2, biến động 0,3. Các số này là giả định, đủ nhỏ để tự kiểm bằng tay.
+
+Việc đầu tiên tôi kiểm là bản thân điểm số có đúng không: A được 0,300, B được 0,828, vậy B hơn 0,528. Chỉ sau đó mới đáng hỏi 0,528 ấy đến từ đâu. Việc thứ hai là mốc so sánh. "Đẩy lên" nghĩa là lên so với một mốc nào đó, và câu hỏi của đồng nghiệp có mốc tự nhiên của nó: A, không phải cổ phiếu trung bình.
+
+Các bước, với Shapley value chính xác của từng feature (ba feature nên có sáu thứ tự xuất hiện):
+
+```python
+from itertools import permutations
+import numpy as np
+
+names = ["momentum", "value", "volatility"]
+
+def score(x):
+    mom, val, vol = x
+    return 0.5 * mom + 0.3 * val - 0.4 * vol + 0.4 * mom * val
+
+def shapley(f, x, base):
+    """Exact Shapley values: average marginal gain over every order of arrival."""
+    n = len(x)
+    phi = np.zeros(n)
+    orders = list(permutations(range(n)))
+    for order in orders:
+        cur = np.array(base, dtype=float)
+        prev = f(cur)
+        for i in order:
+            cur[i] = x[i]
+            now = f(cur)
+            phi[i] += now - prev
+            prev = now
+    return phi / len(orders)
+
+A = np.array([1.0, 0.0, 0.5])    # strong momentum, no value edge, medium volatility
+B = np.array([0.6, 1.2, 0.3])    # milder momentum, cheap, calm
+market = np.zeros(3)             # "average stock" = 0 on every feature
+
+print(f"score A = {score(A):.3f}   score B = {score(B):.3f}   gap = {score(B) - score(A):.3f}")
+for label, base in [("vs market average", market), ("vs stock A", A)]:
+    phi = shapley(score, B, base)
+    gap = score(B) - score(base)
+    print(f"\nB {label}: gap to explain = {gap:.3f}")
+    for n, p in zip(names, phi):
+        print(f"  {n:<11}{p:+.3f}")
+    print(f"  sum        {phi.sum():+.3f}")
+```
+
+<TerminalOutput command={"uv run --with numpy python demo/ai-trading/p09_shapley_pair.py"} label="Python 3.12 · numpy 2.5 · captured Nov 2026" caption="Cùng một cổ phiếu B được giải thích hai lần. So với cổ phiếu trung bình, momentum là điểm cộng; so với cổ phiếu A, nó là điểm trừ.">
+```text
+score A = 0.300   score B = 0.828   gap = 0.528
+
+B vs market average: gap to explain = 0.828
+  momentum   +0.444
+  value      +0.504
+  volatility -0.120
+  sum        +0.828
+
+B vs stock A: gap to explain = 0.528
+  momentum   -0.296
+  value      +0.744
+  volatility +0.080
+  sum        +0.528
+```
+</TerminalOutput>
+
+1. So với trung bình thị trường, 0,828 của B tách thành momentum +0,444, value +0,504 và biến động −0,120. Các phần cộng ra 0,828, đúng như phải thế.
+2. So với A, khoảng cách cần giải thích là 0,528. Value cho +0,744, biến động cho +0,080, còn momentum cho −0,296.
+3. Dấu của momentum đảo chiều mà mô hình không làm gì khác. B có momentum thấp hơn A, nên so với A nó mất điểm ở đó. So với cổ phiếu trung bình thì nó vẫn có điểm.
+
+Kết quả nói gì: B đứng trên A nhờ value, và số hạng tương tác khiến value của một mã rẻ, ít biến động có trọng lượng lớn hơn. Trong cặp này momentum đang kéo B xuống. Một báo cáo chỉ trích các thanh "so với thị trường" sẽ nói với đồng nghiệp rằng momentum giúp B, và đó là câu trả lời cho một câu hỏi khác với câu được hỏi.
+
+Điều gì khiến tôi đổi ý: nếu các phần không cộng ra đúng khoảng cách thì code sai trước mọi thứ khác. Nếu đồng nghiệp thật ra hỏi "vì sao B nằm trong top 10" thì mốc trung bình thị trường mới đúng và bảng đầu là câu trả lời. Và nếu mô hình là một ensemble cây huấn luyện trên dữ liệu thật thay vì công thức tôi tự viết, tôi sẽ không đọc −0,296 như một sự thật về momentum ngoài thị trường, chỉ như sự thật về mô hình này.
+
+## Ý chính cần nhớ
+
+- **Hai câu hỏi, hai công cụ**: importance toàn cục nói mô hình dựa vào gì nói chung; giải thích cục bộ nói vì sao mã này được số điểm này. *(Mục 1)*
+- **Điểm là một tổng**: mốc nền cộng một cú đẩy cho mỗi feature, và các phần phải cộng lại đúng bằng điểm. Lần nào cũng kiểm tra. *(Mục 2)*
+- **Không mốc, không lời giải thích**: cùng mã, cùng điểm vẫn nhận phần công khác nhau khi đổi nhóm đối chứng, nên phải nêu nhóm đó ra. *(Mục 3)*
+- **Song sinh chia công**: hai feature nói cùng một điều thì mỗi cái trông yếu hơn ý tưởng đứng sau; cộng chúng lại trước khi xếp hạng feature. *(Mục 4)*
+- **Biểu đồ importance bắt được rò rỉ**: điểm kiểm tra nhảy vọt mà một cột hút gần hết phần công thì kiểm tra ngày tháng của cột đó trước. *(Mục 5)*
+- **Lý do phải cụ thể**: chuẩn công khai rõ nhất đến từ cho vay, nơi "mô hình bảo vậy" là chưa đủ. *(Mục 6)*
+- **Lời giải thích mô tả mô hình**: nó không có nghĩa nhân quả, nó có thể bị đánh lừa, và nó không chứng minh mô hình đúng. *(Mục 7)*
+- **Nói rõ so với ai**: B so với cổ phiếu trung bình và B so với A cho momentum hai dấu trái nhau từ cùng một mô hình. *(Mục 8)*
+
+## Câu hỏi ôn tập (Review questions)
+
+1. Gu, Kelly và Xiu thấy một bộ tín hiệu dẫn đầu chung cho mọi phương pháp. Đó là giải thích toàn cục hay cục bộ, và nó không cho bạn biết gì về một mã riêng lẻ? *(Xem Mục 1)*
+2. Trong biểu đồ thác nước của cổ phiếu D, những số nào phải cộng ra 1,540, và nếu không khớp thì có nghĩa gì? *(Xem Mục 2)*
+3. Vì sao luật của Shapley cho momentum và value mỗi bên 0,0719 khi chỉ cặp đôi mới có giá trị? *(Xem Mục 2)*
+4. Biến động của D được +0,016 khi so với cả tám mã và -0,159 khi so với bốn mã êm nhất. Vì sao dấu đổi trong khi điểm không đổi? *(Xem Mục 3)*
+5. Bỏ feature 6 tháng làm attribution 12 tháng của D thay đổi ra sao, và bạn nên làm gì trước khi xếp hạng feature? *(Xem Mục 4)*
+6. R² kiểm tra nhảy từ 0,025 lên 0,589 sau khi thêm một cột. Bạn nên mở gì ra xem đầu tiên, và tìm gì? *(Xem Mục 5)*
+7. CFPB yêu cầu gì ở bên cho vay dùng thuật toán phức tạp, và vì sao ví dụ này nói về cho vay chứ không phải giao dịch? *(Xem Mục 6)*
+8. Nêu hai lý do một biểu đồ SHAP trông sạch sẽ không chứng minh được mô hình công bằng hay đúng. *(Xem Mục 7)*
+9. Trong ca thực hành, B xếp trên A. Vì sao momentum được +0,444 khi so với cổ phiếu trung bình nhưng −0,296 khi so với A? *(Xem Mục 8)*
+
+## Đi sâu hơn (Go deeper)
+
+- **[Ribeiro, Singh, Guestrin: "Why Should I Trust You?"](https://arxiv.org/abs/1602.04938)**: thí nghiệm husky ở đầu bài, cùng phương pháp LIME đứng sau.
+- **[Lundberg và Lee: A Unified Approach to Interpreting Model Predictions](https://arxiv.org/abs/1705.07874)**: bài báo SHAP; phần nối tiếp Tree SHAP có link ở phần nguồn.
+- **[Gu, Kelly, Xiu: Empirical Asset Pricing via Machine Learning](https://www.nber.org/papers/w25398)**: nghiên cứu đứng sau câu trả lời toàn cục ở Mục 1.
+
+</Vi>
