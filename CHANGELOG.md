@@ -3,6 +3,16 @@
 Running context cho AI agent, mới nhất trên đầu. Mỗi entry: **đã làm** / **ai quyết** / **chưa chốt**.
 Không cần đọc lại toàn bộ chat history — file này là nguồn sự thật cho trạng thái repo.
 
+## 2026-11-28 — Series AI trading: viết bài 4–22 (19 bài draft, mỗi bài 40 câu quiz)
+
+- **Đã làm (nhánh `feat/ai-trading-batch-2`, plan `docs/superpowers/plans/2026-11-28-ai-trading-batch-2.md`, brief `2026-11-28-ai-trading-batch-{2,3,4}-brief.md`):** 19 agent Sonnet chạy song song, mỗi agent một bài, cùng một thư mục làm việc, mỗi agent chỉ ghi file của bài mình. Mỗi bài: MDX song ngữ (`draft: true`, 2.100–2.900 từ EN), ảnh hero thật (Wikimedia Commons, đã kiểm giấy phép), 9–11 hình vẽ trên trang, 1 demo (số kiểm bằng Python), 8 bộ quiz v2 (20 `interview` + 20 `ai`, `code`) và 4–5 hình quiz. Ba commit: bài 4–11, 12–19, 20–22; mỗi đợt đăng ký sẵn trong `domains.ts`.
+- **Ai quyết:** user ("AI trading bài 4–22", "chạy luôn đợt 2 / đợt 3"). AI chọn cách chia 3 đợt, tên tiền tố `AtP<NN>` / `Atq<NN>`, và gộp thành một PR thay vì ba (đợt sau chỉ cần `domains.ts`, tránh xung đột).
+- **Kiểm tra:** `npm run build` 155 trang, `node --test` 212 pass; mọi link nội bộ giữa các bài đã trỏ tới bài có thật; không có mã màu hex trong hình/demo (`post-check.sh` báo `hex=4` là dương tính giả do chữ "Alpha#101"); mọi `description` trong giới hạn 180/220. Mỗi agent tự chụp hình sáng EN / sáng VI / tối VI.
+- **Chưa kiểm:** 360px; nhiều hình đã sửa lần cuối nhưng chưa chụp lại; vài bộ quiz chưa xem ảnh từng câu (`shot.mjs` lỗi ngắt quãng); demo chưa kéo thanh trượt trong trình duyệt; chưa chạy lại `humanizer` như một lượt riêng trên file hoàn chỉnh. Ảnh hero bài 11 (628 px) và bài 19 (463 px) nhỏ, có thể mờ.
+- **Số liệu bỏ vì không kiểm chứng được:** quy tắc HOSE chỉ dẫn từ bài báo (biên ±7%) chứ chưa từ trang chính thức; T+2, phí và thuế bán không dùng; một số bài báo chỉ đọc được phần tóm tắt (ghi rõ trong bài).
+- **Cần user quyết:** (1) bài 4 nhúng ảnh biểu đồ của 51labs, chưa thấy giấy phép; (2) bài 4 nêu lệch nhẹ với bài 2 về các lag momentum (tuần 2–6 so với biểu đồ gốc); (3) bài 3 và 1–2 đã xuất bản còn nhãn "minh hoạ" trong quiz, khóa `"illustrative": false` cũ và bảng HSG giá chọn cho khớp tỉ lệ 1,5:1 chưa nêu giả định trong câu: để PR riêng.
+- **Chưa chốt:** user đọc 19 bài rồi mới bỏ `draft`.
+
 ## 2026-11-27 — Làm sạch quiz Go: sửa lỗi trong bài, đọc lại tiếng Việt 600 câu, sửa hình
 
 - **Đã làm:** nhánh `fix/go-quiz-polish`, theo yêu cầu "làm 2 cái đầu" (kiểm hình tối/360px + đọc tiếng Việt; sửa lỗi trong bài).
