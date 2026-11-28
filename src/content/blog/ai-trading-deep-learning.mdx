@@ -17,7 +17,6 @@ sources:
   - { title: "Why do tree-based models still outperform deep learning on tabular data?", author: "Léo Grinsztajn, Edouard Oyallon & Gaël Varoquaux", url: "https://arxiv.org/abs/2207.08815" }
   - { title: "Adam: A Method for Stochastic Optimization", author: "Diederik P. Kingma & Jimmy Ba", url: "https://arxiv.org/abs/1412.6980" }
   - { title: "Năm 2024 khởi sắc của chứng khoán (HoSE có 393 mã cổ phiếu cuối 2024)", author: "Đông Vệ, VnExpress", url: "https://vnexpress.net/nam-2024-khoi-sac-cua-chung-khoan-4834265.html" }
-  - { title: "Machine Learning for Financial Market, course curriculum (deep learning foundation, SharpeLoss, DeepLOB, Deep Momentum Network)", author: "51labs", url: "https://51labs.vn/vi/courses" }
   - { title: "330-PSA-80-60 (USN 710739): Mark I Perceptron (photo, public domain)", author: "National Museum of the U.S. Navy, via Wikimedia Commons", url: "https://commons.wikimedia.org/wiki/File:330-PSA-80-60_(USN_710739)_(20897323365).jpg" }
 ---
 
@@ -26,6 +25,7 @@ import Vi from '../../components/mdx/Vi.astro';
 import Callout from '../../components/mdx/Callout.astro';
 import Concepts from '../../components/mdx/Concepts.astro';
 import Figure from '../../components/mdx/Figure.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
 import AtP14GkxDepth from '../../components/mdx/AtP14GkxDepth.astro';
 import AtP14Neuron from '../../components/mdx/AtP14Neuron.astro';
 import AtP14Mlp from '../../components/mdx/AtP14Mlp.astro';
@@ -193,7 +193,7 @@ Most stock data comes as a table: one row per stock and month, many columns. On 
 
 <AtP14Choice />
 
-Nets earn their cost on inputs a table cannot hold: long streams of prices, the order book itself, text. The 51labs deep learning module covers these cases, from DeepLOB for the order book to a Deep Momentum Network trained with the Sharpe loss. The next posts take them in turn: sequence models for prices and books, then order flow.
+Nets earn their cost on inputs a table cannot hold: long streams of prices, the order book itself, text. The next posts take them in turn: sequence models for prices and books, then order flow.
 
 <Concepts>
 
@@ -203,6 +203,48 @@ Nets earn their cost on inputs a table cannot hold: long streams of prices, the 
 
 </Concepts>
 
+## 7. Worked case: 513 weights, 60 rows
+
+Say a colleague shows you a small net for next-month returns. It has six inputs, 64 hidden units and one output, which is 6 × 64 + 64 + 64 + 1 = 513 weights, and it was trained on 60 rows. Its training error is 0.0000. She asks whether to trust it.
+
+I would check the ratio of weights to rows first, because it costs nothing: 513 / 60 is 8.6 weights per row, enough room to memorise. Second, the baseline: the error of always predicting zero on rows the net never saw. Third, a validation split, since training error tells you nothing here. Only then do I look at the architecture.
+
+The snippet uses one simulated market. The signal is 0.5 sin(2.5 x₁), the noise has a standard deviation of 0.5, and five of the six inputs are pure noise. Each run trains with Adam for 3,000 epochs, keeps the weights from the lowest validation error, and scores them on 1,000 fresh rows. The helper functions `make`, `MLP` and `mse` are in the full script.
+
+```python
+def run(n_rows, hidden, seed=14, epochs=3000):
+    rng = np.random.default_rng(seed)
+    xtr, ytr = make(n_rows, rng); xva, yva = make(n_rows // 5 + 20, rng); xte, yte = make(1000, rng)
+    net = MLP(hidden, rng)
+    best = (1e9, 0, None, 0.0)
+    for ep in range(1, epochs + 1):
+        net.step(xtr, ytr)
+        v = mse(net.predict(xva), yva)
+        if v < best[0]:
+            best = (v, ep, [p.copy() for p in net.p], net.b2)
+    last = mse(net.predict(xte), yte)
+    train = mse(net.predict(xtr), ytr)
+    net.w1, net.b1, net.w2 = best[2]; net.b2 = best[3]
+    stop = mse(net.predict(xte), yte)
+    print(f"{n_rows:4d} rows, {hidden:2d} units, {net.n_weights():3d} weights | "
+          f"train {train:.4f} | unseen at epoch {epochs}: {last:.3f} | "
+          f"early stop (epoch {best[1]}): {stop:.3f} | always 0: {mse(0, yte):.3f}")
+
+run(60, 64)
+run(600, 8)
+```
+
+<TerminalOutput command={"uv run --with numpy python demo/ai-trading/p14_overfit_earlystop.py"} label="Python 3.13 · numpy 2.3 · captured Nov 2026" caption="Two nets on the same process. The 513-weight net on 60 rows reaches zero training error and 0.671 on unseen rows; stopping at epoch 36 gives 0.424, still no better than always predicting zero (0.411). The 65-weight net on 600 rows ends at 0.290 against 0.386.">
+```text
+  60 rows, 64 units, 513 weights | train 0.0000 | unseen at epoch 3000: 0.671 | early stop (epoch 36): 0.424 | always 0: 0.411
+ 600 rows,  8 units,  65 weights | train 0.2118 | unseen at epoch 3000: 0.316 | early stop (epoch 329): 0.290 | always 0: 0.386
+```
+</TerminalOutput>
+
+On 60 rows the net has learned its training rows and nothing else. Early stopping repairs most of the damage, from 0.671 to 0.424, but it only gets back to the zero baseline, so there is no evidence of skill. The small net on ten times the rows beats the baseline by about a quarter (0.290 against 0.386). This draw differs from the widget in Section 3, so the exact numbers differ; the ordering is the same.
+
+What would change my mind: a 60-row net that beat always-zero on a long out-of-time test, or a bigger net that kept winning once the rows grew. I would still rerun with other seeds before believing either, because one draw leaves noise of a few hundredths.
+
 ## Key takeaways
 
 - **A net is weighted sums with a floor, stacked**: most of the weights sit between the inputs and the first layer, so depth is cheap and width at the start is costly. *(Section 1)*
@@ -211,6 +253,7 @@ Nets earn their cost on inputs a table cannot hold: long streams of prices, the 
 - **Judge on rows the weights never saw**: stop at the lowest validation error; a smaller net with more rows often beats a bigger one. *(Section 4)*
 - **The loss is the goal in code**: the same LSTM scored 0.791 on squared error and 2.907 on the Sharpe loss, before costs. *(Section 5)*
 - **Look at the rows first**: tables of a few thousand rows go to linear models and trees; streams and order books are where nets earn their keep. *(Section 6)*
+- **Count weights per row before trusting a small-sample net**: 513 weights on 60 rows reached zero training error and no edge over always predicting zero. *(Section 7)*
 
 ## Review questions
 
@@ -223,13 +266,13 @@ Nets earn their cost on inputs a table cannot hold: long streams of prices, the 
 7. Training error falls while validation error rises. Which weights do you keep, and why? *(See Section 4)*
 8. Forecaster A has half the squared error of B but a Sharpe of 0.309 against 1.666. Which loss would pick B, and what is its remaining risk? *(See Section 5)*
 9. You have 3,000 rows of monthly features. What do you try first, and what do Gu-Kelly-Xiu and Grinsztajn say about it? *(See Section 6)*
+10. A net has 513 weights and 60 training rows. List the three checks you run before reading its architecture. *(See Section 7)*
 
 ## Go deeper
 
 - **[Gu, Kelly and Xiu: Empirical Asset Pricing via Machine Learning](https://doi.org/10.1093/rfs/hhaa009)**: the 920-feature study; the table with NN1 to NN5 is the evidence for Section 1 and the hook.
 - **[Zhang et al.: Understanding deep learning requires rethinking generalization](https://arxiv.org/abs/1611.03530)**: the random-label experiments behind Section 3.
 - **[Lim, Zohren and Roberts: Enhancing Time Series Momentum Strategies Using Deep Neural Networks](https://arxiv.org/abs/1904.04912)**: the Sharpe loss and its backtest, Section 5.
-- **[51Labs: Machine Learning for Financial Market](https://51labs.vn/vi/courses)**: the deep learning module, from the MLP to DeepLOB and Deep Momentum Networks.
 
 </En>
 
@@ -388,7 +431,7 @@ Phần lớn dữ liệu cổ phiếu là một cái bảng: mỗi dòng một c
 
 <AtP14Choice />
 
-Mạng xứng đáng với chi phí ở những đầu vào mà một cái bảng không chứa nổi: chuỗi giá dài, chính sổ lệnh, văn bản. Mô-đun học sâu của 51labs đi qua các trường hợp này, từ DeepLOB cho sổ lệnh đến Deep Momentum Network huấn luyện bằng Sharpe loss. Các bài kế tiếp lần lượt đi vào chúng: mô hình chuỗi cho giá và sổ lệnh, rồi dòng lệnh.
+Mạng xứng đáng với chi phí ở những đầu vào mà một cái bảng không chứa nổi: chuỗi giá dài, chính sổ lệnh, văn bản. Các bài kế tiếp lần lượt đi vào chúng: mô hình chuỗi cho giá và sổ lệnh, rồi dòng lệnh.
 
 <Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
 
@@ -398,6 +441,48 @@ Mạng xứng đáng với chi phí ở những đầu vào mà một cái bản
 
 </Concepts>
 
+## 7. Ca thực hành: 513 trọng số, 60 dòng
+
+Giả sử một đồng nghiệp đưa bạn xem một mạng nhỏ dự báo lợi suất tháng sau. Nó có sáu đầu vào, 64 nơ-ron ẩn và một đầu ra, tức 6 × 64 + 64 + 64 + 1 = 513 trọng số, huấn luyện trên 60 dòng. Sai số huấn luyện là 0,0000. Chị hỏi có nên tin nó không.
+
+Tôi kiểm tra trước tỉ lệ trọng số trên dòng, vì nó không tốn gì: 513 / 60 là 8,6 trọng số mỗi dòng, đủ chỗ để học thuộc. Thứ hai là mốc so sánh: sai số của việc luôn đoán 0 trên các dòng mạng chưa từng thấy. Thứ ba là một tập validation, vì sai số huấn luyện ở đây không nói lên điều gì. Sau đó mới nhìn đến kiến trúc.
+
+Đoạn mã dùng một thị trường mô phỏng. Tín hiệu là 0,5 sin(2,5 x₁), nhiễu có độ lệch chuẩn 0,5, và năm trong sáu đầu vào là nhiễu thuần. Mỗi lần chạy huấn luyện bằng Adam 3.000 epoch, giữ bộ trọng số có sai số validation thấp nhất, rồi chấm trên 1.000 dòng mới. Các hàm phụ `make`, `MLP` và `mse` nằm trong script đầy đủ.
+
+```python
+def run(n_rows, hidden, seed=14, epochs=3000):
+    rng = np.random.default_rng(seed)
+    xtr, ytr = make(n_rows, rng); xva, yva = make(n_rows // 5 + 20, rng); xte, yte = make(1000, rng)
+    net = MLP(hidden, rng)
+    best = (1e9, 0, None, 0.0)
+    for ep in range(1, epochs + 1):
+        net.step(xtr, ytr)
+        v = mse(net.predict(xva), yva)
+        if v < best[0]:
+            best = (v, ep, [p.copy() for p in net.p], net.b2)
+    last = mse(net.predict(xte), yte)
+    train = mse(net.predict(xtr), ytr)
+    net.w1, net.b1, net.w2 = best[2]; net.b2 = best[3]
+    stop = mse(net.predict(xte), yte)
+    print(f"{n_rows:4d} rows, {hidden:2d} units, {net.n_weights():3d} weights | "
+          f"train {train:.4f} | unseen at epoch {epochs}: {last:.3f} | "
+          f"early stop (epoch {best[1]}): {stop:.3f} | always 0: {mse(0, yte):.3f}")
+
+run(60, 64)
+run(600, 8)
+```
+
+<TerminalOutput command={"uv run --with numpy python demo/ai-trading/p14_overfit_earlystop.py"} label="Python 3.13 · numpy 2.3 · captured Nov 2026" caption="Hai mạng trên cùng một quá trình sinh dữ liệu. Mạng 513 trọng số trên 60 dòng đạt sai số huấn luyện bằng 0 và 0,671 trên dòng chưa thấy; dừng ở epoch 36 còn 0,424, vẫn chưa hơn việc luôn đoán 0 (0,411). Mạng 65 trọng số trên 600 dòng đạt 0,290 so với 0,386.">
+```text
+  60 rows, 64 units, 513 weights | train 0.0000 | unseen at epoch 3000: 0.671 | early stop (epoch 36): 0.424 | always 0: 0.411
+ 600 rows,  8 units,  65 weights | train 0.2118 | unseen at epoch 3000: 0.316 | early stop (epoch 329): 0.290 | always 0: 0.386
+```
+</TerminalOutput>
+
+Trên 60 dòng, mạng chỉ học thuộc chính các dòng đó. Dừng sớm cứu được phần lớn, từ 0,671 xuống 0,424, nhưng chỉ về lại ngang mốc đoán 0, nên chưa có bằng chứng nào cho thấy nó có kỹ năng. Mạng nhỏ với số dòng gấp mười lần hơn mốc khoảng một phần tư (0,290 so với 0,386). Lần bốc dữ liệu này khác với widget ở Mục 3 nên số cụ thể khác; thứ tự thì giống.
+
+Điều sẽ làm tôi đổi ý: một mạng 60 dòng thắng được mốc đoán 0 trên một đợt kiểm tra ngoài mẫu đủ dài, hoặc một mạng lớn hơn vẫn thắng khi số dòng tăng. Tôi vẫn chạy lại với vài seed khác trước khi tin cả hai, vì một lần bốc còn để lại sai lệch vài phần trăm.
+
 ## Điểm rút ra (Key takeaways)
 
 - **Mạng là các tổng có trọng số kèm cái sàn, xếp chồng**: phần lớn trọng số nằm giữa đầu vào và layer đầu, nên độ sâu rẻ còn độ rộng ở đầu vào thì đắt. *(Mục 1)*
@@ -406,6 +491,7 @@ Mạng xứng đáng với chi phí ở những đầu vào mà một cái bản
 - **Chấm trên dòng mà trọng số chưa từng thấy**: dừng ở sai số validation thấp nhất; mạng nhỏ hơn với nhiều dòng hơn thường thắng mạng lớn. *(Mục 4)*
 - **Loss là mục tiêu viết thành code**: cùng một LSTM đạt 0,791 với sai số bình phương và 2,907 với Sharpe loss, trước phí. *(Mục 5)*
 - **Nhìn các dòng dữ liệu trước**: bảng vài nghìn dòng dành cho mô hình tuyến tính và cây; chuỗi liên tục và sổ lệnh là nơi mạng đáng giá. *(Mục 6)*
+- **Đếm trọng số trên mỗi dòng trước khi tin mạng mẫu nhỏ**: 513 trọng số trên 60 dòng đạt sai số huấn luyện bằng 0 mà không hơn việc luôn đoán 0. *(Mục 7)*
 
 ## Câu hỏi ôn tập (Review questions)
 
@@ -418,12 +504,12 @@ Mạng xứng đáng với chi phí ở những đầu vào mà một cái bản
 7. Sai số huấn luyện giảm còn sai số validation tăng. Bạn giữ trọng số nào, và vì sao? *(Xem Mục 4)*
 8. Người dự báo A có sai số bình phương bằng nửa B nhưng Sharpe 0,309 so với 1,666. Loss nào sẽ chọn B, và rủi ro còn lại của nó là gì? *(Xem Mục 5)*
 9. Bạn có 3.000 dòng feature theo tháng. Thử gì trước, và Gu-Kelly-Xiu cùng Grinsztajn nói gì về nó? *(Xem Mục 6)*
+10. Một mạng có 513 trọng số và 60 dòng huấn luyện. Nêu ba phép kiểm tra bạn làm trước khi đọc kiến trúc. *(Xem Mục 7)*
 
 ## Đi sâu hơn (Go deeper)
 
 - **[Gu, Kelly và Xiu: Empirical Asset Pricing via Machine Learning](https://doi.org/10.1093/rfs/hhaa009)**: nghiên cứu 920 feature; bảng NN1 đến NN5 là bằng chứng cho Mục 1 và phần mở đầu.
 - **[Zhang và cộng sự: Understanding deep learning requires rethinking generalization](https://arxiv.org/abs/1611.03530)**: các thí nghiệm nhãn ngẫu nhiên đằng sau Mục 3.
 - **[Lim, Zohren và Roberts: Enhancing Time Series Momentum Strategies Using Deep Neural Networks](https://arxiv.org/abs/1904.04912)**: Sharpe loss và backtest của nó, Mục 5.
-- **[51Labs: Machine Learning for Financial Market](https://51labs.vn/vi/courses)**: mô-đun học sâu, từ MLP tới DeepLOB và Deep Momentum Network.
 
 </Vi>

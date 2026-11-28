@@ -11,8 +11,6 @@ cover_alt: "A wicker basket full of chicken eggs and speckled quail eggs standin
 draft: true
 sources:
   - { title: "Impact of margin cuts on stock returns and trading value: evidence from the Vietnamese stock market", author: "Nguyen Luong Gia Bao, Ha Quoc Hung, Vo Pham Anh Khoa, Ngo Phu Thanh et al. — Journal of Economics and Finance 50, article 36 (2026)", url: "https://link.springer.com/article/10.1007/s12197-026-09773-x" }
-  - { title: "Impact of margin cuts on stock returns and trading value — evidence from the Vietnamese stock market (51Labs research page)", author: "51Labs", url: "https://51labs.vn/vi/research/impact-margin-vietnam-market" }
-  - { title: "Machine Learning for Financial Market — course curriculum (Portfolio optimization; Project: margin optimization for trading)", author: "51Labs", url: "https://51labs.vn/vi/courses" }
   - { title: "The Markowitz Optimization Enigma: Is 'Optimized' Optimal?", author: "Richard O. Michaud", chapters: "Financial Analysts Journal 45(1), January 1989", url: "https://rpc.cfainstitute.org/research/financial-analysts-journal/1989/the-markowitz-optimization-enigma-is-optimized-optimal" }
   - { title: "Optimal Versus Naive Diversification: How Inefficient Is the 1/N Portfolio Strategy?", author: "Victor DeMiguel, Lorenzo Garlappi & Raman Uppal", chapters: "Review of Financial Studies 22(5), 1915-1953 (2009)", url: "https://ideas.repec.org/a/oup/rfinst/v22y2009i5p1915-1953.html" }
   - { title: "Honey, I Shrunk the Sample Covariance Matrix", author: "Olivier Ledoit & Michael Wolf", chapters: "Journal of Portfolio Management 30(4), 110-119 (2004)", url: "https://econ-papers.upf.edu/en/onepaper.php?id=691" }
@@ -36,6 +34,7 @@ import AtP07MarginCut from '../../components/mdx/AtP07MarginCut.astro';
 import AtP07MarginLadder from '../../components/mdx/AtP07MarginLadder.astro';
 import AtP07LevGrowth from '../../components/mdx/AtP07LevGrowth.astro';
 import AtP07Turnover from '../../components/mdx/AtP07Turnover.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
 import AtP07PortfolioLab from '../../components/mdx/AtP07PortfolioLab.astro';
 import figEggs from '../../assets/blog/ai-trading-portfolio/eggs-in-basket.jpg';
 
@@ -50,7 +49,7 @@ import figEggs from '../../assets/blog/ai-trading-portfolio/eggs-in-basket.jpg';
 
 Every quarter HOSE publishes a list of securities that brokers may no longer lend against. On 6 April 2023 the list for the second quarter held 74 stocks and fund certificates, nine more than at the start of the year. The reasons were plain: accumulated losses, audited financial statements filed late or without the auditor's sign-off, a listing younger than six months, frequent regulatory warnings. Nothing about those companies changed on the day the list came out. What changed was how the shares could be paid for.
 
-A study listed on the 51Labs research page, published in the Journal of Economics and Finance in 2026, looked at stock-level removals like these on HOSE from 2020 to 2025. They paired each stock that was cut with similar stocks that stayed eligible, and compared the two groups. After the announcement the cut stocks trailed their matched peers by about 5 percentage points over the next 30 trading days, with no sign of recovery. Trading value did not fall; it stayed high. The authors read this mainly as a funding and deleveraging effect: people who had borrowed to hold the stock now had to find their own money.
+A study published in the Journal of Economics and Finance in 2026 looked at stock-level removals like these on HOSE from 2020 to 2025. They paired each stock that was cut with similar stocks that stayed eligible, and compared the two groups. After the announcement the cut stocks trailed their matched peers by about 5 percentage points over the next 30 trading days, with no sign of recovery. Trading value did not fall; it stayed high. The authors read this mainly as a funding and deleveraging effect: people who had borrowed to hold the stock now had to find their own money.
 
 That is a portfolio story. The signal and factor posts told you which stocks look attractive. This post is about the next step, the one that decides how much money each stock gets and how much of it is borrowed. Four questions drive it:
 
@@ -230,6 +229,80 @@ An optimizer fed noisy inputs reshuffles the portfolio whenever the inputs wiggl
 
 ---
 
+## 7. Worked case: 30 stocks, 60 months
+
+Say you are handed a spreadsheet of 60 monthly returns for 30 stocks and asked for the lowest-risk portfolio. The tempting plan is minimum variance on the sample covariance: no return forecast, so it should dodge the error-maximizer problem from Section 2. Whether that holds is a number you can compute before trusting anything.
+
+What I would check first is the ratio of months to assets, because it decides how noisy the covariance is. Here it is 60 to 30, only two observations per stock. The sample covariance has 465 distinct entries estimated from 1,800 numbers, and minimum variance will lean on whichever entries came out too small.
+
+The steps, on a simulated world where the truth is known. Say the 30 stocks share one market factor (monthly volatility 4.5%) and each has its own noise of 4% to 9% a month, which gives pairwise correlations of about 0.3 to 0.5. Draw 60 months, build three portfolios, then measure each portfolio's volatility under the true covariance. Repeat for 300 histories.
+
+```python
+import numpy as np
+from sklearn.covariance import LedoitWolf
+
+rng = np.random.default_rng(7)
+N, T, TRIALS = 30, 60, 300
+
+# Assumed truth: monthly vol 6% to 12%, market loading 0.5 to 1.3, so pairwise correlation is around 0.3 to 0.5
+beta = rng.uniform(0.5, 1.3, N)
+idio = rng.uniform(0.04, 0.09, N)
+mkt = 0.045
+true_cov = mkt**2 * np.outer(beta, beta) + np.diag(idio**2)
+
+def draw(t):
+    f = rng.normal(0, mkt, (t, 1))
+    return f * beta + rng.normal(0, 1, (t, N)) * idio
+
+def min_var(cov):
+    w = np.linalg.solve(cov, np.ones(N))
+    return w / w.sum()
+
+def true_vol(w):
+    return float(np.sqrt(w @ true_cov @ w) * np.sqrt(12))
+
+equal = np.full(N, 1 / N)
+rows = {"equal weight": [], "sample min-var": [], "shrunk min-var": []}
+first = None
+for k in range(TRIALS):
+    x = draw(T)
+    w_s = min_var(np.cov(x, rowvar=False))
+    lw = LedoitWolf().fit(x)
+    w_l = min_var(lw.covariance_)
+    if k == 0:
+        first = (w_s, lw.shrinkage_)
+    rows["equal weight"].append(true_vol(equal))
+    rows["sample min-var"].append(true_vol(w_s))
+    rows["shrunk min-var"].append(true_vol(w_l))
+
+best = true_vol(min_var(true_cov))
+print(f"{N} stocks, {T} months of data, {TRIALS} histories")
+print(f"best possible vol (knows the true covariance): {best:.1%}")
+for name, v in rows.items():
+    print(f"{name:15s} realised vol {np.mean(v):.1%}")
+w_s, shrink = first
+print(f"history 1: Ledoit-Wolf shrinkage = {shrink:.2f}")
+print(f"history 1: sample weights run from {w_s.min():+.1%} to {w_s.max():+.1%}; {int((w_s < 0).sum())} of {N} are short")
+```
+
+<TerminalOutput command={"uv run --with numpy==2.3.5 --with scikit-learn==1.8.0 python demo/ai-trading/p07_minvar_shrinkage.py"} label="Python 3.13 · numpy 2.3 · scikit-learn 1.8 · captured Nov 2026" caption="Averaged over 300 histories. Equal weight, sample minimum variance and Ledoit-Wolf minimum variance, scored on the true covariance.">
+```text
+30 stocks, 60 months of data, 300 histories
+best possible vol (knows the true covariance): 11.0%
+equal weight    realised vol 14.9%
+sample min-var  realised vol 15.5%
+shrunk min-var  realised vol 12.8%
+history 1: Ledoit-Wolf shrinkage = 0.25
+history 1: sample weights run from -26.2% to +27.9%; 10 of 30 are short
+```
+</TerminalOutput>
+
+Read the numbers in order. The best possible portfolio, which knows the true covariance, runs at 11.0%. Equal weight runs at 14.9%. Sample minimum variance runs at 15.5%, worse than splitting the money evenly, even though it was built only to cut risk. In the first history it held 10 shorts, as large as 26% of the portfolio, which is the optimizer betting on correlations that were really noise. Shrinking the covariance with the Ledoit-Wolf formula (it blended in 25% of a simple target in the first history) brings it to 12.8%, most of the way to the best possible.
+
+What it tells you: with this few months per asset, the plain minimum-variance portfolio is not safe just because it skips return forecasts. Shrinkage is the step that makes it work. What would change my mind is the months-to-assets ratio. Rerun the script with `N = 10` and the three portfolios land within a point of each other (16.5% to 17.1%), as Section 3 found for few assets; with `T = 600` the sample and shrunk versions both reach about 11.3%, next to the 11.0% best, and equal weight stays at 14.9%. If real data gave a different ranking on the same ratio, I would suspect the one-factor assumption before the method.
+
+---
+
 ## Key takeaways
 
 - **The weighting rule is a decision**: the same scores give 50%, 55.6% or 39.7% to one stock depending on the recipe.
@@ -237,6 +310,7 @@ An optimizer fed noisy inputs reshuffles the portfolio whenever the inputs wiggl
 - **Cheap fixes work**: skip the return forecast, shrink the covariance when assets are many and months are few, cap positions.
 - **Equal money is not equal risk**: weights proportional to 1 over volatility equalise risk when correlations are equal, and correlation rising from 0.3 to 0.8 lifted a five-asset basket from 13.3% to 18.3% volatility.
 - **Borrowed money turns a 25% fall into a 50% loss of equity**, and a funding shock like a margin cut hits every borrower on the same day.
+- **Check months per asset before trusting minimum variance**: with 60 months and 30 stocks the sample version ran at 15.5% against 14.9% for equal weight; shrinkage brought it to 12.8%.
 - **Turnover is a cost**: 50% of the portfolio a month at 0.15% a trade costs 0.9% a year.
 
 ## Review questions
@@ -248,12 +322,11 @@ An optimizer fed noisy inputs reshuffles the portfolio whenever the inputs wiggl
 5. With equal correlations between all pairs, what do risk-parity weights look like? *(See Section 4)*
 6. What happens to a diversified basket when correlations jump, and what can you do about it before it happens? *(See Section 4)*
 7. At 2x leverage with a 35% maintenance ratio, how far can the price fall before a margin call? *(See Section 5)*
-8. What did the 51Labs study find about stocks removed from the HOSE margin list? *(See Section 5)*
+8. What did the 2026 Journal of Economics and Finance study find about stocks removed from the HOSE margin list? *(See Section 5)*
 9. A strategy earns 1.5% a year before costs. At what turnover does it stop paying, if each trade costs 0.15%? *(See Section 6)*
 
 ## Go deeper
 
-- **[51Labs, Machine Learning for Financial Market](https://51labs.vn/vi/courses)**: the public curriculum lists portfolio optimization and a margin optimization project as consecutive days.
 - **[Impact of margin cuts on stock returns and trading value (Journal of Economics and Finance, 2026)](https://link.springer.com/article/10.1007/s12197-026-09773-x)**: the HOSE study behind this post's hook.
 - **[DeMiguel, Garlappi and Uppal (2009), Optimal Versus Naive Diversification](https://ideas.repec.org/a/oup/rfinst/v22y2009i5p1915-1953.html)**: the 1/N benchmark every optimizer must beat.
 - **[Ledoit and Wolf (2004), Honey, I Shrunk the Sample Covariance Matrix](https://econ-papers.upf.edu/en/onepaper.php?id=691)**: shrinkage in a short, readable paper.
@@ -271,7 +344,7 @@ An optimizer fed noisy inputs reshuffles the portfolio whenever the inputs wiggl
 
 Mỗi quý HOSE công bố danh sách chứng khoán mà công ty chứng khoán không được cho vay margin. Ngày 6/4/2023, danh sách quý II gồm 74 cổ phiếu và chứng chỉ quỹ, nhiều hơn 9 mã so với đầu năm. Lý do khá rõ: lỗ lũy kế, báo cáo tài chính kiểm toán nộp trễ hoặc không có chấp nhận của kiểm toán, mới niêm yết chưa đủ sáu tháng, hay bị cơ quan quản lý cảnh báo thường xuyên. Hôm danh sách ra, công ty nào cũng không đổi gì. Thứ đổi là cách trả tiền mua cổ phiếu đó.
 
-Một nghiên cứu đăng trên trang nghiên cứu của 51Labs, xuất bản trên Journal of Economics and Finance năm 2026, xem xét các đợt cắt như vậy ở cấp từng cổ phiếu trên HOSE từ 2020 đến 2025. Họ ghép mỗi cổ phiếu bị cắt với những cổ phiếu tương tự vẫn còn margin, rồi so hai nhóm. Sau thông báo, nhóm bị cắt kém nhóm đối chứng khoảng 5 điểm phần trăm trong 30 phiên giao dịch kế tiếp, và không thấy hồi phục. Giá trị giao dịch không giảm mà vẫn cao. Nhóm tác giả đọc kết quả này chủ yếu là hiệu ứng vốn vay và giảm đòn bẩy: người vay để giữ cổ phiếu giờ phải tự tìm tiền.
+Một nghiên cứu xuất bản trên Journal of Economics and Finance năm 2026 xem xét các đợt cắt như vậy ở cấp từng cổ phiếu trên HOSE từ 2020 đến 2025. Họ ghép mỗi cổ phiếu bị cắt với những cổ phiếu tương tự vẫn còn margin, rồi so hai nhóm. Sau thông báo, nhóm bị cắt kém nhóm đối chứng khoảng 5 điểm phần trăm trong 30 phiên giao dịch kế tiếp, và không thấy hồi phục. Giá trị giao dịch không giảm mà vẫn cao. Nhóm tác giả đọc kết quả này chủ yếu là hiệu ứng vốn vay và giảm đòn bẩy: người vay để giữ cổ phiếu giờ phải tự tìm tiền.
 
 Đó là chuyện danh mục. Các bài về tín hiệu và factor cho biết cổ phiếu nào trông hấp dẫn. Bài này nói về bước kế tiếp: mỗi cổ phiếu được bao nhiêu tiền, và trong đó bao nhiêu là tiền vay. Bốn câu hỏi dẫn đường:
 
@@ -451,6 +524,80 @@ Một optimizer ăn đầu vào nhiễu sẽ xáo lại danh mục mỗi khi đ�
 
 ---
 
+## 7. Tình huống thực hành: 30 cổ phiếu, 60 tháng
+
+Giả sử bạn nhận một bảng tính 60 tháng lợi suất của 30 cổ phiếu và được nhờ dựng danh mục rủi ro thấp nhất. Cách dễ nghĩ tới là minimum variance trên covariance mẫu: không cần dự báo lợi suất nên có vẻ tránh được vấn đề máy khuếch đại sai số ở Mục 2. Điều đó có đúng không thì tính được bằng một con số, trước khi tin.
+
+Việc đầu tiên tôi kiểm tra là tỷ lệ số tháng trên số tài sản, vì nó quyết định covariance nhiễu đến đâu. Ở đây là 60 trên 30, mỗi cổ phiếu chỉ có hai quan sát. Ma trận covariance mẫu có 465 phần tử riêng biệt được ước lượng từ 1.800 con số, và minimum variance sẽ dựa vào đúng những phần tử vô tình bị ước lượng quá nhỏ.
+
+Các bước, trên một thế giới mô phỏng mà ta biết sự thật. Giả sử 30 cổ phiếu cùng chịu một nhân tố thị trường (biến động 4,5% mỗi tháng) và mỗi mã có nhiễu riêng 4% đến 9% mỗi tháng, cho tương quan từng cặp khoảng 0,3 đến 0,5. Lấy 60 tháng, dựng ba danh mục, rồi đo biến động của từng danh mục theo covariance thật. Lặp lại với 300 lịch sử.
+
+```python
+import numpy as np
+from sklearn.covariance import LedoitWolf
+
+rng = np.random.default_rng(7)
+N, T, TRIALS = 30, 60, 300
+
+# Assumed truth: monthly vol 6% to 12%, market loading 0.5 to 1.3, so pairwise correlation is around 0.3 to 0.5
+beta = rng.uniform(0.5, 1.3, N)
+idio = rng.uniform(0.04, 0.09, N)
+mkt = 0.045
+true_cov = mkt**2 * np.outer(beta, beta) + np.diag(idio**2)
+
+def draw(t):
+    f = rng.normal(0, mkt, (t, 1))
+    return f * beta + rng.normal(0, 1, (t, N)) * idio
+
+def min_var(cov):
+    w = np.linalg.solve(cov, np.ones(N))
+    return w / w.sum()
+
+def true_vol(w):
+    return float(np.sqrt(w @ true_cov @ w) * np.sqrt(12))
+
+equal = np.full(N, 1 / N)
+rows = {"equal weight": [], "sample min-var": [], "shrunk min-var": []}
+first = None
+for k in range(TRIALS):
+    x = draw(T)
+    w_s = min_var(np.cov(x, rowvar=False))
+    lw = LedoitWolf().fit(x)
+    w_l = min_var(lw.covariance_)
+    if k == 0:
+        first = (w_s, lw.shrinkage_)
+    rows["equal weight"].append(true_vol(equal))
+    rows["sample min-var"].append(true_vol(w_s))
+    rows["shrunk min-var"].append(true_vol(w_l))
+
+best = true_vol(min_var(true_cov))
+print(f"{N} stocks, {T} months of data, {TRIALS} histories")
+print(f"best possible vol (knows the true covariance): {best:.1%}")
+for name, v in rows.items():
+    print(f"{name:15s} realised vol {np.mean(v):.1%}")
+w_s, shrink = first
+print(f"history 1: Ledoit-Wolf shrinkage = {shrink:.2f}")
+print(f"history 1: sample weights run from {w_s.min():+.1%} to {w_s.max():+.1%}; {int((w_s < 0).sum())} of {N} are short")
+```
+
+<TerminalOutput command={"uv run --with numpy==2.3.5 --with scikit-learn==1.8.0 python demo/ai-trading/p07_minvar_shrinkage.py"} label="Python 3.13 · numpy 2.3 · scikit-learn 1.8 · captured Nov 2026" caption="Trung bình trên 300 lịch sử. Chia đều, minimum variance với covariance mẫu và minimum variance với Ledoit-Wolf, chấm theo covariance thật.">
+```text
+30 stocks, 60 months of data, 300 histories
+best possible vol (knows the true covariance): 11.0%
+equal weight    realised vol 14.9%
+sample min-var  realised vol 15.5%
+shrunk min-var  realised vol 12.8%
+history 1: Ledoit-Wolf shrinkage = 0.25
+history 1: sample weights run from -26.2% to +27.9%; 10 of 30 are short
+```
+</TerminalOutput>
+
+Đọc các con số theo thứ tự. Danh mục tốt nhất có thể, biết covariance thật, chạy ở 11,0%. Chia đều chạy ở 14,9%. Minimum variance với covariance mẫu chạy ở 15,5%, tệ hơn chia đều dù nó được dựng chỉ để giảm rủi ro. Ở lịch sử đầu tiên nó giữ 10 vị thế bán khống, lớn nhất tới 26% danh mục: optimizer đang đặt cược vào những tương quan thật ra là nhiễu. Co covariance bằng công thức Ledoit-Wolf (ở lịch sử đầu nó trộn vào 25% một mục tiêu đơn giản) đưa con số về 12,8%, gần tới mức tốt nhất có thể.
+
+Kết quả cho thấy: khi số tháng trên mỗi tài sản ít như vậy, minimum variance thuần không an toàn chỉ vì nó bỏ qua dự báo lợi suất. Co covariance mới là bước làm nó chạy được. Điều sẽ làm tôi đổi ý là tỷ lệ tháng trên tài sản. Chạy lại script với `N = 10`, ba danh mục chỉ cách nhau chưa tới một điểm (16,5% đến 17,1%), như Mục 3 đã thấy khi tài sản ít; với `T = 600`, bản mẫu và bản co cùng đạt khoảng 11,3%, sát mức tốt nhất 11,0%, còn chia đều vẫn ở 14,9%. Nếu dữ liệu thật cho thứ hạng khác ở cùng tỷ lệ này, tôi sẽ nghi giả định một nhân tố trước khi nghi phương pháp.
+
+---
+
 ## Điểm rút ra (Key takeaways)
 
 - **Quy tắc đặt trọng số là một quyết định**: cùng bộ điểm cho một cổ phiếu 50%, 55,6% hay 39,7% tuỳ công thức.
@@ -458,6 +605,7 @@ Một optimizer ăn đầu vào nhiễu sẽ xáo lại danh mục mỗi khi đ�
 - **Cách sửa rẻ lại hiệu quả**: bỏ dự báo lợi suất, co covariance khi tài sản nhiều mà tháng ít, đặt trần vị thế.
 - **Chia đều tiền không phải chia đều rủi ro**: trọng số tỷ lệ 1 trên độ biến động cân bằng rủi ro khi các tương quan bằng nhau, và tương quan tăng từ 0,3 lên 0,8 đẩy giỏ năm tài sản từ 13,3% lên 18,3% biến động.
 - **Tiền vay biến cú giảm 25% thành mất một nửa vốn tự có**, và một cú sốc vốn vay như cắt margin đánh vào mọi người vay trong cùng một ngày.
+- **Kiểm tra số tháng trên mỗi tài sản trước khi tin minimum variance**: với 60 tháng và 30 cổ phiếu, bản covariance mẫu chạy ở 15,5% so với 14,9% của chia đều; co covariance đưa về 12,8%.
 - **Vòng quay là chi phí**: 50% danh mục mỗi tháng với 0,15% mỗi giao dịch tốn 0,9% mỗi năm.
 
 ## Câu hỏi ôn tập (Review questions)
@@ -469,12 +617,11 @@ Một optimizer ăn đầu vào nhiễu sẽ xáo lại danh mục mỗi khi đ�
 5. Khi mọi cặp có cùng tương quan, trọng số risk parity trông thế nào? *(Xem Mục 4)*
 6. Điều gì xảy ra với một giỏ đa dạng hoá khi tương quan nhảy vọt, và bạn làm được gì trước khi nó xảy ra? *(Xem Mục 4)*
 7. Ở đòn bẩy 2x với tỷ lệ duy trì 35%, giá được giảm bao xa trước khi bị gọi ký quỹ? *(Xem Mục 5)*
-8. Nghiên cứu của 51Labs thấy gì về những cổ phiếu bị đưa ra khỏi danh sách margin HOSE? *(Xem Mục 5)*
+8. Nghiên cứu trên Journal of Economics and Finance (2026) thấy gì về những cổ phiếu bị đưa ra khỏi danh sách margin HOSE? *(Xem Mục 5)*
 9. Một chiến lược lời 1,5% mỗi năm trước phí. Ở mức vòng quay nào thì nó hết lời, nếu mỗi giao dịch tốn 0,15%? *(Xem Mục 6)*
 
 ## Đi sâu hơn (Go deeper)
 
-- **[51Labs, Machine Learning for Financial Market](https://51labs.vn/vi/courses)**: chương trình công khai xếp tối ưu danh mục và dự án tối ưu margin vào hai ngày liên tiếp.
 - **[Impact of margin cuts on stock returns and trading value (Journal of Economics and Finance, 2026)](https://link.springer.com/article/10.1007/s12197-026-09773-x)**: nghiên cứu HOSE làm mở đầu cho bài này.
 - **[DeMiguel, Garlappi và Uppal (2009), Optimal Versus Naive Diversification](https://ideas.repec.org/a/oup/rfinst/v22y2009i5p1915-1953.html)**: mốc 1/N mà mọi optimizer phải vượt.
 - **[Ledoit và Wolf (2004), Honey, I Shrunk the Sample Covariance Matrix](https://econ-papers.upf.edu/en/onepaper.php?id=691)**: shrinkage trong một bài ngắn, dễ đọc.

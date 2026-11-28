@@ -18,7 +18,6 @@ sources:
   - { title: "Mastering Atari, Go, Chess and Shogi by Planning with a Learned Model", author: "Julian Schrittwieser et al.", url: "https://arxiv.org/abs/1911.08265" }
   - { title: "... and the Cross-Section of Expected Returns (NBER Working Paper 20592)", author: "Campbell R. Harvey, Yan Liu, Heqing Zhu", url: "https://www.nber.org/papers/w20592" }
   - { title: "Quy chế giao dịch mới tại HOSE: duy trì biên độ dao động giá 7% và lô chẵn 100 cổ phiếu", author: "Người Quan Sát", url: "https://nguoiquansat.vn/quy-che-giao-dich-moi-tai-hose-duy-tri-bien-do-dao-dong-gia-7-va-lo-chan-100-co-phieu-32586.html" }
-  - { title: "Machine Learning for Financial Market — course curriculum", author: "51labs", url: "https://51labs.vn/vi/courses" }
   - { title: "Gold panning on Jack Wade Creek (photo, public domain)", author: "BLM Alaska / Craig McCaa", url: "https://commons.wikimedia.org/wiki/File:Gold_panning_on_Jack_Wade_Creek_(24785190007).jpg" }
 ---
 
@@ -37,6 +36,7 @@ import AtP20BestOfN from '../../components/mdx/AtP20BestOfN.astro';
 import AtP20Mcts from '../../components/mdx/AtP20Mcts.astro';
 import AtP20Game from '../../components/mdx/AtP20Game.astro';
 import AtP20Protocol from '../../components/mdx/AtP20Protocol.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
 import heroPan from '../../assets/blog/ai-trading-alpha/gold-panning.jpg';
 
 <En>
@@ -199,6 +199,61 @@ First, keep a **trial log**: every formula scored, in a file, so you know N. Sec
 
 If you use an AI to propose formulas, give it a task that includes the log. Ask it how many it tried, which data it saw, and what the score becomes after correcting for N. A good summary has those numbers. A weak one leads with the best Sharpe.
 
+## 8. Worked case: the best of 2,000 formulas
+
+Say a colleague sends you a result. A script wrote 2,000 random formulas from open, high, low, close and return, scored each on 650 days of one stock, and reports the best: a Sharpe ratio of 2.15. You have the script and an afternoon. Here is what I would check, in this order.
+
+**First, how many formulas were tried?** The count comes before the score, because the score means nothing without it. Here N = 2,000.
+
+**Second, what would pure luck have produced?** Over 650 days one zero-skill rule has a Sharpe with a standard error of about 0.62. The expected best of 2,000 such draws is about 2.15, by the same formula as in Section 5. The colleague's best equals what noise predicts.
+
+**Third, look at data the search never saw.** The script held back 750 more days. The best formula scores -0.02 there.
+
+The code below builds a market that is noise by construction, then runs exactly that search. The full script, including the random formula builder, is in `demo/ai-trading/p20_formula_search.py`; this part is the scoring and the checks.
+
+```python
+def sharpe(sig, lo, hi):
+    sig = sig - mean(sig, 20)  # long when the signal is above its 20-day average
+    pos = np.sign(sig[lo - 1:hi - 1])  # trade tomorrow on today's signal
+    pnl = pos * ret[lo:hi]
+    return 0.0 if pnl.std() == 0 else pnl.mean() / pnl.std() * np.sqrt(252)
+
+N = 2000
+scores = []
+for i in range(N):
+    sig = random_tree(3)(data)
+    scores.append((sharpe(sig, 1, SEARCH), sharpe(sig, SEARCH, T)))
+scores = np.array(scores)
+best = scores[:, 0].argmax()
+
+sd = np.sqrt(252 / SEARCH)  # std error of one zero-skill Sharpe
+g = 0.5772
+exp_max = sd * ((1 - g) * norm.ppf(1 - 1 / N) + g * norm.ppf(1 - 1 / (N * np.e)))
+print(f"formulas tried            : {N}")
+print(f"best in search window     : {scores[best, 0]:.2f}")
+print(f"same formula, held-out    : {scores[best, 1]:.2f}")
+print(f"mean of all, search/held  : {scores[:, 0].mean():.2f} / {scores[:, 1].mean():.2f}")
+print(f"expected best of {N} (iid): {exp_max:.2f}")
+print(f"formulas above 1.0 in search: {(scores[:, 0] > 1).sum()}, of those above 1.0 held-out: {((scores[:, 0] > 1) & (scores[:, 1] > 1)).sum()}")
+```
+
+<TerminalOutput command={"uv run --with numpy --with scipy python demo/ai-trading/p20_formula_search.py"} label="Python 3.13 · numpy 2.3 · scipy 1.17 · captured Nov 2026" caption="A market with no pattern, 2,000 random formulas. The best one scores 2.15 in the search window, which is what luck predicts, and -0.02 on days it never saw.">
+```text
+formulas tried            : 2000
+best in search window     : 2.15
+same formula, held-out    : -0.02
+mean of all, search/held  : 0.38 / -0.14
+expected best of 2000 (iid): 2.15
+formulas above 1.0 in search: 424, of those above 1.0 held-out: 2
+```
+</TerminalOutput>
+
+The formulas are correlated, since many share the same pieces, so 2,000 trials are worth fewer than 2,000 independent draws. The match with 2.15 is close, and I would not read two decimals into it. The held-out column is the stronger evidence: 424 formulas cleared a Sharpe of 1.0 in the search window and only 2 of them cleared it again afterwards.
+
+**What the result tells you.** A search that finds a Sharpe of 2.15 here has shown that it can search. It has not shown that the formula predicts anything. The same script on real prices would produce the same table, and you could not tell the two apart from the in-sample number alone.
+
+**What would change my mind.** A formula fixed in writing before the holdout was opened, which then clears a t-ratio of 3 on days nobody tuned against. Or a reason for the signal to exist that I can check without the backtest, for example a cost or a constraint some group of traders faces. Without one of those, the answer to the colleague is: "Come back with the log of how many you tried, and the holdout."
+
 ## Key takeaways
 
 - **A signal is a tree**: formulas like Alpha#101 are small trees of operators, and a program can build, copy and edit them. *(Section 1)*
@@ -209,6 +264,7 @@ If you use an AI to propose formulas, give it a task that includes the log. Ask 
 - **The best of N is partly luck**: 100 zero-skill formulas on three years of data are expected to produce a best Sharpe of 1.46, so ask how many were tried. *(Section 5)*
 - **Tree search transfers its machinery, not its assumptions**: markets lack rules, cheap self-play, a clean reward and a fixed opponent. *(Section 6)*
 - **Trust comes from process**: a trial log, held-out data, a correction for N, costs, and a reason the signal should exist. *(Section 7)*
+- **Worked case**: the best of 2,000 random formulas scored 2.15 in the search window, exactly the luck prediction, and -0.02 on held-out days. *(Section 8)*
 
 ## Review questions
 
@@ -230,7 +286,6 @@ Test yourself with the [quiz for this post](/blog/ai-trading-alpha/quiz/).
 - **[Kakushadze, 101 Formulaic Alphas](https://arxiv.org/abs/1601.00991)**: the whole list of formulas, with the operator definitions. Read a handful and try to say each in one sentence.
 - **[Bailey, Borwein, López de Prado and Zhu, The Probability of Backtest Overfitting](https://www.davidhbailey.com/dhbpapers/backtest-prob.pdf)**: how to estimate the chance that your best result is overfit.
 - **[Allen and Karjalainen, Using genetic algorithms to find technical trading rules](https://ideas.repec.org/a/eee/jfinec/v51y1999i2p245-271.html)**: the genetic-programming case of Section 3.
-- **[51Labs, Machine Learning for Financial Market](https://51labs.vn/vi/courses)**: the public curriculum behind this series, including genetic programming for alpha mining and tree search.
 
 </En>
 
@@ -394,6 +449,61 @@ Một, giữ **nhật ký thử nghiệm**: mọi công thức đã chấm, ghi 
 
 Nếu bạn nhờ AI đề xuất công thức, hãy giao cho nó một nhiệm vụ có kèm nhật ký. Hỏi nó đã thử bao nhiêu công thức, đã thấy dữ liệu nào, và điểm còn lại bao nhiêu sau khi hiệu chỉnh theo N. Bản tóm tắt tốt có đủ những con số đó. Bản yếu mở đầu bằng Sharpe cao nhất.
 
+## 8. Case thực hành: công thức tốt nhất trong 2.000 công thức
+
+Giả sử một đồng nghiệp gửi bạn một kết quả. Một script viết 2.000 công thức ngẫu nhiên từ giá mở, cao, thấp, đóng và lợi suất, chấm từng cái trên 650 ngày của một cổ phiếu, rồi báo cái tốt nhất: Sharpe 2,15. Bạn có script và một buổi chiều. Đây là thứ tự tôi sẽ kiểm tra.
+
+**Một, đã thử bao nhiêu công thức?** Con số này đứng trước điểm số, vì điểm số vô nghĩa nếu thiếu nó. Ở đây N = 2.000.
+
+**Hai, may rủi thuần túy sẽ cho ra bao nhiêu?** Trên 650 ngày, Sharpe của một quy tắc không có kỹ năng có sai số chuẩn khoảng 0,62. Giá trị tốt nhất kỳ vọng của 2.000 mẫu như thế là khoảng 2,15, theo cùng công thức ở Mục 5. Kết quả tốt nhất của đồng nghiệp đúng bằng điều nhiễu dự đoán.
+
+**Ba, nhìn vào dữ liệu mà cuộc tìm kiếm chưa thấy.** Script giữ lại thêm 750 ngày. Công thức tốt nhất chỉ đạt -0,02 ở đó.
+
+Đoạn code dưới đây tạo một thị trường mà theo cách dựng chỉ có nhiễu, rồi chạy đúng cuộc tìm kiếm đó. Script đầy đủ, gồm cả phần dựng công thức ngẫu nhiên, nằm ở `demo/ai-trading/p20_formula_search.py`; đoạn này là phần chấm điểm và kiểm tra.
+
+```python
+def sharpe(sig, lo, hi):
+    sig = sig - mean(sig, 20)  # long when the signal is above its 20-day average
+    pos = np.sign(sig[lo - 1:hi - 1])  # trade tomorrow on today's signal
+    pnl = pos * ret[lo:hi]
+    return 0.0 if pnl.std() == 0 else pnl.mean() / pnl.std() * np.sqrt(252)
+
+N = 2000
+scores = []
+for i in range(N):
+    sig = random_tree(3)(data)
+    scores.append((sharpe(sig, 1, SEARCH), sharpe(sig, SEARCH, T)))
+scores = np.array(scores)
+best = scores[:, 0].argmax()
+
+sd = np.sqrt(252 / SEARCH)  # std error of one zero-skill Sharpe
+g = 0.5772
+exp_max = sd * ((1 - g) * norm.ppf(1 - 1 / N) + g * norm.ppf(1 - 1 / (N * np.e)))
+print(f"formulas tried            : {N}")
+print(f"best in search window     : {scores[best, 0]:.2f}")
+print(f"same formula, held-out    : {scores[best, 1]:.2f}")
+print(f"mean of all, search/held  : {scores[:, 0].mean():.2f} / {scores[:, 1].mean():.2f}")
+print(f"expected best of {N} (iid): {exp_max:.2f}")
+print(f"formulas above 1.0 in search: {(scores[:, 0] > 1).sum()}, of those above 1.0 held-out: {((scores[:, 0] > 1) & (scores[:, 1] > 1)).sum()}")
+```
+
+<TerminalOutput command={"uv run --with numpy --with scipy python demo/ai-trading/p20_formula_search.py"} label="Python 3.13 · numpy 2.3 · scipy 1.17 · captured Nov 2026" caption="Thị trường không có pattern, 2.000 công thức ngẫu nhiên. Công thức tốt nhất đạt 2,15 trong đoạn tìm kiếm, đúng như may rủi dự đoán, và -0,02 trên những ngày nó chưa thấy.">
+```text
+formulas tried            : 2000
+best in search window     : 2.15
+same formula, held-out    : -0.02
+mean of all, search/held  : 0.38 / -0.14
+expected best of 2000 (iid): 2.15
+formulas above 1.0 in search: 424, of those above 1.0 held-out: 2
+```
+</TerminalOutput>
+
+Các công thức tương quan với nhau vì nhiều cái dùng chung mảnh ghép, nên 2.000 lần thử chỉ đáng giá ít hơn 2.000 mẫu độc lập. Việc khớp với 2,15 là khá sát, nhưng tôi sẽ không đọc ra hai chữ số thập phân từ đó. Cột giữ kín mới là bằng chứng mạnh hơn: 424 công thức vượt Sharpe 1,0 trong đoạn tìm kiếm, và chỉ 2 cái trong số đó vượt lại sau đó.
+
+**Kết quả cho bạn biết gì.** Một cuộc tìm kiếm ra Sharpe 2,15 ở đây chỉ cho thấy nó biết tìm. Nó chưa cho thấy công thức dự đoán được gì. Chạy script này trên giá thật sẽ ra cùng một bảng, và chỉ nhìn con số trong mẫu thì bạn không phân biệt được hai trường hợp.
+
+**Điều gì sẽ làm tôi đổi ý.** Một công thức được chốt bằng văn bản trước khi mở tập giữ kín, rồi vượt t-ratio 3 trên những ngày không ai chỉnh theo. Hoặc một lý do để tín hiệu tồn tại mà tôi kiểm được mà không cần backtest, ví dụ một chi phí hay ràng buộc mà một nhóm nhà giao dịch phải chịu. Thiếu cả hai, câu trả lời cho đồng nghiệp là: "Quay lại với nhật ký số lần thử và tập giữ kín."
+
 ## Điểm rút ra (Key takeaways)
 
 - **Tín hiệu là một cái cây**: công thức như Alpha#101 là cây phép tính nhỏ, và chương trình có thể dựng, sao chép, sửa chúng. *(Mục 1)*
@@ -404,6 +514,7 @@ Nếu bạn nhờ AI đề xuất công thức, hãy giao cho nó một nhiệm 
 - **Tốt nhất trong N có một phần là may**: 100 công thức không kỹ năng trên ba năm dữ liệu cho Sharpe tốt nhất kỳ vọng 1,46, nên hãy hỏi đã thử bao nhiêu. *(Mục 5)*
 - **Tree search chuyển được máy móc, không chuyển được giả định**: thị trường thiếu luật, self-play rẻ, phần thưởng sạch và đối thủ cố định. *(Mục 6)*
 - **Niềm tin đến từ quy trình**: nhật ký thử nghiệm, dữ liệu giữ kín, hiệu chỉnh theo N, chi phí, và một lý do để tín hiệu tồn tại. *(Mục 7)*
+- **Case thực hành**: công thức tốt nhất trong 2.000 công thức ngẫu nhiên đạt 2,15 trong đoạn tìm kiếm, đúng bằng dự đoán của may rủi, và -0,02 trên ngày giữ kín. *(Mục 8)*
 
 ## Câu hỏi ôn tập (Review questions)
 
@@ -425,6 +536,5 @@ Tự kiểm tra bằng [quiz của bài này](/blog/ai-trading-alpha/quiz/).
 - **[Kakushadze, 101 Formulaic Alphas](https://arxiv.org/abs/1601.00991)**: toàn bộ danh sách công thức, kèm định nghĩa các phép tính. Đọc vài cái và thử nói mỗi cái bằng một câu.
 - **[Bailey, Borwein, López de Prado và Zhu, The Probability of Backtest Overfitting](https://www.davidhbailey.com/dhbpapers/backtest-prob.pdf)**: cách ước lượng khả năng kết quả tốt nhất của bạn là overfit.
 - **[Allen và Karjalainen, Using genetic algorithms to find technical trading rules](https://ideas.repec.org/a/eee/jfinec/v51y1999i2p245-271.html)**: case genetic programming của Mục 3.
-- **[51Labs, Machine Learning for Financial Market](https://51labs.vn/vi/courses)**: chương trình công khai làm nền cho series, gồm genetic programming cho khai phá alpha và tree search.
 
 </Vi>

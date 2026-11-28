@@ -17,7 +17,6 @@ sources:
   - { title: "Are Transformers Effective for Time Series Forecasting?", author: "Ailing Zeng, Muxi Chen, Lei Zhang & Qiang Xu", chapters: "arXiv 2205.13504", url: "https://arxiv.org/abs/2205.13504" }
   - { title: "Deep Limit Order Book Forecasting", author: "Antonio Briola, Silvia Bartolucci & Tomaso Aste", chapters: "arXiv 2403.09267 (2024)", url: "https://arxiv.org/abs/2403.09267" }
   - { title: "Quy định giao dịch đăng website HOSE (tờ trình 51/TTr-HTGD, 26/04/2025): biên độ dao động giá ±7%, đơn vị yết giá", author: "Sở Giao dịch Chứng khoán TP.HCM", url: "https://static2.vietstock.vn/vietstock/2025/4/29/20250429_20250429___hose___quy_dinh_giao_dich_dang_website_hose.pdf" }
-  - { title: "51Labs — Machine Learning for Financial Market (curriculum: CNN, Recurrent model, LSTM; Transformer; SharpeLoss; projects DeepLOB and Deep Momentum Network)", url: "https://51labs.vn/vi/courses" }
   - { title: "Charles Richter analyzing a seismograph log (photo, CC BY 4.0)", author: "Gil Cooper, Los Angeles Times, 1964; UCLA Library Special Collections", url: "https://commons.wikimedia.org/wiki/File:Charles_Richter_analyzing_a_seismograph_log.jpg" }
 ---
 
@@ -37,6 +36,7 @@ import AtP15SharpeLoss from '../../components/mdx/AtP15SharpeLoss.astro';
 import AtP15Attention from '../../components/mdx/AtP15Attention.astro';
 import AtP15Cost from '../../components/mdx/AtP15Cost.astro';
 import AtP15Ladder from '../../components/mdx/AtP15Ladder.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
 import heroRichter from '../../assets/blog/ai-trading-sequence-models/richter-seismograph-log.jpg';
 
 <En>
@@ -162,8 +162,6 @@ They tested it on 88 continuous futures contracts with prices from 1990 to 2015,
 
 The price of this objective is that the loss is noisy. A Sharpe ratio estimated on a few days or a few months can be large by luck, as the five-day toy shows. Every part of the setup around the DMN, from long histories to periodic retraining to cost-aware penalties, is there to keep the network from chasing that noise.
 
-A taste of the same thinking appears in 51Labs' curriculum, which lists SharpeLoss as the "financial objective function" in its deep learning module and uses a Deep Momentum Network project for trend strategies.
-
 <Concepts>
 
 - **Loss function**: the number training tries to make small.
@@ -227,6 +225,72 @@ Split by time. Compare with repeating the last value and with a linear model on 
 
 ---
 
+## 7. Worked case: a 20-day window that cannot see a 40-day effect
+
+Say a colleague hands you a 20-day LSTM that "finds nothing" in a return series, and asks whether the series is empty or the model is blind. Say the truth, which you do not know yet, is that each day's return carries 0.3 of the return 40 days earlier, on top of 1% daily noise. A window of 20 days never contains lag 40.
+
+**What I would check first.** The window length, before the architecture. It is one line of code and it decides which lags exist for the model at all. Then the baseline: a linear model on the same window, split by time, scored by R² against a forecast of zero. If a linear model on a window fails the same way, the LSTM was not the problem.
+
+**The steps.** Build windows of 20, 60 and 120 days from 3,000 simulated days, fit a linear model on the first 70% and score on the last 30%. Then print how much of day 1 survives for three memory factors.
+
+```python
+import numpy as np
+
+rng = np.random.default_rng(15)
+
+# Say daily returns carry a real effect at lag 40: r[t] = 0.3 * r[t-40] + noise (1% daily)
+n = 3000
+r = rng.normal(0, 0.01, n)
+for t in range(40, n):
+    r[t] += 0.3 * r[t - 40]
+
+def windows(x, w):
+    # sample t uses x[t-w : t] as input and x[t] as the answer
+    X = np.stack([x[i:i + w] for i in range(len(x) - w)])
+    return X, x[w:]
+
+def oos_r2(w):
+    X, y = windows(r, w)
+    cut = int(0.7 * len(y))                      # split by time, no shuffle
+    A = np.c_[np.ones(cut), X[:cut]]
+    beta = np.linalg.lstsq(A, y[:cut], rcond=None)[0]
+    pred = np.c_[np.ones(len(y) - cut), X[cut:]] @ beta
+    yt = y[cut:]
+    return 1 - ((yt - pred) ** 2).sum() / (yt ** 2).sum(), len(y)
+
+print("window  examples  share of days reused  out-of-sample R2 vs zero")
+for w in (20, 60, 120):
+    r2, m = oos_r2(w)
+    print(f"{w:>6}  {m:>8}  {1 - 1 / w:>19.0%}  {r2:>24.4f}")
+
+print("\nshare of day 1 left after n steps, memory factor f per step")
+print("   n   f=0.90   f=0.97   f=0.99")
+for k in (10, 20, 50, 100):
+    print(f"{k:>4}  " + "  ".join(f"{f ** k:>7.1%}" for f in (0.90, 0.97, 0.99)))
+```
+
+<TerminalOutput command={"python demo/ai-trading/p15_window_memory.py"} label="Python 3.13 · numpy 2.3 · captured Nov 2026" caption="The 20-day window scores below zero: it cannot see lag 40, and its 20 weights only fit noise. The 60-day window sees the effect and scores 0.047 out of sample. The 120-day window holds it too, but 120 weights on about 2,000 training rows eat the gain, and R² falls back to 0.002.">
+```text
+window  examples  share of days reused  out-of-sample R2 vs zero
+    20      2980                  95%                   -0.0269
+    60      2940                  98%                    0.0466
+   120      2880                  99%                    0.0016
+
+share of day 1 left after n steps, memory factor f per step
+   n   f=0.90   f=0.97   f=0.99
+  10    34.9%    73.7%    90.4%
+  20    12.2%    54.4%    81.8%
+  50     0.5%    21.8%    60.5%
+ 100     0.0%     4.8%    36.6%
+```
+</TerminalOutput>
+
+**What the result tells you.** The first table shows window length as a trade-off. Too short and the effect does not exist for the model; too long and the model has more weights to fit on the same rows. The second table is the LSTM side of the same question: a memory factor of 0.9 leaves 0.5% of day 1 after 50 steps, 0.97 leaves 21.8%, and only 0.99 still holds 36.6% after 100. A longer window does not help a recurrent net unless its gates can actually keep that old information.
+
+**What would change my mind.** If the 60-day linear model beat the 20-day one on one split but lost on the next walk-forward split, I would call the lag-40 effect luck and not widen the window. If the 60-day model kept its R² across several periods, I would widen the window first and only then try an LSTM on it. The effect here is invented for the exercise; in real data it is the walk-forward result that decides.
+
+---
+
 ## Key takeaways
 
 - Windows turn a history into examples of shape samples × steps × features, and neighbouring windows overlap, so split by time.
@@ -235,6 +299,7 @@ Split by time. Compare with repeating the last value and with a linear model on 
 - The Sharpe loss trains a network on the return of its positions, but a Sharpe ratio from few days is mostly luck.
 - Attention scores every pair of steps, so cost grows with the square of the window: 10,000 pairs at 100 steps and 22.5 billion at 150,000.
 - Simple baselines have beaten Transformers on public time-series benchmarks, and an LSTM that earned 0.46% a day before costs hovered around zero after costs from 2010.
+- A window shorter than the effect's lag cannot find it, and one far longer adds weights without adding signal: in a 3,000-day simulation with a lag-40 effect, 20 days scored R² -0.027, 60 days 0.047 and 120 days 0.002.
 
 ## Review questions
 
@@ -252,7 +317,6 @@ Split by time. Compare with repeating the last value and with a linear model on 
 - **[DeepLOB (Zhang, Zohren & Roberts)](https://arxiv.org/abs/1808.03668)**: the architecture and both datasets, with a sensitivity analysis of which book levels matter.
 - **[Enhancing Time Series Momentum Strategies Using Deep Neural Networks (Lim, Zohren & Roberts)](https://arxiv.org/abs/1904.04912)**: the Deep Momentum Network, with the Sharpe loss and the cost experiments.
 - **[Are Transformers Effective for Time Series Forecasting? (Zeng et al.)](https://arxiv.org/abs/2205.13504)**: the paper behind the baseline ladder.
-- **[51Labs — Machine Learning for Financial Market](https://51labs.vn/vi/courses)**: the course whose deep learning module covers CNN, recurrent models, LSTM, Transformer and SharpeLoss.
 
 </En>
 
@@ -379,8 +443,6 @@ Họ thử trên 88 hợp đồng tương lai liên tục với giá từ 1990 �
 
 Cái giá của mục tiêu này là loss nhiễu. Sharpe ước lượng trên vài ngày hay vài tháng có thể lớn chỉ do may, như ví dụ năm ngày đã cho thấy. Mọi thứ quanh DMN, từ lịch sử dài tới huấn luyện lại định kỳ tới hình phạt chi phí, đều ở đó để mạng khỏi đuổi theo chỗ nhiễu ấy.
 
-Cùng cách nghĩ này có trong chương trình của 51Labs, nơi SharpeLoss được liệt kê là "financial objective function" trong module deep learning, kèm một project Deep Momentum Network cho chiến lược theo xu hướng.
-
 <Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
 
 - **Hàm loss**: con số mà quá trình huấn luyện cố làm nhỏ đi.
@@ -444,6 +506,72 @@ Chia theo thời gian. So với việc lặp lại giá trị gần nhất và v
 
 ---
 
+## 7. Ca thực hành: cửa sổ 20 ngày không thấy được hiệu ứng ở độ trễ 40 ngày
+
+Giả sử đồng nghiệp đưa bạn một LSTM cửa sổ 20 ngày "không tìm thấy gì" trong một chuỗi lợi suất, và hỏi chuỗi này trống hay mô hình bị mù. Giả sử sự thật, mà bạn chưa biết, là lợi suất mỗi ngày mang 0,3 lần lợi suất của 40 ngày trước, cộng nhiễu 1% mỗi ngày. Cửa sổ 20 ngày không bao giờ chứa độ trễ 40.
+
+**Tôi sẽ kiểm tra gì trước.** Độ dài cửa sổ, trước cả kiến trúc. Đó là một dòng code và nó quyết định mô hình có thấy những độ trễ nào. Sau đó là đối chứng: mô hình tuyến tính trên cùng cửa sổ, chia theo thời gian, chấm bằng R² so với dự báo bằng 0. Nếu mô hình tuyến tính trên cửa sổ cũng hỏng y như vậy thì LSTM không phải thủ phạm.
+
+**Các bước.** Dựng cửa sổ 20, 60 và 120 ngày từ 3.000 ngày mô phỏng, khớp mô hình tuyến tính trên 70% đầu và chấm trên 30% cuối. Sau đó in ra bao nhiêu phần của ngày 1 còn sống với ba hệ số nhớ.
+
+```python
+import numpy as np
+
+rng = np.random.default_rng(15)
+
+# Say daily returns carry a real effect at lag 40: r[t] = 0.3 * r[t-40] + noise (1% daily)
+n = 3000
+r = rng.normal(0, 0.01, n)
+for t in range(40, n):
+    r[t] += 0.3 * r[t - 40]
+
+def windows(x, w):
+    # sample t uses x[t-w : t] as input and x[t] as the answer
+    X = np.stack([x[i:i + w] for i in range(len(x) - w)])
+    return X, x[w:]
+
+def oos_r2(w):
+    X, y = windows(r, w)
+    cut = int(0.7 * len(y))                      # split by time, no shuffle
+    A = np.c_[np.ones(cut), X[:cut]]
+    beta = np.linalg.lstsq(A, y[:cut], rcond=None)[0]
+    pred = np.c_[np.ones(len(y) - cut), X[cut:]] @ beta
+    yt = y[cut:]
+    return 1 - ((yt - pred) ** 2).sum() / (yt ** 2).sum(), len(y)
+
+print("window  examples  share of days reused  out-of-sample R2 vs zero")
+for w in (20, 60, 120):
+    r2, m = oos_r2(w)
+    print(f"{w:>6}  {m:>8}  {1 - 1 / w:>19.0%}  {r2:>24.4f}")
+
+print("\nshare of day 1 left after n steps, memory factor f per step")
+print("   n   f=0.90   f=0.97   f=0.99")
+for k in (10, 20, 50, 100):
+    print(f"{k:>4}  " + "  ".join(f"{f ** k:>7.1%}" for f in (0.90, 0.97, 0.99)))
+```
+
+<TerminalOutput command={"python demo/ai-trading/p15_window_memory.py"} label="Python 3.13 · numpy 2.3 · captured Nov 2026" caption="Cửa sổ 20 ngày chấm dưới 0: nó không thấy độ trễ 40, và 20 trọng số chỉ khớp vào nhiễu. Cửa sổ 60 ngày thấy được hiệu ứng và chấm 0,047 ngoài mẫu. Cửa sổ 120 ngày cũng chứa nó, nhưng 120 trọng số trên khoảng 2.000 dòng huấn luyện ăn hết phần lợi, và R² rơi về 0,002.">
+```text
+window  examples  share of days reused  out-of-sample R2 vs zero
+    20      2980                  95%                   -0.0269
+    60      2940                  98%                    0.0466
+   120      2880                  99%                    0.0016
+
+share of day 1 left after n steps, memory factor f per step
+   n   f=0.90   f=0.97   f=0.99
+  10    34.9%    73.7%    90.4%
+  20    12.2%    54.4%    81.8%
+  50     0.5%    21.8%    60.5%
+ 100     0.0%     4.8%    36.6%
+```
+</TerminalOutput>
+
+**Kết quả cho biết gì.** Bảng đầu cho thấy độ dài cửa sổ là một sự đánh đổi. Quá ngắn thì hiệu ứng không tồn tại với mô hình; quá dài thì mô hình có thêm trọng số để khớp trên cùng số dòng. Bảng thứ hai là phía LSTM của cùng câu hỏi: hệ số nhớ 0,9 chỉ còn 0,5% của ngày 1 sau 50 bước, 0,97 còn 21,8%, và chỉ 0,99 mới còn giữ 36,6% sau 100 bước. Cửa sổ dài hơn không giúp mạng hồi quy nếu các cổng của nó không thật sự giữ được thông tin cũ đến vậy.
+
+**Điều gì làm tôi đổi ý.** Nếu mô hình tuyến tính 60 ngày thắng bản 20 ngày ở một lần chia nhưng thua ở lần walk-forward kế tiếp, tôi coi hiệu ứng độ trễ 40 là do may và không nới cửa sổ. Nếu mô hình 60 ngày giữ được R² qua nhiều giai đoạn, tôi nới cửa sổ trước rồi mới thử LSTM trên đó. Hiệu ứng ở đây là do tôi dựng ra cho bài tập; với dữ liệu thật, kết quả walk-forward mới là thứ quyết định.
+
+---
+
 ## Điểm rút ra (Key takeaways)
 
 - Cửa sổ biến lịch sử thành các ví dụ dạng mẫu × bước × đặc trưng, và các cửa sổ liền kề chồng lên nhau, nên hãy chia theo thời gian.
@@ -452,6 +580,7 @@ Chia theo thời gian. So với việc lặp lại giá trị gần nhất và v
 - Loss Sharpe huấn luyện mạng theo lợi suất của các vị thế, nhưng Sharpe tính từ ít ngày phần lớn là may.
 - Attention chấm điểm mọi cặp bước, nên chi phí tăng theo bình phương cửa sổ: 10.000 cặp ở 100 bước và 22,5 tỷ ở 150.000.
 - Các đối chứng đơn giản từng thắng Transformer trên benchmark chuỗi thời gian công khai, và một LSTM lãi 0,46% mỗi ngày trước chi phí đã quanh mức 0 sau chi phí từ 2010.
+- Cửa sổ ngắn hơn độ trễ của hiệu ứng thì không tìm ra nó, còn cửa sổ quá dài thêm trọng số mà không thêm tín hiệu: trong mô phỏng 3.000 ngày với hiệu ứng độ trễ 40, 20 ngày chấm R² -0,027, 60 ngày 0,047 và 120 ngày 0,002.
 
 ## Câu hỏi ôn tập (Review questions)
 
@@ -469,6 +598,5 @@ Chia theo thời gian. So với việc lặp lại giá trị gần nhất và v
 - **[DeepLOB (Zhang, Zohren & Roberts)](https://arxiv.org/abs/1808.03668)**: kiến trúc và cả hai bộ dữ liệu, kèm phân tích độ nhạy cho thấy mức nào của sổ lệnh quan trọng.
 - **[Enhancing Time Series Momentum Strategies Using Deep Neural Networks (Lim, Zohren & Roberts)](https://arxiv.org/abs/1904.04912)**: Deep Momentum Network, với loss Sharpe và các thí nghiệm về chi phí.
 - **[Are Transformers Effective for Time Series Forecasting? (Zeng và cộng sự)](https://arxiv.org/abs/2205.13504)**: bài báo đứng sau cái thang đối chứng.
-- **[51Labs — Machine Learning for Financial Market](https://51labs.vn/vi/courses)**: chương trình mà module deep learning bao gồm CNN, mô hình hồi quy, LSTM, Transformer và SharpeLoss.
 
 </Vi>

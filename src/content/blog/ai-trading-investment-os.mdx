@@ -16,7 +16,6 @@ sources:
   - { title: "Four out of six AI models suffer losses in trading tournament (Forklog, 4 Nov 2025)", author: "Forklog", url: "https://forklog.com/en/four-out-of-six-ai-models-suffer-losses-in-trading-tournament/" }
   - { title: "AI Crypto Trading Showdown: DeepSeek and Grok Are Cashing In as Gemini Implodes (Decrypt, 20 Oct 2025)", author: "Decrypt", url: "https://decrypt.co/345006/ai-crypto-trading-showdown-deepseek-grok-winning-gemini-implodes" }
   - { title: "Quy chế giao dịch mới tại HOSE: Duy trì biên độ dao động giá 7% và lô chẵn 100 cổ phiếu", author: "Người Quan Sát", url: "https://nguoiquansat.vn/quy-che-giao-dich-moi-tai-hose-duy-tri-bien-do-dao-dong-gia-7-va-lo-chan-100-co-phieu-32586.html" }
-  - { title: "Machine Learning for Financial Market: course curriculum", author: "51labs", url: "https://51labs.vn/vi/courses" }
   - { title: "View of Mission Control Center during Apollo 13 splashdown (S70-35471) (photo, public domain, NASA)", author: "NASA Johnson Space Center", url: "https://commons.wikimedia.org/wiki/File:View_of_Mission_Control_Center_during_Apollo_13_splashdown_(S70-35471).jpg" }
 ---
 
@@ -35,6 +34,7 @@ import AtP22KnightGap from '../../components/mdx/AtP22KnightGap.astro';
 import AtP22Gates from '../../components/mdx/AtP22Gates.astro';
 import AtP22RunawayDemo from '../../components/mdx/AtP22RunawayDemo.astro';
 import AtP22SeriesMap from '../../components/mdx/AtP22SeriesMap.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
 import heroMcc from '../../assets/blog/ai-trading-investment-os/mission-control-apollo-13.jpg';
 
 <En>
@@ -176,7 +176,61 @@ Nothing in this post is investment advice or a recommendation to trade. It descr
 
 Read in this order, the series is a tour of the layers. [The Market](/blog/ai-trading-the-market/) and [Data](/blog/ai-trading-data/) are the ground. [Signals](/blog/ai-trading-signals/) through [Alpha](/blog/ai-trading-alpha/) are layer 2, built up from simple statistics to deep nets and graphs. [Financial NLP](/blog/ai-trading-financial-nlp/) and [Agents](/blog/ai-trading-agents/) add the research layer. [Reinforcement Learning](/blog/ai-trading-reinforcement-learning/) shows an agent learning from rewards, and how it learns to exploit your backtest, which is the same lesson as section 3. The risk gate and monitoring layers are where [Backtest](/blog/ai-trading-backtest/) and [Production](/blog/ai-trading-production/) end up.
 
-51labs' public curriculum ends with a module called Agentic Investment, with "Swarm" among its topics and a group project to finish. This post is the series' own version of that last step: the point where the parts have to work together and somebody has to be responsible for them.
+## 7. Worked case: ten orders through the gate
+
+Say an agent that manages a small book keeps sending one idea, "buy more", at about 60,000 VND a share, and a fault makes some of its orders malformed. You sit between it and the broker. What would I check first, and in what order?
+
+I would start with the checks that cost nothing and have a right answer: is the order even legal? Then the checks that bound the damage: how big, how much in total. The stop comes last in the order of thinking but first in the code, because a halted system must refuse everything without looking at the order. Say the limits are these: lot of 100 shares, price within ±7% of the reference (the HOSE band), at most 50 million VND per order, at most 100 million VND of position, and a stop at a 10 million VND loss on the day. Say each fill then loses 4 million VND as the price drifts down. These numbers are assumptions chosen to make each limit visible, not a recommendation.
+
+```python
+LIMITS = dict(band=0.07, lot=100, max_order=50_000_000, max_pos=100_000_000, max_day_loss=10_000_000)
+
+def gate(order, state, ref):
+    """Return (ok, reason). Reject by default; every check is plain code."""
+    qty, px = order["qty"], order["price"]
+    if state["halted"]:
+        return False, "halted"
+    if state["day_pnl"] <= -LIMITS["max_day_loss"]:
+        state["halted"] = True          # the stop: only a person clears it
+        return False, "daily loss stop"
+    if qty % LIMITS["lot"] != 0 or qty <= 0:
+        return False, "lot size"
+    if abs(px / ref - 1) > LIMITS["band"]:
+        return False, "outside price band"
+    if qty * px > LIMITS["max_order"]:
+        return False, "order too large"
+    if state["pos_value"] + qty * px > LIMITS["max_pos"]:
+        return False, "position limit"
+    return True, "ok"
+```
+
+The script feeds ten orders through it:
+
+<TerminalOutput command={"uv run --python 3.13 python demo/ai-trading/p22_risk_gate.py"} label="Python 3.13 · standard library · captured Nov 2026" caption="Ten orders, six outcomes. The malformed three are rejected for their own reasons, the position limit stops two buys, and the third fill pushes the day's loss past the stop, after which everything is refused.">
+```text
+ 0 qty=  700 px= 60000 -> PASS (ok)
+ 1 qty=  150 px= 60000 -> REJECT (lot size)
+ 2 qty=  500 px= 66000 -> REJECT (outside price band)
+ 3 qty= 2000 px= 60000 -> REJECT (order too large)
+ 4 qty=  500 px= 60000 -> PASS (ok)
+ 5 qty=  700 px= 60000 -> REJECT (position limit)
+ 6 qty=  300 px= 60000 -> PASS (ok)
+ 7 qty=  300 px= 60000 -> REJECT (daily loss stop)
+ 8 qty=  300 px= 60000 -> REJECT (halted)
+ 9 qty=  300 px= 60000 -> REJECT (halted)
+sent: 3 position VND: 90000000 day pnl VND: -12000000
+```
+</TerminalOutput>
+
+Reading it order by order:
+
+1. **Orders 1 to 3** fail on form: 150 shares is not a lot, 66,000 is 10% above the reference, and 2,000 shares is 120 million VND in one order. No model judgement is involved, which is why the gate can run in microseconds.
+2. **Order 5** is well formed but would take the position to 114 million VND. The limit rejects it and order 6 still fits, ending at 90 million VND.
+3. **Order 7** is the stop. After three fills the day is at -12 million VND, past the 10 million limit, so the gate flips `halted` and refuses it. Orders 8 and 9 are refused as "halted" without any check of their contents.
+
+What the result tells you: 3 of 10 orders went out, and the loss stopped at 12 million VND instead of growing with every further order. The overshoot of 2 million past the 10 million limit is real: the stop looks at the loss after a fill, so it can only act on the next order. A limit that must hold exactly needs a check on the worst case of the order itself, not only on the realised loss.
+
+What would change my mind about this design: if the stop were reached on most days, the limit is too tight or the strategy is broken, and the answer is a person reviewing the strategy, not a wider limit. If the gate rejected nothing for a month, I would test it with a deliberately bad order, since an untested gate is a belief and not a control. And `halted` should clear only through a person; if the agent can clear it, it is not a stop.
 
 ## Key takeaways
 
@@ -187,6 +241,7 @@ Read in this order, the series is a tour of the layers. [The Market](/blog/ai-tr
 - **Test after the cutoff**: a model may have read the period you backtest. *(Section 3)*
 - **Put checks in code, on the path of every order**: Knight had most of its checks before the router and almost none on it, and lost over $460 million in about 45 minutes. *(Section 4)*
 - **A person owns the limits and the stop button**: those decisions set the rules the machines run inside. *(Section 5)*
+- **Reject by default, stop first**: a ten-order run of a short gate lets 3 through and halts at a 12 million VND loss. *(Section 7)*
 
 ## Review questions
 
@@ -205,7 +260,6 @@ Read in this order, the series is a tour of the layers. [The Market](/blog/ai-tr
 - **[SEC order against Knight Capital Americas (Release 34-70694)](https://www.sec.gov/files/litigation/admin/2013/34-70694.pdf)**: the findings behind Section 4, plain facts in short numbered paragraphs.
 - **[TradingAgents (arXiv 2412.20138)](https://arxiv.org/abs/2412.20138)**: the full framework, with the footnote on the Sharpe ratio in Section 6.1.2.
 - **[Glasserman and Lin, Assessing Look-Ahead Bias (arXiv 2309.17322)](https://arxiv.org/abs/2309.17322)**: the headline-anonymisation test.
-- **[51labs, Machine Learning for Financial Market](https://51labs.vn/vi/courses)**: the public curriculum this series builds on, including the Agentic Investment module.
 
 </En>
 
@@ -348,7 +402,61 @@ Không có gì trong bài này là lời khuyên đầu tư hay khuyến nghị 
 
 Đọc theo thứ tự này, series là một chuyến đi qua các lớp. [Thị trường](/blog/ai-trading-the-market/) và [Dữ liệu](/blog/ai-trading-data/) là nền đất. Từ [Tín hiệu](/blog/ai-trading-signals/) đến [Alpha](/blog/ai-trading-alpha/) là lớp 2, dựng từ thống kê đơn giản lên học sâu và đồ thị. [NLP tài chính](/blog/ai-trading-financial-nlp/) và [Agent](/blog/ai-trading-agents/) thêm lớp nghiên cứu. [Học tăng cường](/blog/ai-trading-reinforcement-learning/) cho thấy một agent học từ phần thưởng, và cách nó học cách khai thác backtest của bạn, cùng một bài học với mục 3. Cổng rủi ro và lớp giám sát là chỗ [Backtest](/blog/ai-trading-backtest/) và [Triển khai](/blog/ai-trading-production/) dẫn tới.
 
-Chương trình công khai của 51labs kết thúc bằng module Agentic Investment, có "Swarm" trong các chủ đề và một dự án nhóm để hoàn thành. Bài này là phiên bản của riêng series cho bước cuối đó: lúc các bộ phận phải chạy cùng nhau và có người phải chịu trách nhiệm về chúng.
+## 7. Ca thực tế: mười lệnh đi qua cổng
+
+Giả sử một agent quản lý một danh mục nhỏ cứ gửi một ý, "mua thêm", ở khoảng 60.000 đồng một cổ phiếu, và một lỗi làm vài lệnh của nó sai dạng. Bạn đứng giữa agent và công ty chứng khoán. Tôi sẽ kiểm tra gì trước, theo thứ tự nào?
+
+Tôi bắt đầu với những kiểm tra không tốn gì và có đáp án đúng: lệnh này có hợp lệ không? Rồi đến những kiểm tra giới hạn thiệt hại: lệnh lớn cỡ nào, tổng cộng bao nhiêu. Nút dừng đứng cuối trong thứ tự suy nghĩ nhưng đứng đầu trong code, vì một hệ thống đã dừng phải từ chối mọi thứ mà không cần nhìn vào lệnh. Giả sử hạn mức là: lô 100 cổ phiếu, giá trong ±7% so với giá tham chiếu (biên độ HOSE), tối đa 50 triệu đồng mỗi lệnh, tối đa 100 triệu đồng vị thế, và dừng khi lỗ 10 triệu đồng trong ngày. Giả sử mỗi lần khớp lỗ thêm 4 triệu đồng vì giá trôi xuống. Các con số này là giả định chọn để mỗi hạn mức hiện ra rõ, không phải khuyến nghị.
+
+```python
+LIMITS = dict(band=0.07, lot=100, max_order=50_000_000, max_pos=100_000_000, max_day_loss=10_000_000)
+
+def gate(order, state, ref):
+    """Return (ok, reason). Reject by default; every check is plain code."""
+    qty, px = order["qty"], order["price"]
+    if state["halted"]:
+        return False, "halted"
+    if state["day_pnl"] <= -LIMITS["max_day_loss"]:
+        state["halted"] = True          # the stop: only a person clears it
+        return False, "daily loss stop"
+    if qty % LIMITS["lot"] != 0 or qty <= 0:
+        return False, "lot size"
+    if abs(px / ref - 1) > LIMITS["band"]:
+        return False, "outside price band"
+    if qty * px > LIMITS["max_order"]:
+        return False, "order too large"
+    if state["pos_value"] + qty * px > LIMITS["max_pos"]:
+        return False, "position limit"
+    return True, "ok"
+```
+
+Script đưa mười lệnh qua hàm này:
+
+<TerminalOutput command={"uv run --python 3.13 python demo/ai-trading/p22_risk_gate.py"} label="Python 3.13 · standard library · captured Nov 2026" caption="Mười lệnh, sáu kết cục. Ba lệnh sai dạng bị từ chối vì lý do riêng, hạn mức vị thế chặn hai lệnh mua, và lần khớp thứ ba đẩy lỗ trong ngày qua mức dừng, sau đó mọi lệnh đều bị từ chối.">
+```text
+ 0 qty=  700 px= 60000 -> PASS (ok)
+ 1 qty=  150 px= 60000 -> REJECT (lot size)
+ 2 qty=  500 px= 66000 -> REJECT (outside price band)
+ 3 qty= 2000 px= 60000 -> REJECT (order too large)
+ 4 qty=  500 px= 60000 -> PASS (ok)
+ 5 qty=  700 px= 60000 -> REJECT (position limit)
+ 6 qty=  300 px= 60000 -> PASS (ok)
+ 7 qty=  300 px= 60000 -> REJECT (daily loss stop)
+ 8 qty=  300 px= 60000 -> REJECT (halted)
+ 9 qty=  300 px= 60000 -> REJECT (halted)
+sent: 3 position VND: 90000000 day pnl VND: -12000000
+```
+</TerminalOutput>
+
+Đọc từng lệnh:
+
+1. **Lệnh 1 đến 3** sai về dạng: 150 cổ phiếu không phải một lô, 66.000 cao hơn tham chiếu 10%, và 2.000 cổ phiếu là 120 triệu đồng trong một lệnh. Không cần phán đoán của mô hình, nên cổng chạy trong vài micro giây.
+2. **Lệnh 5** đúng dạng nhưng sẽ đưa vị thế lên 114 triệu đồng. Hạn mức từ chối nó, lệnh 6 vẫn vừa và vị thế kết thúc ở 90 triệu đồng.
+3. **Lệnh 7** là nút dừng. Sau ba lần khớp, ngày đang ở -12 triệu đồng, qua mức 10 triệu, nên cổng bật `halted` và từ chối. Lệnh 8 và 9 bị từ chối vì "halted" mà không cần xem nội dung.
+
+Kết quả cho thấy: 3 trong 10 lệnh được gửi đi, và khoản lỗ dừng ở 12 triệu đồng thay vì lớn thêm với mỗi lệnh sau. Khoản vượt 2 triệu so với mức 10 triệu là thật: nút dừng nhìn vào khoản lỗ sau khi khớp, nên chỉ chặn được lệnh kế tiếp. Hạn mức cần giữ chính xác thì phải kiểm tra cả trường hợp xấu nhất của chính lệnh đó, không chỉ khoản lỗ đã xảy ra.
+
+Điều làm tôi đổi ý về thiết kế này: nếu nút dừng chạm gần như mỗi ngày thì hạn mức quá chặt hoặc chiến lược đang hỏng, và cách xử lý là một người xem lại chiến lược, không phải nới hạn mức. Nếu cổng không từ chối gì trong cả tháng, tôi sẽ thử nó bằng một lệnh xấu cố ý, vì cổng chưa từng được thử chỉ là một niềm tin, không phải một kiểm soát. Còn `halted` chỉ nên được gỡ bởi một người; nếu agent gỡ được thì đó không phải nút dừng.
 
 ## Điểm rút ra (Key takeaways)
 
@@ -359,6 +467,7 @@ Chương trình công khai của 51labs kết thúc bằng module Agentic Invest
 - **Kiểm tra sau mốc cắt**: mô hình có thể đã đọc giai đoạn bạn backtest. *(Mục 3)*
 - **Đặt kiểm soát trong code, trên đường đi của mọi lệnh**: Knight có phần lớn kiểm soát trước bộ định tuyến và gần như không có trên nó, và mất hơn 460 triệu USD trong khoảng 45 phút. *(Mục 4)*
 - **Một con người nắm hạn mức và nút dừng**: các quyết định ấy đặt ra luật mà máy chạy bên trong. *(Mục 5)*
+- **Từ chối mặc định, dừng trước**: chạy mười lệnh qua một cổng ngắn, 3 lệnh đi qua và hệ thống dừng ở mức lỗ 12 triệu đồng. *(Mục 7)*
 
 ## Câu hỏi ôn tập (Review questions)
 
@@ -377,6 +486,5 @@ Chương trình công khai của 51labs kết thúc bằng module Agentic Invest
 - **[Lệnh của SEC với Knight Capital Americas (Release 34-70694)](https://www.sec.gov/files/litigation/admin/2013/34-70694.pdf)**: các kết luận đằng sau Mục 4, dữ kiện thẳng thắn trong các đoạn đánh số ngắn.
 - **[TradingAgents (arXiv 2412.20138)](https://arxiv.org/abs/2412.20138)**: toàn bộ framework, kèm chú thích về Sharpe ở Mục 6.1.2.
 - **[Glasserman và Lin, Assessing Look-Ahead Bias (arXiv 2309.17322)](https://arxiv.org/abs/2309.17322)**: phép thử ẩn danh tiêu đề tin.
-- **[51labs, Machine Learning for Financial Market](https://51labs.vn/vi/courses)**: chương trình công khai mà series dựng trên đó, gồm cả module Agentic Investment.
 
 </Vi>

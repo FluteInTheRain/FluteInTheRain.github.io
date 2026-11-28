@@ -21,7 +21,6 @@ sources:
   - { title: "FinRL: A Deep Reinforcement Learning Library for Automated Stock Trading in Quantitative Finance", author: "Xiao-Yang Liu et al., 2020", url: "https://arxiv.org/abs/2011.09607" }
   - { title: "Reinforcement Learning: An Introduction (2nd edition)", author: "Richard S. Sutton & Andrew G. Barto", url: "http://incompleteideas.net/book/the-book-2nd.html" }
   - { title: "Quy định giao dịch đăng website HOSE (tờ trình 51/TTr-HTGD, 26/04/2025)", author: "Sở Giao dịch Chứng khoán TP.HCM", url: "https://static2.vietstock.vn/vietstock/2025/4/29/20250429_20250429___hose___quy_dinh_giao_dich_dang_website_hose.pdf" }
-  - { title: "Machine Learning for Financial Market — course curriculum (Module 4: Reinforcement learning)", author: "51labs", url: "https://51labs.vn/vi/courses" }
   - { title: "Original puzzle box apparatus design, from Thorndike, Animal Intelligence (1898) (image, public domain)", author: "E. L. Thorndike — Wikimedia Commons", url: "https://commons.wikimedia.org/wiki/File:Original_%22Puzzle_Box%22_Apparatus_Design.png" }
 ---
 
@@ -30,6 +29,7 @@ import Vi from '../../components/mdx/Vi.astro';
 import Callout from '../../components/mdx/Callout.astro';
 import Concepts from '../../components/mdx/Concepts.astro';
 import Figure from '../../components/mdx/Figure.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
 import AtP19Loop from '../../components/mdx/AtP19Loop.astro';
 import AtP19Spec from '../../components/mdx/AtP19Spec.astro';
 import AtP19MoodyResults from '../../components/mdx/AtP19MoodyResults.astro';
@@ -231,6 +231,59 @@ Whenever you meet an RL trading result, ask five questions.
 
 The Backtest post covers the protocol for the first two. The third matters more for RL than for most models, because the algorithms are so sensitive to the seed. The fifth is easy to forget: an environment that ignores lots, the price band or what you can sell on a given day will train an agent for a market that does not exist.
 
+## 8. Worked case: edge or sample?
+
+Section 6 showed an agent learning noise. The harder question is the one you meet in practice: an agent shows a profit on its training history, and you have to decide whether it found something. Say your own pipeline is the thing under test, and you want to know whether it can tell the two cases apart.
+
+**What I would check first.** Build two worlds where I know the answer. In the first, daily returns are pure noise. In the second, I plant a weak edge on purpose: each day's return carries 0.3 of the previous day's return, plus fresh noise (standard deviation 1 percent). Real daily returns are nowhere near that persistent, so this is a planted signal to test the method, not a model of a stock. If the pipeline cannot find an edge I put there, or invents one where there is none, I should not trust it on real data. I check this before touching real data because only here the right answer is known.
+
+**The steps.** The agent sees the signs of the last two returns and its current position (short, flat or long), so a table of 12 states by 3 actions. A position change costs 0.05 percent per unit, and a short-to-long flip changes two units. Train on one 500-day path, then freeze the table and run it on that same path and on 100 fresh paths from the same world. Here is the core, which continues the script after `make_path` and `state`:
+
+```python
+def step_reward(r, t, p, a):
+    return POS[a] * r[t] - COST * abs(POS[a] - POS[p])
+
+def train(r, seed, passes=300, alpha=0.02, gamma=0.5, eps=0.3):
+    rng, q = np.random.default_rng(seed), np.zeros((12, 3))
+    for _ in range(passes):
+        p = 1
+        for t in range(2, len(r) - 1):
+            s = state(r, t, p)
+            a = int(rng.integers(3)) if rng.random() < eps else int(q[s].argmax())
+            q[s, a] += alpha * (step_reward(r, t, p, a) + gamma * q[state(r, t + 1, a)].max() - q[s, a])
+            p = a
+    return q
+
+def run(q, r):
+    p, total, trades = 1, 0.0, 0
+    for t in range(2, len(r)):
+        a = int(q[state(r, t, p)].argmax())
+        total += step_reward(r, t, p, a)
+        trades += a != p
+        p = a
+    return total, trades
+
+for rho in (0.0, 0.3):
+    q = train(make_path(7, rho), seed=7)
+    gain, trades = run(q, make_path(7, rho))
+    fresh = [run(q, make_path(1000 + i, rho))[0] for i in range(N_FRESH)]
+    print(f"rho={rho}: train {gain*100:+.1f}% ({trades} trades) | fresh mean {np.mean(fresh)*100:+.1f}%, "
+          f"profitable {sum(f > 0 for f in fresh)}/{N_FRESH}")
+```
+
+The full script is `demo/ai-trading/p19_edge_or_noise.py`. Running it:
+
+<TerminalOutput command={"uv run --with numpy python demo/ai-trading/p19_edge_or_noise.py"} label="Python 3.12 · numpy 2.5 · captured Nov 2026" caption="Same agent, same cost, two worlds. In the noise world it trades 410 times and gains on its own path; on fresh paths it loses. In the planted world it keeps most of the gain.">
+```text
+rho=0.0: train +29.4% (410 trades) | fresh mean -20.7%, profitable 12/100
+rho=0.3: train +89.8% (207 trades) | fresh mean +53.3%, profitable 100/100
+```
+</TerminalOutput>
+
+**What the result tells you.** In the noise world the agent earned +29.4 percent on the path it trained on. On fresh paths from the same world it averaged −20.7 percent, and 12 of 100 ended in profit. That +29.4 is the sample, not a rule. In the planted world the training gain was +89.8 percent and the fresh average +53.3 percent, with all 100 paths profitable. The 36-point drop between those two numbers is what the agent fitted to its own history; the 53 is what survived. So the useful reading is the fresh column. Two worlds with similar training stories (+29 and +90) have fresh results that point in opposite directions.
+
+**What would change my mind.** If a pipeline lost money on fresh paths in the planted world, I would suspect the design (too few states, a cost that swallows the edge) before blaming the market. If it made money on fresh paths in the noise world, I would hunt for a leak, such as a state that peeks at the current return. And on real data, a fresh-path number from one split is still a single draw: run it over several non-overlapping windows, as the Backtest post describes, before believing it.
+
 ## Key takeaways
 
 - **RL learns from a score, not from labels**: the agent acts, gets a reward and adjusts. Trading fits because positions and fees make decisions depend on each other. *(Section 1)*
@@ -239,6 +292,7 @@ The Backtest post covers the protocol for the first two. The third matters more 
 - **Q-learning nudges a table toward its own target**: it needs exploration, and a table only works for few states. *(Section 4)*
 - **DQN and PPO make deep RL trainable**: replay and a frozen target for DQN, a clipped ratio for PPO. They fix instability, not overfitting. *(Section 5)*
 - **An agent fits what it is given**: on pure noise it earned +15.3% in-sample and lost 9.0% on average on fresh paths. Show every seed and test on data it never saw. *(Section 6)*
+- **Test your pipeline on a world where you know the answer**: with the same agent, noise gave +29.4% in-sample and −20.7% on fresh paths, while a planted edge gave +89.8% and +53.3%. *(Section 8)*
 - **RL does best where feedback is dense and the target is measurable**, as in order execution. *(Section 7)*
 
 ## Review questions
@@ -254,13 +308,13 @@ The Backtest post covers the protocol for the first two. The third matters more 
 9. In the demo, setting the cost to 0 brings the fresh-path average to about zero. What does that say about what the agent learned? *(See Section 6)*
 10. Why is "the best of ten seeds returned +25.2%" not a result? *(See Section 6)*
 11. Why is trade execution a friendlier RL problem than predicting direction? *(See Section 7)*
+12. In the worked case, the noise-world agent gains 29.4% on its own path and loses 20.7% on fresh ones. Which column do you read, and why? *(See Section 8)*
 
 ## Go deeper
 
 - **[Sutton and Barto, Reinforcement Learning: An Introduction](http://incompleteideas.net/book/the-book-2nd.html)**: the standard textbook, free online. Chapters on MDPs, Bellman equations and Q-learning match Sections 3 and 4.
 - **[Moody and Saffell, Reinforcement Learning for Trading](https://papers.nips.cc/paper/1551-reinforcement-learning-for-trading)**: the 25-year test of Section 2, with the differential Sharpe ratio as the reward.
 - **[Henderson et al., Deep Reinforcement Learning that Matters](https://arxiv.org/abs/1709.06560)**: why single runs of deep RL cannot be trusted, and what to report instead.
-- **[51Labs, Machine Learning for Financial Market](https://51labs.vn/vi/courses)**: the public curriculum has a module on reinforcement learning, from MDP and Q-learning to DQN and PPO.
 
 </En>
 
@@ -451,6 +505,59 @@ Mỗi khi gặp một kết quả RL trong giao dịch, hãy hỏi năm câu.
 
 Bài Backtest nói về quy trình cho hai câu đầu. Câu thứ ba quan trọng với RL hơn phần lớn mô hình khác, vì các thuật toán này rất nhạy với seed. Câu thứ năm dễ bị quên: một môi trường bỏ qua lô, biên độ giá hay thứ bạn bán được trong một ngày sẽ huấn luyện agent cho một thị trường không tồn tại.
 
+## 8. Ca thực hành: edge hay chỉ là mẫu?
+
+Mục 6 cho thấy agent học nhiễu. Câu hỏi khó hơn là câu bạn gặp ngoài đời: agent báo lãi trên lịch sử huấn luyện, và bạn phải quyết định nó có tìm ra thứ gì không. Giả sử chính quy trình của bạn là thứ đang bị kiểm tra, và bạn muốn biết nó có phân biệt được hai trường hợp không.
+
+**Tôi sẽ kiểm tra gì trước.** Dựng hai thế giới mà tôi biết đáp án. Thế giới thứ nhất, lợi suất ngày là nhiễu thuần. Thế giới thứ hai, tôi cố ý cài một edge yếu: lợi suất mỗi ngày mang 0,3 lần lợi suất hôm trước, cộng nhiễu mới (độ lệch chuẩn 1 phần trăm). Lợi suất ngày ngoài thực tế không bền đến mức đó, nên đây là tín hiệu cài sẵn để thử phương pháp, không phải mô hình của một cổ phiếu. Nếu quy trình không tìm ra edge tôi đã cài, hoặc bịa ra edge ở nơi không có, tôi không nên tin nó trên dữ liệu thật. Tôi làm bước này trước khi chạm dữ liệu thật vì chỉ ở đây mới biết đáp án đúng.
+
+**Các bước.** Agent thấy dấu của hai lợi suất gần nhất và vị thế hiện tại (bán khống, đứng ngoài hoặc mua), tức bảng 12 state nhân 3 action. Mỗi lần đổi vị thế mất 0,05 phần trăm cho mỗi đơn vị, và đảo từ bán sang mua đổi hai đơn vị. Huấn luyện trên một chuỗi 500 ngày, rồi đóng băng bảng và chạy trên chính chuỗi đó cùng 100 chuỗi mới từ cùng thế giới. Phần lõi nằm dưới đây, nối tiếp script sau `make_path` và `state`:
+
+```python
+def step_reward(r, t, p, a):
+    return POS[a] * r[t] - COST * abs(POS[a] - POS[p])
+
+def train(r, seed, passes=300, alpha=0.02, gamma=0.5, eps=0.3):
+    rng, q = np.random.default_rng(seed), np.zeros((12, 3))
+    for _ in range(passes):
+        p = 1
+        for t in range(2, len(r) - 1):
+            s = state(r, t, p)
+            a = int(rng.integers(3)) if rng.random() < eps else int(q[s].argmax())
+            q[s, a] += alpha * (step_reward(r, t, p, a) + gamma * q[state(r, t + 1, a)].max() - q[s, a])
+            p = a
+    return q
+
+def run(q, r):
+    p, total, trades = 1, 0.0, 0
+    for t in range(2, len(r)):
+        a = int(q[state(r, t, p)].argmax())
+        total += step_reward(r, t, p, a)
+        trades += a != p
+        p = a
+    return total, trades
+
+for rho in (0.0, 0.3):
+    q = train(make_path(7, rho), seed=7)
+    gain, trades = run(q, make_path(7, rho))
+    fresh = [run(q, make_path(1000 + i, rho))[0] for i in range(N_FRESH)]
+    print(f"rho={rho}: train {gain*100:+.1f}% ({trades} trades) | fresh mean {np.mean(fresh)*100:+.1f}%, "
+          f"profitable {sum(f > 0 for f in fresh)}/{N_FRESH}")
+```
+
+Script đầy đủ là `demo/ai-trading/p19_edge_or_noise.py`. Chạy ra:
+
+<TerminalOutput command={"uv run --with numpy python demo/ai-trading/p19_edge_or_noise.py"} label="Python 3.12 · numpy 2.5 · captured Nov 2026" caption="Cùng agent, cùng phí, hai thế giới. Ở thế giới nhiễu nó giao dịch 410 lần và lãi trên chuỗi của mình; trên chuỗi mới thì lỗ. Ở thế giới có edge cài sẵn nó giữ lại phần lớn khoản lãi.">
+```text
+rho=0.0: train +29.4% (410 trades) | fresh mean -20.7%, profitable 12/100
+rho=0.3: train +89.8% (207 trades) | fresh mean +53.3%, profitable 100/100
+```
+</TerminalOutput>
+
+**Kết quả nói lên điều gì.** Ở thế giới nhiễu, agent lãi +29,4 phần trăm trên chuỗi nó đã học. Trên chuỗi mới cùng thế giới nó lỗ trung bình 20,7 phần trăm và chỉ 12 trong 100 chuỗi có lãi. Con số +29,4 là cái mẫu, không phải một quy luật. Ở thế giới có edge, lãi huấn luyện là +89,8 phần trăm và trung bình trên chuỗi mới là +53,3 phần trăm, cả 100 chuỗi đều lãi. Mức rơi 36 điểm giữa hai số đó là phần agent khớp vào lịch sử của chính nó; 53 là phần còn sống sót. Vậy cột đáng đọc là cột chuỗi mới. Hai thế giới có câu chuyện huấn luyện na ná nhau (+29 và +90) nhưng kết quả trên chuỗi mới đi ngược chiều nhau.
+
+**Điều gì sẽ làm tôi đổi ý.** Nếu một quy trình lỗ trên chuỗi mới ở thế giới có edge cài sẵn, tôi sẽ nghi thiết kế (quá ít state, phí nuốt mất edge) trước khi đổ cho thị trường. Nếu nó lãi trên chuỗi mới ở thế giới nhiễu, tôi sẽ đi tìm rò rỉ, ví dụ một state nhìn trộm lợi suất của chính ngày đó. Còn trên dữ liệu thật, con số chuỗi mới từ một lần chia vẫn chỉ là một lần rút mẫu: hãy chạy trên nhiều cửa sổ không chồng lấn, như bài Backtest mô tả, trước khi tin nó.
+
 ## Điểm rút ra (Key takeaways)
 
 - **RL học từ điểm số, không từ nhãn**: agent hành động, nhận reward và chỉnh lại. Giao dịch hợp vì vị thế và phí làm các quyết định phụ thuộc nhau. *(Mục 1)*
@@ -459,6 +566,7 @@ Bài Backtest nói về quy trình cho hai câu đầu. Câu thứ ba quan trọ
 - **Q-learning nhích một bảng về phía mục tiêu của chính nó**: cần thăm dò, và bảng chỉ dùng được khi ít state. *(Mục 4)*
 - **DQN và PPO làm deep RL huấn luyện được**: replay và target đóng băng cho DQN, tỉ lệ bị cắt cho PPO. Chúng sửa sự bất ổn, không sửa overfitting. *(Mục 5)*
 - **Agent khớp với thứ nó được cho**: trên nhiễu thuần nó lãi +15,3% trong mẫu và lỗ trung bình 9,0% trên chuỗi mới. Hãy báo mọi seed và thử trên dữ liệu nó chưa thấy. *(Mục 6)*
+- **Thử quy trình trên một thế giới đã biết đáp án**: cùng một agent, nhiễu cho +29,4% trong mẫu và −20,7% trên chuỗi mới, còn edge cài sẵn cho +89,8% và +53,3%. *(Mục 8)*
 - **RL tốt nhất ở nơi phản hồi dày và mục tiêu đo được**, như khớp lệnh. *(Mục 7)*
 
 ## Câu hỏi ôn tập (Review questions)
@@ -474,12 +582,12 @@ Bài Backtest nói về quy trình cho hai câu đầu. Câu thứ ba quan trọ
 9. Trong demo, đưa phí về 0 thì trung bình trên chuỗi mới về quanh 0. Điều đó nói gì về thứ agent đã học? *(Xem Mục 6)*
 10. Vì sao "seed tốt nhất trong mười cho +25,2%" không phải một kết quả? *(Xem Mục 6)*
 11. Vì sao khớp lệnh là bài toán RL dễ chịu hơn dự đoán hướng giá? *(Xem Mục 7)*
+12. Trong ca thực hành, agent ở thế giới nhiễu lãi 29,4% trên chuỗi của nó và lỗ 20,7% trên chuỗi mới. Bạn đọc cột nào, và vì sao? *(Xem Mục 8)*
 
 ## Đi sâu hơn (Go deeper)
 
 - **[Sutton và Barto, Reinforcement Learning: An Introduction](http://incompleteideas.net/book/the-book-2nd.html)**: giáo trình chuẩn, đọc miễn phí. Các chương về MDP, phương trình Bellman và Q-learning khớp với Mục 3 và 4.
 - **[Moody và Saffell, Reinforcement Learning for Trading](https://papers.nips.cc/paper/1551-reinforcement-learning-for-trading)**: phép thử 25 năm ở Mục 2, với differential Sharpe ratio làm reward.
 - **[Henderson và cộng sự, Deep Reinforcement Learning that Matters](https://arxiv.org/abs/1709.06560)**: vì sao không tin được một lần chạy deep RL, và nên báo gì thay vào đó.
-- **[51Labs, Machine Learning for Financial Market](https://51labs.vn/vi/courses)**: chương trình công khai có một module về học tăng cường, từ MDP và Q-learning tới DQN và PPO.
 
 </Vi>

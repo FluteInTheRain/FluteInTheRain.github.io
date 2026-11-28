@@ -1,0 +1,36 @@
+# Post 03 (Data): a bonus-issue series done wrong, then right.
+# Run: uv run --with numpy python demo/ai-trading/p03_back_adjust.py
+# Assumption: one made-up stock, 750 trading days, three bonus issues
+# (1.5-for-1, 1.2-for-1, 1.1-for-1) the way HSG had in 2016-2018. Seeded, no network.
+import numpy as np
+
+rng = np.random.default_rng(3)
+n = 750
+real = rng.normal(0.0004, 0.015, n)            # what the business really did
+events = {200: 1.5, 450: 1.2, 600: 1.1}        # day -> bonus ratio N (N-for-1)
+
+true_px = 30_000 * np.cumprod(1 + real)        # price as if shares never changed
+raw = true_px.copy()
+for day, N in events.items():                  # the exchange divides the price by N
+    raw[day:] /= N                             # from the event day on
+
+raw_ret = raw[1:] / raw[:-1] - 1
+print(f"raw     : total {raw[-1]/raw[0]-1:+.1%}, worst day {raw_ret.min():+.1%}, "
+      f"daily vol {raw_ret.std():.2%}")
+
+# Step 1: every fall worse than -8% gets tested against the 1/N rules
+for i in np.where(raw_ret < -0.08)[0]:
+    N = raw[i] / raw[i + 1]
+    near = min([1.1, 1.2, 1.5], key=lambda x: abs(x - N))
+    print(f"day {i+1:3d}: {raw_ret[i]:+.1%}  implied N={N:.2f}  nearest rule: {near}")
+
+# Step 2: back-adjust. Every price before an event is divided by that event's ratio
+factor = np.ones(n)
+for day, N in events.items():
+    factor[:day] /= N
+adj = raw * factor
+adj_ret = adj[1:] / adj[:-1] - 1
+print(f"adjusted: total {adj[-1]/adj[0]-1:+.1%}, worst day {adj_ret.min():+.1%}, "
+      f"daily vol {adj_ret.std():.2%}")
+print(f"check   : adjusted path equals the true path up to scale: "
+      f"{np.allclose(adj / adj[-1], true_px / true_px[-1])}")

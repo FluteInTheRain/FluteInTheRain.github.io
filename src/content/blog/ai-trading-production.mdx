@@ -10,7 +10,6 @@ cover: "../../assets/blog/ai-trading-production/emergency-stop-button.jpg"
 cover_alt: "A big red emergency stop button on a wooden post, with a sign reading emergency stop, press and hold"
 draft: true
 sources:
-  - { title: "51Labs — Machine Learning for Financial Market (curriculum: Full trading pipeline, Trading strategy deployment, Optimizing data pipeline for trading)", url: "https://51labs.vn/vi/courses" }
   - { title: "In the Matter of Knight Capital Americas LLC — Order Instituting Administrative and Cease-and-Desist Proceedings, Release No. 34-70694, File No. 3-15570", author: "U.S. Securities and Exchange Commission, 16 Oct 2013", url: "https://www.sec.gov/files/litigation/admin/2013/34-70694.pdf" }
   - { title: "Hidden Technical Debt in Machine Learning Systems", author: "D. Sculley, G. Holt, D. Golovin, E. Davydov, T. Phillips, D. Ebner, V. Chaudhary, M. Young, J.-F. Crespo & D. Dennison", chapters: "Advances in Neural Information Processing Systems 28 (NIPS 2015), 2494–2502", url: "https://papers.nips.cc/paper_files/paper/2015/file/86df7dcfd896fcaf2674f757a2463eba-Paper.pdf" }
   - { title: "Trading Costs of Asset Pricing Anomalies (preliminary and incomplete draft, 5 December 2012)", author: "Andrea Frazzini, Ronen Israel & Tobias J. Moskowitz", url: "https://conference.nber.org/conf_papers/f68262/f68262.pdf" }
@@ -33,6 +32,7 @@ import AtP13Monitors from '../../components/mdx/AtP13Monitors.astro';
 import AtP13Luck from '../../components/mdx/AtP13Luck.astro';
 import AtP13Controls from '../../components/mdx/AtP13Controls.astro';
 import AtP13CapDemo from '../../components/mdx/AtP13CapDemo.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
 import figStop from '../../assets/blog/ai-trading-production/emergency-stop-button.jpg';
 import figSec from '../../assets/blog/ai-trading-production/sec-order-paragraph-17.png';
 
@@ -90,8 +90,6 @@ Read the boxes from left to right. Data must arrive on time and complete. Featur
 Sculley and colleagues at Google describe how this part of an ML system rots. Data preparation grows "organically, as new signals are identified and new information sources added" into what they call a pipeline jungle, "a jungle of scrapes, joins, and sampling steps, often with intermediate files output". Their advice is to think about data collection and feature extraction as a whole, before the jungle forms. The [Data](/blog/ai-trading-data/) post has the starting point: one honest table with a `known_at` column. In production, add a log of every input each decision used, so a bad day can be replayed.
 
 Data failures cost real money too. The SEC order records an event from October 2011. Knight ran a weekend disaster-recovery test with test data, and when trading began on Monday its market-making desk kept generating automated quotes from that test data. The loss was nearly $7.5 million. The SEC adds that Knight "did not have a mechanism to test whether their systems were relying on stale data."
-
-A course like 51Labs' Machine Learning for Financial Market lists "Full trading pipeline", "Trading strategy deployment" and "Optimizing data pipeline for trading" as separate sessions. They are separate because each one fails in its own way.
 
 <Concepts>
 
@@ -244,6 +242,62 @@ None of this is a recommendation to trade or a claim that these controls would m
 
 </Concepts>
 
+## 7. Worked case: sizing a loss cap
+
+Say you run a small account of 2,000 million VND. A bug in your order loop sends one 5 million VND buy every half second and never checks what it already holds. You have a kill switch, and the open question is where to set the cap on gross position. Two numbers decide it: how much you can lose, and how long the system takes to notice.
+
+I would start from the loss, not from the cap. Say you accept losing 1% of capital, 20 million VND, in the worst case. For a long position the worst case on HOSE is the floor, 7% below the reference price, so the largest gross that survives is 20 / 0.07, about 286 million VND. Any cap above that has already spent more than your budget before the market moves at all.
+
+Next comes the delay, because a cap only works as fast as the check that enforces it. The script below runs the loop under three set-ups: a check on every order with a 1 second stop, a check every 10 seconds with a 5 second stop, and a check every minute with a 30 second stop. The last is how a dashboard someone glances at behaves. Each is tried with caps of 100, 200 and 500 million.
+
+```python
+CAPITAL = 2_000e6   # VND
+ORDER = 5e6         # VND per runaway order
+DT = 0.5            # seconds between orders
+LIMIT_MOVE = 0.07   # HOSE +/-7% band
+
+def gross_at_stop(cap, check_every, stop_lag):
+    """Orders go out every DT. A check runs every `check_every` seconds; the first one that
+    sees gross >= cap trips the switch, which takes effect `stop_lag` seconds later."""
+    t, gross, trip_at = 0.0, 0.0, None
+    while trip_at is None or t < trip_at:
+        gross += ORDER
+        t += DT
+        if trip_at is None and t % check_every == 0 and gross >= cap:
+            trip_at = t + stop_lag
+    return gross
+
+budget = 0.01 * CAPITAL                       # we accept losing 1% of capital
+print(f"loss budget {budget/1e6:.0f}m  ->  largest gross that survives a "
+      f"{LIMIT_MOVE:.0%} drop: {budget/LIMIT_MOVE/1e6:.0f}m\n")
+print(f"{'cap (m)':>8} {'check every':>12} {'lag':>5} {'gross at stop (m)':>18} {'loss at -7% (m)':>16}")
+for cap in (100e6, 200e6, 500e6):
+    for check_every, lag in ((0.5, 1.0), (10.0, 5.0), (60.0, 30.0)):
+        g = gross_at_stop(cap, check_every, lag)
+        print(f"{cap/1e6:>8.0f} {check_every:>11.1f}s {lag:>4.0f}s {g/1e6:>18.0f} {g*LIMIT_MOVE/1e6:>16.1f}")
+```
+
+<TerminalOutput command={"python3 demo/ai-trading/p13_kill_switch.py"} label="Python 3.13 · stdlib only · captured Nov 2026" caption="Gross position at the moment the switch takes effect, and the loss if the stock then falls 7%. Only the first two set-ups stay under the 286 million line, and only with a cap of 100 or 200.">
+```text
+loss budget 20m  ->  largest gross that survives a 7% drop: 286m
+
+ cap (m)  check every   lag  gross at stop (m)  loss at -7% (m)
+     100         0.5s    1s                110              7.7
+     100        10.0s    5s                150             10.5
+     100        60.0s   30s                900             63.0
+     200         0.5s    1s                210             14.7
+     200        10.0s    5s                250             17.5
+     200        60.0s   30s                900             63.0
+     500         0.5s    1s                510             35.7
+     500        10.0s    5s                550             38.5
+     500        60.0s   30s                900             63.0
+```
+</TerminalOutput>
+
+The cap decides the outcome only when the check is fast. With a check on each order, a 100 million cap ends at 110 million, because the orders sent during the stop delay are still counted. With a check every minute, all three caps end at 900 million, since the first check at 60 seconds is the first time anyone looks and the loop has already sent 120 orders, then 60 more during the stop. The 500 million cap with a check on every order (36 million loss) is worse than the 100 million cap with a ten-second check (10.5 million). Check speed buys more than a tighter number does.
+
+So the rule I would write down is: the cap must be at most the loss budget divided by the planned worst move, minus what the loop can send during the stop delay (here 2 orders a second of 5 million each, times a 1 second stop, is 10 million). The cap goes inside the order path, as a pre-trade check on each order, because a limit that runs on a timer is a report. What would change my mind: a stock that can gap through the band (ceiling and floor do not apply the same way outside continuous sessions, and a suspended stock cannot be sold at all), or a loop that sends faster than one order per half second. Both make the delay term larger, and the cap smaller.
+
 ---
 
 ## Key takeaways
@@ -254,6 +308,7 @@ None of this is a recommendation to trade or a claim that these controls would m
 - **Put slippage in the backtest.** Break-even cost is gross return divided by turnover: 53 bps for 15x, 400 bps for 2x on an 8% edge.
 - **On HOSE, safeguards go before the order.** 120 of the 345 minutes from 9:00 to 14:45 allow no cancel, and the price band is ±7%.
 - **Alert on faults you can see.** A Sharpe-1 strategy loses money in about a quarter of half-years, so P&L alone cannot tell broken from unlucky.
+- **Size the cap from the loss you accept.** 20 million of loss at a 7% drop allows 286 million gross, minus what the loop sends while the switch takes effect.
 - **A limit that does not stop orders is a report.** Link caps and checks to order entry, and test the kill switch.
 
 ## Review questions
@@ -272,7 +327,6 @@ None of this is a recommendation to trade or a claim that these controls would m
 - **[SEC order against Knight Capital Americas LLC (Release 34-70694)](https://www.sec.gov/files/litigation/admin/2013/34-70694.pdf)**: 18 pages, readable without a legal background. Paragraphs 13 to 27 are the incident.
 - **[Hidden Technical Debt in Machine Learning Systems (Sculley et al., NIPS 2015)](https://papers.nips.cc/paper_files/paper/2015/file/86df7dcfd896fcaf2674f757a2463eba-Paper.pdf)**: the sections on pipeline jungles, dead experimental codepaths and changes in the external world.
 - **[Trading Costs of Asset Pricing Anomalies (Frazzini, Israel, Moskowitz)](https://conference.nber.org/conf_papers/f68262/f68262.pdf)**: how implementation shortfall is measured on live trades.
-- **[51Labs: Machine Learning for Financial Market](https://51labs.vn/vi/courses)**: the course sessions on the full trading pipeline and strategy deployment.
 
 </En>
 
@@ -330,8 +384,6 @@ Notebook đọc một file, tính feature, fit mô hình rồi vẽ đường v�
 Sculley và các đồng tác giả ở Google mô tả phần này của một hệ thống ML mục ra sao. Khâu chuẩn bị dữ liệu mọc lên "một cách tự nhiên, khi có tín hiệu mới và nguồn thông tin mới" thành thứ họ gọi là pipeline jungle, "một khu rừng gồm scrape, join và các bước lấy mẫu, thường kèm file trung gian". Lời khuyên của họ là nghĩ về thu thập dữ liệu và trích xuất feature như một tổng thể, trước khi khu rừng kịp mọc. Bài [Dữ liệu](/blog/ai-trading-data/) đã có điểm xuất phát: một bảng trung thực với cột `known_at`. Khi chạy thật, thêm một bản log mọi đầu vào mà mỗi quyết định đã dùng, để một ngày xấu có thể phát lại được.
 
 Lỗi dữ liệu cũng tốn tiền thật. Lệnh của SEC ghi lại một sự kiện tháng 10/2011. Knight chạy thử khôi phục thảm hoạ vào cuối tuần bằng dữ liệu test, và khi giao dịch bắt đầu vào thứ Hai, bàn tạo lập thị trường của họ vẫn tiếp tục sinh báo giá tự động từ dữ liệu test đó. Khoản lỗ gần 7,5 triệu USD. SEC nói thêm rằng Knight "không có cơ chế kiểm tra xem các hệ thống có đang dựa vào dữ liệu cũ hay không".
-
-Một khoá học như Machine Learning for Financial Market của 51Labs liệt kê "Full trading pipeline", "Trading strategy deployment" và "Optimizing data pipeline for trading" thành các buổi riêng. Chúng tách riêng vì mỗi cái hỏng theo kiểu của nó.
 
 <Concepts>
 
@@ -484,6 +536,62 @@ Không điều nào ở đây là khuyến nghị giao dịch hay khẳng địn
 
 </Concepts>
 
+## 7. Ca thực hành: định cỡ hạn mức lỗ
+
+Giả sử bạn chạy một tài khoản nhỏ 2.000 triệu đồng. Một lỗi trong vòng lặp đặt lệnh cứ nửa giây gửi một lệnh mua 5 triệu đồng và không bao giờ kiểm tra mình đã giữ bao nhiêu. Bạn có công tắc dừng, và câu hỏi còn lại là đặt hạn mức vị thế gộp ở đâu. Hai con số quyết định: bạn chịu lỗ được bao nhiêu, và hệ thống mất bao lâu để nhận ra.
+
+Tôi sẽ bắt đầu từ mức lỗ, không từ hạn mức. Giả sử bạn chấp nhận lỗ tối đa 1% vốn, tức 20 triệu đồng. Với vị thế mua, trường hợp xấu nhất ở HOSE là giá sàn, thấp hơn giá tham chiếu 7%, nên vị thế gộp lớn nhất còn chịu được là 20 / 0,07, khoảng 286 triệu đồng. Hạn mức nào cao hơn con số đó đã vượt ngân sách lỗ trước cả khi thị trường nhúc nhích.
+
+Tiếp theo là độ trễ, vì hạn mức chỉ nhanh bằng phép kiểm tra thi hành nó. Đoạn script dưới đây chạy vòng lặp với ba cách thiết lập: kiểm tra ở mỗi lệnh với 1 giây để dừng, kiểm tra mỗi 10 giây với 5 giây để dừng, và kiểm tra mỗi phút với 30 giây để dừng. Cách cuối giống một bảng theo dõi mà thỉnh thoảng có người liếc qua. Mỗi cách thử với hạn mức 100, 200 và 500 triệu.
+
+```python
+CAPITAL = 2_000e6   # VND
+ORDER = 5e6         # VND per runaway order
+DT = 0.5            # seconds between orders
+LIMIT_MOVE = 0.07   # HOSE +/-7% band
+
+def gross_at_stop(cap, check_every, stop_lag):
+    """Orders go out every DT. A check runs every `check_every` seconds; the first one that
+    sees gross >= cap trips the switch, which takes effect `stop_lag` seconds later."""
+    t, gross, trip_at = 0.0, 0.0, None
+    while trip_at is None or t < trip_at:
+        gross += ORDER
+        t += DT
+        if trip_at is None and t % check_every == 0 and gross >= cap:
+            trip_at = t + stop_lag
+    return gross
+
+budget = 0.01 * CAPITAL                       # we accept losing 1% of capital
+print(f"loss budget {budget/1e6:.0f}m  ->  largest gross that survives a "
+      f"{LIMIT_MOVE:.0%} drop: {budget/LIMIT_MOVE/1e6:.0f}m\n")
+print(f"{'cap (m)':>8} {'check every':>12} {'lag':>5} {'gross at stop (m)':>18} {'loss at -7% (m)':>16}")
+for cap in (100e6, 200e6, 500e6):
+    for check_every, lag in ((0.5, 1.0), (10.0, 5.0), (60.0, 30.0)):
+        g = gross_at_stop(cap, check_every, lag)
+        print(f"{cap/1e6:>8.0f} {check_every:>11.1f}s {lag:>4.0f}s {g/1e6:>18.0f} {g*LIMIT_MOVE/1e6:>16.1f}")
+```
+
+<TerminalOutput command={"python3 demo/ai-trading/p13_kill_switch.py"} label="Python 3.13 · stdlib only · captured Nov 2026" caption="Vị thế gộp tại lúc công tắc có hiệu lực, và khoản lỗ nếu cổ phiếu sau đó giảm 7%. Chỉ hai cách đầu nằm dưới mốc 286 triệu, và chỉ với hạn mức 100 hoặc 200.">
+```text
+loss budget 20m  ->  largest gross that survives a 7% drop: 286m
+
+ cap (m)  check every   lag  gross at stop (m)  loss at -7% (m)
+     100         0.5s    1s                110              7.7
+     100        10.0s    5s                150             10.5
+     100        60.0s   30s                900             63.0
+     200         0.5s    1s                210             14.7
+     200        10.0s    5s                250             17.5
+     200        60.0s   30s                900             63.0
+     500         0.5s    1s                510             35.7
+     500        10.0s    5s                550             38.5
+     500        60.0s   30s                900             63.0
+```
+</TerminalOutput>
+
+Hạn mức chỉ quyết định kết quả khi phép kiểm tra đủ nhanh. Kiểm tra ở mỗi lệnh, hạn mức 100 triệu kết thúc ở 110 triệu, vì các lệnh gửi trong lúc chờ dừng vẫn tính vào. Kiểm tra mỗi phút, cả ba hạn mức đều kết thúc ở 900 triệu: lần kiểm tra đầu tiên ở giây thứ 60 là lần đầu có người nhìn, lúc đó vòng lặp đã gửi 120 lệnh, rồi gửi thêm 60 lệnh trong lúc dừng. Hạn mức 500 triệu có kiểm tra ở mỗi lệnh (lỗ 35,7 triệu) còn tệ hơn hạn mức 100 triệu kiểm tra mỗi mười giây (lỗ 10,5 triệu). Tốc độ kiểm tra đáng giá hơn một con số chặt hơn.
+
+Quy tắc tôi sẽ ghi lại: hạn mức tối đa bằng ngân sách lỗ chia cho mức giảm xấu nhất đã dự tính, trừ đi phần vòng lặp gửi được trong lúc chờ dừng (ở đây 2 lệnh mỗi giây, mỗi lệnh 5 triệu, nhân 1 giây dừng là 10 triệu). Hạn mức nằm ngay trong đường đi của lệnh, như một phép kiểm tra trước lệnh ở từng lệnh, vì hạn mức chạy theo đồng hồ chỉ là một bản báo cáo. Điều khiến tôi đổi ý: một cổ phiếu có thể nhảy qua biên độ (trần sàn không áp dụng như nhau ngoài các phiên khớp liên tục, và cổ phiếu bị tạm ngừng thì không bán được), hoặc một vòng lặp gửi nhanh hơn một lệnh mỗi nửa giây. Cả hai làm số hạng độ trễ lớn hơn, và hạn mức nhỏ lại.
+
 ---
 
 ## Điểm rút ra (Key takeaways)
@@ -494,6 +602,7 @@ Không điều nào ở đây là khuyến nghị giao dịch hay khẳng địn
 - **Đưa slippage vào backtest.** Chi phí hoà vốn bằng lợi nhuận gộp chia vòng quay: 53 bps cho 15 lần, 400 bps cho 2 lần với lợi thế 8%.
 - **Ở HOSE, chốt an toàn nằm trước lệnh.** 120 trong 345 phút từ 9:00 tới 14:45 không cho huỷ, và biên độ giá là ±7%.
 - **Báo động theo lỗi nhìn thấy được.** Chiến lược Sharpe 1 lỗ trong khoảng một phần tư số nửa năm, nên chỉ nhìn lãi lỗ thì không phân biệt được hỏng hay xui.
+- **Định cỡ hạn mức từ mức lỗ bạn chấp nhận.** Lỗ 20 triệu ở mức giảm 7% cho phép vị thế gộp 286 triệu, trừ phần vòng lặp gửi trong lúc công tắc có hiệu lực.
 - **Hạn mức không chặn được lệnh thì chỉ là một bản báo cáo.** Nối hạn mức và các phép kiểm tra với việc đặt lệnh, và thử công tắc dừng.
 
 ## Câu hỏi ôn tập (Review questions)
@@ -512,6 +621,5 @@ Không điều nào ở đây là khuyến nghị giao dịch hay khẳng địn
 - **[Lệnh của SEC đối với Knight Capital Americas LLC (Release 34-70694)](https://www.sec.gov/files/litigation/admin/2013/34-70694.pdf)**: 18 trang, đọc được mà không cần nền tảng pháp lý. Đoạn 13 tới 27 là diễn biến sự cố.
 - **[Hidden Technical Debt in Machine Learning Systems (Sculley và cộng sự, NIPS 2015)](https://papers.nips.cc/paper_files/paper/2015/file/86df7dcfd896fcaf2674f757a2463eba-Paper.pdf)**: các phần về pipeline jungle, codepath thử nghiệm chết và thay đổi của thế giới bên ngoài.
 - **[Trading Costs of Asset Pricing Anomalies (Frazzini, Israel, Moskowitz)](https://conference.nber.org/conf_papers/f68262/f68262.pdf)**: cách đo implementation shortfall trên lệnh thật.
-- **[51Labs: Machine Learning for Financial Market](https://51labs.vn/vi/courses)**: các buổi học về full trading pipeline và triển khai chiến lược.
 
 </Vi>

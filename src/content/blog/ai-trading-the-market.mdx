@@ -10,8 +10,6 @@ cover: "../../assets/blog/ai-trading-the-market/ho-chi-minh-stock-exchange.jpg"
 cover_alt: "The Ho Chi Minh City Stock Exchange building under the Exchange Tower, Ho Chi Minh City"
 draft: false
 sources:
-  - { title: "Machine Learning for Financial Market — chương trình học của 51Labs", url: "https://51labs.vn/vi/courses" }
-  - { title: "Stochastic process part 1: Gambler's ruin of VN30F (51Labs blog)", url: "https://51labs.vn/vi/blog/stochastic-process-part-1-gambler-s-ruin-of-vn30f" }
   - { title: "From pioneer to leader: Vietnam's stock market hits 25-year milestone (VNA / VietnamPlus)", url: "https://en.vietnamplus.vn/from-pioneer-to-leader-vietnams-stock-market-hits-25-year-milestone-post323659.vnp" }
   - { title: "VN-Index hits record as Vietnam sees surge in stock trading accounts (VietnamNet, số liệu VSDC)", url: "https://vietnamnet.vn/en/vn-index-hits-record-as-vietnam-sees-surge-in-stock-trading-accounts-2429595.html" }
   - { title: "Quy định giao dịch cổ phiếu (SSI)", url: "https://www.ssi.com.vn/khach-hang-ca-nhan/quy-dinh-giao-dich/quy-dinh-giao-dich-co-phieu" }
@@ -36,6 +34,7 @@ import Vi from '../../components/mdx/Vi.astro';
 import Callout from '../../components/mdx/Callout.astro';
 import Concepts from '../../components/mdx/Concepts.astro';
 import Figure from '../../components/mdx/Figure.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
 import AtMarketOrderJourney from '../../components/mdx/AtMarketOrderJourney.astro';
 import AtMarketOrderBookSim from '../../components/mdx/AtMarketOrderBookSim.astro';
 import AtMarketCandleBuild from '../../components/mdx/AtMarketCandleBuild.astro';
@@ -423,12 +422,100 @@ This composition matters for anyone planning to feed market data to a model. Pri
 
 ---
 
+## 6. Worked case: one limit order, step by step
+
+Say a stock closed yesterday at 24,500, so today's band runs from 22,800 to 26,200. You want 800 shares and you type a buy limit at 24,600. The resting orders, in the order they arrived, are:
+
+| Side | Price | Orders in arrival order |
+|---|---|---|
+| Ask | 24,650 | Z 800 |
+| Ask | 24,600 | X 150, then Y 250 |
+| Ask | 24,550 | W 200 |
+| Bid | 24,500 | A 300, then B 200 |
+| Bid | 24,450 | C 500 |
+
+**What I would check first.** Whether the order is allowed at all. 24,600 is inside the band, on the 50 VND step, and 800 is a whole number of 100-share lots, so the exchange accepts it. A price of 24,620 or a quantity of 850 would be rejected before it touched the book. Only then do I ask what it will match, because that decides what I pay.
+
+**The steps.**
+
+1. The cheapest ask is W at 24,550, below my limit. I trade 200 shares there. 600 left.
+2. Next price is 24,600, equal to my limit, which is still acceptable. X arrived before Y, so X goes first: 150 shares. 450 left.
+3. Then Y: 250 shares. 200 left.
+4. The next ask is Z at 24,650, above my limit. The engine stops. Matching never fills you at a price worse than the one you typed.
+5. The remaining 200 shares become a new bid at 24,600. It is now the best bid, above A and B, and the best ask is 24,650.
+
+The code does exactly this walk, with one list sorted by price and kept in arrival order inside each price.
+
+```python
+from dataclasses import dataclass
+
+TICK, LOT = 50, 100          # HOSE: 50 VND price step in this range, 100-share lots
+
+
+@dataclass
+class Order:
+    who: str
+    price: int
+    qty: int
+
+
+def match_buy(buy, asks):
+    """Fill a buy limit against asks ordered by (price, arrival). Returns fills."""
+    fills = []
+    for ask in asks:
+        if buy.qty == 0 or ask.price > buy.price:
+            break                          # never pay above your own limit
+        take = min(buy.qty, ask.qty)
+        fills.append((ask.who, ask.price, take))
+        buy.qty -= take
+        ask.qty -= take
+    asks[:] = [a for a in asks if a.qty > 0]
+    return fills
+
+
+# Say the book holds these resting orders, listed in arrival order.
+bids = [Order("A", 24_500, 300), Order("B", 24_500, 200), Order("C", 24_450, 500)]
+asks = [Order("X", 24_600, 150), Order("W", 24_550, 200),
+        Order("Y", 24_600, 250), Order("Z", 24_650, 800)]
+asks.sort(key=lambda o: o.price)          # stable: arrival order kept within a price
+
+mine = Order("me", 24_600, 800)
+assert mine.price % TICK == 0 and mine.qty % LOT == 0
+
+fills = match_buy(mine, asks)
+for who, px, q in fills:
+    print(f"filled {q:>4} @ {px:,} against {who}")
+filled = sum(q for _, _, q in fills)
+vwap = sum(px * q for _, px, q in fills) / filled
+print(f"filled {filled} of 800, average price {vwap:,.1f}")
+print(f"left over {mine.qty} rests as a bid at {mine.price:,}")
+print("best bid", max(mine.price, bids[0].price), "| best ask", asks[0].price)
+```
+
+<TerminalOutput command="uv run demo/ai-trading/p01_order_matcher.py" label="Python 3.13 · standard library only · captured Nov 2026" caption="Three fills, 600 of 800 shares, and a leftover 200 that now sets the best bid at 24,600.">
+```text
+filled  200 @ 24,550 against W
+filled  150 @ 24,600 against X
+filled  250 @ 24,600 against Y
+filled 600 of 800, average price 24,583.3
+left over 200 rests as a bid at 24,600
+best bid 24600 | best ask 24650
+```
+</TerminalOutput>
+
+**What the result tells you.** The average price is 24,583.3, which is 33 VND above the best ask you saw when you pressed the button, and you did not get the whole order. If you had sent 800 shares as a market order that day, you would have crossed 24,650 too and paid more for the last 200. That gap between the screen price and the average fill is the cost that a backtest which fills at the last price leaves out.
+
+**What would change my mind.** This is the continuous session only. The opening and closing auctions on HOSE match everything at a single price, so none of this walk applies there. I also assumed the book does not move while my order is being matched. In a real queue, X and Y can cancel the moment they see me coming, and then my 450 shares fall through to Z. Only the exchange's own order log would tell me which happened.
+
+---
+
 ## Key takeaways
 
 - **The market is a matching system, not a price-setter**: HOSE takes orders from everyone and pairs them by price first, then by arrival time.
 - **Follow one order end to end** — broker → matching → clearing → settlement — and you know exactly when money and shares move: before 13:00 on T+2, sellable that same afternoon.
 - **The order book is the queue you join**: the spread is the price of trading now, and "walking the book" is why big orders get sliced into small ones.
 - **A candle is a lossy compression** of a day into OHLC plus volume; tick data keeps what the candle throws away.
+- **Walk one order by hand**: it fills against the cheapest ask first, stops at your limit, and the leftover becomes the new best bid.
 - **HOSE's ±7% band and 80–90% retail share are structural**: they decide liquidity at the edges and shape the statistics of the data you will later train AI on.
 
 ## Review questions
@@ -440,11 +527,10 @@ This composition matters for anyone planning to feed market data to a model. Pri
 5. What happens to your buy order when a stock is stuck at limit-up with a long queue? *(Section 4)*
 6. Roughly what share of HOSE trading value comes from individual investors, and why does that matter for a model trained on price data? *(Section 5)*
 7. You buy 1,000 shares on Monday. Under normal settlement, when can you sell them again? *(Section 1)*
+8. You send a buy limit for 800 at 24,600 into the book above. How many shares fill, at what average price, and where does the rest go? *(Section 6)*
 
 ## Go deeper
 
-- The course this series follows: **51Labs — Machine Learning for Financial Market**. Module 1 opens exactly here: foundations, financial data structure, then systematic trading ([51labs.vn/vi/courses](https://51labs.vn/vi/courses)).
-- A 51labs post that uses this market directly: **Stochastic process part 1: Gambler's ruin of VN30F** — a first stochastic process applied to VN30 futures ([51labs.vn blog](https://51labs.vn/vi/blog/stochastic-process-part-1-gambler-s-ruin-of-vn30f)).
 - The exchange's own rules, beginner-grade: **Hệ thống giao dịch — quy định cần biết khi giao dịch chứng khoán trên HOSE** (HSX PDF, [staticfile.hsx.vn](https://staticfile.hsx.vn/Uploads/UploadDocuments/2453338/HTGD_Quy%20dinh%20can%20biet%20khi%20GDCK%20tren%20HOSE_T2.2026.pdf)).
 - The book behind the epigraph: Benjamin Graham, **The Intelligent Investor** — chapter 8 is where the voting-machine line comes from.
 
@@ -468,12 +554,100 @@ Cơ cấu này quan trọng với bất kỳ ai định đưa dữ liệu thị 
 
 ---
 
+## 6. Ca thực hành: một lệnh giới hạn, từng bước
+
+Giả sử một cổ phiếu hôm qua đóng cửa ở 24.500, nên biên độ hôm nay chạy từ 22.800 đến 26.200. Bạn muốn mua 800 cổ phiếu và đặt lệnh mua giới hạn ở 24.600. Các lệnh đang chờ trong sổ, theo thứ tự đến, là:
+
+| Phía | Giá | Lệnh theo thứ tự đến |
+|---|---|---|
+| Bán | 24.650 | Z 800 |
+| Bán | 24.600 | X 150, rồi Y 250 |
+| Bán | 24.550 | W 200 |
+| Mua | 24.500 | A 300, rồi B 200 |
+| Mua | 24.450 | C 500 |
+
+**Việc đầu tiên tôi kiểm tra.** Lệnh có hợp lệ không. 24.600 nằm trong biên độ, đúng bước giá 50 đồng, và 800 là bội của lô 100 cổ phiếu, nên sàn nhận lệnh. Giá 24.620 hoặc khối lượng 850 sẽ bị từ chối trước khi chạm vào sổ. Sau đó mới hỏi lệnh sẽ khớp với ai, vì chỗ đó quyết định bạn trả bao nhiêu.
+
+**Các bước.**
+
+1. Giá bán thấp nhất là W ở 24.550, thấp hơn giá giới hạn của tôi. Tôi khớp 200 cổ phiếu ở đây. Còn 600.
+2. Mức giá kế tiếp là 24.600, bằng giá giới hạn, vẫn chấp nhận được. X đến trước Y nên X khớp trước: 150 cổ phiếu. Còn 450.
+3. Rồi tới Y: 250 cổ phiếu. Còn 200.
+4. Lệnh bán kế tiếp là Z ở 24.650, cao hơn giá giới hạn. Máy khớp lệnh dừng. Bạn không bao giờ bị khớp ở giá tệ hơn giá mình đã gõ.
+5. 200 cổ phiếu còn lại thành một lệnh mua mới ở 24.600. Đó giờ là giá mua tốt nhất, nằm trên A và B, còn giá bán tốt nhất là 24.650.
+
+Đoạn code đi đúng đường này: một danh sách sắp theo giá và giữ nguyên thứ tự đến trong cùng một giá.
+
+```python
+from dataclasses import dataclass
+
+TICK, LOT = 50, 100          # HOSE: 50 VND price step in this range, 100-share lots
+
+
+@dataclass
+class Order:
+    who: str
+    price: int
+    qty: int
+
+
+def match_buy(buy, asks):
+    """Fill a buy limit against asks ordered by (price, arrival). Returns fills."""
+    fills = []
+    for ask in asks:
+        if buy.qty == 0 or ask.price > buy.price:
+            break                          # never pay above your own limit
+        take = min(buy.qty, ask.qty)
+        fills.append((ask.who, ask.price, take))
+        buy.qty -= take
+        ask.qty -= take
+    asks[:] = [a for a in asks if a.qty > 0]
+    return fills
+
+
+# Say the book holds these resting orders, listed in arrival order.
+bids = [Order("A", 24_500, 300), Order("B", 24_500, 200), Order("C", 24_450, 500)]
+asks = [Order("X", 24_600, 150), Order("W", 24_550, 200),
+        Order("Y", 24_600, 250), Order("Z", 24_650, 800)]
+asks.sort(key=lambda o: o.price)          # stable: arrival order kept within a price
+
+mine = Order("me", 24_600, 800)
+assert mine.price % TICK == 0 and mine.qty % LOT == 0
+
+fills = match_buy(mine, asks)
+for who, px, q in fills:
+    print(f"filled {q:>4} @ {px:,} against {who}")
+filled = sum(q for _, _, q in fills)
+vwap = sum(px * q for _, px, q in fills) / filled
+print(f"filled {filled} of 800, average price {vwap:,.1f}")
+print(f"left over {mine.qty} rests as a bid at {mine.price:,}")
+print("best bid", max(mine.price, bids[0].price), "| best ask", asks[0].price)
+```
+
+<TerminalOutput command="uv run demo/ai-trading/p01_order_matcher.py" label="Python 3.13 · standard library only · captured Nov 2026" caption="Ba lần khớp, 600 trên 800 cổ phiếu, và 200 còn lại đang là giá mua tốt nhất ở 24.600.">
+```text
+filled  200 @ 24,550 against W
+filled  150 @ 24,600 against X
+filled  250 @ 24,600 against Y
+filled 600 of 800, average price 24,583.3
+left over 200 rests as a bid at 24,600
+best bid 24600 | best ask 24650
+```
+</TerminalOutput>
+
+**Kết quả cho thấy gì.** Giá trung bình là 24.583,3, cao hơn 33 đồng so với giá bán tốt nhất bạn thấy lúc bấm nút, và bạn cũng không mua đủ lệnh. Nếu hôm đó bạn gửi 800 cổ phiếu dưới dạng lệnh thị trường, bạn sẽ vượt qua cả 24.650 và trả đắt hơn cho 200 cổ phiếu cuối. Khoảng cách giữa giá trên màn hình và giá khớp trung bình chính là chi phí mà một backtest khớp ở giá cuối cùng đã bỏ qua.
+
+**Điều gì sẽ làm tôi đổi ý.** Đây chỉ là phiên khớp lệnh liên tục. Ở phiên mở cửa và đóng cửa của HOSE, mọi lệnh khớp ở một mức giá duy nhất, nên cách đi trên không áp dụng. Tôi cũng giả định sổ lệnh đứng yên trong lúc lệnh của tôi được khớp. Ngoài đời, X và Y có thể hủy ngay khi thấy tôi tới, và khi đó 450 cổ phiếu của tôi rơi xuống Z. Chỉ nhật ký lệnh của sàn mới cho biết điều nào đã xảy ra.
+
+---
+
 ## Điểm rút ra (Key takeaways)
 
 - **Thị trường là hệ khớp lệnh, không phải cơ quan định giá**: HOSE nhận lệnh của tất cả mọi người và ghép chúng theo giá trước, thời điểm đến sau.
 - **Đi hết vòng một lệnh** — CTCK → khớp lệnh → bù trừ → thanh toán — là bạn biết chính xác tiền và cổ phiếu đổi chủ khi nào: trước 13h ngày T+2, chiều đó bán lại được.
 - **Sổ lệnh là hàng đợi bạn tham gia**: spread là cái giá của việc giao dịch ngay, còn "walking the book" là lý do lệnh lớn bị cắt nhỏ.
 - **Nến là phép nén hao hụt** cả một ngày xuống OHLC kèm khối lượng; dữ liệu tick giữ lại những gì nến vứt bỏ.
+- **Tự đi một lệnh bằng tay**: nó khớp với giá bán thấp nhất trước, dừng ở giá giới hạn, và phần còn lại thành giá mua tốt nhất mới.
 - **Biên độ ±7% và tỷ trọng 80–90% của cá nhân là cấu trúc**: chúng quyết định thanh khoản ở hai mép và định hình các thống kê của dữ liệu bạn sẽ dùng train AI sau này.
 
 ## Câu hỏi ôn tập
@@ -485,11 +659,10 @@ Cơ cấu này quan trọng với bất kỳ ai định đưa dữ liệu thị 
 5. Khi một cổ phiếu đứng trần với hàng đợi dài, lệnh mua của bạn số phận ra sao? *(Xem Mục 4)*
 6. Cá nhân chiếm khoảng bao nhiêu phần trăm giá trị giao dịch trên HOSE, và điều đó quan trọng thế nào với một model học từ dữ liệu giá? *(Xem Mục 5)*
 7. Bạn mua 1.000 cổ phiếu vào thứ Hai. Theo luồng thanh toán thường, khi nào bán lại được? *(Xem Mục 1)*
+8. Bạn gửi lệnh mua giới hạn 800 cổ phiếu ở 24.600 vào sổ ở trên. Bao nhiêu cổ phiếu khớp, giá trung bình bao nhiêu, và phần còn lại đi đâu? *(Xem Mục 6)*
 
 ## Đi sâu hơn (Go deeper)
 
-- Khóa học mà series này đi theo: **51Labs — Machine Learning for Financial Market**. Module 1 mở màn đúng ở đây: nền tảng, cấu trúc dữ liệu tài chính, rồi tới giao dịch có hệ thống ([51labs.vn/vi/courses](https://51labs.vn/vi/courses)).
-- Một bài của 51labs dùng chính thị trường này: **Stochastic process part 1: Gambler's ruin of VN30F** — quá trình ngẫu nhiên đầu tiên áp lên hợp đồng tương lai VN30 ([blog 51labs](https://51labs.vn/vi/blog/stochastic-process-part-1-gambler-s-ruin-of-vn30f)).
 - Tài liệu chính thức của sàn, viết cho người mới: **Hệ thống giao dịch — quy định cần biết khi giao dịch chứng khoán trên HOSE** (PDF của HSX, [staticfile.hsx.vn](https://staticfile.hsx.vn/Uploads/UploadDocuments/2453338/HTGD_Quy%20dinh%20can%20biet%20khi%20GDCK%20tren%20HOSE_T2.2026.pdf)).
 - Cuốn sách đứng sau câu mở đầu: Benjamin Graham, **The Intelligent Investor** — chương 8 là nơi xuất hiện hình ảnh "cỗ máy bỏ phiếu" và "chiếc cân".
 

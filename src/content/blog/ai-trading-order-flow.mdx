@@ -16,7 +16,6 @@ sources:
   - { title: "Deep limit order book forecasting: a microstructural guide (Quantitative Finance 25(7), 2025)", author: "Antonio Briola, Silvia Bartolucci & Tomaso Aste", url: "https://arxiv.org/abs/2403.09267" }
   - { title: "Quy định giao dịch đăng website HOSE (worked examples 1 to 3, trading hours, price steps, order types; April 2025)", author: "Sở Giao dịch Chứng khoán TP.HCM (HOSE)", url: "https://static2.vietstock.vn/vietstock/2025/4/29/20250429_20250429___hose___quy_dinh_giao_dich_dang_website_hose.pdf" }
   - { title: "Các quy định cần biết khi giao dịch chứng khoán trên HOSE (hours, price steps, ±7% band; February 2026)", author: "Sở Giao dịch Chứng khoán TP.HCM (HOSE)", url: "https://staticfile.hsx.vn/Uploads/UploadDocuments/2453338/HTGD_Quy%20dinh%20can%20biet%20khi%20GDCK%20tren%20HOSE_T2.2026.pdf" }
-  - { title: "Machine Learning for Financial Market — course curriculum (projects: order flow imbalance prediction; DeepLOB)", author: "51labs", url: "https://51labs.vn/vi/courses" }
   - { title: "Ho Chi Minh stock exchange at night (photo, CC0)", author: "Syced — Wikimedia Commons", url: "https://commons.wikimedia.org/wiki/File:Ho_Chi_Minh_stock_exchange_at_night.jpg" }
 ---
 
@@ -36,6 +35,7 @@ import AtP16CkR2 from '../../components/mdx/AtP16CkR2.astro';
 import AtP16TickMcc from '../../components/mdx/AtP16TickMcc.astro';
 import AtP16DeepLob from '../../components/mdx/AtP16DeepLob.astro';
 import AtP16Cost from '../../components/mdx/AtP16Cost.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
 import heroNight from '../../assets/blog/ai-trading-order-flow/hose-exchange-night.jpg';
 
 <En>
@@ -192,6 +192,63 @@ A resting limit order avoids paying the spread, but it may never fill, and it te
 
 </Concepts>
 
+## 9. Worked case: five events, one number
+
+Say you watch a stock with a 50 dong step. The best bid is 800 shares at 40,700 and the best ask is 600 shares at 40,800. Over the next few seconds five things happen at the top of the book, and a screen that shows only the queues at the end tells a story that the flow contradicts. What does the flow say?
+
+What I would check first is the rule, on one event by hand, before trusting any code. Event 1 is a limit buy of 400 at the bid: the bid queue grows from 800 to 1,200 at the same price, so the event adds plus 1,200 and takes away 800, plus 400. Only after one event agrees with the definition do I run all five.
+
+The five events, in the order they arrive:
+
+1. A limit buy of 400 joins the bid. OFI plus 400.
+2. A market buy of 400 takes shares from the ask, which falls from 600 to 200. Plus 400.
+3. 700 shares are cancelled at the bid, which falls from 1,200 to 500. Minus 700.
+4. The last 200 at 40,800 are bought. The ask moves to 40,850 with 900 waiting. The event contributes the old queue that vanished, plus 200.
+5. A new buyer posts 300 at 40,750, inside the old spread. The bid improves, so plus 300.
+
+```python
+# Best quote after each event: (bid_price, bid_size, ask_price, ask_size)
+book = [
+    (40700,  800, 40800,  600),  # start
+    (40700, 1200, 40800,  600),  # 1 limit buy +400 at the bid
+    (40700, 1200, 40800,  200),  # 2 market buy takes 400 from the ask
+    (40700,  500, 40800,  200),  # 3 700 shares cancelled at the bid
+    (40700,  500, 40850,  900),  # 4 last 200 at 40,800 bought, ask steps up
+    (40750,  300, 40850,  900),  # 5 new buyer improves the bid
+]
+
+def ofi_event(prev, cur):
+    pb0, qb0, pa0, qa0 = prev
+    pb1, qb1, pa1, qa1 = cur
+    e = 0
+    e += qb1 if pb1 >= pb0 else 0   # bid at same/higher price: its new size counts
+    e -= qb0 if pb1 <= pb0 else 0   # bid at same/lower price: its old size leaves
+    e -= qa1 if pa1 <= pa0 else 0   # ask at same/lower price: its new size is supply
+    e += qa0 if pa1 >= pa0 else 0   # ask at same/higher price: its old size leaves
+    return e
+
+flows = [ofi_event(a, b) for a, b in zip(book, book[1:])]
+mid = [(b[0] + b[2]) / 2 for b in book]
+print("event OFI :", flows)
+print("OFI total :", sum(flows))
+print("mid       :", mid[0], "->", mid[-1], "change", mid[-1] - mid[0])
+qi = [(b[1] - b[3]) / (b[1] + b[3]) for b in book]
+print("queue imbalance start/end: %.2f / %.2f" % (qi[0], qi[-1]))
+```
+
+<TerminalOutput command="python demo/ai-trading/p16_ofi_five_events.py" label="Python 3.13 · standard library · captured Nov 2026" caption="Event by event the signs match the list above. The total is plus 600 shares while the queue imbalance went from 0.14 to minus 0.50.">
+```text
+event OFI : [400, 400, -700, 200, 300]
+OFI total : 600
+mid       : 40750.0 -> 40800.0 change 50.0
+queue imbalance start/end: 0.14 / -0.50
+```
+</TerminalOutput>
+
+What the result tells you: the picture at the end, 300 bid against 900 ask, looks like selling pressure, and queue imbalance says so with minus 0.50. The flow says the opposite. Net 600 shares of demand arrived and the mid-price rose 50 dong, one step, from 40,750 to 40,800. The cancellation in event 3 is the one event that pointed down, and it is the only one that would show up if you compared the first and last bid queues.
+
+What would change my mind: if event 3 were a market sell instead of a cancel, the number would be the same, because OFI sees the queue and not the intention. If I had to decide whether this flow was real pressure or a participant pulling a quote, I would need order-level data that this measure does not use. And one window of five events says nothing about whether OFI forecasts the next move. Section 5 shows the fit is contemporaneous.
+
 ## Key takeaways
 
 - The price is the edge of two queues. A buy order that clears the best ask moves the mid-price without any new buyer appearing. *(Sections 1 and 3)*
@@ -200,6 +257,7 @@ A resting limit order avoids paying the spread, but it may never fill, and it te
 - OFI explained about 65% of 10-second price moves in 50 US stocks, and the slope falls as depth rises. *(Section 5)*
 - That fit is contemporaneous. Forecast quality of a DeepLOB-type model differs by tick-size group and horizon, and a good score is not a trading result. *(Sections 6 and 7)*
 - Compare any short-horizon forecast with the spread before believing it is useful. *(Section 8)*
+- A queue imbalance can read negative while the flow was net buying: compute OFI event by event. *(Section 9)*
 
 ## Review questions
 
@@ -215,13 +273,13 @@ Quiz for this post: [/blog/ai-trading-order-flow/quiz/](/blog/ai-trading-order-f
 8. Which stocks did a DeepLOB-type model predict best in the 15-stock NASDAQ study, and what happened to the small-tick group at 100 updates ahead? *(See Section 6)*
 9. DeepLOB's trading simulation used mid-price fills and gross profit. What does that leave out? *(See Section 7)*
 10. A model predicts a one-step rise on a stock with a three-step spread. Why is acting on it a loss before fees? *(See Section 8)*
+11. A book ends with 300 shares at the bid and 900 at the ask, yet five events summed to plus 600 OFI. How, and what did the mid-price do? *(See Section 9)*
 
 ## Go deeper
 
 - **[Cont, Kukanov & Stoikov, The Price Impact of Order Book Events](https://arxiv.org/abs/1011.6402)**: the source of the OFI definition, the depth relation and the 65% figure.
 - **[Zhang, Zohren & Roberts, DeepLOB](https://arxiv.org/abs/1808.03668)**: the architecture, the labelling choices and the London Stock Exchange test.
 - **[Briola, Bartolucci & Aste, Deep limit order book forecasting: a microstructural guide](https://arxiv.org/abs/2403.09267)**: the tick-size study and the case for evaluating forecasts by what they would let you trade.
-- **[51labs, Machine Learning for Financial Market](https://51labs.vn/vi/courses)**: the public curriculum lists a project on order flow imbalance prediction and another on DeepLOB. This post builds only the background for them.
 - **Related in this series:** [Sequence Models](/blog/ai-trading-sequence-models/) for the layers DeepLOB reuses, and [Vietnam order types, the order book, ATO and ATC](/blog/vietnam-order-types-order-book-ato-atc/) for HOSE order types from a trader's side.
 
 </En>
@@ -380,6 +438,63 @@ Lệnh giới hạn đứng chờ tránh được spread, nhưng nó có thể k
 
 </Concepts>
 
+## 9. Ca thực hành: năm sự kiện, một con số
+
+Giả sử bạn theo dõi một mã có bước giá 50 đồng. Bid tốt nhất là 800 cổ phiếu ở 40.700 và ask tốt nhất là 600 cổ phiếu ở 40.800. Trong vài giây kế tiếp có năm việc xảy ra ở đỉnh sổ lệnh, và màn hình chỉ cho thấy các hàng chờ lúc cuối sẽ kể một câu chuyện mà dòng chảy phản bác. Dòng chảy nói gì?
+
+Việc đầu tiên tôi làm là kiểm quy tắc trên một sự kiện bằng tay, trước khi tin vào bất kỳ đoạn code nào. Sự kiện 1 là một lệnh mua giới hạn 400 ở bid: hàng chờ mua dài ra từ 800 lên 1.200 ở cùng mức giá, nên sự kiện cộng 1.200 và trừ 800, ra cộng 400. Chỉ khi một sự kiện khớp với định nghĩa tôi mới chạy cả năm.
+
+Năm sự kiện, theo thứ tự đến:
+
+1. Một lệnh mua giới hạn 400 vào hàng bid. OFI cộng 400.
+2. Một lệnh mua thị trường 400 lấy cổ phiếu từ ask, ask giảm từ 600 xuống 200. Cộng 400.
+3. 700 cổ phiếu bị huỷ ở bid, bid giảm từ 1.200 xuống 500. Trừ 700.
+4. 200 cổ phiếu cuối ở 40.800 bị mua hết. Ask dịch lên 40.850 với 900 đang chờ. Sự kiện đóng góp cỡ hàng chờ cũ đã biến mất, cộng 200.
+5. Một người mua mới đặt 300 ở 40.750, nằm trong spread cũ. Bid được cải thiện nên cộng 300.
+
+```python
+# Best quote after each event: (bid_price, bid_size, ask_price, ask_size)
+book = [
+    (40700,  800, 40800,  600),  # start
+    (40700, 1200, 40800,  600),  # 1 limit buy +400 at the bid
+    (40700, 1200, 40800,  200),  # 2 market buy takes 400 from the ask
+    (40700,  500, 40800,  200),  # 3 700 shares cancelled at the bid
+    (40700,  500, 40850,  900),  # 4 last 200 at 40,800 bought, ask steps up
+    (40750,  300, 40850,  900),  # 5 new buyer improves the bid
+]
+
+def ofi_event(prev, cur):
+    pb0, qb0, pa0, qa0 = prev
+    pb1, qb1, pa1, qa1 = cur
+    e = 0
+    e += qb1 if pb1 >= pb0 else 0   # bid at same/higher price: its new size counts
+    e -= qb0 if pb1 <= pb0 else 0   # bid at same/lower price: its old size leaves
+    e -= qa1 if pa1 <= pa0 else 0   # ask at same/lower price: its new size is supply
+    e += qa0 if pa1 >= pa0 else 0   # ask at same/higher price: its old size leaves
+    return e
+
+flows = [ofi_event(a, b) for a, b in zip(book, book[1:])]
+mid = [(b[0] + b[2]) / 2 for b in book]
+print("event OFI :", flows)
+print("OFI total :", sum(flows))
+print("mid       :", mid[0], "->", mid[-1], "change", mid[-1] - mid[0])
+qi = [(b[1] - b[3]) / (b[1] + b[3]) for b in book]
+print("queue imbalance start/end: %.2f / %.2f" % (qi[0], qi[-1]))
+```
+
+<TerminalOutput command="python demo/ai-trading/p16_ofi_five_events.py" label="Python 3.13 · standard library · captured Nov 2026" caption="Từng sự kiện có dấu khớp với danh sách trên. Tổng là cộng 600 cổ phiếu trong khi mất cân bằng hàng chờ đi từ 0,14 xuống âm 0,50.">
+```text
+event OFI : [400, 400, -700, 200, 300]
+OFI total : 600
+mid       : 40750.0 -> 40800.0 change 50.0
+queue imbalance start/end: 0.14 / -0.50
+```
+</TerminalOutput>
+
+Kết quả cho biết gì: bức ảnh lúc cuối, 300 ở bid so với 900 ở ask, trông như áp lực bán, và mất cân bằng hàng chờ nói đúng vậy với âm 0,50. Dòng chảy nói ngược lại. Ròng 600 cổ phiếu cầu đã đến và giá giữa tăng 50 đồng, đúng một bước, từ 40.750 lên 40.800. Việc huỷ lệnh ở sự kiện 3 là sự kiện duy nhất chỉ xuống, và cũng là sự kiện duy nhất bạn thấy nếu chỉ so hàng chờ bid đầu với cuối.
+
+Điều gì làm tôi đổi ý: nếu sự kiện 3 là một lệnh bán thị trường thay vì huỷ lệnh, con số vẫn y nguyên, vì OFI thấy hàng chờ chứ không thấy ý định. Muốn phân biệt áp lực thật với một bên rút lệnh, tôi cần dữ liệu theo từng lệnh mà thước đo này không dùng. Và một cửa sổ năm sự kiện không nói được OFI có dự báo nước đi kế tiếp hay không. Mục 5 đã cho thấy độ khớp là cùng thời điểm.
+
 ## Điểm rút ra (Key takeaways)
 
 - Giá là rìa của hai hàng chờ. Một lệnh mua quét sạch ask tốt nhất làm dịch giá giữa mà không cần người mua mới nào xuất hiện. *(Mục 1 và 3)*
@@ -388,6 +503,7 @@ Lệnh giới hạn đứng chờ tránh được spread, nhưng nó có thể k
 - OFI giải thích khoảng 65% cú dịch giá 10 giây ở 50 cổ phiếu Mỹ, và hệ số dốc giảm khi độ sâu tăng. *(Mục 5)*
 - Độ khớp đó là cùng thời điểm. Chất lượng dự báo của mô hình kiểu DeepLOB khác nhau theo nhóm bước giá và tầm nhìn, và điểm số tốt chưa phải kết quả giao dịch. *(Mục 6 và 7)*
 - Hãy so mọi dự báo ngắn hạn với spread trước khi tin rằng nó có ích. *(Mục 8)*
+- Mất cân bằng hàng chờ có thể âm trong khi dòng chảy ròng là mua: hãy tính OFI từng sự kiện. *(Mục 9)*
 
 ## Câu hỏi ôn tập (Review questions)
 
@@ -403,13 +519,13 @@ Bài kiểm tra cho bài này: [/blog/ai-trading-order-flow/quiz/](/blog/ai-trad
 8. Mô hình kiểu DeepLOB đoán tốt nhất ở nhóm cổ phiếu nào trong nghiên cứu 15 mã NASDAQ, và nhóm bước giá nhỏ ra sao ở 100 lần cập nhật phía trước? *(Xem Mục 6)*
 9. Mô phỏng giao dịch của DeepLOB dùng khớp ở giá giữa và lợi nhuận gộp. Điều đó bỏ sót gì? *(Xem Mục 7)*
 10. Một mô hình dự đoán giá tăng một bước ở mã có spread ba bước. Vì sao hành động theo nó là lỗ ngay trước khi tính phí? *(Xem Mục 8)*
+11. Sổ lệnh kết thúc với 300 cổ phiếu ở bid và 900 ở ask, vậy mà năm sự kiện cộng lại ra OFI cộng 600. Vì sao, và giá giữa làm gì? *(Xem Mục 9)*
 
 ## Đi sâu hơn (Go deeper)
 
 - **[Cont, Kukanov & Stoikov, The Price Impact of Order Book Events](https://arxiv.org/abs/1011.6402)**: nguồn của định nghĩa OFI, quan hệ với độ sâu và con số 65%.
 - **[Zhang, Zohren & Roberts, DeepLOB](https://arxiv.org/abs/1808.03668)**: kiến trúc, các lựa chọn gán nhãn và thử nghiệm trên Sở Giao dịch Chứng khoán London.
 - **[Briola, Bartolucci & Aste, Deep limit order book forecasting: a microstructural guide](https://arxiv.org/abs/2403.09267)**: nghiên cứu theo bước giá và lập luận rằng nên đánh giá dự báo bằng thứ nó cho phép bạn giao dịch.
-- **[51labs, Machine Learning for Financial Market](https://51labs.vn/vi/courses)**: chương trình công khai có một dự án dự đoán mất cân bằng dòng lệnh và một dự án về DeepLOB. Bài này chỉ dựng phần nền cho chúng.
 - **Liên quan trong series:** [Mô hình chuỗi](/blog/ai-trading-sequence-models/) cho các lớp mà DeepLOB dùng lại, và [Lệnh, sổ lệnh, ATO và ATC ở Việt Nam](/blog/vietnam-order-types-order-book-ato-atc/) cho các loại lệnh HOSE nhìn từ phía người giao dịch.
 
 </Vi>

@@ -13,6 +13,15 @@ Không cần đọc lại toàn bộ chat history — file này là nguồn sự
 - **Cần user quyết:** (1) bài 4 nhúng ảnh biểu đồ của 51labs, chưa thấy giấy phép; (2) bài 4 nêu lệch nhẹ với bài 2 về các lag momentum (tuần 2–6 so với biểu đồ gốc); (3) bài 3 và 1–2 đã xuất bản còn nhãn "minh hoạ" trong quiz, khóa `"illustrative": false` cũ và bảng HSG giá chọn cho khớp tỉ lệ 1,5:1 chưa nêu giả định trong câu: để PR riêng.
 - **Chưa chốt:** user đọc 19 bài rồi mới bỏ `draft`.
 
+### Cập nhật cùng ngày: đã bỏ 51Labs, thêm "Worked case" và code (22 bài)
+
+- **Yêu cầu của user (28/11):** bài đọc như lý thuyết thuần, muốn có code minh họa hoặc tình huống thực tế kèm cách tư duy giải; và xóa mọi chỗ nhắc 51Labs (chỉ là tham khảo, không đưa vào nội dung). Brief: `docs/superpowers/specs/2026-11-28-ai-trading-worked-cases-brief.md`.
+- **Đã làm (22 agent Sonnet, mỗi bài một agent, cả bài 1–3 đã xuất bản):** mỗi bài có thêm một mục "Worked case" (bài toán, kiểm gì trước, các bước, kết quả, điều gì sẽ khiến đổi ý) đặt sau các mục đánh số, không đổi tiêu đề cũ nên neo quiz còn đúng; phần lớn có đoạn Python 15–46 dòng kèm `TerminalOutput` đầu ra thật, mã đầy đủ ở `demo/ai-trading/p<NN>_*.py` (24 file). Đã xóa 51Labs khỏi bài, `sources`, quiz, hình và credit của series (`series.ts`). Chỗ nào chỉ có nguồn 51Labs thì bỏ hẳn và thay bằng ví dụ tự tính nêu giả định trong câu: bài 2 (momentum 60 cổ phiếu), 4 (bản ghi VN30F1M), 5 (bảng HPG), 6 (HPG momentum), 10 (VN100), 11 (cộng đồng VN100, visibility), 17 (Alpha 6.8, Metro Line 1), 18 (VN100). Hai lần agent giữ số của họ chỉ đổi cách nói (bài 4 và 6) đã bắt và buộc đổi sang số tự đặt. Bài 3 sửa luôn nhãn "minh hoạ", khóa `"illustrative"` cũ và bảng HSG (giá nêu là giả định, ngày chốt quyền 29/5/2016 là Chủ nhật nên đổi 27/5).
+- **Ai quyết:** user. AI quyết đặt mục "Worked case" sau mục đánh số và bỏ (thay vì dẫn lại) mọi con số chỉ có từ 51Labs.
+- **Kiểm tra:** `npm run build` 155 trang, `node --test` 212 pass; `validate.ts` ok và `check:quiz-mix` on target cho 22 bộ quiz; không còn `51labs` / `Thematic Narrative` / `Alpha 6.8` trong `src`, `demo`, `public`; chạy lại cả 24 script bằng `uv run` và đầu ra khớp khối `TerminalOutput` trong bài; quét heuristic giọng AI (gạch dài, "không phải X mà là Y", từ sáo) trong các mục mới: sạch.
+- **Chưa kiểm:** `humanizer` chưa chạy như một lượt riêng trên 22 mục mới (chỉ quét heuristic); 360px; một số hình đã sửa chưa chụp lại (`AtP10Recovery`, `Atq10RecoveryTable`, `Atq04CoinTails`, `AtP11Communities` tối); các cụm "framing" của `post-check.sh` ở bài 1 và 2 là dương tính giả ("the book" = order book).
+- **Cần user quyết:** (1) kịch bản momentum của bài 6 vẫn cùng cấu trúc thiết kế (tín hiệu dấu lợi suất vài tuần, chỉ mua, nhắm biến động) dù số đã khác hẳn: muốn tách xa hơn thì đổi tín hiệu; (2) bài 18 dùng mã HPG/HSG/NKG/VCB/BID với cạnh giả định (nhóm thép khác ngân hàng là kiến thức chung).
+
 ## 2026-11-27 — Làm sạch quiz Go: sửa lỗi trong bài, đọc lại tiếng Việt 600 câu, sửa hình
 
 - **Đã làm:** nhánh `fix/go-quiz-polish`, theo yêu cầu "làm 2 cái đầu" (kiểm hình tối/360px + đọc tiếng Việt; sửa lỗi trong bài).

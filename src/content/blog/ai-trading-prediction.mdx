@@ -16,9 +16,6 @@ sources:
   - { title: "TimeSeriesSplit (scikit-learn 1.8 documentation)", author: "scikit-learn developers", url: "https://scikit-learn.org/stable/modules/generated/sklearn.model_selection.TimeSeriesSplit.html" }
   - { title: "CombinatorialPurgedCV (skfolio documentation: purging and embargo)", author: "skfolio", url: "https://skfolio.org/generated/skfolio.model_selection.CombinatorialPurgedCV.html" }
   - { title: "Numerai data documentation: eras, features and targets", author: "Numerai", url: "https://docs.numer.ai/numerai-tournament/data" }
-  - { title: "Linear regression (HPG against VNINDEX)", author: "51labs", url: "https://51labs.vn/vi/blog/linear-regression" }
-  - { title: "Time series momentum: a traditional approach (tested on the Vietnamese market)", author: "51labs", url: "https://51labs.vn/vi/blog/time-series-momentum-a-traditional-approach" }
-  - { title: "51Labs, Machine Learning for Financial Market (curriculum: Supervised learning, Tree-based and Ensemble ML model, Predict-then-rank portfolio)", url: "https://51labs.vn/vi/courses" }
   - { title: "Quy chế giao dịch mới tại HOSE: duy trì biên độ dao động giá 7% và lô chẵn 100 cổ phiếu", author: "Người Quan Sát", url: "https://nguoiquansat.vn/quy-che-giao-dich-moi-tai-hose-duy-tri-bien-do-dao-dong-gia-7-va-lo-chan-100-co-phieu-32586.html" }
   - { title: "Beech Forest (AU), Great Otway National Park, 2019, 1294 (photo, CC BY-SA 4.0)", author: "Dietmar Rabich — Wikimedia Commons", url: "https://commons.wikimedia.org/wiki/File:Beech_Forest_(AU),_Great_Otway_National_Park_--_2019_--_1294.jpg" }
 ---
@@ -39,6 +36,7 @@ import AtP08Splits from '../../components/mdx/AtP08Splits.astro';
 import AtP08LeakGap from '../../components/mdx/AtP08LeakGap.astro';
 import AtP08IcStrip from '../../components/mdx/AtP08IcStrip.astro';
 import AtP08AiSummary from '../../components/mdx/AtP08AiSummary.astro';
+import TerminalOutput from '../../components/mdx/TerminalOutput.astro';
 import heroForest from '../../assets/blog/ai-trading-prediction/otway-forest.jpg';
 
 <En>
@@ -96,7 +94,7 @@ Rank IC is computed once per month, so a model gets a series of them, and that s
 
 <AtP08Pipeline />
 
-The pipeline is short. Features known at month end go in, the model gives each stock a score, you sort, and the top group goes to portfolio construction, which is the next stage of the series. The label appears only during training. A 51labs curriculum puts this under "Predict-then-rank portfolio", which is the same idea under another name.
+The pipeline is short. Features known at month end go in, the model gives each stock a score, you sort, and the top group goes to portfolio construction, which is the next stage of the series. The label appears only during training.
 
 <Concepts>
 
@@ -116,7 +114,7 @@ A model learns whatever the label says, so the label is the first design decisio
 
 **Relative or raw.** A raw return label asks the model to guess whether the whole market rises. A return relative to the other stocks of the same month asks only the question the ranking needs. Numerai's docs say to treat an era as one data point; the same habit works for any month: compare stocks with their month, not with other months.
 
-**Features.** The 51labs study of time-series momentum on the 60 most liquid Vietnamese stocks, with weekly data, found that past returns mattered at lags of about two and six weeks and turned significantly negative beyond roughly ten weeks. Features like those, past returns over several windows, are typical inputs, next to valuation and liquidity measures from the Data post. Every feature must be known at the month end, with the point-in-time rules of the Data post.
+**Features.** Past returns over several windows are typical inputs, next to valuation and liquidity measures from the Data post. Every feature must be known at the month end, with the point-in-time rules of the Data post.
 
 Vietnam adds a detail on the label side. HOSE caps the daily move of a stock at 7% around the reference price (HOSE's trading regulation in force from 5 July 2021). A one-day return label is therefore bounded, and a stock stuck at the limit hides how far it would have gone. A multi-week label avoids some of that, and a rank-based score does not care about a few capped values.
 
@@ -224,6 +222,66 @@ Every line is plausible, and every line hides a choice. Shuffled folds mix past 
 
 ---
 
+## 6. Worked case: a model that "works" on noise
+
+Say a colleague sends you a ridge model with a rank IC of 0.06 on 20 held-out months, and the split is clean: train on months 1 to 40, test on 41 to 60. There is no random fold and no overlapping label. You still have to find out whether to believe it.
+
+**What I would check first.** The split, because it is the cheapest thing to read. It is fine here. The next cheapest is anything that touched the data before the split: scaling, filling gaps, and above all choosing features. The colleague mentions that the model uses "the 10 best of 300 candidate features". Best by what, and measured on which months?
+
+**The steps.** To test the idea without trusting anyone, build a panel where the answer is known: 60 months, 100 stocks, 300 features, and a return that is pure noise. No feature can carry real skill.
+
+1. Rank the features by their average monthly rank IC with next month's return, keep the 10 with the largest absolute value.
+2. Fit a ridge on months 1 to 40 with those 10 columns and score it on months 41 to 60.
+3. Do step 1 twice: once on all 60 months (what the colleague did), once on months 1 to 40 only.
+
+```python
+T, N, F = 60, 100, 300                      # months, stocks, candidate features
+
+def make(seed):
+    global X, y
+    rng = np.random.default_rng(seed)
+    X = rng.standard_normal((T, N, F))      # features: noise
+    y = rng.standard_normal((T, N))         # next-month return: noise
+
+def pick(months, k=10):
+    """Rank the k features with the highest |mean monthly rank IC| over `months`."""
+    ic = np.array([[spearmanr(X[t, :, j], y[t])[0] for j in range(F)] for t in months])
+    return np.argsort(-np.abs(ic.mean(0)))[:k]
+
+def mean_ic(cols, train, test):
+    m = Ridge(alpha=100).fit(X[train][:, :, cols].reshape(-1, len(cols)), y[train].ravel())
+    ics = [spearmanr(m.predict(X[t][:, cols]), y[t])[0] for t in test]
+    return np.mean(ics)
+
+train, test = np.arange(0, 40), np.arange(40, 60)
+
+def run(seed):
+    make(seed)
+    leaky = pick(np.arange(T))              # LEAK: features chosen using all 60 months
+    clean = pick(train)                     # features chosen using the training months only
+    return mean_ic(leaky, train, test), mean_ic(clean, train, test)
+
+a, b = run(8)
+print(f"features chosen on all months : test IC = {a:+.3f}")
+print(f"features chosen on train only : test IC = {b:+.3f}")
+```
+
+<TerminalOutput command={"uv run --with numpy --with scipy --with scikit-learn demo/ai-trading/p08_selection_leak.py"} label="Python 3.13 · numpy 2.3 · scikit-learn 1.8 · captured Nov 2026" caption="Same noise, same model, same split. The only difference is which months were used to pick the 10 columns.">
+```text
+features chosen on all months : test IC = +0.058
+features chosen on train only : test IC = -0.023
+20 more panels, mean test IC  : all-months +0.081, train-only +0.002
+```
+</TerminalOutput>
+
+Picking on all 60 months gives a test IC of +0.058, about what the colleague reported, from data with no signal in it. Picking on the training months gives -0.023. Twenty more noise panels average +0.081 and +0.002. With 300 candidates, the 10 largest in-sample correlations are mostly luck, and when the test months are among the months used to choose them, that luck is carried into the score.
+
+**What the result tells you.** The honest procedure scores about zero on noise, so a number above zero from the leaky one is the size of the leak. Here it is about 0.06 to 0.08, the same size as the colleague's claim. The claim is not proven false, because a real signal would show up in both rows. It is just not shown yet.
+
+**What would change my mind.** Re-running the colleague's pipeline with the selection moved inside the training window. If the IC stays near 0.06 across several windows and the t-statistic of the monthly series (Section 5) holds, the signal is real. If it drops to zero, the 0.06 came from the selection step. Any step that learns from data (selection, scaling, imputing, tuning) belongs inside the training fold.
+
+---
+
 ## Key takeaways
 
 - **Ordering is the product**: a model that explains 0.4% of return variance can still rank stocks well enough to pay, because the portfolio only uses the order.
@@ -231,6 +289,7 @@ Every line is plausible, and every line hides a choice. Shuffled folds mix past 
 - **A deep tree memorises**: it can score 0.43 on its training months and 0.00 on new ones; forests and boosting keep much more of the skill.
 - **Overlapping labels couple the rows**: a three-month label makes neighbouring monthly rows near-copies.
 - **Test in the future**: walk-forward splits with a purge at least as long as the label horizon; a random split inflated the same model's result from 0.09 to 0.16 here.
+- **Learning steps live inside the training window**: choosing 10 of 300 noise features on all months gave a test IC of +0.058; choosing on the training months gave -0.023.
 - **Ask four questions of any summary**: how were the folds cut, how do labels overlap, is the number per month, and is it before costs.
 
 ## Review questions
@@ -243,12 +302,12 @@ Every line is plausible, and every line hides a choice. Shuffled folds mix past 
 6. What does the gap argument of scikit-learn's TimeSeriesSplit do, and how long should it be for a three-month label? *(See Section 4)*
 7. In the simulated panel, why did random 5-fold cross-validation report 0.163 while walk-forward reported 0.091? *(See Section 4)*
 8. A summary reports a correlation of 0.16 and nothing else. Which questions do you ask? *(See Section 5)*
+9. A model picks its 10 best features out of 300 using all months, then scores 0.06 on a clean holdout. What do you re-run? *(See Section 6)*
 
 ## Go deeper
 
 - **[Gu, Kelly & Xiu (2020), Empirical Asset Pricing via Machine Learning](https://dachxiu.chicagobooth.edu/download/ML.pdf)**: the large test behind the hook, with every model's out-of-sample R² and the decile portfolios.
 - **[Kapoor & Narayanan, Leakage and the Reproducibility Crisis in ML-based Science](https://arxiv.org/abs/2207.07048)**: how leakage inflates published results across 17 fields.
-- **[51Labs, Machine Learning for Financial Market](https://51labs.vn/vi/courses)**: the course whose supervised-learning, tree-ensemble and predict-then-rank days this post follows.
 - **[Numerai data documentation](https://docs.numer.ai/numerai-tournament/data)**: a real dataset built around eras and relative targets, free to read.
 
 </En>
@@ -308,7 +367,7 @@ Rank IC tính một lần mỗi tháng, nên một mô hình có cả chuỗi IC
 
 <AtP08Pipeline />
 
-Pipeline khá ngắn. Feature biết được cuối tháng đi vào, mô hình cho mỗi cổ phiếu một điểm, bạn sắp xếp, rồi nhóm đầu được giao cho bước dựng danh mục, chặng kế tiếp của series. Nhãn chỉ xuất hiện lúc huấn luyện. Chương trình của 51labs xếp việc này dưới tên "Predict-then-rank portfolio", cùng một ý tưởng.
+Pipeline khá ngắn. Feature biết được cuối tháng đi vào, mô hình cho mỗi cổ phiếu một điểm, bạn sắp xếp, rồi nhóm đầu được giao cho bước dựng danh mục, chặng kế tiếp của series. Nhãn chỉ xuất hiện lúc huấn luyện.
 
 <Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
 
@@ -328,7 +387,7 @@ Mô hình học đúng cái nhãn nói, nên nhãn là quyết định thiết k
 
 **Tương đối hay thô.** Nhãn lợi suất thô buộc mô hình đoán xem cả thị trường có tăng không. Nhãn lợi suất tương đối so với các cổ phiếu khác cùng tháng chỉ đặt đúng câu hỏi mà việc xếp hạng cần. Tài liệu Numerai dặn coi một era là một điểm dữ liệu; cùng thói quen đó dùng được cho mọi tháng: so cổ phiếu với tháng của nó, đừng so với các tháng khác.
 
-**Feature.** Nghiên cứu momentum chuỗi thời gian của 51labs trên 60 cổ phiếu thanh khoản nhất Việt Nam, dữ liệu tuần, thấy lợi suất quá khứ có ý nghĩa ở độ trễ khoảng hai và sáu tuần, rồi đổi dấu âm từ khoảng mười tuần trở đi. Những feature kiểu đó, lợi suất quá khứ nhiều cửa sổ, là input điển hình, bên cạnh các thước đo định giá và thanh khoản từ bài Dữ liệu. Mọi feature phải biết được tại cuối tháng, theo các quy tắc point-in-time của bài Dữ liệu.
+**Feature.** Lợi suất quá khứ qua nhiều cửa sổ là input điển hình, bên cạnh các thước đo định giá và thanh khoản từ bài Dữ liệu. Mọi feature phải biết được tại cuối tháng, theo các quy tắc point-in-time của bài Dữ liệu.
 
 Việt Nam thêm một chi tiết ở phía nhãn. HOSE giới hạn biên độ trong ngày của cổ phiếu ở 7% quanh giá tham chiếu (quy chế giao dịch của HOSE có hiệu lực từ 5/7/2021). Nhãn lợi suất một ngày vì thế bị chặn, và một mã kẹt ở giá trần che mất việc nó lẽ ra đi được bao xa. Nhãn nhiều tuần tránh được phần nào, còn điểm dựa trên thứ hạng thì không bận tâm vài giá trị bị chặn.
 
@@ -436,6 +495,66 @@ Dòng nào cũng hợp lý, và dòng nào cũng giấu một lựa chọn. Fold
 
 ---
 
+## 6. Ca thực tế: mô hình "hiệu quả" trên nhiễu
+
+Giả sử đồng nghiệp gửi bạn một mô hình ridge có rank IC 0,06 trên 20 tháng giữ lại, và cách chia là sạch: huấn luyện tháng 1 đến 40, kiểm tra tháng 41 đến 60. Không có fold ngẫu nhiên, không có nhãn chồng nhau. Bạn vẫn phải quyết định có tin hay không.
+
+**Tôi kiểm tra gì trước.** Cách chia, vì đọc nó rẻ nhất. Ở đây nó ổn. Rẻ kế tiếp là bất cứ thứ gì chạm vào dữ liệu trước khi chia: chuẩn hóa, điền chỗ trống, và trên hết là chọn feature. Đồng nghiệp nói mô hình dùng "10 feature tốt nhất trong 300 ứng viên". Tốt nhất theo tiêu chí gì, và đo trên những tháng nào?
+
+**Các bước.** Để thử ý này mà không phải tin ai, dựng một panel mà đáp án đã biết: 60 tháng, 100 cổ phiếu, 300 feature, và lợi suất là nhiễu thuần. Không feature nào có năng lực thật.
+
+1. Xếp hạng feature theo rank IC trung bình hằng tháng với lợi suất tháng sau, giữ 10 feature có giá trị tuyệt đối lớn nhất.
+2. Fit ridge trên tháng 1 đến 40 với 10 cột đó rồi chấm trên tháng 41 đến 60.
+3. Làm bước 1 hai lần: một lần trên cả 60 tháng (việc đồng nghiệp đã làm), một lần chỉ trên tháng 1 đến 40.
+
+```python
+T, N, F = 60, 100, 300                      # months, stocks, candidate features
+
+def make(seed):
+    global X, y
+    rng = np.random.default_rng(seed)
+    X = rng.standard_normal((T, N, F))      # features: noise
+    y = rng.standard_normal((T, N))         # next-month return: noise
+
+def pick(months, k=10):
+    """Rank the k features with the highest |mean monthly rank IC| over `months`."""
+    ic = np.array([[spearmanr(X[t, :, j], y[t])[0] for j in range(F)] for t in months])
+    return np.argsort(-np.abs(ic.mean(0)))[:k]
+
+def mean_ic(cols, train, test):
+    m = Ridge(alpha=100).fit(X[train][:, :, cols].reshape(-1, len(cols)), y[train].ravel())
+    ics = [spearmanr(m.predict(X[t][:, cols]), y[t])[0] for t in test]
+    return np.mean(ics)
+
+train, test = np.arange(0, 40), np.arange(40, 60)
+
+def run(seed):
+    make(seed)
+    leaky = pick(np.arange(T))              # LEAK: features chosen using all 60 months
+    clean = pick(train)                     # features chosen using the training months only
+    return mean_ic(leaky, train, test), mean_ic(clean, train, test)
+
+a, b = run(8)
+print(f"features chosen on all months : test IC = {a:+.3f}")
+print(f"features chosen on train only : test IC = {b:+.3f}")
+```
+
+<TerminalOutput command={"uv run --with numpy --with scipy --with scikit-learn demo/ai-trading/p08_selection_leak.py"} label="Python 3.13 · numpy 2.3 · scikit-learn 1.8 · captured Nov 2026" caption="Cùng nhiễu, cùng mô hình, cùng cách chia. Khác biệt duy nhất là 10 cột được chọn bằng những tháng nào.">
+```text
+features chosen on all months : test IC = +0.058
+features chosen on train only : test IC = -0.023
+20 more panels, mean test IC  : all-months +0.081, train-only +0.002
+```
+</TerminalOutput>
+
+Chọn trên cả 60 tháng cho IC kiểm tra +0,058, gần bằng con số đồng nghiệp báo, từ dữ liệu không chứa tín hiệu nào. Chọn trên các tháng huấn luyện cho -0,023. Hai mươi panel nhiễu khác cho trung bình +0,081 và +0,002. Với 300 ứng viên, 10 tương quan lớn nhất trong mẫu phần lớn là may rủi, và khi các tháng kiểm tra nằm trong số tháng dùng để chọn, phần may rủi đó đi thẳng vào điểm số.
+
+**Kết quả cho bạn biết gì.** Quy trình trung thực cho điểm gần 0 trên nhiễu, nên số dương của quy trình rò rỉ chính là độ lớn của chỗ rò. Ở đây khoảng 0,06 đến 0,08, bằng đúng con số đồng nghiệp nêu. Điều đó không chứng minh tuyên bố là sai, vì tín hiệu thật sẽ hiện ở cả hai dòng. Nó chỉ chưa được chứng minh.
+
+**Điều gì sẽ đổi ý tôi.** Chạy lại pipeline của đồng nghiệp với bước chọn feature đưa vào trong cửa sổ huấn luyện. Nếu IC vẫn quanh 0,06 qua nhiều cửa sổ và thống kê t của chuỗi theo tháng (Mục 5) còn vững, tín hiệu là thật. Nếu rơi về 0, con số 0,06 đến từ bước chọn. Mọi bước học từ dữ liệu (chọn lọc, chuẩn hóa, điền khuyết, chỉnh tham số) đều thuộc về bên trong fold huấn luyện.
+
+---
+
 ## Điểm rút ra (Key takeaways)
 
 - **Thứ tự mới là sản phẩm**: mô hình giải thích 0,4% phương sai lợi suất vẫn có thể xếp hạng đủ tốt để sinh lời, vì danh mục chỉ dùng thứ tự.
@@ -443,6 +562,7 @@ Dòng nào cũng hợp lý, và dòng nào cũng giấu một lựa chọn. Fold
 - **Cây sâu thuộc lòng**: nó có thể đạt 0,43 trên các tháng đã học và 0,00 trên tháng mới; forest và boosting giữ lại nhiều năng lực hơn hẳn.
 - **Nhãn chồng nhau làm các dòng dính nhau**: nhãn ba tháng khiến các dòng tháng liền kề gần như bản sao.
 - **Test ở tương lai**: walk-forward với purge ít nhất bằng chân trời của nhãn; chia ngẫu nhiên đã đẩy kết quả cùng một mô hình từ 0,09 lên 0,16 ở đây.
+- **Bước học nằm trong cửa sổ huấn luyện**: chọn 10 trong 300 feature nhiễu bằng tất cả các tháng cho IC kiểm tra +0,058; chọn bằng các tháng huấn luyện cho -0,023.
 - **Hỏi bốn câu với mọi bản tóm tắt**: fold chia thế nào, nhãn chồng nhau ra sao, con số có theo tháng không, và có trước chi phí không.
 
 ## Câu hỏi ôn tập (Review questions)
@@ -455,12 +575,12 @@ Dòng nào cũng hợp lý, và dòng nào cũng giấu một lựa chọn. Fold
 6. Tham số gap của TimeSeriesSplit trong scikit-learn làm gì, và với nhãn ba tháng nó nên dài bao nhiêu? *(Xem Mục 4)*
 7. Trong panel mô phỏng, vì sao cross-validation 5 fold ngẫu nhiên báo 0,163 còn walk-forward báo 0,091? *(Xem Mục 4)*
 8. Một bản tóm tắt chỉ báo tương quan 0,16 và không gì thêm. Bạn hỏi những câu nào? *(Xem Mục 5)*
+9. Một mô hình chọn 10 feature tốt nhất trong 300 bằng tất cả các tháng rồi đạt 0,06 trên phần giữ lại sạch. Bạn chạy lại điều gì? *(Xem Mục 6)*
 
 ## Đi sâu hơn (Go deeper)
 
 - **[Gu, Kelly & Xiu (2020), Empirical Asset Pricing via Machine Learning](https://dachxiu.chicagobooth.edu/download/ML.pdf)**: thử nghiệm lớn đứng sau phần mở bài, với R² ngoài mẫu của từng mô hình và các danh mục theo decile.
 - **[Kapoor & Narayanan, Leakage and the Reproducibility Crisis in ML-based Science](https://arxiv.org/abs/2207.07048)**: cách leakage thổi phồng kết quả đã công bố ở 17 lĩnh vực.
-- **[51Labs, Machine Learning for Financial Market](https://51labs.vn/vi/courses)**: chương trình có các buổi supervised learning, tree ensemble và predict-then-rank mà bài này đi theo.
 - **[Tài liệu dữ liệu của Numerai](https://docs.numer.ai/numerai-tournament/data)**: một bộ dữ liệu thật dựng quanh era và target tương đối, đọc miễn phí.
 
 </Vi>

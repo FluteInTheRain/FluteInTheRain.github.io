@@ -1690,8 +1690,8 @@ const aiTrading: Series = {
       slug: AT.nlp,
       topic: { en: 'Financial NLP', vi: 'NLP tài chính' },
       hook: {
-        en: 'LLMs read the news: thematic investing, Alpha 6.8, sentiment before price.',
-        vi: 'LLM đọc tin: thematic investing, Alpha 6.8, cảm xúc đi trước giá.',
+        en: 'LLMs read the news: word lists, embeddings, sentiment before price.',
+        vi: 'LLM đọc tin: bộ từ, embedding, cảm xúc đi trước giá.',
       },
       act: 'dl',
       builds: [AT.deepLearning],
