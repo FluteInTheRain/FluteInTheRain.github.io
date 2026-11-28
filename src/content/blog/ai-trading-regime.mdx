@@ -1,0 +1,515 @@
+---
+title: "Regime"
+title_vi: "Chu kỳ thị trường"
+description: "How EWMA and a hidden Markov model tell calm markets from turbulent ones, and why a signal that peeks at the future makes a backtest lie. Post 5 of the AI-trading series."
+description_vi: "EWMA và hidden Markov model phân biệt thị trường yên với hỗn loạn ra sao, và vì sao tín hiệu nhìn trộm tương lai làm backtest nói dối. Bài 5 của series AI trong chứng khoán."
+date: 2026-11-28
+category: "finance"
+tags: ["ai", "ai-trading", "regime", "hidden-markov-model"]
+cover: "../../assets/blog/ai-trading-regime/saigon-blue-hour.jpg"
+cover_alt: "The Ho Chi Minh City skyline at blue hour, towers lit against a deep blue sky"
+draft: true
+sources:
+  - { title: "51Labs — Machine Learning for Financial Market (curriculum: Project Regime detection; Hidden Markov Model)", url: "https://51labs.vn/vi/courses" }
+  - { title: "Graph visibility for regime detection and risk management (51Labs blog, 22 Jun 2025)", url: "https://51labs.vn/vi/blog/graph-visibility-for-regime-detection-and-risk-management" }
+  - { title: "A New Approach to the Economic Analysis of Nonstationary Time Series and the Business Cycle", author: "James D. Hamilton", chapters: "Econometrica 57(2), 357–384, 1989", url: "https://www.econometricsociety.org/publications/econometrica/1989/03/01/new-approach-economic-analysis-nonstationary-time-series-and" }
+  - { title: "Regime Shifts: Implications for Dynamic Strategies", author: "Mark Kritzman, Sébastien Page & David Turkington", chapters: "Financial Analysts Journal 68(3), 2012 (abstract page)", url: "https://rpc.cfainstitute.org/research/financial-analysts-journal/2012/regime-shifts-implications-for-dynamic-strategies-corrected" }
+  - { title: "S&P 500 (SP500), daily close, S&P Dow Jones Indices via FRED", author: "Federal Reserve Bank of St. Louis", url: "https://fred.stlouisfed.org/series/SP500" }
+  - { title: "VN-Index falls to lowest this year", author: "VnExpress International, 10 Jan 2022", url: "https://e.vnexpress.net/news/business/economy/vn-index-falls-to-lowest-this-year-4413011.html" }
+  - { title: "Vietnam's 2022 stock market provides investors mixed emotions", author: "The Investor", url: "https://theinvestor.vn/vietnams-2022-stock-market-provides-investors-mixed-emotions-d3139.html" }
+  - { title: "Quy chế giao dịch mới tại HOSE: Duy trì biên độ dao động giá 7% và lô chẵn 100 cổ phiếu", author: "Người Quan Sát", url: "https://nguoiquansat.vn/quy-che-giao-dich-moi-tai-hose-duy-tri-bien-do-dao-dong-gia-7-va-lo-chan-100-co-phieu-32586.html" }
+  - { title: "Saigon at Blue Hour (photo, CC BY 2.0)", author: "Radek Kucharski — Wikimedia Commons", url: "https://commons.wikimedia.org/wiki/File:Saigon_at_Blue_Hour.jpg" }
+---
+
+import En from '../../components/mdx/En.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import AtP05TwoPersonalities from '../../components/mdx/AtP05TwoPersonalities.astro';
+import AtP05Ewma from '../../components/mdx/AtP05Ewma.astro';
+import AtP05States from '../../components/mdx/AtP05States.astro';
+import AtP05FilterStep from '../../components/mdx/AtP05FilterStep.astro';
+import AtP05FilteredVsSmoothed from '../../components/mdx/AtP05FilteredVsSmoothed.astro';
+import AtP05Backtest from '../../components/mdx/AtP05Backtest.astro';
+import AtP05FilterDemo from '../../components/mdx/AtP05FilterDemo.astro';
+import AtP05Pipeline from '../../components/mdx/AtP05Pipeline.astro';
+import AtP05VnIndex from '../../components/mdx/AtP05VnIndex.astro';
+import AtP05WalkForward from '../../components/mdx/AtP05WalkForward.astro';
+import heroSaigon from '../../assets/blog/ai-trading-regime/saigon-blue-hour.jpg';
+
+<En>
+
+<Figure src={heroSaigon} alt="The Ho Chi Minh City skyline at blue hour, towers lit against a deep blue sky" caption="Same skyline, a different state of the day. A market does the same thing, except nobody announces the change. Photo: Radek Kucharski, CC BY 2.0." sourceTitle="Wikimedia Commons: Saigon at Blue Hour (Radek Kucharski, CC BY 2.0)" sourceUrl="https://commons.wikimedia.org/wiki/File:Saigon_at_Blue_Hour.jpg" />
+
+> "The parameters of an autoregression are viewed as the outcome of a discrete-state Markov process."
+> &mdash; *James D. Hamilton, Econometrica (1989)*
+
+### The day a calm model met a 3% fall
+
+On 19 February 2020 the S&P 500 closed at 3,386.15, a record. Through 2017 its daily returns had a standard deviation of 0.42%, about 6.7% a year, and the biggest single move that year was 1.83%. Say you sized every position for that kind of market.
+
+Five trading days later, on 24 February, the index fell 3.35% (a log return of −3.41%). Measured against the calm state of the model fitted in section 1, that day sits 5.3 standard deviations from the mean, which a bell curve puts at roughly one day in ten million. By 23 March the index had closed at 2,237.40, 33.9% below its February peak, and on 16 March alone it had fallen almost 12%.
+
+The market had switched to a different state, with larger moves and a different rhythm, and any rule tuned on the old state stopped fitting. Quants call such a state a **regime**. This post covers three questions:
+
+1. **What a regime is** and how a number like EWMA volatility summarises it.
+2. **How a hidden Markov model** (HMM) infers a state nobody labels for you.
+3. **Why the signal must not peek**: the same model produces a great or a modest backtest depending on whether it sees tomorrow.
+
+Everything here uses real S&P 500 closes from FRED, with the model fitted by Python, plus the VN-Index for the Vietnamese side. None of it is investment advice or a recommendation.
+
+<Callout type="note" title="TL;DR">
+A regime is a stretch of days that share the same behaviour, such as calm with small moves or turbulent with large ones. EWMA volatility tracks that behaviour with one decaying average, but you pick the threshold yourself. A two-state hidden Markov model fitted to 2,509 daily S&P 500 returns found a calm state (10.1% annual volatility, lasting about 56 days) and a turbulent state (30.7%, about 22 days). Each day it updates a probability that the market is turbulent. The probability computed with only past data (filtered) gave a rule that ended with 2.20 units from 1 and a worst fall of 13.4%, against 3.28 and 33.9% for buy and hold. The probability computed with the whole sample (smoothed) gave 4.93 and 10.3%, which no live system could have produced. Fitting on the first five years and testing on the rest gave 1.55 against 1.57 for buy and hold, and a worst fall of 12.1% against 25.4%.
+</Callout>
+
+<Concepts>
+
+- **Regime**: a period in which returns follow one pattern, mostly one level of volatility. The regime changes, but you do not see a label for it.
+- **Log return**: the natural logarithm of today's close divided by yesterday's. A price fall of 3.35% is a log return of −3.41%. Log returns add across days, which makes them the usual input for models.
+- **Volatility**: how large daily returns are, measured as their standard deviation. Annual volatility is the daily figure times the square root of 252 trading days.
+- **Drawdown**: the fall from the highest value so far. The worst drawdown is the deepest such fall in the sample.
+
+</Concepts>
+
+---
+
+## 1. Same index, two personalities
+
+Put the 2,509 daily returns of the S&P 500 from December 2016 to November 2026 into one pile and you get a single bell curve with a fat tail. Split the pile into two, one for each state a model finds, and two clean curves appear.
+
+<AtP05TwoPersonalities />
+
+In the calm state a day moves by about 0.64%, which is 10.1% a year. In the turbulent state it moves by about 1.93%, or 30.7% a year, three times as much. All 57 days with a move beyond 3% (in either direction) fall in the turbulent group.
+
+Economists got here first. In 1989 James Hamilton modelled postwar US real GNP growth as an autoregression whose parameters switch according to an unobserved Markov chain, and found that the switch from positive to negative growth recurs over the business cycle. His estimates imply that a typical recession goes with a permanent 3% drop in the level of GNP. Kritzman, Page and Turkington applied the same family of models to market turbulence, inflation and growth, and report that a regime-based dynamic strategy beat static allocation in their backtests, especially at avoiding large losses (abstract page; the full text is members-only).
+
+51Labs lists "Project: Regime detection" and a Hidden Markov Model session in its Machine Learning for Financial Market curriculum, and publishes a blog post on regime detection for Vietnamese stocks that section 6 reads closely.
+
+<Concepts>
+
+- **Fat tail**: extreme moves happen more often than a single bell curve says. Mixing a calm and a turbulent curve produces exactly this.
+- **Mixture**: data drawn from two or more distributions, with a hidden label saying which one produced each point.
+- **Business cycle**: the recurring swing between expansion and contraction of economic activity. Hamilton's paper turned the swing into a two-state statistical model.
+
+</Concepts>
+
+---
+
+## 2. EWMA: a volatility that forgets
+
+The simplest regime tool needs no states. An exponentially weighted moving average (EWMA) keeps one running estimate of variance and updates it each day: new estimate = 0.94 × old estimate + 0.06 × today's squared return. Say we pick 0.94 for the decay. Yesterday's return then carries weight 0.06, the day before 0.056, and the weights halve about every 11 days.
+
+<AtP05Ewma />
+
+On the S&P 500, the EWMA volatility sat near 11% a year through 21 February 2020. After the −3.41% day of 24 February it jumped to 17.1%, then to 20.4%, and reached 26.1% on 27 February. It reacts within a day, and it forgets old calm quickly, so it follows the market better than a plain 252-day average would.
+
+What it does not give you is a state. To act on EWMA you choose a cutoff ("above 20% is turbulent"), and that cutoff is a knob you tuned on the same history you are testing. The previous post on statistics explains why every such knob counts as another test.
+
+<Concepts>
+
+- **EWMA**: exponentially weighted moving average, a running estimate in which each older day counts for a fixed fraction less than the one after it.
+- **Decay factor (λ)**: the fraction of the old estimate kept each day. 0.94 keeps 94% and gives today's return 6%.
+- **Half-life**: the number of days after which a day's weight has halved. For λ = 0.94 it is ln 0.5 / ln 0.94 ≈ 11.2 days.
+
+</Concepts>
+
+---
+
+## 3. Hidden Markov model: a state you cannot see
+
+An HMM adds two ideas to the mixture. First, the hidden state follows a **Markov chain**: tomorrow's state depends only on today's, through a table of transition probabilities. Second, each state produces returns with its own mean and spread.
+
+<AtP05States />
+
+Fitted to the S&P 500 sample, the table says calm stays calm on 98.2% of days and turns turbulent on 1.8%. Turbulent stays turbulent on 95.4% of days and returns to calm on 4.6%. A state that continues with probability p lasts on average 1 / (1 − p) days, which gives about 56 days for calm and 22 for turbulent. In the long run the chain spends about 72% of its time calm and 28% turbulent. Labelling a day turbulent when the full-sample probability is above 50% marks 26.7% of days, in spells like 21 February to 6 July 2020 (94 days) and 13 January to 15 November 2022 (212 days).
+
+The parameters come from the expectation-maximisation (EM) algorithm: start with a guess, work out how likely each state was on each day, re-estimate means, spreads and transitions from those weights, and repeat until nothing moves. The fit is still an estimate of one sample, and the number of states, two here, is a choice you make. On this sample a third state raises the log-likelihood from 8,212.9 to 8,335.7, and the Bayesian information criterion, which charges for extra parameters, still prefers three states (−16,562 against −16,371 for two). The third state has 61% annual volatility and is the rarest of the three. Two states keep the story readable, and the choice is a judgement, not a result.
+
+<Concepts>
+
+- **Hidden Markov model (HMM)**: a chain of unseen states, each producing a visible observation (here, a daily return) from its own distribution.
+- **Transition matrix**: the table of probabilities of moving from each state to each state in one step. Each row sums to 1.
+- **Sticky state**: a state with a high self-transition probability, so it lasts many days. Regimes are sticky by definition.
+- **EM algorithm**: the loop that fits an HMM by alternating between estimating state probabilities and re-estimating parameters.
+
+</Concepts>
+
+---
+
+## 4. Filtering: updating the belief every day
+
+Once the parameters are fixed, the model keeps one number per day: the probability that today is turbulent. It updates in two steps. First it lets the state drift for one day using the transition matrix. Then it weighs each state by how well it explains the return that just printed (Bayes' rule).
+
+<AtP05FilterStep />
+
+On 24 February 2020 the model started from 4.5% after the 21 February close, and the transition step took it to 6.0%. A return of −3.41% is 300,000 times more likely under the turbulent state than under the calm one, so the posterior became 99.995%. One bad day was enough, because the calm model finds such a day almost impossible.
+
+The result is called the **filtered** probability: it uses data up to and including that day. A second version, the **smoothed** probability, also uses every later day. Both are legitimate statistics. They answer different questions.
+
+<AtP05FilteredVsSmoothed />
+
+On 21 February the filtered probability was still 4.5%, while the smoothed one was already 72%, because the smoothed estimate had seen the crash days that followed. A live system sitting at the close of 21 February could only have the first number.
+
+<Concepts>
+
+- **Filtering**: estimating today's hidden state from data up to today.
+- **Smoothing**: estimating a past day's hidden state using data on both sides of it. It describes history well and cannot be used to trade.
+- **Bayes' rule**: new belief is proportional to old belief times how well each possibility explains the new data.
+- **Likelihood**: how probable the observed return is under a given state.
+
+</Concepts>
+
+---
+
+## 5. The hindsight trap
+
+Here is a rule anyone could write. Hold the index every day. If yesterday's probability of "turbulent" was above 0.5, hold cash today. The one-day lag matters: you learn the probability at the close, and you can trade on it only the next day.
+
+<AtP05Backtest />
+
+On the real sample the rule using smoothed probabilities turns 1 into 4.93, with a worst drawdown of 10.3%. Buy and hold gets 3.28 with a 33.9% drawdown. That looks like a free lunch. The rule using filtered probabilities gets 2.20 and 13.4%: it gives up growth to cut the worst fall by more than half, a trade you may or may not want. The gap between 2.20 and 4.93 is what the smoothed signal learned from the future.
+
+Even the filtered number is flattered, because the parameters were fitted on the same ten years. The demo below isolates the effect on a simulated market, where the true states are known and the model is given the true parameters.
+
+<AtP05FilterDemo />
+
+Move the slider and switch between the two signals. The smoothed signal beats buy and hold at every threshold, and the filtered one can lose money, because the filter only recognises a turbulent spell after it has started, and the biggest moves of a spell often come at the start.
+
+A practical pipeline keeps the lag and the order of operations explicit.
+
+<AtP05Pipeline />
+
+<Callout type="warning" title="Look for this in AI-written backtests">
+If a regime backtest was produced by a script or an assistant, check which probability it feeds the rule. A library call that returns the most likely state for every day (the decoded or smoothed path) uses the whole sample. The honest version loops forward one day at a time, refits only on past data, and applies a one-day lag.
+</Callout>
+
+<Concepts>
+
+- **Look-ahead bias**: using information in a simulation that was not yet available at the time of the decision. It is the cause of the gap in this section.
+- **In-sample**: evaluated on the same data the parameters were fitted on. It flatters any model.
+- **Lag**: a delay between computing a signal and acting on it. A signal computed at today's close cannot trade at today's close.
+
+</Concepts>
+
+---
+
+## 6. Vietnam: one index, one price band
+
+The VN-Index gives a clear example of a regime break. On 10 January 2022 it closed at 1,503.71, its lowest of the year at that point. On 16 November it touched 873.78, and it ended 2022 at 1,007.09, down 32.78% on the year. From the January level to the November low is a fall of 41.9%.
+
+<AtP05VnIndex />
+
+I could not obtain the VN-Index daily series from a source I could cite, so the figure shows only three published values and the HMM above is fitted to the S&P 500. The HOSE rules still matter if you do fit one. A normal-session price band of 7% around the reference price has applied to HOSE stocks since 5 July 2021 under the exchange's trading regulation (check the exchange's current rules before relying on it). A day's index return then stays within that band, so a model fitted on daily index returns sees compressed tails and may need more days to separate calm from turbulent.
+
+51Labs posted a regime study on Vietnamese stocks in June 2025, built on visibility graphs of prices. Days are grouped by Louvain community detection, each community is read as a regime, and the regimes last about 15 to 60 trading days. The same post turns a graph measure into a risk indicator that scales down a time-series momentum strategy, and reports results for one stock, HPG:
+
+| HPG, as reported | Buy and hold | Momentum | Momentum with graph warning |
+|---|---|---|---|
+| Total return | 656.45% | 852.83% | 1000.08% |
+| Sharpe ratio | 0.82 | 0.97 | 1.04 |
+| Worst drawdown | −71.62% | −41.70% | −41.70% |
+
+Read it the way you would read any backtest. The overlay raised the Sharpe ratio from 0.97 to 1.04 and left the worst drawdown unchanged at −41.70%, so on this one stock it did not do the job a risk overlay exists for. The post states no sample period, tests one stock, and judges the regimes by eye. Those are the right questions to ask of a regime result: which dates, how many assets, and whether the signal used only the past.
+
+<Concepts>
+
+- **Price band (biên độ)**: the maximum percentage a stock may move from the reference price in a session. On HOSE it is 7% for ordinary stocks in a normal session.
+- **Reference price (giá tham chiếu)**: the price from which the band is measured, normally the previous session's closing price.
+- **Visibility graph**: a graph built from a price series in which two days are linked if no price between them rises above the line joining them.
+
+</Concepts>
+
+---
+
+## 7. Trusting a regime model
+
+A cleaner test than the in-sample run fits on the past and judges on what follows. Fitting on the first 1,259 days (2 December 2016 to 2 December 2021), then freezing the parameters and only filtering through the next 1,250 days, gives the walk-forward result.
+
+<AtP05WalkForward />
+
+On the test period buy and hold turned 1 into 1.57 with a worst fall of 25.4%. The filtered rule turned 1 into 1.55 with a worst fall of 12.1%, and sat in cash on 30.6% of days. That is the honest offer: about the same ending wealth and half the worst fall, over one sample, and it will not repeat on command.
+
+The filtered probability also flickers. Across the whole sample it crossed the 50% line 167 times, against 55 for the smoothed one, and each crossing is a trade with a cost. Before using a regime signal, check four things: whether the probability is filtered, whether the parameters were fitted only on earlier data, how many times the rule trades, and how many knobs (states, threshold, lag) you tried before settling on these. Nothing in this post is a recommendation to trade any rule.
+
+<Callout type="tip" title="Next in the series">
+Regimes tell you when risk changes. The portfolio post turns that into position sizes, and the graph post reuses regime ideas on a network of stocks.
+</Callout>
+
+<Concepts>
+
+- **Walk-forward**: fit on an earlier window, evaluate on the next one, then slide the window forward. It imitates how a model would really be used.
+- **Frozen parameters**: values estimated once and not re-estimated during the test, so nothing in the test period leaks into the fit.
+
+</Concepts>
+
+---
+
+## Key takeaways
+
+- A regime is a stretch of days with similar behaviour. On the S&P 500, a two-state model finds a calm state (about 10% annual volatility) and a turbulent one (about 31%).
+- EWMA volatility reacts within a day but yields a number, and the threshold you choose from it is a tuned knob.
+- An HMM gives each day a probability of being turbulent, using a sticky transition table. States last about 56 and 22 days here.
+- Filtered probabilities use only the past. Smoothed ones use the future, so a backtest built on them lies, here by 4.93 against 2.20.
+- Fit on earlier data, freeze, and test on later data. The walk-forward gain was a similar ending wealth with half the worst fall.
+- A price band such as the 7% on HOSE compresses daily tails, and any regime result should come with its dates, assets and lag.
+
+## Review questions
+
+1. A −3.41% log return is how large a price fall, and why was it so surprising to a model fitted on calm years? *(See the opening and Section 1)*
+2. What does the decay factor 0.94 do in EWMA, and what does EWMA leave you to decide? *(See Section 2)*
+3. How long does a state with a 95.4% chance of staying last on average? *(See Section 3)*
+4. What is the difference between a filtered and a smoothed probability, and which one can a live system compute? *(See Section 4)*
+5. Why does the smoothed rule beat buy and hold in the backtest while the filtered rule gives up growth? *(See Section 5)*
+6. What should you check in an AI-written regime backtest? *(See Section 5)*
+7. What did the HPG results in the 51Labs post show about the drawdown, and what was missing from the post? *(See Section 6)*
+8. Why is a walk-forward result more believable than an in-sample one? *(See Section 7)*
+
+Quiz: [test yourself on this post](/blog/ai-trading-regime/quiz/).
+
+## Go deeper
+
+- **[51Labs — Machine Learning for Financial Market](https://51labs.vn/vi/courses)**: the curriculum with a Regime detection project and a Hidden Markov Model session.
+- **[Graph visibility for regime detection and risk management (51Labs)](https://51labs.vn/vi/blog/graph-visibility-for-regime-detection-and-risk-management)**: a Vietnamese-market regime study, with the HPG table this post discusses.
+- **[Hamilton (1989), A New Approach to the Economic Analysis of Nonstationary Time Series and the Business Cycle](https://www.econometricsociety.org/publications/econometrica/1989/03/01/new-approach-economic-analysis-nonstationary-time-series-and)**: where Markov-switching models start.
+- **[Kritzman, Page & Turkington (2012), Regime Shifts: Implications for Dynamic Strategies](https://rpc.cfainstitute.org/research/financial-analysts-journal/2012/regime-shifts-implications-for-dynamic-strategies-corrected)**: regime forecasts used to scale exposure.
+
+</En>
+
+<Vi>
+
+<Figure src={heroSaigon} alt="Đường chân trời TP.HCM lúc hoàng hôn xanh, các toà nhà sáng đèn dưới bầu trời xanh thẫm" caption="Cùng một đường chân trời, ở một trạng thái khác của ngày. Thị trường cũng đổi như vậy, chỉ khác là không ai báo trước. Ảnh: Radek Kucharski, CC BY 2.0." sourceTitle="Wikimedia Commons: Saigon at Blue Hour (Radek Kucharski, CC BY 2.0)" sourceUrl="https://commons.wikimedia.org/wiki/File:Saigon_at_Blue_Hour.jpg" />
+
+> "Các tham số của một mô hình tự hồi quy được xem là kết quả của một quá trình Markov với số trạng thái rời rạc."
+> &mdash; *James D. Hamilton, Econometrica (1989)*
+
+### Ngày một mô hình điềm tĩnh gặp cú giảm 3%
+
+Ngày 19/2/2020, S&P 500 đóng cửa ở 3.386,15, mức kỷ lục. Suốt năm 2017, lợi suất ngày của nó có độ lệch chuẩn 0,42%, khoảng 6,7% một năm, và cú đi lớn nhất cả năm là 1,83%. Giả sử bạn chia vị thế cho đúng kiểu thị trường đó.
+
+Năm phiên sau, ngày 24/2, chỉ số giảm 3,35% (lợi suất log −3,41%). Đo theo trạng thái yên của mô hình khớp ở mục 1, ngày đó nằm cách trung bình 5,3 độ lệch chuẩn, tức đường cong hình chuông cho là cỡ một ngày trong mười triệu ngày. Đến 23/3 chỉ số đóng cửa ở 2.237,40, thấp hơn đỉnh tháng 2 tới 33,9%, và riêng ngày 16/3 nó đã giảm gần 12%.
+
+Thị trường đã chuyển sang một trạng thái khác, biên độ lớn hơn, nhịp khác hẳn, và mọi luật chỉnh theo trạng thái cũ thôi khớp. Giới quant gọi trạng thái đó là **chế độ (regime)**. Bài này trả lời ba câu hỏi:
+
+1. **Chế độ là gì**, và một con số như độ biến động EWMA tóm tắt nó thế nào.
+2. **Hidden Markov model** (HMM) suy ra một trạng thái mà không ai gán nhãn cho bạn ra sao.
+3. **Vì sao tín hiệu không được nhìn trộm**: cùng một mô hình cho backtest rất đẹp hoặc khá khiêm tốn tuỳ nó có thấy ngày mai hay không.
+
+Mọi con số ở đây dùng giá đóng cửa thật của S&P 500 từ FRED, mô hình do Python khớp, kèm VN-Index cho phần Việt Nam. Không có gì trong bài là lời khuyên đầu tư hay khuyến nghị.
+
+<Callout type="note" title="Tóm tắt nhanh">
+Chế độ là một chuỗi ngày có cùng kiểu hành vi, ví dụ yên với biên độ nhỏ hoặc hỗn loạn với biên độ lớn. EWMA theo dõi hành vi đó bằng một trung bình suy giảm, nhưng ngưỡng thì bạn tự chọn. Một hidden Markov model hai trạng thái khớp trên 2.509 lợi suất ngày của S&P 500 tìm ra trạng thái yên (biến động 10,1% một năm, kéo dài khoảng 56 ngày) và trạng thái hỗn loạn (30,7%, khoảng 22 ngày). Mỗi ngày nó cập nhật xác suất thị trường đang hỗn loạn. Xác suất tính chỉ bằng dữ liệu quá khứ (filtered) cho một luật kết thúc ở 2,20 từ 1 và sụt tối đa 13,4%, so với 3,28 và 33,9% của cứ giữ. Xác suất tính trên cả mẫu (smoothed) cho 4,93 và 10,3%, thứ mà không hệ thống chạy thật nào tạo ra được. Khớp trên năm năm đầu rồi kiểm trên phần còn lại cho 1,55 so với 1,57 của cứ giữ, và sụt tối đa 12,1% so với 25,4%.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Chế độ (regime)**: giai đoạn lợi suất theo một kiểu, chủ yếu là một mức biến động. Chế độ đổi, nhưng bạn không thấy nhãn nào cho nó.
+- **Lợi suất log (log return)**: logarit tự nhiên của giá đóng cửa hôm nay chia cho hôm qua. Giá giảm 3,35% ứng với lợi suất log −3,41%. Lợi suất log cộng được qua các ngày, nên là đầu vào quen thuộc của mô hình.
+- **Độ biến động (volatility)**: lợi suất ngày lớn cỡ nào, đo bằng độ lệch chuẩn. Biến động năm bằng số ngày nhân căn bậc hai của 252 phiên.
+- **Drawdown**: mức giảm tính từ đỉnh cao nhất tới lúc đó. Drawdown tệ nhất là mức giảm sâu nhất trong mẫu.
+
+</Concepts>
+
+---
+
+## 1. Cùng một chỉ số, hai tính cách
+
+Gom 2.509 lợi suất ngày của S&P 500 từ 12/2016 tới 11/2026 vào một đống thì ra một đường chuông duy nhất với đuôi dày. Tách đống đó làm hai theo hai trạng thái mô hình tìm được, và hai đường chuông gọn gàng hiện ra.
+
+<AtP05TwoPersonalities />
+
+Ở trạng thái yên, một ngày dao động cỡ 0,64%, tức 10,1% một năm. Ở trạng thái hỗn loạn là cỡ 1,93%, tức 30,7% một năm, gấp ba. Cả 57 ngày có biến động vượt 3% (cả hai chiều) đều rơi vào nhóm hỗn loạn.
+
+Giới kinh tế đến đây trước. Năm 1989 James Hamilton mô hình hoá tăng trưởng GNP thực của Mỹ thời hậu chiến như một mô hình tự hồi quy có tham số đổi theo một chuỗi Markov không quan sát được, và thấy việc chuyển từ tăng trưởng dương sang âm lặp đi lặp lại trong chu kỳ kinh doanh. Các ước lượng của ông cho thấy một cuộc suy thoái điển hình đi kèm mức tụt vĩnh viễn 3% của GNP. Kritzman, Page và Turkington áp dụng họ mô hình này cho độ hỗn loạn của thị trường, lạm phát và tăng trưởng, và báo cáo chiến lược động theo chế độ thắng phân bổ tĩnh trong backtest của họ, nhất là ở khoản tránh các khoản lỗ lớn (trang tóm tắt; toàn văn chỉ dành cho hội viên).
+
+51Labs có "Project: Regime detection" và một buổi Hidden Markov Model trong chương trình Machine Learning for Financial Market, đồng thời đăng một bài blog về nhận diện chế độ cho cổ phiếu Việt Nam mà mục 6 đọc kỹ.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Đuôi dày (fat tail)**: các cú đi cực đoan xảy ra thường hơn một đường chuông đơn cho là. Trộn đường chuông yên với đường chuông hỗn loạn cho đúng kết quả này.
+- **Hỗn hợp (mixture)**: dữ liệu rút từ hai hay nhiều phân phối, kèm một nhãn ẩn cho biết phân phối nào sinh ra từng điểm.
+- **Chu kỳ kinh doanh (business cycle)**: nhịp lên xuống lặp lại giữa mở rộng và thu hẹp của hoạt động kinh tế. Bài của Hamilton biến nhịp đó thành một mô hình thống kê hai trạng thái.
+
+</Concepts>
+
+---
+
+## 2. EWMA: độ biến động biết quên
+
+Công cụ chế độ đơn giản nhất không cần trạng thái. Trung bình động có trọng số mũ (EWMA) giữ một ước lượng phương sai chạy liên tục và cập nhật mỗi ngày: ước lượng mới = 0,94 × ước lượng cũ + 0,06 × bình phương lợi suất hôm nay. Giả sử ta chọn hệ số suy giảm là 0,94. Lợi suất hôm qua khi đó có trọng số 0,06, hôm kia 0,056, và trọng số giảm một nửa sau khoảng 11 ngày.
+
+<AtP05Ewma />
+
+Trên S&P 500, độ biến động EWMA quanh mức 11% một năm đến hết 21/2/2020. Sau ngày −3,41% hôm 24/2 nó nhảy lên 17,1%, rồi 20,4%, và đạt 26,1% hôm 27/2. Nó phản ứng trong vòng một ngày và quên sự yên ắng cũ rất nhanh, nên theo thị trường sát hơn một trung bình 252 ngày thông thường.
+
+Cái nó không cho bạn là một trạng thái. Muốn hành động theo EWMA, bạn phải chọn một ngưỡng ("trên 20% là hỗn loạn"), và ngưỡng đó là một núm vặn bạn chỉnh trên chính lịch sử đang kiểm tra. Bài trước về thống kê đã nói vì sao mỗi núm vặn như vậy được tính là thêm một phép thử.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **EWMA**: trung bình động có trọng số mũ, một ước lượng chạy trong đó mỗi ngày cũ hơn đóng góp một tỷ lệ cố định thấp hơn ngày sau nó.
+- **Hệ số suy giảm (λ)**: phần ước lượng cũ được giữ lại mỗi ngày. 0,94 giữ 94% và cho lợi suất hôm nay 6%.
+- **Chu kỳ bán rã (half-life)**: số ngày để trọng số của một ngày giảm một nửa. Với λ = 0,94 là ln 0,5 / ln 0,94 ≈ 11,2 ngày.
+
+</Concepts>
+
+---
+
+## 3. Hidden Markov model: trạng thái bạn không nhìn thấy
+
+HMM thêm hai ý tưởng vào mô hình hỗn hợp. Thứ nhất, trạng thái ẩn đi theo một **chuỗi Markov**: trạng thái ngày mai chỉ phụ thuộc hôm nay, qua một bảng xác suất chuyển. Thứ hai, mỗi trạng thái sinh ra lợi suất với trung bình và độ rộng riêng của nó.
+
+<AtP05States />
+
+Khớp vào mẫu S&P 500, bảng cho thấy yên thì 98,2% số ngày vẫn yên và 1,8% chuyển sang hỗn loạn. Hỗn loạn thì 95,4% số ngày vẫn hỗn loạn và 4,6% quay về yên. Một trạng thái tiếp tục với xác suất p kéo dài trung bình 1 / (1 − p) ngày, tức khoảng 56 ngày với yên và 22 với hỗn loạn. Về lâu dài, chuỗi ở trạng thái yên khoảng 72% thời gian và hỗn loạn 28%. Gán nhãn một ngày là hỗn loạn khi xác suất trên cả mẫu vượt 50% thì đánh dấu 26,7% số ngày, thành từng đợt như 21/2 tới 6/7/2020 (94 ngày) và 13/1 tới 15/11/2022 (212 ngày).
+
+Tham số đến từ thuật toán kỳ vọng-cực đại (EM): bắt đầu bằng một phỏng đoán, tính xem mỗi trạng thái có khả năng thế nào vào từng ngày, ước lượng lại trung bình, độ rộng và xác suất chuyển từ các trọng số đó, rồi lặp tới khi không còn thay đổi. Kết quả vẫn chỉ là ước lượng của một mẫu, và số trạng thái, hai ở đây, là lựa chọn của bạn. Trên mẫu này, thêm trạng thái thứ ba làm log-likelihood tăng từ 8.212,9 lên 8.335,7, và tiêu chí thông tin Bayes (BIC), vốn tính phí cho tham số thừa, vẫn chọn ba trạng thái (−16.562 so với −16.371 của hai trạng thái). Trạng thái thứ ba có biến động 61% một năm và hiếm nhất trong ba. Hai trạng thái giúp câu chuyện dễ đọc, và việc chọn là một phán đoán, không phải một kết quả.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Hidden Markov model (HMM)**: một chuỗi trạng thái không nhìn thấy, mỗi trạng thái sinh ra một quan sát nhìn thấy được (ở đây là lợi suất ngày) từ phân phối riêng của nó.
+- **Ma trận chuyển (transition matrix)**: bảng xác suất đi từ mỗi trạng thái sang mỗi trạng thái trong một bước. Mỗi hàng cộng lại bằng 1.
+- **Trạng thái bám dai (sticky state)**: trạng thái có xác suất ở lại cao, nên kéo dài nhiều ngày. Chế độ thị trường theo định nghĩa là bám dai.
+- **Thuật toán EM**: vòng lặp khớp một HMM bằng cách luân phiên ước lượng xác suất trạng thái và ước lượng lại tham số.
+
+</Concepts>
+
+---
+
+## 4. Lọc: cập nhật niềm tin mỗi ngày
+
+Khi tham số đã cố định, mô hình giữ một con số mỗi ngày: xác suất hôm nay là hỗn loạn. Nó cập nhật hai bước. Trước hết cho trạng thái trôi một ngày theo ma trận chuyển. Sau đó cân từng trạng thái theo mức nó giải thích được lợi suất vừa in ra (quy tắc Bayes).
+
+<AtP05FilterStep />
+
+Ngày 24/2/2020 mô hình xuất phát từ 4,5% sau phiên 21/2, bước chuyển đưa nó lên 6,0%. Lợi suất −3,41% có khả năng xảy ra ở trạng thái hỗn loạn gấp 300.000 lần so với trạng thái yên, nên xác suất hậu nghiệm thành 99,995%. Một ngày xấu là đủ, vì mô hình yên thấy một ngày như vậy gần như không thể.
+
+Kết quả đó gọi là xác suất **filtered**: nó dùng dữ liệu tới hết ngày đó. Phiên bản thứ hai, xác suất **smoothed**, dùng thêm mọi ngày về sau. Cả hai đều là thống kê hợp lệ. Chúng trả lời hai câu hỏi khác nhau.
+
+<AtP05FilteredVsSmoothed />
+
+Ngày 21/2, xác suất filtered vẫn là 4,5% trong khi smoothed đã 72%, vì ước lượng smoothed đã thấy những ngày sập phía sau. Một hệ thống chạy thật, đứng ở giá đóng cửa 21/2, chỉ có thể có con số đầu.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Lọc (filtering)**: ước lượng trạng thái ẩn của hôm nay từ dữ liệu tới hôm nay.
+- **Làm mượt (smoothing)**: ước lượng trạng thái ẩn của một ngày quá khứ bằng dữ liệu cả hai phía của nó. Nó mô tả lịch sử rất tốt và không dùng để giao dịch được.
+- **Quy tắc Bayes**: niềm tin mới tỷ lệ với niềm tin cũ nhân mức mỗi khả năng giải thích được dữ liệu mới.
+- **Likelihood (khả năng)**: xác suất quan sát được lợi suất đó ở một trạng thái cho trước.
+
+</Concepts>
+
+---
+
+## 5. Cái bẫy nhìn lại sau
+
+Đây là một luật ai cũng viết được. Hôm nào cũng giữ chỉ số. Nếu xác suất "hỗn loạn" của hôm qua vượt 0,5 thì hôm nay đứng tiền mặt. Độ trễ một ngày là điều quan trọng: bạn biết xác suất lúc đóng cửa, và chỉ giao dịch được theo nó vào ngày kế tiếp.
+
+<AtP05Backtest />
+
+Trên mẫu thật, luật dùng xác suất smoothed biến 1 thành 4,93, với drawdown tệ nhất 10,3%. Cứ giữ được 3,28 với drawdown 33,9%. Trông như bữa trưa miễn phí. Luật dùng xác suất filtered được 2,20 và 13,4%: nó nhường bớt tăng trưởng để cắt hơn nửa mức sụt tệ nhất, một sự đánh đổi bạn có thể muốn hoặc không. Khoảng cách giữa 2,20 và 4,93 là phần tín hiệu smoothed đã học từ tương lai.
+
+Ngay cả con số filtered cũng được làm đẹp, vì tham số được khớp trên chính mười năm đó. Demo dưới đây tách riêng hiệu ứng này trên một thị trường mô phỏng, nơi các trạng thái thật đã biết và mô hình được đưa đúng tham số thật.
+
+<AtP05FilterDemo />
+
+Kéo thanh trượt và đổi qua lại giữa hai tín hiệu. Tín hiệu smoothed thắng cứ giữ ở mọi ngưỡng, còn tín hiệu filtered có thể lỗ, vì bộ lọc chỉ nhận ra một đợt hỗn loạn sau khi nó đã bắt đầu, mà những cú đi lớn nhất của một đợt thường nằm ngay đầu đợt.
+
+Một pipeline thực tế giữ độ trễ và thứ tự các phép tính thật tường minh.
+
+<AtP05Pipeline />
+
+<Callout type="warning" title="Hãy soi điểm này trong backtest do AI viết">
+Nếu một backtest chế độ do script hoặc trợ lý viết ra, hãy kiểm tra xem nó đưa xác suất nào vào luật. Một lệnh thư viện trả về trạng thái có khả năng nhất cho mọi ngày (đường đã giải mã, hay smoothed) dùng toàn bộ mẫu. Phiên bản trung thực chạy tiến từng ngày, chỉ khớp lại trên dữ liệu quá khứ, và áp dụng độ trễ một ngày.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Look-ahead bias (thiên lệch nhìn trước)**: dùng trong mô phỏng thông tin mà lúc ra quyết định chưa có. Đó là nguyên nhân của khoảng cách trong mục này.
+- **In-sample**: đánh giá trên chính dữ liệu đã dùng để khớp tham số. Nó làm đẹp mọi mô hình.
+- **Độ trễ (lag)**: khoảng chậm giữa lúc tính tín hiệu và lúc hành động. Tín hiệu tính ở giá đóng cửa hôm nay không giao dịch được ở giá đóng cửa hôm nay.
+
+</Concepts>
+
+---
+
+## 6. Việt Nam: một chỉ số, một biên độ giá
+
+VN-Index là một ví dụ rõ về một cú gãy chế độ. Ngày 10/1/2022 nó đóng cửa ở 1.503,71, mức thấp nhất của năm tính tới lúc đó. Ngày 16/11 nó chạm 873,78, và kết thúc 2022 ở 1.007,09, giảm 32,78% trong năm. Từ mức tháng 1 tới đáy tháng 11 là giảm 41,9%.
+
+<AtP05VnIndex />
+
+Mình không lấy được chuỗi VN-Index theo ngày từ một nguồn trích dẫn được, nên hình chỉ vẽ ba mốc đã công bố và HMM ở trên được khớp trên S&P 500. Quy tắc HOSE vẫn quan trọng nếu bạn tự khớp một mô hình. Biên độ 7% quanh giá tham chiếu trong phiên bình thường áp dụng cho cổ phiếu HOSE từ 5/7/2021 theo quy chế giao dịch của sở (hãy kiểm tra quy định hiện hành của sở trước khi dựa vào). Lợi suất ngày của chỉ số khi đó nằm trong biên đó, nên mô hình khớp trên lợi suất ngày chỉ thấy phần đuôi bị nén và có thể cần nhiều ngày hơn để tách yên khỏi hỗn loạn.
+
+51Labs đăng một nghiên cứu chế độ trên cổ phiếu Việt Nam hồi tháng 6/2025, dựa trên đồ thị tầm nhìn (visibility graph) của giá. Các ngày được gom bằng phát hiện cộng đồng Louvain, mỗi cộng đồng được đọc như một chế độ, và các chế độ kéo dài khoảng 15 tới 60 phiên. Cũng bài đó biến một số đo của đồ thị thành chỉ báo rủi ro để giảm vị thế của chiến lược momentum chuỗi thời gian, và báo cáo kết quả cho một mã, HPG:
+
+| HPG, theo báo cáo | Cứ giữ | Momentum | Momentum có cảnh báo đồ thị |
+|---|---|---|---|
+| Tổng lợi nhuận | 656,45% | 852,83% | 1000,08% |
+| Sharpe | 0,82 | 0,97 | 1,04 |
+| Drawdown tệ nhất | −71,62% | −41,70% | −41,70% |
+
+Hãy đọc nó như đọc bất kỳ backtest nào. Lớp phủ nâng Sharpe từ 0,97 lên 1,04 và để drawdown tệ nhất nguyên ở −41,70%, nên trên mã này nó không làm việc mà một lớp phủ rủi ro sinh ra để làm. Bài không nêu giai đoạn mẫu, chỉ thử trên một mã, và đánh giá các chế độ bằng mắt. Đó là những câu hỏi đúng cần hỏi với mọi kết quả về chế độ: ngày nào, bao nhiêu tài sản, và tín hiệu có chỉ dùng quá khứ hay không.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Biên độ giá**: mức phần trăm tối đa một cổ phiếu được dao động so với giá tham chiếu trong một phiên. Trên HOSE là 7% với cổ phiếu thường trong phiên bình thường.
+- **Giá tham chiếu**: giá làm gốc để tính biên độ, thường là giá đóng cửa của phiên trước.
+- **Visibility graph (đồ thị tầm nhìn)**: đồ thị dựng từ một chuỗi giá, trong đó hai ngày được nối nếu không có giá nào ở giữa vượt lên trên đường thẳng nối chúng.
+
+</Concepts>
+
+---
+
+## 7. Tin một mô hình chế độ tới đâu
+
+Một phép thử sạch hơn chạy in-sample là khớp trên quá khứ rồi chấm trên phần xảy ra sau. Khớp trên 1.259 ngày đầu (2/12/2016 tới 2/12/2021), sau đó đóng băng tham số và chỉ lọc qua 1.250 ngày kế tiếp, cho kết quả walk-forward.
+
+<AtP05WalkForward />
+
+Trong giai đoạn kiểm, cứ giữ biến 1 thành 1,57 với mức sụt tệ nhất 25,4%. Luật filtered biến 1 thành 1,55 với mức sụt tệ nhất 12,1%, và đứng tiền mặt 30,6% số ngày. Đó là lời đề nghị trung thực: tài sản cuối cùng gần như nhau và mức sụt tệ nhất giảm một nửa, trên một mẫu duy nhất, và nó sẽ không lặp lại theo lệnh.
+
+Xác suất filtered còn nhấp nháy. Trên cả mẫu nó cắt ngang đường 50% tới 167 lần, so với 55 lần của smoothed, và mỗi lần cắt là một giao dịch có phí. Trước khi dùng một tín hiệu chế độ, hãy kiểm bốn điều: xác suất có phải filtered không, tham số có chỉ được khớp trên dữ liệu trước đó không, luật giao dịch bao nhiêu lần, và bạn đã thử bao nhiêu núm vặn (số trạng thái, ngưỡng, độ trễ) trước khi dừng ở những giá trị này. Không có gì trong bài là khuyến nghị giao dịch theo một luật nào.
+
+<Callout type="tip" title="Bài tiếp theo trong series">
+Chế độ cho bạn biết khi nào rủi ro đổi. Bài về danh mục biến điều đó thành cỡ vị thế, và bài về đồ thị dùng lại ý tưởng chế độ trên một mạng các cổ phiếu.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Walk-forward**: khớp trên một cửa sổ sớm hơn, đánh giá trên cửa sổ kế tiếp, rồi trượt cửa sổ về phía trước. Nó mô phỏng cách một mô hình thật sự được dùng.
+- **Tham số đóng băng (frozen parameters)**: giá trị ước lượng một lần và không ước lượng lại trong giai đoạn kiểm, để không có gì từ giai đoạn kiểm rò vào bước khớp.
+
+</Concepts>
+
+---
+
+## Điểm rút ra (Key takeaways)
+
+- Chế độ là một chuỗi ngày có hành vi giống nhau. Trên S&P 500, mô hình hai trạng thái tìm ra trạng thái yên (biến động khoảng 10% một năm) và hỗn loạn (khoảng 31%).
+- Độ biến động EWMA phản ứng trong một ngày nhưng chỉ cho ra một con số, và ngưỡng bạn chọn từ nó là một núm vặn đã chỉnh.
+- HMM cho mỗi ngày một xác suất hỗn loạn, dùng bảng chuyển bám dai. Các trạng thái ở đây kéo dài khoảng 56 và 22 ngày.
+- Xác suất filtered chỉ dùng quá khứ. Smoothed dùng cả tương lai, nên backtest dựng trên nó nói dối, ở đây là 4,93 so với 2,20.
+- Khớp trên dữ liệu sớm hơn, đóng băng, rồi kiểm trên dữ liệu muộn hơn. Phần được ở walk-forward là tài sản cuối gần như nhau với mức sụt tệ nhất giảm một nửa.
+- Một biên độ giá như 7% trên HOSE nén phần đuôi lợi suất ngày, và mọi kết quả chế độ phải đi kèm ngày tháng, số tài sản và độ trễ.
+
+## Câu hỏi ôn tập (Review questions)
+
+1. Lợi suất log −3,41% ứng với giá giảm bao nhiêu, và vì sao nó gây bất ngờ lớn với một mô hình khớp trên những năm yên ắng? *(Xem phần mở đầu và Mục 1)*
+2. Hệ số suy giảm 0,94 làm gì trong EWMA, và EWMA để bạn tự quyết điều gì? *(Xem Mục 2)*
+3. Một trạng thái có 95,4% xác suất ở lại kéo dài trung bình bao lâu? *(Xem Mục 3)*
+4. Xác suất filtered khác smoothed ở đâu, và hệ thống chạy thật tính được cái nào? *(Xem Mục 4)*
+5. Vì sao luật smoothed thắng cứ giữ trong backtest còn luật filtered nhường bớt tăng trưởng? *(Xem Mục 5)*
+6. Cần kiểm tra gì trong một backtest chế độ do AI viết? *(Xem Mục 5)*
+7. Kết quả HPG trong bài của 51Labs cho thấy gì về drawdown, và bài thiếu gì? *(Xem Mục 6)*
+8. Vì sao kết quả walk-forward đáng tin hơn kết quả in-sample? *(Xem Mục 7)*
+
+Quiz: [tự kiểm tra với bài này](/blog/ai-trading-regime/quiz/).
+
+## Đi sâu hơn (Go deeper)
+
+- **[51Labs — Machine Learning for Financial Market](https://51labs.vn/vi/courses)**: chương trình có project Regime detection và buổi Hidden Markov Model.
+- **[Graph visibility for regime detection and risk management (51Labs)](https://51labs.vn/vi/blog/graph-visibility-for-regime-detection-and-risk-management)**: một nghiên cứu chế độ trên thị trường Việt Nam, kèm bảng HPG mà bài này bàn tới.
+- **[Hamilton (1989), A New Approach to the Economic Analysis of Nonstationary Time Series and the Business Cycle](https://www.econometricsociety.org/publications/econometrica/1989/03/01/new-approach-economic-analysis-nonstationary-time-series-and)**: nơi các mô hình Markov-switching bắt đầu.
+- **[Kritzman, Page & Turkington (2012), Regime Shifts: Implications for Dynamic Strategies](https://rpc.cfainstitute.org/research/financial-analysts-journal/2012/regime-shifts-implications-for-dynamic-strategies-corrected)**: dự báo chế độ dùng để điều chỉnh mức phơi nhiễm.
+
+</Vi>

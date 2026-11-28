@@ -1,0 +1,427 @@
+---
+title: "Statistics"
+title_vi: "Thống kê"
+description: "How a backtest result can be luck: p-values, the t-statistic behind a Sharpe ratio, and why many tries break both. Post 4 of the AI-trading series."
+description_vi: "Kết quả backtest có thể chỉ là may rủi thế nào: p-value, t-statistic sau Sharpe ratio, và vì sao thử nhiều lần làm hỏng cả hai. Bài 4 của series AI trong chứng khoán."
+date: 2026-11-28
+category: "ai"
+tags: ["ai", "ai-trading", "statistics"]
+cover: "../../assets/blog/ai-trading-statistics/salmon.jpg"
+cover_alt: "A painted illustration of an Atlantic salmon seen from the side on a white background"
+draft: true
+sources:
+  - { title: "Neural Correlates of Interspecies Perspective Taking in the Post-Mortem Atlantic Salmon: An Argument For Proper Multiple Comparisons Correction (Journal of Serendipitous and Unexpected Results, vol. 1 no. 1)", author: "Craig M. Bennett, Abigail A. Baird, Michael B. Miller, George L. Wolford", url: "https://w.mriquestions.com/uploads/3/4/5/7/34572113/bennett_salmon_journal_serendipity.pdf" }
+  - { title: "… and the Cross-Section of Expected Returns (Review of Financial Studies, vol. 29 no. 1, 2016)", author: "Campbell R. Harvey, Yan Liu, Heqing Zhu", url: "https://academic.oup.com/rfs/article/29/1/5/1843824" }
+  - { title: "Backtesting (The Journal of Portfolio Management, Fall 2015)", author: "Campbell R. Harvey, Yan Liu", url: "https://people.duke.edu/~charvey/Research/Published_Papers/P120_Backtesting.PDF" }
+  - { title: "Backtest overfitting in financial markets", author: "David H. Bailey, Jonathan M. Borwein, Amir Salehipour, Marcos López de Prado, Qiji Zhu", url: "https://www.davidhbailey.com/dhbpapers/overfit-tools-at.pdf" }
+  - { title: "Stochastic process part 1: Gambler's ruin of VN30F1", author: "51labs", url: "https://51labs.vn/vi/blog/stochastic-process-part-1-gambler-s-ruin-of-vn30f" }
+  - { title: "Time series momentum - A traditional approach", author: "51labs", url: "https://51labs.vn/vi/blog/time-series-momentum-a-traditional-approach" }
+  - { title: "Machine Learning for Financial Market — course curriculum", author: "51labs", url: "https://51labs.vn/vi/courses" }
+  - { title: "Salmo salar (illustration, Public domain, U.S. Fish and Wildlife Service)", author: "Timothy Knepp / USFWS", url: "https://commons.wikimedia.org/wiki/File:Salmo_salar.jpg" }
+---
+
+import En from '../../components/mdx/En.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import AtP04SalmonVoxels from '../../components/mdx/AtP04SalmonVoxels.astro';
+import AtP04CoinDays from '../../components/mdx/AtP04CoinDays.astro';
+import AtP04Ladder from '../../components/mdx/AtP04Ladder.astro';
+import AtP04SharpeToT from '../../components/mdx/AtP04SharpeToT.astro';
+import AtP04BestOfN from '../../components/mdx/AtP04BestOfN.astro';
+import AtP04TrialFarmDemo from '../../components/mdx/AtP04TrialFarmDemo.astro';
+import AtP04NoiseLags from '../../components/mdx/AtP04NoiseLags.astro';
+import AtP04Hurdle from '../../components/mdx/AtP04Hurdle.astro';
+import AtP04LuckBand from '../../components/mdx/AtP04LuckBand.astro';
+import AtP04Holdout from '../../components/mdx/AtP04Holdout.astro';
+import heroSalmon from '../../assets/blog/ai-trading-statistics/salmon.jpg';
+import tsmomChart from '../../assets/blog/ai-trading-statistics/51labs-tsmom-tstats.png';
+
+<En>
+
+<Figure src={heroSalmon} alt="A painted illustration of an Atlantic salmon seen from the side on a white background" caption="An Atlantic salmon. One of them, scanned after it had died, once &quot;responded&quot; to photographs of people in a brain scanner, and the reason is the subject of this post." sourceTitle="Wikimedia Commons: Salmo salar (illustration by Timothy Knepp, U.S. Fish and Wildlife Service, public domain)" sourceUrl="https://commons.wikimedia.org/wiki/File:Salmo_salar.jpg" />
+
+> "We argue that most claimed research findings in financial economics are likely false."
+> &mdash; *Campbell Harvey, Yan Liu and Heqing Zhu*, "… and the Cross-Section of Expected Returns" (2016)
+
+### A dead salmon in a scanner
+
+A team led by Craig Bennett put a dead Atlantic salmon in an fMRI scanner. They showed it photographs of people in social situations and asked it to work out which emotion each person felt, the same task they later gave to human volunteers. Then they ran the usual analysis: for each of about 130,000 voxels (tiny cubes of brain volume), test whether it reacted to the task.
+
+With the threshold many studies used, p &lt; 0.001 and no correction for the number of tests, clusters of voxels in the salmon's brain and spine lit up. When the authors applied a proper correction, no voxel was active.
+
+<AtP04SalmonVoxels />
+
+Nothing was wrong with the fish or the scanner. A threshold of 0.001 means one false alarm in a thousand tests. Run 130,000 tests and you expect 130 of them. A backtest has the same shape: every idea, parameter and stock list you try is another voxel. Post 2 (Signals) showed that a market signal is faint. This post measures how faint, and how to tell a real result from one that luck handed you.
+
+<Callout type="note" title="TL;DR">
+
+A p-value tells you how often luck alone would produce a result at least this good, for one test. A Sharpe ratio converts into that same kind of number: t = annual Sharpe × √years, so the same Sharpe is weak after two years and convincing after ten. The trouble starts when you try many strategies and show only the best: with five years of daily data, about 45 tries are enough for the best Sharpe to reach 1.0 with no edge at all. Fix it by counting your tries, raising the bar as the count grows (Harvey, Liu and Zhu suggest t above 3.0 for new factors), and keeping data you have never touched for a final check. Nothing here is investment advice.
+
+</Callout>
+
+<Concepts>
+
+- **Null hypothesis**: the boring explanation, here "this strategy has no edge and its record is luck". A test asks how surprising the data would be if the boring explanation were true.
+- **p-value**: how often luck alone would give a result at least this extreme, if the null hypothesis were true. It is not the probability that the strategy works.
+- **t-statistic**: an average divided by its own uncertainty. Roughly, how many "typical error sizes" the result sits away from zero. Above about 1.96 in size, researchers call it significant at 5%.
+- **Multiple testing**: running many tests on the same data. At a 5% threshold, 1 in 20 tests passes by luck.
+
+</Concepts>
+
+---
+
+## 1. Is this result stronger than luck?
+
+To decide whether a result means anything, compare it with a world where nothing is going on. The fair coin is that world.
+
+A 51labs post on gambler's ruin gives a clean Vietnamese example. It tests a deliberately simple trade on VN30F1M, the front-month VN30 index future: buy at the open, sell at the close, every day since 2018. The post reports 777 up days and 734 down days (51% up), with an average gain of 9.21 points on up days and an average loss of 10.14 on down days. The post uses this to set up a gambler's-ruin calculation, not to claim an edge. But suppose someone showed you this record as a strategy.
+
+Is 777 up days out of 1,511 more than a fair coin would give? A fair coin gives 755.5 up days on average, with a spread of √(1,511 × 0.25) = 19.4 days. The record sits (777 − 755.5) ÷ 19.4 = 1.11 spreads above the average. Landing 21.5 days or more away from the centre, in either direction, happens 28% of the time. That is the p-value: 0.28.
+
+<AtP04CoinDays />
+
+The averages say more. Weighting the post's two averages by the day counts gives (777 × 9.21 − 734 × 10.14) ÷ 1,511 = −0.19 points per day. The strategy was slightly behind on average, and the up-day share could not be told from a coin anyway.
+
+Two habits come out of this. First, a p-value answers a narrow question: how surprising is this record if there is no edge? It does not say how likely it is that there is an edge. Second, "51% right" sounds like skill and is not, until you know how many days it took to get there.
+
+<Concepts>
+
+- **Fair coin**: the reference world with no edge: each day is up with probability 50%, independent of the others.
+- **Spread (standard deviation)**: the typical size of the wobble around the average. For 1,511 fair flips it is 19.4 up days.
+
+</Concepts>
+
+## 2. From Sharpe to a t-statistic
+
+Backtest reports quote a Sharpe ratio: the average return divided by how much it wobbles, scaled to a year. Daily numbers are annualised by multiplying by √252, the common convention for the number of trading days in a year.
+
+A t-statistic asks the coin question in the same way, for any series of returns. For roughly independent daily returns the two are linked by one line:
+
+t = annual Sharpe × √(years of data)
+
+<AtP04Ladder />
+
+The square root is the important part. Quadruple the data and the same Sharpe ratio looks twice as convincing.
+
+<AtP04SharpeToT />
+
+Say a backtest reports a Sharpe of 1.0 over five years. Then t = 1.0 × √5 = 2.24 and p = 0.025: it clears the 5% bar, barely. The same Sharpe over two years has t = 1.41, which a fair coin matches about one time in six. The same strategy, the same quality, a very different verdict. That is why "Sharpe 1.0" means little until you know the length of the sample.
+
+One warning. The link assumes daily returns that are roughly independent and bell-shaped. Strategies with long calm stretches and rare large losses can show a flattering Sharpe, a caveat Harvey and Liu raise about option-like payoffs.
+
+<Concepts>
+
+- **Sharpe ratio**: average return divided by its wobble. Annual Sharpe = daily average ÷ daily spread × √252.
+- **Independent returns**: today's return tells you nothing about tomorrow's. The t-statistic formula leans on this.
+
+</Concepts>
+
+## 3. Many tries, one lucky winner
+
+The coin test is fair when you ran one test. In practice nobody runs one. You try a moving-average window of 10, 20, 50 days, a few thresholds, three stock lists, and you keep the one that looks best.
+
+Bailey, Borwein, Salehipour, López de Prado and Zhu put a number on it: with five years of daily data, no more than 45 variations of a strategy should be tried, or the best Sharpe ratio is likely to reach 1.0 or more by chance, even if the true Sharpe is zero or negative. A simulation made for this post agrees. Take 45 strategies that all have exactly zero edge: the best one has an average Sharpe of 0.98 over five years, and in 43% of runs it reaches 1.0.
+
+<AtP04BestOfN />
+
+Try it yourself. Each strategy below is pure noise: daily returns with an average of zero. Raise the number of tries and the red line, the best of them, climbs.
+
+<AtP04TrialFarmDemo />
+
+The same trap shows up in a real chart. The 51labs post on time-series momentum tests 60 liquid Vietnamese stocks at every lag from 1 to 50 weeks and marks ±1.96 as the line for significance. Here is its t-statistic chart:
+
+<Figure src={tsmomChart} alt="A bar chart titled T-statistic by Week Lag. Fifty bars for lags 1 to 50 weeks. Lag 1 reaches about 8, lag 2 about 5, lag 6 about 7 and lag 21 about 5.6. Most other bars sit between minus 3 and plus 3, with lag 46 near minus 3.7. Two dashed red lines mark plus and minus 1.96." caption="The t-statistic of the momentum coefficient at each week lag, as published by 51labs. Roughly 20 of the 50 bars cross the ±1.96 lines (counted by eye); luck alone would put 2 or 3 there." sourceTitle="51labs: Time series momentum - A traditional approach" sourceUrl="https://51labs.vn/vi/blog/time-series-momentum-a-traditional-approach" />
+
+Read by eye, about 20 of the 50 bars cross ±1.96. Fifty tests at a 5% line give 2.5 crossings by luck, so most of this chart is not luck. Four bars reach about 5 or more (lags 1, 2, 6 and 21). Those survive any correction in this post. The bars between 2 and 3.3, such as lags 3, 14 and 26, are the ones a correction would drop. The post does not discuss a correction for the 50 lags. It also does not say how the standard errors treat 60 stocks that move together. If they do not, every bar is too tall, not only the marginal ones.
+
+For comparison, here is what 50 lags of pure noise look like:
+
+<AtP04NoiseLags />
+
+<Concepts>
+
+- **Overfitting by search**: choosing, among many candidates, the one that fits the history best. The winner fits the noise too.
+- **Family of tests**: all the tests that went into one decision. The family, not a single test, decides how surprised you should be.
+
+</Concepts>
+
+## 4. Raising the bar
+
+If you ran N tests, a result has to be more surprising to count. The simplest rule, Bonferroni, divides the 5% threshold by N. After 10 tries the t-statistic you need is 2.81. After 45 tries it is 3.26, and after 316 it is 3.78.
+
+<AtP04Hurdle />
+
+Harvey, Liu and Zhu applied this to a real pile of research. One of the first tests of the CAPM beta, by Fama and MacBeth in 1973, reported t = 2.57, comfortably above the usual 2.0. Since then, the authors counted at least 316 factors proposed to explain stock returns, and likely many more that were tried and never published. Their conclusion: a new factor should clear t above 3.0, and most claimed findings in financial economics are likely false. They use three correction methods: Bonferroni, Holm, and a method that controls the share of false discoveries among the findings. At 316 factors, Holm gives a hurdle of 3.64.
+
+For practitioners, Harvey and Liu note that it is common to cut a reported Sharpe ratio in half. They argue the cut should not be flat: very high Sharpe ratios are likely true discoveries and lose little, while marginal ones lose most of their value.
+
+A stricter bar has a price: it will turn away some real effects. So count your tries honestly instead of setting the bar as high as you can.
+
+<Concepts>
+
+- **Bonferroni correction**: divide the threshold by the number of tests. Simple and strict.
+- **False discovery rate**: the share of your "discoveries" that are false. Some methods control this instead of the chance of any single false positive.
+
+</Concepts>
+
+## 5. How much data is enough?
+
+Every Sharpe ratio you measure is itself a noisy estimate. If a strategy truly has zero edge, its measured Sharpe over T years falls within ±1.96 ÷ √T about 95% of the time.
+
+<AtP04LuckBand />
+
+After one year, luck alone gives you a Sharpe anywhere from −2 to +2. After five, ±0.88. After twenty, ±0.44. A measured Sharpe of 1.0 sits inside luck's band for the first two rows. The 1,511 days of the VN30F1M record are about six years, so the band there is about ±0.80, and this is for a single clean test.
+
+The cleanest defence against search is data the search never saw. Pick the winner on the first part of the history and judge it on the rest. In a simulation of 45 zero-edge strategies, the winner of the first three years averaged a Sharpe of 1.28. On the last two years the same strategy averaged 0.02, and it was positive in about half of the runs.
+
+<AtP04Holdout />
+
+The holdout only works once. If you look at the result, change the idea and look again, the held-out years turn into another set of tries.
+
+<Concepts>
+
+- **In-sample / out-of-sample**: the data used to choose a strategy, and the data kept back to judge it.
+- **Holdout**: the data you do not look at until you have committed to one strategy.
+
+</Concepts>
+
+## 6. When an AI writes the backtest
+
+An AI assistant can write and test 500 variants of a strategy before you finish a coffee, and a summary will often show the best one. Every point above applies, only faster. Ask for the count of variants behind the Sharpe.
+
+| What the summary says | What to ask |
+|---|---|
+| "Sharpe 1.8 over 5 years" | What is the t-statistic, and how many variants were tried before this one? |
+| "Significant at 5%" | Significant for one test, or after correcting for all of the tries? |
+| "Tested out of sample" | Was that data used to choose parameters, even once? |
+| "51% win rate" | Compared with what? How many days, and what is the average win versus the average loss? |
+
+Later posts pick up the other half of the story. Post 8 (Prediction) covers how information from the future leaks into a model, and Post 12 (Backtest) builds a test that refuses to flatter you.
+
+Nothing in this post is a recommendation to buy or sell anything. The numbers are tools for doubting a result.
+
+## Key takeaways
+
+- **A p-value is a comparison with luck**: it says how often chance alone would match the result, for one test. It does not say the strategy works. *(Section 1)*
+- **Sharpe and t are one number in two outfits**: t = annual Sharpe × √years, so the same Sharpe is weak on two years of data and stronger on ten. *(Section 2)*
+- **Tries are part of the result**: with five years of daily data, about 45 tries make a best Sharpe of 1.0 ordinary. Report and demand the count. *(Section 3)*
+- **The bar rises with the count**: Bonferroni divides 5% by the number of tests, and Harvey, Liu and Zhu suggest t above 3.0 for new factors. *(Section 4)*
+- **Short samples are wide**: luck's range for a Sharpe is ±1.96 ÷ √years. *(Section 5)*
+- **Keep data you have not touched**: it is the only test that the search could not bend. Use it once. *(Section 5)*
+- **Ask AI-written reports for the count**: a polished summary of the best of many tries is a search result, not evidence. *(Section 6)*
+
+## Review questions
+
+1. In Bennett's experiment, a dead salmon showed "active" voxels. Why does 130,000 tests at p &lt; 0.001 predict that, and what did the authors do to remove it? *(See the opening section)*
+2. A strategy is up on 777 of 1,511 days. Using the numbers in Section 1, why is that not evidence that the strategy has an edge? *(See Section 1)*
+3. A backtest has a Sharpe ratio of 1.0. How does its t-statistic change from 2 to 5 to 10 years of data? *(See Section 2)*
+4. With five years of daily data, why do about 45 tries make a Sharpe of 1.0 unremarkable? *(See Section 3)*
+5. Fifty lags of pure noise are tested at ±1.96. How many do you expect to cross, and what is the chance that at least one does? *(See Section 3)*
+6. Why is a t-statistic of 2.5 weak evidence for the 316th factor proposed in a research literature but decent evidence for the first? *(See Section 4)*
+7. What does Harvey and Liu's argument say is wrong with always cutting a reported Sharpe in half? *(See Section 4)*
+8. Why does the winner of three years of selection average a Sharpe near zero on the next two years when every strategy has no edge? *(See Section 5)*
+9. An AI reports "Sharpe 1.8, significant at 5%". Which two questions do you ask before taking it seriously? *(See Section 6)*
+
+## Go deeper
+
+- **[Harvey, Liu and Zhu: ... and the Cross-Section of Expected Returns](https://academic.oup.com/rfs/article/29/1/5/1843824)**: the 316-factor paper and its multiple-testing hurdles.
+- **[Bailey, Borwein, Salehipour, López de Prado and Zhu: Backtest overfitting in financial markets](https://www.davidhbailey.com/dhbpapers/overfit-tools-at.pdf)**: the short version of why backtests with many tries mislead, with the 45-variations example.
+- **[51Labs: Stochastic process part 1, gambler's ruin of VN30F1](https://51labs.vn/vi/blog/stochastic-process-part-1-gambler-s-ruin-of-vn30f)** and **[Time series momentum](https://51labs.vn/vi/blog/time-series-momentum-a-traditional-approach)**: the two Vietnamese cases used here. The public curriculum, [Machine Learning for Financial Market](https://51labs.vn/vi/courses), lists a session on statistical analysis for investment.
+
+</En>
+
+<Vi>
+
+<Figure src={heroSalmon} alt="Bức tranh vẽ một con cá hồi Đại Tây Dương nhìn nghiêng trên nền trắng" caption="Một con cá hồi Đại Tây Dương. Có một con, bị quét não sau khi đã chết, từng &quot;phản ứng&quot; với ảnh người trong máy quét, và lý do là chủ đề của bài này." sourceTitle="Wikimedia Commons: Salmo salar (tranh vẽ của Timothy Knepp, U.S. Fish and Wildlife Service, public domain)" sourceUrl="https://commons.wikimedia.org/wiki/File:Salmo_salar.jpg" />
+
+> "We argue that most claimed research findings in financial economics are likely false."
+> &mdash; *Campbell Harvey, Yan Liu và Heqing Zhu*, "… and the Cross-Section of Expected Returns" (2016)
+
+### Con cá hồi chết trong máy quét
+
+Một nhóm do Craig Bennett dẫn đầu đặt một con cá hồi Đại Tây Dương đã chết vào máy fMRI. Họ cho nó xem ảnh những người trong các tình huống xã hội và yêu cầu nó đoán mỗi người đang cảm thấy gì, đúng bài mà sau đó họ giao cho các tình nguyện viên. Rồi họ chạy phân tích quen thuộc: với mỗi trong khoảng 130.000 voxel (khối não nhỏ xíu), kiểm tra xem nó có phản ứng với bài không.
+
+Với ngưỡng nhiều nghiên cứu dùng, p &lt; 0,001 và không hiệu chỉnh theo số phép test, các cụm voxel trong não và tủy sống con cá sáng lên. Khi các tác giả áp dụng hiệu chỉnh đúng cách, không voxel nào hoạt động.
+
+<AtP04SalmonVoxels />
+
+Con cá và cái máy không có gì sai. Ngưỡng 0,001 nghĩa là một lần báo nhầm trong một nghìn phép test. Chạy 130.000 phép test thì bạn kỳ vọng 130 lần. Backtest có hình dạng y hệt: mỗi ý tưởng, mỗi tham số, mỗi danh sách cổ phiếu bạn thử là thêm một voxel. Bài 2 (Tín hiệu) cho thấy tín hiệu thị trường mỏng. Bài này đo xem nó mỏng cỡ nào, và làm sao phân biệt kết quả thật với kết quả may rủi trao cho bạn.
+
+<Callout type="note" title="Tóm tắt nhanh">
+
+P-value cho biết riêng may rủi sẽ cho ra kết quả ít nhất tốt thế này thường xuyên đến đâu, với một phép test. Sharpe ratio đổi được sang cùng loại con số đó: t = Sharpe năm × √số năm, nên cùng một Sharpe thì yếu sau hai năm và thuyết phục sau mười năm. Rắc rối bắt đầu khi bạn thử nhiều chiến lược rồi chỉ đưa cái tốt nhất ra: với năm năm dữ liệu ngày, khoảng 45 lần thử là đủ để Sharpe cao nhất chạm 1,0 dù chẳng có lợi thế nào. Cách chữa: đếm số lần thử, nâng ngưỡng theo số lần đó (Harvey, Liu và Zhu đề xuất t trên 3,0 cho factor mới), và giữ lại phần dữ liệu chưa từng đụng tới để kiểm tra cuối. Không có gì ở đây là lời khuyên đầu tư.
+
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Giả thuyết không (null hypothesis)**: lời giải thích nhàm chán, ở đây là "chiến lược này không có lợi thế và kết quả của nó chỉ là may rủi". Phép test hỏi: nếu lời giải thích nhàm chán đúng thì dữ liệu này đáng ngạc nhiên đến đâu.
+- **P-value**: riêng may rủi cho ra kết quả ít nhất cực đoan thế này thường xuyên đến đâu, nếu giả thuyết không đúng. Nó không phải xác suất chiến lược chạy được.
+- **t-statistic**: một giá trị trung bình chia cho độ bất định của chính nó. Gần đúng là kết quả cách số 0 bao nhiêu "cỡ sai số điển hình". Về độ lớn trên khoảng 1,96 thì giới nghiên cứu gọi là có ý nghĩa ở mức 5%.
+- **Kiểm định nhiều lần (multiple testing)**: chạy nhiều phép test trên cùng dữ liệu. Ở ngưỡng 5%, cứ 20 phép test thì có 1 phép qua do may.
+
+</Concepts>
+
+---
+
+## 1. Kết quả này có mạnh hơn may rủi không?
+
+Muốn biết một kết quả có nghĩa gì không, hãy so nó với một thế giới mà chẳng có gì xảy ra. Đồng xu công bằng chính là thế giới đó.
+
+Một bài của 51labs về gambler's ruin cho một ví dụ Việt Nam rất gọn. Bài kiểm tra một lệnh cố ý đơn giản trên VN30F1M, hợp đồng tương lai chỉ số VN30 tháng gần nhất: mua ở giá mở cửa, bán ở giá đóng cửa, mỗi ngày từ 2018. Bài ghi 777 ngày tăng và 734 ngày giảm (51% ngày tăng), trung bình lãi 9,21 điểm vào ngày tăng và lỗ 10,14 điểm vào ngày giảm. Bài dùng số liệu này để dựng phép tính gambler's ruin, không để khẳng định có lợi thế. Nhưng giả sử có người đưa bạn xem kết quả này như một chiến lược.
+
+777 ngày tăng trong 1.511 ngày có nhiều hơn mức đồng xu công bằng cho ra không? Đồng xu công bằng cho trung bình 755,5 ngày tăng, với độ lệch √(1.511 × 0,25) = 19,4 ngày. Kết quả nằm trên mức trung bình (777 − 755,5) ÷ 19,4 = 1,11 độ lệch. Rơi lệch khỏi tâm 21,5 ngày trở lên, về phía nào cũng được, xảy ra 28% số lần. Đó là p-value: 0,28.
+
+<AtP04CoinDays />
+
+Hai con số trung bình còn nói nhiều hơn. Lấy hai mức trung bình của bài nhân với số ngày tương ứng cho (777 × 9,21 − 734 × 10,14) ÷ 1.511 = −0,19 điểm mỗi ngày. Chiến lược hơi thua trung bình, và tỉ lệ ngày tăng thì cũng không phân biệt được với đồng xu.
+
+Từ đây có hai thói quen. Một, p-value trả lời một câu hẹp: nếu không có lợi thế thì kết quả này đáng ngạc nhiên đến đâu? Nó không nói khả năng có lợi thế là bao nhiêu. Hai, "đúng 51%" nghe như kỹ năng và không phải, chừng nào bạn chưa biết nó mất bao nhiêu ngày để có.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Đồng xu công bằng**: thế giới tham chiếu không có lợi thế: mỗi ngày tăng với xác suất 50%, độc lập với các ngày khác.
+- **Độ lệch (độ lệch chuẩn)**: cỡ dao động điển hình quanh mức trung bình. Với 1.511 lần tung đồng xu công bằng nó là 19,4 ngày tăng.
+
+</Concepts>
+
+## 2. Từ Sharpe sang t-statistic
+
+Báo cáo backtest hay ghi Sharpe ratio: lợi suất trung bình chia cho mức dao động của nó, quy về năm. Số theo ngày được quy năm bằng cách nhân √252, quy ước thông dụng cho số ngày giao dịch một năm.
+
+t-statistic đặt câu hỏi đồng xu theo cách tương tự, cho bất kỳ chuỗi lợi suất nào. Với lợi suất ngày gần như độc lập, hai thứ nối với nhau bằng một dòng:
+
+t = Sharpe năm × √(số năm dữ liệu)
+
+<AtP04Ladder />
+
+Căn bậc hai là chỗ quan trọng. Dữ liệu nhân bốn thì cùng một Sharpe trông thuyết phục gấp đôi.
+
+<AtP04SharpeToT />
+
+Giả sử một backtest báo Sharpe 1,0 trong năm năm. Khi đó t = 1,0 × √5 = 2,24 và p = 0,025: qua ngưỡng 5%, sát nút. Cùng Sharpe đó trong hai năm có t = 1,41, mức mà đồng xu công bằng đạt được khoảng một lần trong sáu. Cùng chiến lược, cùng chất lượng, kết luận rất khác. Vì thế "Sharpe 1,0" chưa có nghĩa nhiều chừng nào bạn chưa biết mẫu dài bao lâu.
+
+Một lời cảnh báo. Công thức này giả định lợi suất ngày gần như độc lập và có hình chuông. Chiến lược có những quãng dài êm ả và thỉnh thoảng lỗ lớn có thể cho Sharpe đẹp giả tạo, một lưu ý Harvey và Liu nêu ra với các payoff giống quyền chọn.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Sharpe ratio**: lợi suất trung bình chia cho độ dao động của nó. Sharpe năm = trung bình ngày ÷ độ lệch ngày × √252.
+- **Lợi suất độc lập**: lợi suất hôm nay không cho bạn biết gì về ngày mai. Công thức t-statistic dựa vào điều này.
+
+</Concepts>
+
+## 3. Thử nhiều lần, một người thắng may mắn
+
+Phép test đồng xu công bằng khi bạn chỉ chạy một phép. Thực tế chẳng ai chạy một phép. Bạn thử đường trung bình 10, 20, 50 ngày, vài ngưỡng, ba danh sách cổ phiếu, rồi giữ cái trông đẹp nhất.
+
+Bailey, Borwein, Salehipour, López de Prado và Zhu đặt một con số lên chuyện này: với năm năm dữ liệu ngày, không nên thử quá 45 biến thể của một chiến lược, nếu không Sharpe cao nhất nhiều khả năng đạt 1,0 trở lên do may rủi, kể cả khi Sharpe thật bằng 0 hoặc âm. Một mô phỏng làm riêng cho bài này khớp với điều đó. Lấy 45 chiến lược đều có lợi thế đúng bằng 0: cái tốt nhất có Sharpe trung bình 0,98 trong năm năm, và 43% số lần chạy nó đạt 1,0.
+
+<AtP04BestOfN />
+
+Bạn thử ngay đi. Mỗi chiến lược dưới đây là nhiễu thuần: lợi suất ngày trung bình bằng không. Tăng số lần thử và đường đỏ, tức cái tốt nhất, leo lên.
+
+<AtP04TrialFarmDemo />
+
+Cái bẫy này hiện ra cả trong một biểu đồ thật. Bài của 51labs về time-series momentum test 60 cổ phiếu thanh khoản của Việt Nam ở mọi độ trễ từ 1 đến 50 tuần và dùng ±1,96 làm vạch ý nghĩa. Đây là biểu đồ t-statistic của bài:
+
+<Figure src={tsmomChart} alt="Biểu đồ cột tên T-statistic by Week Lag. Năm mươi cột cho độ trễ 1 đến 50 tuần. Độ trễ 1 đạt khoảng 8, độ trễ 2 khoảng 5, độ trễ 6 khoảng 7 và độ trễ 21 khoảng 5,6. Phần lớn cột còn lại nằm giữa âm 3 và dương 3, độ trễ 46 gần âm 3,7. Hai đường đứt đỏ đánh dấu dương và âm 1,96." caption="t-statistic của hệ số momentum ở từng độ trễ tuần, theo bài đăng của 51labs. Khoảng 20 trong 50 cột vượt hai vạch ±1,96 (đếm bằng mắt); riêng may rủi chỉ đặt 2 hoặc 3 cột ở đó." sourceTitle="51labs: Time series momentum - A traditional approach" sourceUrl="https://51labs.vn/vi/blog/time-series-momentum-a-traditional-approach" />
+
+Nhìn bằng mắt, khoảng 20 trong 50 cột vượt ±1,96. Năm mươi phép test ở vạch 5% cho 2,5 lần vượt do may, nên phần lớn biểu đồ này không phải may rủi. Bốn cột đạt khoảng 5 trở lên (độ trễ 1, 2, 6 và 21). Những cột đó qua mọi cách hiệu chỉnh trong bài này. Các cột ở giữa 2 và 3,3, như độ trễ 3, 14 và 26, là những cột mà hiệu chỉnh sẽ loại. Bài không bàn tới hiệu chỉnh cho 50 độ trễ. Bài cũng không nói sai số chuẩn xử lý thế nào với 60 cổ phiếu hay cùng lên cùng xuống. Nếu không xử lý thì mọi cột đều cao hơn thực tế, chứ không chỉ các cột sát ngưỡng.
+
+Để so sánh, đây là diện mạo của 50 độ trễ toàn nhiễu:
+
+<AtP04NoiseLags />
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Overfitting do tìm kiếm**: trong nhiều ứng viên, chọn cái khớp lịch sử nhất. Người thắng cũng khớp luôn cả nhiễu.
+- **Họ phép test (family of tests)**: toàn bộ các phép test góp vào một quyết định. Chính họ phép test, chứ không phải một phép riêng lẻ, quyết định bạn nên ngạc nhiên đến đâu.
+
+</Concepts>
+
+## 4. Nâng ngưỡng
+
+Nếu bạn chạy N phép test, kết quả phải đáng ngạc nhiên hơn mới được tính. Quy tắc đơn giản nhất, Bonferroni, chia ngưỡng 5% cho N. Sau 10 lần thử, t-statistic cần có là 2,81. Sau 45 lần là 3,26, và sau 316 lần là 3,78.
+
+<AtP04Hurdle />
+
+Harvey, Liu và Zhu áp dụng điều này lên một đống nghiên cứu có thật. Một trong những lần kiểm tra beta CAPM đầu tiên, của Fama và MacBeth năm 1973, báo t = 2,57, thoải mái trên mức 2,0 thông thường. Từ đó, nhóm tác giả đếm được ít nhất 316 factor được đề xuất để giải thích lợi suất cổ phiếu, và chắc còn nhiều cái được thử mà không bao giờ công bố. Kết luận của họ: factor mới nên vượt t trên 3,0, và phần lớn phát hiện được công bố trong kinh tế tài chính nhiều khả năng là sai. Họ dùng ba phương pháp hiệu chỉnh: Bonferroni, Holm, và một phương pháp kiểm soát tỉ lệ phát hiện sai trong các phát hiện. Ở 316 factor, Holm cho ngưỡng 3,64.
+
+Với người làm nghề, Harvey và Liu ghi nhận rằng cắt đôi Sharpe ratio được báo cáo là việc phổ biến. Họ lập luận mức cắt không nên đều: Sharpe rất cao nhiều khả năng là phát hiện thật và mất ít, còn Sharpe ở mức biên mất gần hết giá trị.
+
+Ngưỡng chặt hơn có cái giá của nó: nó sẽ làm mất vài hiệu ứng thật. Vì vậy hãy đếm số lần thử cho trung thực thay vì đặt ngưỡng cao hết mức.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Hiệu chỉnh Bonferroni**: chia ngưỡng cho số phép test. Đơn giản và chặt.
+- **Tỉ lệ phát hiện sai (false discovery rate)**: phần trăm "phát hiện" của bạn là sai. Một số phương pháp kiểm soát cái này thay vì xác suất có bất kỳ dương tính giả nào.
+
+</Concepts>
+
+## 5. Bao nhiêu dữ liệu là đủ?
+
+Mỗi Sharpe ratio bạn đo đều là một ước lượng có nhiễu. Nếu một chiến lược thật sự có lợi thế bằng 0, Sharpe đo được trong T năm rơi vào khoảng ±1,96 ÷ √T chừng 95% số lần.
+
+<AtP04LuckBand />
+
+Sau một năm, riêng may rủi cho bạn Sharpe ở bất kỳ đâu từ −2 tới +2. Sau năm năm, ±0,88. Sau hai mươi năm, ±0,44. Sharpe đo được 1,0 nằm trong dải của may rủi ở hai hàng đầu. 1.511 ngày của kết quả VN30F1M là khoảng sáu năm, nên dải ở đó khoảng ±0,80, và đó mới chỉ cho một phép test sạch.
+
+Cách phòng thủ sạch nhất trước việc tìm kiếm là dữ liệu mà cuộc tìm kiếm chưa từng thấy. Chọn người thắng trên phần đầu của lịch sử rồi đánh giá nó trên phần còn lại. Trong một mô phỏng với 45 chiến lược không có lợi thế, người thắng của ba năm đầu có Sharpe trung bình 1,28. Ở hai năm cuối, chính chiến lược đó trung bình 0,02, và dương trong khoảng một nửa số lần chạy.
+
+<AtP04Holdout />
+
+Phần giữ lại chỉ dùng được một lần. Nếu bạn xem kết quả, đổi ý tưởng rồi xem lại, các năm giữ lại biến thành thêm một đợt thử.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Trong mẫu / ngoài mẫu (in-sample / out-of-sample)**: dữ liệu dùng để chọn chiến lược, và dữ liệu giữ lại để đánh giá nó.
+- **Holdout**: dữ liệu bạn không nhìn cho tới khi đã chốt đúng một chiến lược.
+
+</Concepts>
+
+## 6. Khi AI viết backtest
+
+Một trợ lý AI có thể viết và test 500 biến thể của một chiến lược trước khi bạn uống xong ly cà phê, và bản tóm tắt thường chỉ đưa cái tốt nhất. Mọi điểm ở trên đều áp dụng, chỉ nhanh hơn. Hãy hỏi số biến thể đứng sau Sharpe.
+
+| Bản tóm tắt nói | Nên hỏi |
+|---|---|
+| "Sharpe 1,8 trong 5 năm" | t-statistic là bao nhiêu, và đã thử bao nhiêu biến thể trước biến thể này? |
+| "Có ý nghĩa ở mức 5%" | Có ý nghĩa với một phép test, hay sau khi hiệu chỉnh cho mọi lần thử? |
+| "Đã test ngoài mẫu" | Dữ liệu đó có từng được dùng để chọn tham số, dù chỉ một lần không? |
+| "Tỉ lệ thắng 51%" | So với cái gì? Bao nhiêu ngày, và lãi trung bình so với lỗ trung bình thế nào? |
+
+Các bài sau nhặt nửa còn lại của câu chuyện. Bài 8 (Dự đoán) nói thông tin từ tương lai rò vào mô hình ra sao, và Bài 12 (Backtest) dựng một bài test từ chối nịnh bạn.
+
+Không có gì trong bài này là lời khuyên mua hay bán thứ gì. Các con số là công cụ để nghi ngờ một kết quả.
+
+## Điểm rút ra (Key takeaways)
+
+- **P-value là phép so sánh với may rủi**: nó cho biết riêng ngẫu nhiên sẽ khớp kết quả thường xuyên đến đâu, với một phép test. Nó không nói chiến lược chạy được. *(Mục 1)*
+- **Sharpe và t là một con số mặc hai bộ đồ**: t = Sharpe năm × √số năm, nên cùng một Sharpe yếu với hai năm dữ liệu và mạnh hơn với mười năm. *(Mục 2)*
+- **Số lần thử là một phần của kết quả**: với năm năm dữ liệu ngày, khoảng 45 lần thử khiến Sharpe tốt nhất 1,0 thành chuyện thường. Hãy báo cáo và đòi con số đếm này. *(Mục 3)*
+- **Ngưỡng tăng theo số lần đếm**: Bonferroni chia 5% cho số phép test, và Harvey, Liu và Zhu gợi ý t trên 3,0 cho factor mới. *(Mục 4)*
+- **Mẫu ngắn thì khoảng rộng**: dải của may rủi quanh Sharpe là ±1,96 ÷ √số năm. *(Mục 5)*
+- **Giữ dữ liệu chưa đụng tới**: đó là phép test duy nhất mà việc tìm kiếm không bẻ cong được. Dùng nó một lần. *(Mục 5)*
+- **Đòi số lần thử trong báo cáo do AI viết**: bản tóm tắt bóng bẩy về cái tốt nhất trong nhiều lần thử là một kết quả tìm kiếm, không phải bằng chứng. *(Mục 6)*
+
+## Câu hỏi ôn tập (Review questions)
+
+1. Trong thí nghiệm của Bennett, một con cá hồi chết có các voxel "hoạt động". Vì sao 130.000 phép test ở p &lt; 0,001 dự báo được điều đó, và các tác giả làm gì để loại nó? *(Xem phần mở đầu)*
+2. Một chiến lược tăng ở 777 trong 1.511 ngày. Dùng số liệu ở Mục 1, vì sao đó chưa phải bằng chứng chiến lược có lợi thế? *(Xem Mục 1)*
+3. Một backtest có Sharpe ratio 1,0. t-statistic của nó thay đổi thế nào khi có 2, 5, rồi 10 năm dữ liệu? *(Xem Mục 2)*
+4. Với năm năm dữ liệu ngày, vì sao khoảng 45 lần thử khiến Sharpe 1,0 chẳng có gì đặc biệt? *(Xem Mục 3)*
+5. Năm mươi độ trễ toàn nhiễu được test ở ±1,96. Bạn kỳ vọng bao nhiêu độ trễ vượt, và xác suất có ít nhất một độ trễ vượt là bao nhiêu? *(Xem Mục 3)*
+6. Vì sao t-statistic 2,5 là bằng chứng yếu cho factor thứ 316 được đề xuất trong một nền nghiên cứu nhưng là bằng chứng khá tốt cho factor đầu tiên? *(Xem Mục 4)*
+7. Lập luận của Harvey và Liu nói việc luôn cắt đôi Sharpe được báo cáo sai ở đâu? *(Xem Mục 4)*
+8. Vì sao người thắng sau ba năm chọn lọc lại có Sharpe trung bình gần bằng không ở hai năm kế tiếp, khi mọi chiến lược đều không có lợi thế? *(Xem Mục 5)*
+9. Một AI báo "Sharpe 1,8, có ý nghĩa ở mức 5%". Bạn hỏi hai câu nào trước khi tin nó? *(Xem Mục 6)*
+
+## Đi sâu hơn (Go deeper)
+
+- **[Harvey, Liu và Zhu: ... and the Cross-Section of Expected Returns](https://academic.oup.com/rfs/article/29/1/5/1843824)**: bài báo về 316 factor và các ngưỡng cho nhiều phép test.
+- **[Bailey, Borwein, Salehipour, López de Prado và Zhu: Backtest overfitting in financial markets](https://www.davidhbailey.com/dhbpapers/overfit-tools-at.pdf)**: bản ngắn giải thích vì sao backtest thử nhiều lần gây hiểu lầm, kèm ví dụ 45 biến thể.
+- **[51Labs: Stochastic process part 1, gambler's ruin of VN30F1](https://51labs.vn/vi/blog/stochastic-process-part-1-gambler-s-ruin-of-vn30f)** và **[Time series momentum](https://51labs.vn/vi/blog/time-series-momentum-a-traditional-approach)**: hai case Việt Nam dùng ở đây. Chương trình công khai [Machine Learning for Financial Market](https://51labs.vn/vi/courses) có một buổi về phân tích thống kê cho đầu tư.
+
+</Vi>

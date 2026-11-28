@@ -1,0 +1,466 @@
+---
+title: "Prediction"
+title_vi: "Dự đoán"
+description: "Predicting stock returns is really ranking stocks. How trees and forests do it, why a deep tree memorises, and how leakage makes a test lie. Post 8 of the AI-trading series."
+description_vi: "Dự đoán lợi suất thực chất là xếp hạng cổ phiếu. Tree và forest làm việc đó thế nào, vì sao cây sâu chỉ thuộc lòng, và leakage khiến bài test nói dối ra sao. Bài 8 của series AI trong chứng khoán."
+date: 2026-11-28
+category: "ai"
+tags: ["ai", "ai-trading", "machine-learning"]
+cover: "../../assets/blog/ai-trading-prediction/otway-forest.jpg"
+cover_alt: "Sunlight through tall eucalyptus and beech trees in Great Otway National Park, Victoria, Australia"
+draft: true
+sources:
+  - { title: "Empirical Asset Pricing via Machine Learning", author: "Shihao Gu, Bryan Kelly & Dacheng Xiu", chapters: "Review of Financial Studies 33(5), 2223–2273 (NBER Working Paper 25398)", url: "https://dachxiu.chicagobooth.edu/download/ML.pdf" }
+  - { title: "Empirical Asset Pricing via Machine Learning (NBER abstract)", author: "NBER", url: "https://www.nber.org/papers/w25398" }
+  - { title: "Leakage and the Reproducibility Crisis in ML-based Science", author: "Sayash Kapoor & Arvind Narayanan", url: "https://arxiv.org/abs/2207.07048" }
+  - { title: "TimeSeriesSplit (scikit-learn 1.8 documentation)", author: "scikit-learn developers", url: "https://scikit-learn.org/stable/modules/generated/sklearn.model_selection.TimeSeriesSplit.html" }
+  - { title: "CombinatorialPurgedCV (skfolio documentation: purging and embargo)", author: "skfolio", url: "https://skfolio.org/generated/skfolio.model_selection.CombinatorialPurgedCV.html" }
+  - { title: "Numerai data documentation: eras, features and targets", author: "Numerai", url: "https://docs.numer.ai/numerai-tournament/data" }
+  - { title: "Linear regression (HPG against VNINDEX)", author: "51labs", url: "https://51labs.vn/vi/blog/linear-regression" }
+  - { title: "Time series momentum: a traditional approach (tested on the Vietnamese market)", author: "51labs", url: "https://51labs.vn/vi/blog/time-series-momentum-a-traditional-approach" }
+  - { title: "51Labs, Machine Learning for Financial Market (curriculum: Supervised learning, Tree-based and Ensemble ML model, Predict-then-rank portfolio)", url: "https://51labs.vn/vi/courses" }
+  - { title: "Quy chế giao dịch mới tại HOSE: duy trì biên độ dao động giá 7% và lô chẵn 100 cổ phiếu", author: "Người Quan Sát", url: "https://nguoiquansat.vn/quy-che-giao-dich-moi-tai-hose-duy-tri-bien-do-dao-dong-gia-7-va-lo-chan-100-co-phieu-32586.html" }
+  - { title: "Beech Forest (AU), Great Otway National Park, 2019, 1294 (photo, CC BY-SA 4.0)", author: "Dietmar Rabich — Wikimedia Commons", url: "https://commons.wikimedia.org/wiki/File:Beech_Forest_(AU),_Great_Otway_National_Park_--_2019_--_1294.jpg" }
+---
+
+import En from '../../components/mdx/En.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import AtP08GkxBars from '../../components/mdx/AtP08GkxBars.astro';
+import AtP08RankNotPrice from '../../components/mdx/AtP08RankNotPrice.astro';
+import AtP08Pipeline from '../../components/mdx/AtP08Pipeline.astro';
+import AtP08LabelOverlap from '../../components/mdx/AtP08LabelOverlap.astro';
+import AtP08Staircase from '../../components/mdx/AtP08Staircase.astro';
+import AtP08Ensemble from '../../components/mdx/AtP08Ensemble.astro';
+import AtP08TreeDepthDemo from '../../components/mdx/AtP08TreeDepthDemo.astro';
+import AtP08Splits from '../../components/mdx/AtP08Splits.astro';
+import AtP08LeakGap from '../../components/mdx/AtP08LeakGap.astro';
+import AtP08IcStrip from '../../components/mdx/AtP08IcStrip.astro';
+import AtP08AiSummary from '../../components/mdx/AtP08AiSummary.astro';
+import heroForest from '../../assets/blog/ai-trading-prediction/otway-forest.jpg';
+
+<En>
+
+<Figure src={heroForest} alt="Sunlight through tall eucalyptus and beech trees in Great Otway National Park, Victoria, Australia" caption="A forest is many trees voting. One tree is easy to fool; a few hundred, each looking at a different slice of the data, are harder to fool together. Photo: Dietmar Rabich, CC BY-SA 4.0." sourceTitle="Wikimedia Commons: Beech Forest (AU), Great Otway National Park (Dietmar Rabich, CC BY-SA 4.0)" sourceUrl="https://commons.wikimedia.org/wiki/File:Beech_Forest_(AU),_Great_Otway_National_Park_--_2019_--_1294.jpg" />
+
+> "The historical mean stock return is so noisy that it artificially lowers the bar for 'good' forecasting performance."
+> &mdash; *Shihao Gu, Bryan Kelly & Dacheng Xiu, Empirical Asset Pricing via Machine Learning (2020)*
+
+### A model that explains 0.4% and still pays
+
+In 2020 Gu, Kelly and Xiu published one of the largest tests of machine learning on stock returns. They used nearly 30,000 US stocks over 60 years, from 1957 to 2016. Each stock came with 94 characteristics, and together with interaction terms and industry dummies that made more than 900 predictors. They trained on the first 18 years, tuned on the next 12, and kept 1987 to 2016 as a test no model ever touched.
+
+The best model, a three-layer neural network, explained 0.40% of the variance of next month's return. Trees and forests came close at 0.33% to 0.34%. A plain regression on all 900+ predictors went below zero. Yet a long-short portfolio that bought the stocks the neural network ranked highest and sold the lowest earned an out-of-sample Sharpe ratio of 1.35, against 0.61 for the same strategy built on a simple linear benchmark.
+
+Both facts are true at once. Raw prediction accuracy is tiny. The ordering it produces is worth money. This post follows that gap:
+
+1. **Prediction as ranking**: why the job is to order stocks, and how to score an ordering.
+2. **The label**: what exactly the model is asked to predict, and why neighbouring rows are not independent.
+3. **Trees and forests**: how they find interactions, and how a deep tree learns nothing while looking brilliant.
+4. **Leakage**: how a test that peeks at the future inflates a result by more than half.
+5. **Judging the output**: what to check when a model, or an AI assistant's summary of one, claims a number.
+
+Nothing here is investment advice. The numbers are research results or simulations, and none of it is a recommendation to buy or sell anything.
+
+<Callout type="note" title="TL;DR">
+Return prediction is a ranking problem: each month, order the stocks so the ones that go up more sit higher, then act on the top of the list. Accuracy in the usual sense stays tiny (0.4% R² in the largest published test), but the ordering can still pay, because ranking only needs the order to be slightly better than chance. Trees and forests suit it because they find interactions between features without a formula. They also memorise noise when grown deep, so every model needs a test that stands in the future: walk-forward splits with a purge gap sized to the label horizon. A random split on overlapping labels can nearly double a result without anyone cheating on purpose.
+</Callout>
+
+<Concepts>
+
+- **Supervised learning**: teaching a model from examples where the answer is known. Here an example is one stock in one month, and the answer is what the stock did next.
+- **Feature**: one number describing a stock at a date, such as its return over the last six weeks or its price-to-book ratio.
+- **Label**: the answer the model learns to predict, usually the return over a coming window.
+- **Out-of-sample**: scored on months the model never saw while learning.
+
+</Concepts>
+
+---
+
+## 1. Prediction is a ranking problem
+
+Start with what a fund actually does. At each month end it holds a list of stocks and has to decide which ones to own. It does not need to say "this stock will return 1.3%". It needs to say "this one is likely to beat that one". An exact forecast is a harder question than an ordering, and an ordering is all the portfolio uses.
+
+Say a model scores 2,000 stocks in one month, and its score has a real but weak link to next month's return, one that explains about 1% of the variance. In this simulated month the sample R² came out at 1.5%.
+
+<AtP08RankNotPrice />
+
+The scatter on the left looks like a cloud with no shape. Sort the same 2,000 stocks into ten groups by score and the picture changes: the average realised return climbs from about minus 0.26 in the lowest group to plus 0.20 in the highest, in units of one standard deviation of a stock's monthly return. The top decile beats the bottom decile by 0.47. Two ways to score this are standard:
+
+- **Rank IC** (information coefficient): the Spearman rank correlation between score and realised return across the stocks of one month. Here it is 0.12. Because it uses ranks, one stock jumping 40% does not drag it around.
+- **Decile spread**: the average return of the top 10% minus the bottom 10%, the long-short portfolio that Gu, Kelly and Xiu report.
+
+Rank IC is computed once per month, so a model gets a series of them, and that series is what you test (Section 5). Vietnam adds one practical point. VN30 has 30 stocks, so a decile is three names, and one wrong name moves the spread a lot. Wider universes such as the stocks listed on HOSE give deciles that are less noisy, though they come with thin, hard-to-trade names at the bottom of the liquidity list.
+
+<AtP08Pipeline />
+
+The pipeline is short. Features known at month end go in, the model gives each stock a score, you sort, and the top group goes to portfolio construction, which is the next stage of the series. The label appears only during training. A 51labs curriculum puts this under "Predict-then-rank portfolio", which is the same idea under another name.
+
+<Concepts>
+
+- **Rank IC**: the average, month by month, of the Spearman correlation between the model's scores and the returns that followed. 0 means no skill.
+- **Decile**: one tenth of the stocks after sorting. Decile 10 holds the highest scores.
+- **Long-short**: buy the top group and sell (short) the bottom group, so market direction cancels out.
+
+</Concepts>
+
+---
+
+## 2. The label: what you ask the model
+
+A model learns whatever the label says, so the label is the first design decision. Three choices matter.
+
+**Horizon.** One month, three months, sixty trading days. Numerai, a data-science tournament built on stock data, trains on targets that measure a stock's performance relative to its era (one point in time), with market, country, sector and factor exposures removed. Its default target looks 60 business days ahead. A long horizon is smoother, because less of the label is noise. It also makes rows overlap, which is the trap below.
+
+**Relative or raw.** A raw return label asks the model to guess whether the whole market rises. A return relative to the other stocks of the same month asks only the question the ranking needs. Numerai's docs say to treat an era as one data point; the same habit works for any month: compare stocks with their month, not with other months.
+
+**Features.** The 51labs study of time-series momentum on the 60 most liquid Vietnamese stocks, with weekly data, found that past returns mattered at lags of about two and six weeks and turned significantly negative beyond roughly ten weeks. Features like those, past returns over several windows, are typical inputs, next to valuation and liquidity measures from the Data post. Every feature must be known at the month end, with the point-in-time rules of the Data post.
+
+Vietnam adds a detail on the label side. HOSE caps the daily move of a stock at 7% around the reference price (HOSE's trading regulation in force from 5 July 2021). A one-day return label is therefore bounded, and a stock stuck at the limit hides how far it would have gone. A multi-week label avoids some of that, and a rank-based score does not care about a few capped values.
+
+<AtP08LabelOverlap />
+
+Now the trap. Take monthly rows and a three-month label. Row 1's label covers months 2 to 4 and row 2's covers months 3 to 5, so two of their three label months are the same. The rows are not five independent examples. They are closer to one fact counted several times. A model that sees row 1 in training and row 2 in testing has already seen most of the answer.
+
+<Concepts>
+
+- **Horizon**: how far ahead the label looks.
+- **Overlapping labels**: labels from neighbouring rows that cover some of the same period, so the rows are correlated.
+- **Era**: Numerai's word for one point in time; all stocks of an era are compared with each other.
+
+</Concepts>
+
+---
+
+## 3. Trees and forests
+
+A decision tree is a list of yes-or-no questions. "Is the six-week return above the median? If so, is the stock cheap on book value?" Each answer sends the stock down a branch, and each leaf holds a score. Trees need no formula and no scaling, and they find interactions by construction: a stock that is cheap and rising can score differently from one that is cheap and falling, which a straight line cannot say. That is the reason Gu, Kelly and Xiu found trees and neural networks on top.
+
+<AtP08GkxBars />
+
+The weakness is just as built in. Grown until every leaf holds a single stock, a tree fits its training data perfectly, noise included. Say 60 points follow a rising line, y = 0.6x, with noise of the same size as the signal.
+
+<AtP08Staircase />
+
+A depth-2 tree draws four steps that follow the trend. A tree grown to 60 leaves touches every dot and reaches a rank correlation of 1.00 on the points it has seen, then 0.40 on fresh points, below the 0.54 of the shallow tree.
+
+Two ideas fix this, and both replace one fragile tree with many.
+
+<AtP08Ensemble />
+
+A **random forest** trains hundreds of deep trees, each on a random sample of the rows and a random subset of the columns, and averages their scores. Each tree overfits in its own direction, so the average keeps what they agree on. **Boosting** goes the other way: it trains shallow trees one after another, each fitted to what the previous trees got wrong, and adds up small steps. Both are widely used on tabular data; in finance both come with an extra rule that you tune on a time-ordered validation block, never a shuffled one.
+
+Try it on the simulated panel below: 200 stocks, 120 months, the true signal a linear piece in one feature plus an interaction between two others. Train on 80 months, test on the last 40.
+
+<AtP08TreeDepthDemo />
+
+With one tree, depth 1 to 3 gives about 0.05. At no depth limit the tree scores 0.434 on the months it trained on and 0.001 on the months it did not. The forest peaks at about 0.062 around depth 8 and stays near 0.057 with no limit at all. Averaging does not remove the overfit, but it keeps most of the skill. Depth is one hyperparameter among several, such as the number of trees, the minimum leaf size and the learning rate for boosting; the point of the demo is that the unseen-month number is the one to choose by.
+
+<Concepts>
+
+- **Decision tree**: a set of nested yes-or-no questions on features, ending in leaves that hold a score.
+- **Random forest**: many deep trees trained on random subsets of rows and columns; the final score is their average.
+- **Boosting**: shallow trees added one at a time, each one correcting the errors of the sum so far.
+- **Overfitting**: a model that has learned the noise of its training data and scores worse on new data.
+
+</Concepts>
+
+---
+
+## 4. Leakage: when the test is not a test
+
+Leakage means information from the test period reaches the model during training. Kapoor and Narayanan surveyed papers in fields that adopted machine learning and found errors from leakage in 17 fields, affecting 329 papers. In one of them, civil-war prediction, complex models were believed to beat logistic regression by a wide margin; the papers claiming it failed to reproduce because of leakage, and the complex models did not do substantially better than logistic regression. In markets the usual forms are:
+
+- A **random split** of time-ordered rows, so the model trains on months after the ones it is tested on.
+- **Overlapping labels** across the train and test boundary (Section 2).
+- **Features that were not yet known**, such as a figure restated months later (the Data post).
+- **Scaling or selecting features on the full sample**, so the test period shapes the training step.
+
+<AtP08Splits />
+
+The standard repair is a walk-forward split: train on the past, test on what follows. scikit-learn's TimeSeriesSplit builds these, and its gap argument drops that many samples before each test set. For labels that overlap, López de Prado's purging removes every training observation whose label overlaps in time with a test label, and an embargo removes the observations right after the test set, because financial features are serially correlated. The skfolio library implements both. As a rule of thumb the gap is at least as long as the label horizon.
+
+Here is what it does on the simulated panel: 200 stocks, 120 months, features that persist from month to month, a three-month label, one random forest of 100 deep trees.
+
+<AtP08LeakGap />
+
+Scored on its own training rows, the forest reaches a rank IC of 0.407. Random 5-fold cross-validation says 0.163. Walk-forward, train on 80 months and test on the last 40, says 0.091, and a three-month purge changes it to 0.090. The random split reports about 1.8 times the real figure because a neighbouring month of the same stock, with almost the same features and an overlapping label, is waiting in the training set for every test row. Nobody did anything dishonest. The purge moves little here only because the boundary touches only a few rows of an 80-month train set. With a longer horizon or fewer months the effect grows.
+
+<Concepts>
+
+- **Leakage**: information from the test period reaching the model while it trains, which makes the test score optimistic.
+- **Walk-forward**: train on the past, test on the period that follows, then roll forward.
+- **Purge**: dropping training rows whose labels overlap the test period.
+- **Embargo**: dropping training rows just after the test period, because features are serially correlated.
+
+</Concepts>
+
+---
+
+## 5. Judging the output
+
+A model gives you one rank IC per month. Judge the series, not one number.
+
+<AtP08IcStrip />
+
+In the simulation, 40 unseen months give a mean IC of 0.055, a standard deviation of 0.076 and a t-statistic of 4.6 (0.055 divided by 0.076 over the square root of 40). Seven of the 40 months are negative, and that is what a working model looks like. The question from the Statistics post applies directly: how many standard errors from zero, and after how many things were tried. If someone tried 200 feature sets and reports the best, the same t-statistic means far less.
+
+Gu, Kelly and Xiu add the cost side. Their neural-network portfolios turn over 110% to 130% of the portfolio each month. A decile spread before costs says little about what a Vietnamese retail account, paying commissions and facing daily price limits, would keep. The next stage of this series, Portfolio, turns scores into weights that respect those frictions.
+
+Now a situation you will meet. An AI assistant fits a gradient-boosted model and sends a summary.
+
+<AtP08AiSummary />
+
+Every line is plausible, and every line hides a choice. Shuffled folds mix past and future. A three-month label calls for a purge. A correlation without a per-month breakdown and a month count cannot be judged. A decile spread that ignores costs is a research number. Asking those four questions takes a minute. The next post, Explainable AI, takes up the question after that: once a model ranks a stock high, why?
+
+<Concepts>
+
+- **t-statistic of the mean IC**: mean IC divided by its standard error (the monthly standard deviation over the square root of the number of months); it says how far the average sits from zero in standard errors.
+- **Turnover**: the share of the portfolio traded each period; more turnover means more cost.
+
+</Concepts>
+
+---
+
+## Key takeaways
+
+- **Ordering is the product**: a model that explains 0.4% of return variance can still rank stocks well enough to pay, because the portfolio only uses the order.
+- **Score the monthly ranking**: rank IC per month and the decile spread, then test the series for consistency instead of trusting one number.
+- **A deep tree memorises**: it can score 0.43 on its training months and 0.00 on new ones; forests and boosting keep much more of the skill.
+- **Overlapping labels couple the rows**: a three-month label makes neighbouring monthly rows near-copies.
+- **Test in the future**: walk-forward splits with a purge at least as long as the label horizon; a random split inflated the same model's result from 0.09 to 0.16 here.
+- **Ask four questions of any summary**: how were the folds cut, how do labels overlap, is the number per month, and is it before costs.
+
+## Review questions
+
+1. Why does a model with 0.4% R² still produce a profitable long-short portfolio in the Gu, Kelly and Xiu test? *(See Section 1)*
+2. What do rank IC and decile spread each measure, and why is rank IC less sensitive to one extreme stock? *(See Section 1)*
+3. With monthly rows and a three-month label, how many label months do rows 1 and 2 share? *(See Section 2)*
+4. Why does a tree grown until each leaf has one stock score 1.00 on its training months? *(See Section 3)*
+5. How does a random forest reduce the damage of overfitting, and how does boosting differ? *(See Section 3)*
+6. What does the gap argument of scikit-learn's TimeSeriesSplit do, and how long should it be for a three-month label? *(See Section 4)*
+7. In the simulated panel, why did random 5-fold cross-validation report 0.163 while walk-forward reported 0.091? *(See Section 4)*
+8. A summary reports a correlation of 0.16 and nothing else. Which questions do you ask? *(See Section 5)*
+
+## Go deeper
+
+- **[Gu, Kelly & Xiu (2020), Empirical Asset Pricing via Machine Learning](https://dachxiu.chicagobooth.edu/download/ML.pdf)**: the large test behind the hook, with every model's out-of-sample R² and the decile portfolios.
+- **[Kapoor & Narayanan, Leakage and the Reproducibility Crisis in ML-based Science](https://arxiv.org/abs/2207.07048)**: how leakage inflates published results across 17 fields.
+- **[51Labs, Machine Learning for Financial Market](https://51labs.vn/vi/courses)**: the course whose supervised-learning, tree-ensemble and predict-then-rank days this post follows.
+- **[Numerai data documentation](https://docs.numer.ai/numerai-tournament/data)**: a real dataset built around eras and relative targets, free to read.
+
+</En>
+
+<Vi>
+
+<Figure src={heroForest} alt="Nắng xuyên qua những hàng cây bạch đàn và sồi cao trong Vườn quốc gia Great Otway, bang Victoria, Úc" caption="Một khu rừng là nhiều cây cùng bỏ phiếu. Một cây rất dễ bị lừa; vài trăm cây, mỗi cây nhìn một lát dữ liệu khác nhau, khó bị lừa cùng lúc hơn nhiều. Ảnh: Dietmar Rabich, CC BY-SA 4.0." sourceTitle="Wikimedia Commons: Beech Forest (AU), Great Otway National Park (Dietmar Rabich, CC BY-SA 4.0)" sourceUrl="https://commons.wikimedia.org/wiki/File:Beech_Forest_(AU),_Great_Otway_National_Park_--_2019_--_1294.jpg" />
+
+> "Lợi suất trung bình lịch sử của một cổ phiếu nhiễu đến mức nó hạ thấp một cách giả tạo ngưỡng thế nào là dự báo 'tốt'."
+> &mdash; *Shihao Gu, Bryan Kelly & Dacheng Xiu, Empirical Asset Pricing via Machine Learning (2020)*
+
+### Mô hình chỉ giải thích 0,4% mà vẫn kiếm ra tiền
+
+Năm 2020, Gu, Kelly và Xiu công bố một trong những thử nghiệm machine learning lớn nhất trên lợi suất cổ phiếu. Họ dùng gần 30.000 cổ phiếu Mỹ trong 60 năm, từ 1957 tới 2016. Mỗi cổ phiếu có 94 đặc trưng, cộng thêm các số hạng tương tác và biến giả theo ngành thì thành hơn 900 predictor. Họ huấn luyện trên 18 năm đầu, tinh chỉnh trên 12 năm kế tiếp, và giữ 1987 tới 2016 làm bài test mà không mô hình nào được chạm vào.
+
+Mô hình tốt nhất, một neural network ba tầng, giải thích 0,40% phương sai lợi suất tháng sau. Tree và forest sát nút với 0,33% tới 0,34%. Hồi quy thường trên cả 900+ predictor thì xuống dưới 0. Vậy mà một danh mục long-short mua nhóm cổ phiếu neural network xếp cao nhất và bán nhóm thấp nhất đạt Sharpe ngoài mẫu 1,35, so với 0,61 của cùng chiến lược dựng trên một mô hình tuyến tính đơn giản.
+
+Cả hai điều đều đúng cùng lúc. Độ chính xác dự báo thô rất nhỏ. Thứ tự mà nó tạo ra thì đáng tiền. Bài này đi theo khoảng cách đó:
+
+1. **Dự đoán là xếp hạng**: vì sao việc cần làm là sắp thứ tự cổ phiếu, và chấm một thứ tự thế nào.
+2. **Nhãn (label)**: mô hình được yêu cầu dự đoán chính xác cái gì, và vì sao các dòng liền kề không độc lập.
+3. **Tree và forest**: chúng tìm tương tác ra sao, và một cây sâu có thể không học được gì trong khi trông rất xuất sắc.
+4. **Leakage**: một bài test nhìn trộm tương lai làm kết quả phồng lên một nửa hoặc hơn thế nào.
+5. **Đánh giá kết quả**: kiểm gì khi một mô hình, hay bản tóm tắt của trợ lý AI về nó, đưa ra một con số.
+
+Không có gì ở đây là lời khuyên đầu tư. Các con số là kết quả nghiên cứu hoặc mô phỏng, và không thứ nào là khuyến nghị mua hay bán.
+
+<Callout type="note" title="Tóm tắt nhanh">
+Dự đoán lợi suất là bài toán xếp hạng: mỗi tháng, sắp các cổ phiếu sao cho mã tăng nhiều hơn đứng cao hơn, rồi hành động trên phần đầu danh sách. Độ chính xác theo nghĩa thông thường vẫn rất nhỏ (R² 0,4% trong thử nghiệm công bố lớn nhất), nhưng thứ tự vẫn có thể sinh lời, vì xếp hạng chỉ cần thứ tự hơi tốt hơn ngẫu nhiên. Tree và forest hợp với việc này vì chúng tìm được tương tác giữa các feature mà không cần công thức. Chúng cũng thuộc lòng nhiễu nếu cho mọc sâu, nên mọi mô hình cần một bài test nằm ở tương lai: walk-forward với khoảng purge bằng chân trời của nhãn. Chia ngẫu nhiên trên nhãn chồng nhau có thể gần như nhân đôi kết quả mà không ai cố tình gian lận.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Supervised learning (học có giám sát)**: dạy mô hình từ các ví dụ đã biết đáp án. Ở đây một ví dụ là một cổ phiếu trong một tháng, và đáp án là diễn biến sau đó của nó.
+- **Feature (đặc trưng)**: một con số mô tả cổ phiếu tại một ngày, như lợi suất sáu tuần gần nhất hay tỷ lệ giá trên giá trị sổ sách.
+- **Label (nhãn)**: đáp án mô hình học để dự đoán, thường là lợi suất trong một cửa sổ sắp tới.
+- **Out-of-sample (ngoài mẫu)**: chấm trên những tháng mô hình chưa từng thấy khi học.
+
+</Concepts>
+
+---
+
+## 1. Dự đoán là bài toán xếp hạng
+
+Bắt đầu từ việc một quỹ thật sự làm. Cuối mỗi tháng, quỹ có một danh sách cổ phiếu và phải quyết định nắm mã nào. Quỹ không cần nói "mã này sẽ lời 1,3%". Quỹ cần nói "mã này nhiều khả năng hơn mã kia". Dự báo chính xác là câu hỏi khó hơn thứ tự, mà danh mục chỉ dùng tới thứ tự.
+
+Giả sử một mô hình chấm điểm 2.000 cổ phiếu trong một tháng, và điểm đó có liên hệ thật nhưng yếu với lợi suất tháng sau, giải thích khoảng 1% phương sai. Trong tháng mô phỏng này, R² đo được là 1,5%.
+
+<AtP08RankNotPrice />
+
+Biểu đồ phân tán bên trái trông như đám mây không có hình dạng. Sắp cùng 2.000 cổ phiếu đó vào mười nhóm theo điểm thì bức tranh đổi hẳn: lợi suất thực tế trung bình leo từ khoảng âm 0,26 ở nhóm thấp nhất lên dương 0,20 ở nhóm cao nhất, tính theo đơn vị một độ lệch chuẩn của lợi suất tháng. Decile đầu hơn decile cuối 0,47. Có hai cách chấm chuẩn:
+
+- **Rank IC** (information coefficient): tương quan hạng Spearman giữa điểm và lợi suất thực tế, tính qua các cổ phiếu của một tháng. Ở đây là 0,12. Vì dùng thứ hạng, một cổ phiếu tăng 40% không kéo con số đi lung tung.
+- **Decile spread**: lợi suất trung bình của 10% cao nhất trừ 10% thấp nhất, tức danh mục long-short mà Gu, Kelly và Xiu báo cáo.
+
+Rank IC tính một lần mỗi tháng, nên một mô hình có cả chuỗi IC, và chính chuỗi đó mới là thứ đem đi kiểm định (Mục 5). Việt Nam thêm một điểm thực tế. VN30 chỉ có 30 mã, nên một decile là ba mã, và chỉ một mã sai là spread lệch đi nhiều. Universe rộng hơn như các mã niêm yết trên HOSE cho decile ít nhiễu hơn, đổi lại phần đáy danh sách thanh khoản có những mã mỏng, khó giao dịch.
+
+<AtP08Pipeline />
+
+Pipeline khá ngắn. Feature biết được cuối tháng đi vào, mô hình cho mỗi cổ phiếu một điểm, bạn sắp xếp, rồi nhóm đầu được giao cho bước dựng danh mục, chặng kế tiếp của series. Nhãn chỉ xuất hiện lúc huấn luyện. Chương trình của 51labs xếp việc này dưới tên "Predict-then-rank portfolio", cùng một ý tưởng.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Rank IC**: trung bình theo tháng của tương quan Spearman giữa điểm của mô hình và lợi suất xảy ra sau đó. 0 là không có năng lực.
+- **Decile**: một phần mười số cổ phiếu sau khi sắp xếp. Decile 10 là nhóm điểm cao nhất.
+- **Long-short**: mua nhóm đầu và bán khống nhóm cuối, nên hướng đi của thị trường tự triệt tiêu.
+
+</Concepts>
+
+---
+
+## 2. Nhãn: bạn yêu cầu mô hình dự đoán gì
+
+Mô hình học đúng cái nhãn nói, nên nhãn là quyết định thiết kế đầu tiên. Có ba lựa chọn đáng kể.
+
+**Chân trời (horizon).** Một tháng, ba tháng, sáu mươi phiên. Numerai, một cuộc thi khoa học dữ liệu dựng trên dữ liệu cổ phiếu, huấn luyện trên target đo hiệu suất của cổ phiếu so với era của nó (một thời điểm), đã loại bỏ các phơi nhiễm thị trường, quốc gia, ngành và factor. Target mặc định của họ nhìn trước 60 ngày làm việc. Chân trời dài thì mượt hơn, vì nhãn ít nhiễu hơn. Nó cũng khiến các dòng chồng lên nhau, đó là cái bẫy bên dưới.
+
+**Tương đối hay thô.** Nhãn lợi suất thô buộc mô hình đoán xem cả thị trường có tăng không. Nhãn lợi suất tương đối so với các cổ phiếu khác cùng tháng chỉ đặt đúng câu hỏi mà việc xếp hạng cần. Tài liệu Numerai dặn coi một era là một điểm dữ liệu; cùng thói quen đó dùng được cho mọi tháng: so cổ phiếu với tháng của nó, đừng so với các tháng khác.
+
+**Feature.** Nghiên cứu momentum chuỗi thời gian của 51labs trên 60 cổ phiếu thanh khoản nhất Việt Nam, dữ liệu tuần, thấy lợi suất quá khứ có ý nghĩa ở độ trễ khoảng hai và sáu tuần, rồi đổi dấu âm từ khoảng mười tuần trở đi. Những feature kiểu đó, lợi suất quá khứ nhiều cửa sổ, là input điển hình, bên cạnh các thước đo định giá và thanh khoản từ bài Dữ liệu. Mọi feature phải biết được tại cuối tháng, theo các quy tắc point-in-time của bài Dữ liệu.
+
+Việt Nam thêm một chi tiết ở phía nhãn. HOSE giới hạn biên độ trong ngày của cổ phiếu ở 7% quanh giá tham chiếu (quy chế giao dịch của HOSE có hiệu lực từ 5/7/2021). Nhãn lợi suất một ngày vì thế bị chặn, và một mã kẹt ở giá trần che mất việc nó lẽ ra đi được bao xa. Nhãn nhiều tuần tránh được phần nào, còn điểm dựa trên thứ hạng thì không bận tâm vài giá trị bị chặn.
+
+<AtP08LabelOverlap />
+
+Giờ tới cái bẫy. Lấy các dòng theo tháng và nhãn ba tháng. Nhãn của dòng 1 phủ tháng 2 tới 4 và nhãn của dòng 2 phủ tháng 3 tới 5, nên hai trong ba tháng của nhãn là trùng nhau. Các dòng không phải năm ví dụ độc lập. Chúng gần với một sự thật bị đếm nhiều lần. Một mô hình thấy dòng 1 lúc huấn luyện rồi bị test trên dòng 2 là đã thấy gần hết đáp án.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Horizon (chân trời)**: nhãn nhìn trước bao xa.
+- **Overlapping labels (nhãn chồng nhau)**: nhãn của các dòng liền kề phủ một phần cùng giai đoạn, nên các dòng tương quan với nhau.
+- **Era**: cách Numerai gọi một thời điểm; mọi cổ phiếu trong một era được so với nhau.
+
+</Concepts>
+
+---
+
+## 3. Tree và forest
+
+Decision tree là một danh sách câu hỏi có hoặc không. "Lợi suất sáu tuần có trên trung vị không? Nếu có, cổ phiếu có rẻ theo giá trị sổ sách không?" Mỗi câu trả lời đẩy cổ phiếu xuống một nhánh, và mỗi lá giữ một điểm số. Tree không cần công thức và không cần chuẩn hóa thang đo, và tìm được tương tác ngay từ cách xây: một cổ phiếu rẻ và đang tăng có thể điểm khác một cổ phiếu rẻ và đang giảm, điều mà một đường thẳng không nói được. Đó là lý do Gu, Kelly và Xiu thấy tree và neural network đứng đầu.
+
+<AtP08GkxBars />
+
+Điểm yếu cũng có sẵn như vậy. Cho mọc tới khi mỗi lá chỉ giữ một cổ phiếu, cây khớp hoàn hảo dữ liệu huấn luyện, nhiễu cũng khớp luôn. Giả sử 60 điểm nằm quanh một đường đi lên, y = 0,6x, với nhiễu to bằng tín hiệu.
+
+<AtP08Staircase />
+
+Cây độ sâu 2 vẽ bốn bậc đi theo xu hướng. Cây mọc tới 60 lá chạm vào mọi chấm, đạt tương quan hạng 1,00 trên các điểm đã thấy, rồi 0,40 trên điểm mới, thấp hơn 0,54 của cây nông.
+
+Có hai ý tưởng chữa việc này, và cả hai đều thay một cây mong manh bằng nhiều cây.
+
+<AtP08Ensemble />
+
+**Random forest** huấn luyện hàng trăm cây sâu, mỗi cây trên một mẫu hàng và một tập cột ngẫu nhiên, rồi lấy trung bình điểm. Mỗi cây overfit theo hướng riêng của nó, nên trung bình giữ lại phần chúng đồng thuận. **Boosting** đi hướng ngược lại: huấn luyện các cây nông lần lượt, mỗi cây khớp phần các cây trước làm sai, rồi cộng các bước nhỏ lại. Cả hai được dùng rộng rãi trên dữ liệu bảng; trong tài chính, cả hai đi kèm một luật nữa: tinh chỉnh trên một khối validation xếp theo thời gian, không bao giờ trên khối bị xáo trộn.
+
+Thử trên panel mô phỏng bên dưới: 200 cổ phiếu, 120 tháng, tín hiệu thật là một phần tuyến tính theo một feature cộng tương tác giữa hai feature khác. Train trên 80 tháng, test trên 40 tháng cuối.
+
+<AtP08TreeDepthDemo />
+
+Với một cây, độ sâu 1 tới 3 cho khoảng 0,05. Không giới hạn độ sâu thì cây đạt 0,434 trên các tháng đã học và 0,001 trên các tháng chưa học. Rừng đạt đỉnh khoảng 0,062 quanh độ sâu 8 và vẫn ở gần 0,057 khi không giới hạn gì. Lấy trung bình không xóa được overfit, nhưng giữ lại phần lớn năng lực. Độ sâu chỉ là một hyperparameter trong số nhiều cái khác, như số cây, kích thước lá tối thiểu và learning rate của boosting; điều demo muốn nói là con số trên tháng chưa thấy mới là thứ để chọn theo.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Decision tree (cây quyết định)**: các câu hỏi có/không lồng nhau trên feature, kết thúc ở những lá giữ một điểm số.
+- **Random forest (rừng ngẫu nhiên)**: nhiều cây sâu huấn luyện trên các tập hàng và cột ngẫu nhiên; điểm cuối là trung bình của chúng.
+- **Boosting**: các cây nông được thêm vào từng cái, mỗi cái sửa lỗi của tổng đã có.
+- **Overfitting (khớp quá mức)**: mô hình đã học cả nhiễu của dữ liệu huấn luyện và chấm kém hơn trên dữ liệu mới.
+
+</Concepts>
+
+---
+
+## 4. Leakage: khi bài test không còn là bài test
+
+Leakage nghĩa là thông tin từ giai đoạn test lọt vào mô hình trong lúc huấn luyện. Kapoor và Narayanan khảo sát các bài báo trong những lĩnh vực đã dùng machine learning và thấy lỗi do leakage ở 17 lĩnh vực, ảnh hưởng 329 bài báo. Ở một lĩnh vực, dự đoán nội chiến, người ta từng tin các mô hình phức tạp vượt hồi quy logistic một khoảng lớn; các bài báo tuyên bố điều đó đều không tái lập được vì leakage, và mô hình phức tạp không tốt hơn hồi quy logistic một cách đáng kể. Trên thị trường, các dạng thường gặp là:
+
+- **Chia ngẫu nhiên** các dòng có thứ tự thời gian, nên mô hình học trên những tháng nằm sau tháng nó bị test.
+- **Nhãn chồng nhau** qua ranh giới train và test (Mục 2).
+- **Feature chưa biết được lúc đó**, như một con số bị soát xét lại nhiều tháng sau (bài Dữ liệu).
+- **Chuẩn hóa hoặc chọn feature trên toàn bộ mẫu**, nên giai đoạn test tham gia định hình bước huấn luyện.
+
+<AtP08Splits />
+
+Cách sửa chuẩn là chia walk-forward: train trên quá khứ, test trên phần theo sau. TimeSeriesSplit của scikit-learn dựng sẵn kiểu chia này, và tham số gap bỏ đi chừng đó mẫu ngay trước mỗi tập test. Với nhãn chồng nhau, purging của López de Prado loại mọi quan sát train có nhãn chồng về thời gian với một nhãn test, còn embargo loại các quan sát ngay sau tập test, vì feature tài chính có tương quan chuỗi. Thư viện skfolio cài đặt cả hai. Quy tắc ngón tay: khoảng gap ít nhất dài bằng chân trời của nhãn.
+
+Đây là kết quả trên panel mô phỏng: 200 cổ phiếu, 120 tháng, feature bền theo từng tháng, nhãn ba tháng, một random forest 100 cây sâu.
+
+<AtP08LeakGap />
+
+Chấm trên chính các dòng đã học, forest đạt rank IC 0,407. Cross-validation 5 fold ngẫu nhiên báo 0,163. Walk-forward, train 80 tháng và test 40 tháng cuối, báo 0,091, và purge ba tháng đổi nó thành 0,090. Chia ngẫu nhiên báo gấp khoảng 1,8 lần con số thật, vì với mỗi dòng test luôn có một tháng sát bên của cùng cổ phiếu, feature gần như y hệt và nhãn chồng lên, nằm sẵn trong tập train. Không ai làm gì thiếu trung thực. Purge ở đây đổi ít chỉ vì ranh giới chỉ chạm vài dòng trong tập train 80 tháng. Chân trời dài hơn hay ít tháng hơn thì ảnh hưởng lớn lên.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Leakage (rò rỉ)**: thông tin từ giai đoạn test lọt vào mô hình lúc huấn luyện, khiến điểm test lạc quan.
+- **Walk-forward**: train trên quá khứ, test trên giai đoạn kế sau, rồi trượt tiếp.
+- **Purge**: bỏ các dòng train có nhãn chồng sang giai đoạn test.
+- **Embargo**: bỏ các dòng train ngay sau giai đoạn test, vì feature có tương quan chuỗi.
+
+</Concepts>
+
+---
+
+## 5. Đánh giá kết quả
+
+Một mô hình cho bạn một rank IC mỗi tháng. Hãy đánh giá cả chuỗi, đừng dựa vào một con số.
+
+<AtP08IcStrip />
+
+Trong mô phỏng, 40 tháng chưa thấy cho IC trung bình 0,055, độ lệch chuẩn 0,076 và thống kê t là 4,6 (0,055 chia cho 0,076 trên căn bậc hai của 40). Bảy trong 40 tháng âm, và một mô hình đang chạy tốt trông đúng như vậy. Câu hỏi của bài Thống kê áp dụng thẳng vào đây: cách số 0 bao nhiêu sai số chuẩn, và sau khi đã thử bao nhiêu thứ. Nếu ai đó thử 200 bộ feature rồi báo bộ tốt nhất, cùng thống kê t đó có ý nghĩa kém đi nhiều.
+
+Gu, Kelly và Xiu thêm phần chi phí. Các danh mục neural network của họ quay vòng 110% tới 130% danh mục mỗi tháng. Decile spread trước chi phí nói rất ít về phần một tài khoản cá nhân ở Việt Nam giữ lại được, khi phải trả phí và chịu biên độ giá trong ngày. Chặng kế tiếp của series, Danh mục, biến điểm số thành tỷ trọng có tính tới những ma sát đó.
+
+Giờ là một tình huống bạn sẽ gặp. Một trợ lý AI fit một mô hình gradient boosting và gửi bản tóm tắt.
+
+<AtP08AiSummary />
+
+Dòng nào cũng hợp lý, và dòng nào cũng giấu một lựa chọn. Fold xáo trộn trộn lẫn quá khứ và tương lai. Nhãn ba tháng đòi purge. Một tương quan không kèm số liệu theo tháng và số tháng thì không chấm được. Một decile spread bỏ qua chi phí chỉ là con số nghiên cứu. Hỏi bốn câu đó chỉ mất một phút. Bài kế tiếp, AI giải thích được, bàn câu hỏi đứng sau: một khi mô hình xếp một cổ phiếu cao, vì sao?
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Thống kê t của IC trung bình**: IC trung bình chia cho sai số chuẩn của nó (độ lệch chuẩn theo tháng trên căn bậc hai số tháng); nó cho biết trung bình cách số 0 bao nhiêu sai số chuẩn.
+- **Turnover (vòng quay danh mục)**: tỷ lệ danh mục được giao dịch mỗi kỳ; vòng quay càng cao thì chi phí càng lớn.
+
+</Concepts>
+
+---
+
+## Điểm rút ra (Key takeaways)
+
+- **Thứ tự mới là sản phẩm**: mô hình giải thích 0,4% phương sai lợi suất vẫn có thể xếp hạng đủ tốt để sinh lời, vì danh mục chỉ dùng thứ tự.
+- **Chấm bảng xếp hạng theo tháng**: rank IC mỗi tháng và decile spread, rồi kiểm định cả chuỗi xem có đều không, thay vì tin một con số.
+- **Cây sâu thuộc lòng**: nó có thể đạt 0,43 trên các tháng đã học và 0,00 trên tháng mới; forest và boosting giữ lại nhiều năng lực hơn hẳn.
+- **Nhãn chồng nhau làm các dòng dính nhau**: nhãn ba tháng khiến các dòng tháng liền kề gần như bản sao.
+- **Test ở tương lai**: walk-forward với purge ít nhất bằng chân trời của nhãn; chia ngẫu nhiên đã đẩy kết quả cùng một mô hình từ 0,09 lên 0,16 ở đây.
+- **Hỏi bốn câu với mọi bản tóm tắt**: fold chia thế nào, nhãn chồng nhau ra sao, con số có theo tháng không, và có trước chi phí không.
+
+## Câu hỏi ôn tập (Review questions)
+
+1. Vì sao một mô hình có R² 0,4% vẫn tạo ra danh mục long-short có lời trong thử nghiệm của Gu, Kelly và Xiu? *(Xem Mục 1)*
+2. Rank IC và decile spread mỗi cái đo gì, và vì sao rank IC ít nhạy với một cổ phiếu cực đoan hơn? *(Xem Mục 1)*
+3. Với dòng theo tháng và nhãn ba tháng, dòng 1 và dòng 2 dùng chung bao nhiêu tháng của nhãn? *(Xem Mục 2)*
+4. Vì sao một cây cho mọc tới khi mỗi lá chỉ một cổ phiếu lại đạt 1,00 trên các tháng đã học? *(Xem Mục 3)*
+5. Random forest làm giảm tác hại của overfitting thế nào, và boosting khác ra sao? *(Xem Mục 3)*
+6. Tham số gap của TimeSeriesSplit trong scikit-learn làm gì, và với nhãn ba tháng nó nên dài bao nhiêu? *(Xem Mục 4)*
+7. Trong panel mô phỏng, vì sao cross-validation 5 fold ngẫu nhiên báo 0,163 còn walk-forward báo 0,091? *(Xem Mục 4)*
+8. Một bản tóm tắt chỉ báo tương quan 0,16 và không gì thêm. Bạn hỏi những câu nào? *(Xem Mục 5)*
+
+## Đi sâu hơn (Go deeper)
+
+- **[Gu, Kelly & Xiu (2020), Empirical Asset Pricing via Machine Learning](https://dachxiu.chicagobooth.edu/download/ML.pdf)**: thử nghiệm lớn đứng sau phần mở bài, với R² ngoài mẫu của từng mô hình và các danh mục theo decile.
+- **[Kapoor & Narayanan, Leakage and the Reproducibility Crisis in ML-based Science](https://arxiv.org/abs/2207.07048)**: cách leakage thổi phồng kết quả đã công bố ở 17 lĩnh vực.
+- **[51Labs, Machine Learning for Financial Market](https://51labs.vn/vi/courses)**: chương trình có các buổi supervised learning, tree ensemble và predict-then-rank mà bài này đi theo.
+- **[Tài liệu dữ liệu của Numerai](https://docs.numer.ai/numerai-tournament/data)**: một bộ dữ liệu thật dựng quanh era và target tương đối, đọc miễn phí.
+
+</Vi>

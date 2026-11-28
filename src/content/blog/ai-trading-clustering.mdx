@@ -1,0 +1,425 @@
+---
+title: "Clustering"
+title_vi: "Phân cụm"
+description: "How to group assets by how they move together: correlation as distance, dendrograms, hierarchical risk parity, and a 51Labs run on VN100. Post 10 of the AI-trading series."
+description_vi: "Cách gom tài sản theo cách chúng di chuyển cùng nhau: đổi tương quan thành khoảng cách, dendrogram và hierarchical risk parity, kèm một lần chạy của 51Labs trên VN100. Bài 10 của series AI trong chứng khoán."
+date: 2026-11-28
+category: "ai"
+tags: ["ai", "ai-trading", "clustering", "portfolio"]
+cover: "../../assets/blog/ai-trading-clustering/haeckel-tree-of-life.png"
+cover_alt: "Ernst Haeckel's 1866 family tree of living things: three tall trees labelled Plantae, Protista and Animalia, each branching into labelled groups"
+draft: true
+sources:
+  - { title: "Community detection for VN100 (51Labs blog, 19 May 2025)", author: "51labs", url: "https://51labs.vn/vi/blog/community-detection-for-vn100" }
+  - { title: "Optimal Versus Naive Diversification: How Inefficient is the 1/N Portfolio Strategy? (Review of Financial Studies 22(5), 2009)", author: "Victor DeMiguel, Lorenzo Garlappi & Raman Uppal", url: "https://econpapers.repec.org/RePEc:oup:rfinst:v:22:y:2009:i:5:p:1915-1953" }
+  - { title: "Hierarchical structure in financial markets (European Physical Journal B 11, 1999; arXiv cond-mat/9802256)", author: "Rosario N. Mantegna", url: "https://arxiv.org/abs/cond-mat/9802256" }
+  - { title: "Hierarchical Risk Parity (Wikipedia; summarises Lopez de Prado, 'Building Diversified Portfolios that Outperform Out of Sample', Journal of Portfolio Management 42(4), 2016)", author: "Wikipedia", url: "https://en.wikipedia.org/wiki/Hierarchical_Risk_Parity" }
+  - { title: "An Introduction to the Hierarchical Risk Parity Algorithm", author: "Hudson & Thames", url: "https://hudsonthames.org/an-introduction-to-the-hierarchical-risk-parity-algorithm/" }
+  - { title: "Clustering (scikit-learn user guide)", author: "scikit-learn", url: "https://scikit-learn.org/stable/modules/clustering.html" }
+  - { title: "Fisher transformation (Wikipedia)", author: "Wikipedia", url: "https://en.wikipedia.org/wiki/Fisher_transformation" }
+  - { title: "Machine Learning for Financial Market, course curriculum", author: "51labs", url: "https://51labs.vn/vi/courses" }
+  - { title: "Haeckel's 1866 tree of life (Haeckel arbol bn.png, public domain)", author: "Ernst Haeckel", url: "https://commons.wikimedia.org/wiki/File:Haeckel_arbol_bn.png" }
+---
+
+import En from '../../components/mdx/En.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import AtP10PairCount from '../../components/mdx/AtP10PairCount.astro';
+import AtP10CorrNoise from '../../components/mdx/AtP10CorrNoise.astro';
+import AtP10Distance from '../../components/mdx/AtP10Distance.astro';
+import AtP10Dendrogram from '../../components/mdx/AtP10Dendrogram.astro';
+import AtP10Linkage from '../../components/mdx/AtP10Linkage.astro';
+import AtP10Vn100 from '../../components/mdx/AtP10Vn100.astro';
+import AtP10HrpSteps from '../../components/mdx/AtP10HrpSteps.astro';
+import AtP10Bisection from '../../components/mdx/AtP10Bisection.astro';
+import AtP10OutOfSample from '../../components/mdx/AtP10OutOfSample.astro';
+import AtP10HrpDemo from '../../components/mdx/AtP10HrpDemo.astro';
+import heroHaeckel from '../../assets/blog/ai-trading-clustering/haeckel-tree-of-life.png';
+
+<En>
+
+<Figure src={heroHaeckel} alt="Ernst Haeckel's 1866 family tree of living things: three tall trees labelled Plantae, Protista and Animalia, each branching into labelled groups" caption="Haeckel's 1866 tree sorts living things into groups inside groups. A dendrogram of stocks does the same with price moves instead of anatomy." sourceTitle="Wikimedia Commons: Haeckel arbol bn.png (Ernst Haeckel, 1866, public domain)" sourceUrl="https://commons.wikimedia.org/wiki/File:Haeckel_arbol_bn.png" />
+
+> "None is consistently better than the 1-N rule in terms of Sharpe ratio, certainty-equivalent return, or turnover."
+> &mdash; *DeMiguel, Garlappi and Uppal*, on fourteen portfolio-optimisation models (2009)
+
+### A hundred stocks, and nobody told the computer the sectors
+
+In May 2025 51Labs ran a test on the 100 stocks of the VN100 index. They measured how every pair of stocks moved together, which makes 4,950 pairs, kept about 294 of the strongest links, and let two graph algorithms, Louvain and InfoMap, sort the stocks into groups. The algorithms were never given a list of sectors. HPG, HSG and NKG still landed together, and so did VCB, BID and CTG.
+
+Why would anyone want that? Because the usual way to turn a list of stocks into portfolio weights, Markowitz optimisation, leans on exactly that 4,950-number table, and it leans hard. DeMiguel, Garlappi and Uppal tested fourteen optimisation models on seven datasets. None beat the plain rule of putting the same amount in every stock. Estimation error ate the gains. Clustering is one answer: stop trusting thousands of noisy numbers one by one, and look for the few blocks they form.
+
+This post goes in order. First why the table is noisy, then how to turn it into distances and a tree, then what the tree finds on real data, and last how hierarchical risk parity turns the tree into weights. Nothing here is a recommendation to buy or sell anything.
+
+<Callout type="note" title="TL;DR">
+
+A correlation table for N stocks holds N(N-1)/2 numbers, each estimated from a short and noisy history, so portfolio maths that inverts it can swing wildly. Clustering turns the table into a tree: convert correlation to a distance, merge the closest groups step by step, and cut where the gap is long. On real Vietnamese data this recovers sectors such as steel and banks without being told them. Hierarchical risk parity (HRP) then gives each group a share by its calm, with no matrix inverse. In the paper's own simulation it beat Markowitz out of sample; in the run built for this post it only matched a simpler rule. The tree also depends on how much history you feed it, so check it before you trust it.
+
+</Callout>
+
+<Concepts>
+
+- **Correlation**: a number from -1 to +1 saying how closely two stocks' daily returns move together. +1 means in step, 0 means unrelated, -1 means opposite.
+- **Cluster**: a group of assets that sit closer to each other than to the rest.
+- **Dendrogram**: a tree that shows which assets merge first and at what distance.
+- **Covariance matrix**: the table of how every pair of assets moves together, in units of return squared. Portfolio optimisers use it as their main input.
+
+</Concepts>
+
+---
+
+## 1. Too many pairs for too little history
+
+Plain version first: the more stocks you track, the faster the list of pairs grows, and the history you have does not grow with it.
+
+<AtP10PairCount />
+
+Twelve stocks have 66 pairs. A VN30-sized basket has 435. A hundred stocks have 4,950. Each pair needs its own correlation, and each correlation is measured on the same few hundred trading days. There is a harder limit too: if you have fewer days than stocks, the covariance matrix cannot be inverted at all, and Markowitz needs that inverse.
+
+Even when there are enough days, each single number is blurry. Say two stocks truly have a correlation of 0.3. A standard formula (the Fisher transform, with standard error 1/√(T-3) for T days) gives the range you should expect to measure.
+
+<AtP10CorrNoise />
+
+On 60 days the measured value can land anywhere from 0.05 to 0.52. The Statistics post gave the habit of asking how much luck is in a number; here the number is a correlation, and 60 days is a normal amount of history for a recent strategy. The optimiser treats each of those blurry numbers as exact, and it amplifies the errors. DeMiguel and co-authors estimated that, with parameters calibrated to US stocks, an optimiser needs around 3,000 months of data for 25 assets, and about 6,000 months for 50, before it reliably beats 1/N.
+
+<Concepts>
+
+- **Estimation error**: the gap between a number you measured from a short sample and its true value.
+- **1/N rule**: put the same amount in each of N assets. It estimates nothing, so it has no estimation error.
+- **Sample size (T)**: how many days of returns you measured on.
+
+</Concepts>
+
+## 2. From correlation to distance
+
+A clustering algorithm needs distances: small for things that belong together, large for things that do not. Correlation points the wrong way (high means close), so we flip it.
+
+<AtP10Distance />
+
+The usual conversion in the HRP literature is d = √(½(1-ρ)). Two identical assets get 0, two exact opposites get 1. The 51Labs VN100 code uses √(2(1-ρ)), which is the same formula multiplied by 2, so every ranking of "who is closest" is identical. There is a tidy reason for the square root: d equals the straight-line distance between the two standardised return series, divided by 2√T. That means ordinary geometric clustering methods apply, which matters for the Ward rule below.
+
+One consequence is easy to miss. A stock with a strong negative correlation is far away, not close. A hedge pair does not end up in one cluster; it ends up on opposite sides of the tree.
+
+<Concepts>
+
+- **Standardised series**: a return series shifted to average zero and scaled to standard deviation one, so only its shape is left.
+- **Distance**: a number that is 0 for identical things and grows as they differ.
+
+</Concepts>
+
+## 3. Building the tree
+
+Plain version: start with every stock alone. Find the two closest, merge them into a group, then repeat with the groups until one group is left. The record of merges is the tree. This is agglomerative hierarchical clustering.
+
+The other common method is k-means. It asks you for the number of clusters in advance and minimises the squared distance to each cluster's centre. scikit-learn's guide notes that it assumes clusters are convex and round, and that it responds poorly to elongated shapes. The tree asks for no number up front, and it shows you every level of grouping at once. That is why finance papers lean on it.
+
+Here is the tree for 12 simulated stocks. Say there are three sectors of four stocks each, built from one market factor, one sector factor and noise, with 250 days of returns.
+
+<AtP10Dendrogram />
+
+Heights between 0.35 and 0.41 are stocks joining their own sector. The next merges happen at 0.99 and 1.06. The long empty stretch between them is the sign to cut, and a cut at 0.7 returns the three sectors exactly.
+
+When two groups merge, the rule for "distance between groups" matters. Single linkage uses the closest pair. Complete uses the farthest. Average uses the mean. Ward uses the rise in within-group spread. The scikit-learn guide says single linkage gives the most uneven cluster sizes and Ward the most regular. Short history shows why.
+
+<AtP10Linkage />
+
+With only 20 days, one noisy pair of a steel stock and a bank stock is enough for single linkage to chain two sectors together. Ward and average, which weigh the whole group, still find the three sectors. With 60 days or more every rule worked in this run. The demo further down lets you flip between them.
+
+<Concepts>
+
+- **Linkage**: the rule for measuring the distance between two groups, not two single assets.
+- **Chaining**: single linkage joining groups through one close pair, producing long stringy clusters.
+- **k-means**: a clustering method that needs the number of clusters first and fits round blobs.
+
+</Concepts>
+
+## 4. What groups look like on real data
+
+Rosario Mantegna did this in 1999 on US stocks. He took the daily closing prices of the 30 Dow Jones stocks, and of 443 stocks in the S&P 500, from July 1989 to October 1995, built a tree from their correlations, and checked the result against what the companies do. In the Dow he found oil companies (Chevron, Texaco, Exxon), raw materials (Alcoa, International Paper) and consumer goods and food and drink (Procter & Gamble, Coca-Cola) together, with no sector label in the input. In the larger sample the groups matched industries such as oil, utilities and telecoms, and metals and packaging.
+
+The Vietnamese run is the one from the start of the post.
+
+<AtP10Vn100 />
+
+51Labs filtered the 4,950 pairs down to about 294 links, found 7 groups with Louvain and 9 with InfoMap (read from their sample portfolio), then bought the best Sharpe-ratio stock of each group with equal weights, rebalancing every 60 days. InfoMap reported a Sharpe ratio of 0.90 against 0.63 for the VN-Index, and a maximum drawdown of -42.85% against -40.34%. The post does not give the test period or trading costs, and the author says to combine the method with other analysis. Louvain sometimes put banks together with financial and insurance firms, which the author counts as a weakness.
+
+Read the figure for what it shows: the groups are plausible and recover sectors. The return numbers are one backtest with an unstated period, and they are not evidence of an edge. Graph methods like Louvain and InfoMap get their own post later in the series.
+
+<Concepts>
+
+- **Sharpe ratio**: return above the risk-free rate divided by volatility. Higher means more return per unit of ups and downs.
+- **Drawdown**: the fall from a peak to the next low point.
+- **Community detection**: clustering done on a network of links between assets instead of on a distance table.
+
+</Concepts>
+
+## 5. From tree to weights: hierarchical risk parity
+
+Marcos Lopez de Prado proposed hierarchical risk parity (HRP) in 2016. It builds weights from the tree and never inverts the covariance matrix, and it needs no forecast of expected returns.
+
+<AtP10HrpSteps />
+
+Step 1 is the tree you already have. Step 2 reorders the covariance table so that similar stocks sit next to each other. Step 3 splits that ordered list in half, measures how risky each half is, and gives the calmer half the larger share, in inverse proportion to variance. Then it repeats inside each half until every stock has a weight. On the 12 simulated stocks it looks like this.
+
+<AtP10Bisection />
+
+The calmer right half, with variance 1.04 against 2.15, gets 67.4%. Inside each half the split is repeated. Banks are the least volatile group in this simulation, so they end with 57.0% in total, retail 25.7% and steel 17.3%. One quirk is worth knowing: the split is at the middle of the ordered list, not at the top of the tree, so here it falls inside the steel group. The method still works that way in the original code as described by Hudson & Thames.
+
+Now try it yourself. The numbers come from the same simulation, and every weight below was cross-checked against a Python run.
+
+<AtP10HrpDemo />
+
+<Concepts>
+
+- **Inverse-variance portfolio**: weights proportional to 1 divided by each asset's variance. Calm assets get more.
+- **Quasi-diagonalisation**: reordering the covariance matrix by the tree so that large values gather along the diagonal.
+- **Risk parity**: a family of methods that spread risk, not money, across assets.
+
+</Concepts>
+
+## 6. Does it hold up out of sample?
+
+The paper's claim, summarised on Wikipedia, comes from a Monte Carlo test: 10 Gaussian return series, a 260-observation window, rebalancing every 22 observations, 10,000 repetitions. Out-of-sample variance came out at 0.1157 for the critical line algorithm (CLA, the Markowitz method), 0.0928 for inverse-variance and 0.0671 for HRP. Wikipedia also records that the result depends on the setup, and that in-sample CLA has the lowest variance. HRP's edge is an out-of-sample claim.
+
+I ran a similar check on the 12-stock simulation: 2,000 repetitions, weights estimated on 60 or 250 days, risk measured with the true covariance.
+
+<AtP10OutOfSample />
+
+Here HRP did not beat inverse-variance. At 60 days the minimum-variance portfolio, which does invert the matrix, was about 8% riskier than inverse-variance (1.095 against 1.016 daily volatility), and at 250 days it caught up (1.009 against 1.014). Equal weighting was the worst, since banks are calm and it ignores that. So the honest summary is narrower than the paper's headline. When estimates are short and noisy, simple rules that skip the inverse do well. HRP is one of those, and its advantage depends on the structure of the data. These are variances of simulated portfolios, and none of this says a strategy will earn money.
+
+## 7. What to check when an AI hands you a clustering
+
+Clustering has no right answer to compare against, so the checks are about stability and meaning.
+
+- **History length.** Re-run with half the days. If the groups change, the structure is mostly noise (section 1).
+- **Linkage and distance.** Try Ward and average beside single. If one rule gives a group of 40 and a group of 1, that is chaining (section 3).
+- **The cut.** Ask where the tree was cut and why. A gap like 0.41 to 0.99 is a reason; "five clusters" with no gap is a choice.
+- **Meaning.** Do the groups look like something real, such as sectors? A cluster that mixes steel and banks on 20 days of data is a symptom.
+- **Weights.** Check that no single stock or group takes most of the portfolio, and that the claimed gain is out of sample and not only in sample.
+
+Next in the series: Graphs treats the same table as a network, and Regime asks when the groups themselves change.
+
+## Key takeaways
+
+- **The table is the weak point**: N stocks give N(N-1)/2 correlations, each blurry on short history, so optimisers that invert it can swing wildly. *(Section 1)*
+- **Clustering needs a distance**: d = √(½(1-ρ)) is 0 for identical assets and 1 for opposites, so hedges sit far apart. *(Section 2)*
+- **The tree shows structure at every level**: merge the closest groups step by step and cut at a long gap, which gives the number of clusters without guessing it. *(Section 3)*
+- **Short history breaks linkage rules unevenly**: on 20 days single linkage chained sectors together while Ward found all three. *(Section 3)*
+- **Real data gives plausible groups**: Mantegna found oil and food groups in the Dow, and 51Labs found steel and bank groups in VN100. The return numbers are one backtest. *(Section 4)*
+- **HRP uses the tree, not the inverse**: the calmer half of each split gets more weight. In the paper's simulation it beat Markowitz; in the run here it matched inverse-variance. *(Sections 5 and 6)*
+
+## Review questions
+
+1. A basket holds 30 stocks. How many pairwise correlations does the optimiser need, and what happens to the covariance matrix if you have 25 days of returns? *(See Section 1)*
+2. Two stocks have a true correlation of 0.3. On 20 days, what range of measured values is plausible, and why does it matter for clustering? *(See Section 1)*
+3. Why is a strongly negatively correlated pair far apart in the distance d = √(½(1-ρ))? *(See Section 2)*
+4. The 51Labs code uses √(2(1-ρ)) and the HRP paper uses √(½(1-ρ)). Does the choice change which pair is closest? *(See Section 2)*
+5. What does k-means need before it starts, and what does a dendrogram need instead? *(See Section 3)*
+6. On 20 days of data single linkage gave groups of 7, 4 and 1 where Ward gave 4, 4 and 4. What mechanism explains this? *(See Section 3)*
+7. What did 51Labs not tell the algorithm in the VN100 test, and what did it find anyway? *(See Section 4)*
+8. In HRP, why does the calmer half get the larger share, and why is no matrix inverse needed? *(See Section 5)*
+9. In the 12-stock run, did HRP beat inverse-variance out of sample? What does that say about the paper's claim? *(See Section 6)*
+
+## Go deeper
+
+- **[51Labs: Community detection for VN100](https://51labs.vn/vi/blog/community-detection-for-vn100)**: the Vietnamese case of Section 4, with the code and the full results table.
+- **[Hudson & Thames: An Introduction to the Hierarchical Risk Parity Algorithm](https://hudsonthames.org/an-introduction-to-the-hierarchical-risk-parity-algorithm/)**: the three steps with the exact formulas.
+- **[Mantegna: Hierarchical structure in financial markets](https://arxiv.org/abs/cond-mat/9802256)**: the first tree built from stock correlations.
+- **[51Labs: Machine Learning for Financial Market](https://51labs.vn/vi/courses)**: the public curriculum, which includes clustering and a hierarchical risk parity project.
+
+</En>
+
+<Vi>
+
+<Figure src={heroHaeckel} alt="Cây phả hệ các loài sinh vật năm 1866 của Ernst Haeckel: ba cây cao mang nhãn Plantae, Protista và Animalia, mỗi cây tỏa thành các nhóm có tên" caption="Cây năm 1866 của Haeckel xếp sinh vật thành nhóm nằm trong nhóm. Dendrogram của cổ phiếu cũng làm vậy, chỉ khác là dùng biến động giá thay vì giải phẫu." sourceTitle="Wikimedia Commons: Haeckel arbol bn.png (Ernst Haeckel, 1866, public domain)" sourceUrl="https://commons.wikimedia.org/wiki/File:Haeckel_arbol_bn.png" />
+
+> "None is consistently better than the 1-N rule in terms of Sharpe ratio, certainty-equivalent return, or turnover."
+> &mdash; *DeMiguel, Garlappi và Uppal*, về mười bốn mô hình tối ưu danh mục (2009)
+
+### Một trăm cổ phiếu, và không ai nói cho máy biết ngành
+
+Tháng 5/2025, 51Labs chạy một thử nghiệm trên 100 cổ phiếu của VN100. Họ đo mức độ di chuyển cùng nhau của từng cặp cổ phiếu, tổng cộng 4.950 cặp, giữ lại khoảng 294 liên kết mạnh nhất, rồi để hai thuật toán đồ thị là Louvain và InfoMap tự chia nhóm. Hai thuật toán không hề được cho danh sách ngành. Vậy mà HPG, HSG và NKG vẫn rơi vào cùng một nhóm, VCB, BID và CTG cũng thế.
+
+Vì sao nên quan tâm? Vì cách thông thường để biến một danh sách cổ phiếu thành tỷ trọng danh mục, tối ưu hóa Markowitz, dựa chính vào bảng 4.950 con số đó, và dựa rất nặng. DeMiguel, Garlappi và Uppal thử mười bốn mô hình tối ưu trên bảy bộ dữ liệu. Không mô hình nào thắng được cách chia đều cho mọi cổ phiếu. Sai số ước lượng nuốt hết phần lợi. Phân cụm là một lời đáp: thôi không tin từng con số nhiễu trong hàng nghìn con số, mà tìm vài khối mà chúng hợp thành.
+
+Bài đi theo thứ tự. Trước hết là vì sao bảng đó nhiễu, rồi cách đổi nó thành khoảng cách và một cái cây, rồi cái cây tìm ra gì trên dữ liệu thật, và cuối cùng hierarchical risk parity biến cây thành tỷ trọng ra sao. Không điều nào ở đây là khuyến nghị mua hay bán bất cứ thứ gì.
+
+<Callout type="note" title="Tóm tắt nhanh">
+
+Bảng tương quan của N cổ phiếu có N(N-1)/2 con số, mỗi số ước lượng từ một đoạn lịch sử ngắn và nhiễu, nên phép toán danh mục có nghịch đảo bảng này dễ dao động mạnh. Phân cụm biến bảng thành một cái cây: đổi tương quan thành khoảng cách, nhập dần các nhóm gần nhất, và cắt ở chỗ có khoảng trống dài. Trên dữ liệu Việt Nam thật, cách này tìm lại các ngành như thép và ngân hàng mà không cần ai nói trước. Hierarchical risk parity (HRP) sau đó chia cho mỗi nhóm một phần theo độ êm của nó, không cần nghịch đảo ma trận. Trong mô phỏng của chính bài báo gốc, nó thắng Markowitz ngoài mẫu; trong lần chạy dựng cho bài này, nó chỉ ngang với một quy tắc đơn giản hơn. Cái cây còn phụ thuộc vào lượng lịch sử bạn đưa vào, nên hãy kiểm trước khi tin.
+
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Tương quan (correlation)**: con số từ -1 đến +1 cho biết lợi suất hằng ngày của hai cổ phiếu đi cùng nhau chặt đến đâu. +1 là đi cùng nhịp, 0 là không liên quan, -1 là ngược nhau.
+- **Cụm (cluster)**: nhóm tài sản gần nhau hơn so với phần còn lại.
+- **Dendrogram**: cái cây cho thấy tài sản nào nhập với nhau trước và ở khoảng cách nào.
+- **Ma trận hiệp phương sai (covariance matrix)**: bảng mô tả từng cặp tài sản di chuyển cùng nhau ra sao, theo đơn vị lợi suất bình phương. Các bộ tối ưu danh mục dùng nó làm đầu vào chính.
+
+</Concepts>
+
+---
+
+## 1. Quá nhiều cặp, quá ít lịch sử
+
+Nói thẳng trước: càng theo dõi nhiều cổ phiếu, danh sách cặp càng phình nhanh, còn lịch sử bạn có thì không phình theo.
+
+<AtP10PairCount />
+
+Mười hai cổ phiếu có 66 cặp. Một rổ cỡ VN30 có 435. Một trăm cổ phiếu có 4.950. Mỗi cặp cần một hệ số tương quan riêng, và mỗi hệ số đều đo trên cùng vài trăm phiên giao dịch ấy. Còn một giới hạn cứng hơn: nếu số ngày ít hơn số cổ phiếu, ma trận hiệp phương sai không nghịch đảo được, mà Markowitz cần chính phép nghịch đảo đó.
+
+Ngay cả khi đủ ngày, từng con số cũng vẫn mờ. Giả sử hai cổ phiếu thật sự có tương quan 0,3. Một công thức chuẩn (phép biến đổi Fisher, sai số chuẩn 1/√(T-3) với T ngày) cho biết khoảng bạn nên chờ đợi khi đo.
+
+<AtP10CorrNoise />
+
+Trên 60 ngày, giá trị đo được có thể rơi vào bất cứ đâu từ 0,05 đến 0,52. Bài Thống kê đã tập cho bạn thói quen hỏi trong một con số có bao nhiêu phần là may rủi; ở đây con số là tương quan, và 60 ngày là lượng lịch sử bình thường cho một chiến lược gần đây. Bộ tối ưu coi từng con số mờ đó là chính xác, rồi khuếch đại sai số. DeMiguel và các đồng tác giả ước tính, với tham số hiệu chỉnh theo cổ phiếu Mỹ, một bộ tối ưu cần khoảng 3.000 tháng dữ liệu cho 25 tài sản, và khoảng 6.000 tháng cho 50 tài sản, mới thắng 1/N một cách ổn định.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Sai số ước lượng (estimation error)**: chênh lệch giữa con số bạn đo từ một mẫu ngắn và giá trị thật của nó.
+- **Quy tắc 1/N**: bỏ số tiền bằng nhau vào mỗi tài sản trong N tài sản. Nó không ước lượng gì cả, nên không có sai số ước lượng.
+- **Cỡ mẫu (T)**: bạn đo trên bao nhiêu ngày lợi suất.
+
+</Concepts>
+
+## 2. Từ tương quan sang khoảng cách
+
+Thuật toán phân cụm cần khoảng cách: nhỏ với những thứ thuộc về nhau, lớn với những thứ không. Tương quan chỉ ngược hướng (cao nghĩa là gần), nên ta lật nó lại.
+
+<AtP10Distance />
+
+Phép đổi thường dùng trong tài liệu HRP là d = √(½(1-ρ)). Hai tài sản giống hệt nhau cho 0, hai tài sản đối nghịch hoàn toàn cho 1. Mã nguồn VN100 của 51Labs dùng √(2(1-ρ)), tức cùng công thức nhân với 2, nên mọi thứ hạng "ai gần ai nhất" đều y như nhau. Căn bậc hai có lý do gọn gàng: d bằng khoảng cách đường thẳng giữa hai chuỗi lợi suất đã chuẩn hóa, chia cho 2√T. Nghĩa là các phương pháp phân cụm hình học thông thường áp dụng được, điều này quan trọng với quy tắc Ward bên dưới.
+
+Có một hệ quả dễ bỏ sót. Cổ phiếu tương quan âm mạnh thì ở xa, không ở gần. Một cặp phòng hộ không rơi vào cùng một cụm; nó rơi vào hai phía đối diện của cái cây.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Chuỗi chuẩn hóa (standardised series)**: chuỗi lợi suất được dịch về trung bình không và co về độ lệch chuẩn một, để chỉ còn lại hình dáng của nó.
+- **Khoảng cách (distance)**: con số bằng 0 với những thứ giống hệt nhau và lớn dần khi chúng khác nhau.
+
+</Concepts>
+
+## 3. Dựng cái cây
+
+Nói thẳng trước: bắt đầu với mỗi cổ phiếu đứng một mình. Tìm hai mã gần nhất, nhập thành một nhóm, rồi lặp lại với các nhóm cho tới khi còn một nhóm. Bản ghi các lần nhập chính là cái cây. Đây là phân cụm phân cấp kiểu gộp dần (agglomerative hierarchical clustering).
+
+Phương pháp phổ biến còn lại là k-means. Nó đòi bạn cho trước số cụm và cực tiểu hóa bình phương khoảng cách tới tâm mỗi cụm. Hướng dẫn của scikit-learn ghi rằng nó giả định các cụm lồi và tròn đều, và hoạt động kém với hình dạng dài, méo. Cái cây không đòi số nào từ đầu, và cho bạn thấy mọi mức gom nhóm cùng lúc. Vì vậy các bài tài chính hay chuộng nó.
+
+Đây là cái cây của 12 cổ phiếu mô phỏng. Giả sử có ba ngành, mỗi ngành bốn mã, dựng từ một nhân tố thị trường, một nhân tố ngành và nhiễu, với 250 ngày lợi suất.
+
+<AtP10Dendrogram />
+
+Các độ cao từ 0,35 đến 0,41 là cổ phiếu nhập với chính ngành của mình. Các lần nhập tiếp theo diễn ra ở 0,99 và 1,06. Khoảng trống dài giữa hai mức là dấu hiệu để cắt, và nhát cắt ở 0,7 trả đúng ba ngành.
+
+Khi hai nhóm nhập lại, quy tắc đo "khoảng cách giữa các nhóm" rất quan trọng. Single linkage dùng cặp gần nhất. Complete dùng cặp xa nhất. Average dùng trung bình. Ward dùng mức tăng của độ phân tán trong nhóm. Hướng dẫn scikit-learn nói single linkage cho kích thước cụm lệch nhất còn Ward cho kích thước đều nhất. Lịch sử ngắn cho thấy vì sao.
+
+<AtP10Linkage />
+
+Chỉ với 20 ngày, một cặp nhiễu giữa một mã thép và một mã ngân hàng là đủ để single linkage nối hai ngành thành dây chuyền. Ward và average, vốn cân cả nhóm, vẫn tìm đúng ba ngành. Từ 60 ngày trở lên, mọi quy tắc đều chạy đúng trong lần này. Demo phía dưới cho bạn tự đổi qua lại.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Linkage (cách nối cụm)**: quy tắc đo khoảng cách giữa hai nhóm, không phải giữa hai tài sản đơn lẻ.
+- **Chaining (nối dây chuyền)**: single linkage nối các nhóm qua một cặp gần nhau, tạo ra những cụm dài lòng khòng.
+- **k-means**: phương pháp phân cụm cần biết số cụm trước và khớp các khối tròn.
+
+</Concepts>
+
+## 4. Nhóm trông ra sao trên dữ liệu thật
+
+Rosario Mantegna đã làm việc này năm 1999 trên cổ phiếu Mỹ. Ông lấy giá đóng cửa hằng ngày của 30 cổ phiếu Dow Jones, và của 443 cổ phiếu trong S&P 500, từ tháng 7/1989 đến tháng 10/1995, dựng cây từ tương quan của chúng, rồi đối chiếu kết quả với việc các công ty thực sự làm. Trong Dow, ông thấy các công ty dầu (Chevron, Texaco, Exxon), nguyên liệu thô (Alcoa, International Paper) và hàng tiêu dùng cùng đồ ăn thức uống (Procter & Gamble, Coca-Cola) nằm chung nhóm, dù đầu vào không có nhãn ngành nào. Ở mẫu lớn hơn, các nhóm khớp với những ngành như dầu khí, điện nước và viễn thông, kim loại và bao bì.
+
+Lần chạy ở Việt Nam là lần ở đầu bài.
+
+<AtP10Vn100 />
+
+51Labs lọc 4.950 cặp xuống còn khoảng 294 liên kết, tìm được 7 nhóm với Louvain và 9 nhóm với InfoMap (đọc từ danh mục mẫu của họ), rồi mua mã có Sharpe cao nhất của mỗi nhóm theo tỷ trọng đều, tái cân bằng mỗi 60 ngày. InfoMap báo Sharpe 0,90 so với 0,63 của VN-Index, và mức sụt giảm tối đa -42,85% so với -40,34%. Bài không nêu giai đoạn kiểm thử hay chi phí giao dịch, và tác giả dặn nên kết hợp phương pháp này với phân tích khác. Louvain đôi khi xếp ngân hàng chung với công ty tài chính và bảo hiểm, điều tác giả coi là điểm yếu.
+
+Hãy đọc hình đúng với những gì nó cho thấy: các nhóm hợp lý và tìm lại được các ngành. Các con số lợi suất là một backtest với giai đoạn không nêu, và chúng không phải bằng chứng về lợi thế. Các phương pháp đồ thị như Louvain và InfoMap có bài riêng ở phía sau series.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Tỷ số Sharpe (Sharpe ratio)**: lợi suất vượt lãi suất phi rủi ro, chia cho biến động. Càng cao nghĩa là mỗi đơn vị lên xuống cho nhiều lợi suất hơn.
+- **Sụt giảm (drawdown)**: mức rơi từ một đỉnh xuống đáy kế tiếp.
+- **Community detection (tìm cộng đồng)**: phân cụm làm trên mạng các liên kết giữa tài sản thay vì trên bảng khoảng cách.
+
+</Concepts>
+
+## 5. Từ cây sang tỷ trọng: hierarchical risk parity
+
+Marcos Lopez de Prado đề xuất hierarchical risk parity (HRP) năm 2016. Nó dựng tỷ trọng từ cái cây và không bao giờ nghịch đảo ma trận hiệp phương sai, cũng không cần dự báo lợi suất kỳ vọng.
+
+<AtP10HrpSteps />
+
+Bước 1 là cái cây bạn đã có. Bước 2 sắp lại bảng hiệp phương sai để các cổ phiếu giống nhau nằm cạnh nhau. Bước 3 chia đôi danh sách đã sắp, đo mỗi nửa rủi ro đến đâu, và cho nửa êm hơn phần lớn hơn, tỷ lệ nghịch với phương sai. Rồi lặp lại trong từng nửa cho đến khi mỗi cổ phiếu có một tỷ trọng. Trên 12 cổ phiếu mô phỏng, nó trông như sau.
+
+<AtP10Bisection />
+
+Nửa phải êm hơn, với phương sai 1,04 so với 2,15, nhận 67,4%. Trong mỗi nửa, phép chia lặp lại. Ngân hàng là nhóm ít biến động nhất trong mô phỏng này, nên tổng cộng nhận 57,0%, bán lẻ 25,7% và thép 17,3%. Có một điểm lạ nên biết: nhát chia nằm ở giữa danh sách đã sắp, không phải ở đỉnh cây, nên ở đây nó rơi vào trong nhóm thép. Mã gốc theo mô tả của Hudson & Thames vẫn làm đúng như vậy.
+
+Giờ tự thử đi. Các con số lấy từ cùng mô phỏng đó, và mọi tỷ trọng bên dưới đã được đối chiếu với một lần chạy Python.
+
+<AtP10HrpDemo />
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Danh mục nghịch đảo phương sai (inverse-variance)**: tỷ trọng tỷ lệ với 1 chia cho phương sai của từng tài sản. Tài sản êm được nhiều hơn.
+- **Quasi-diagonalisation (sắp lại ma trận)**: sắp lại ma trận hiệp phương sai theo cây để các giá trị lớn dồn về đường chéo.
+- **Risk parity**: họ phương pháp chia rủi ro, chứ không chia tiền, đều cho các tài sản.
+
+</Concepts>
+
+## 6. Ngoài mẫu có trụ được không?
+
+Khẳng định của bài báo, như Wikipedia tóm tắt, đến từ một thử nghiệm Monte Carlo: 10 chuỗi lợi suất Gaussian, cửa sổ 260 quan sát, tái cân bằng mỗi 22 quan sát, lặp 10.000 lần. Phương sai ngoài mẫu ra 0,1157 với critical line algorithm (CLA, phương pháp Markowitz), 0,0928 với nghịch đảo phương sai và 0,0671 với HRP. Wikipedia cũng ghi rằng kết quả phụ thuộc thiết lập, và trong mẫu thì CLA có phương sai thấp nhất. Lợi thế của HRP là một khẳng định ngoài mẫu.
+
+Mình chạy một phép kiểm tương tự trên mô phỏng 12 cổ phiếu: lặp 2.000 lần, ước lượng tỷ trọng trên 60 hoặc 250 ngày, đo rủi ro bằng hiệp phương sai thật.
+
+<AtP10OutOfSample />
+
+Ở đây HRP không thắng nghịch đảo phương sai. Ở 60 ngày, danh mục phương sai tối thiểu, vốn có nghịch đảo ma trận, rủi ro hơn nghịch đảo phương sai khoảng 8% (biến động ngày 1,095 so với 1,016), và ở 250 ngày nó bắt kịp (1,009 so với 1,014). Chia đều là tệ nhất, vì ngân hàng êm mà cách này bỏ qua điều đó. Nên bản tóm tắt trung thực hẹp hơn tiêu đề của bài báo. Khi ước lượng ngắn và nhiễu, các quy tắc đơn giản bỏ qua phép nghịch đảo chạy khá tốt. HRP là một trong số đó, và lợi thế của nó phụ thuộc cấu trúc dữ liệu. Đây là phương sai của các danh mục mô phỏng, và không điều nào nói rằng một chiến lược sẽ kiếm được tiền.
+
+## 7. Cần kiểm gì khi AI đưa bạn một kết quả phân cụm
+
+Phân cụm không có đáp án đúng để so, nên các phép kiểm xoay quanh tính ổn định và ý nghĩa.
+
+- **Độ dài lịch sử.** Chạy lại với nửa số ngày. Nếu nhóm đổi, cấu trúc phần lớn là nhiễu (mục 1).
+- **Cách nối và khoảng cách.** Thử Ward và average bên cạnh single. Nếu một quy tắc ra một nhóm 40 mã và một nhóm 1 mã, đó là chaining (mục 3).
+- **Chỗ cắt.** Hỏi cây được cắt ở đâu và vì sao. Khoảng trống như từ 0,41 đến 0,99 là một lý do; "năm cụm" mà không có khoảng trống là một lựa chọn.
+- **Ý nghĩa.** Các nhóm có giống thứ gì có thật, như ngành, không? Một cụm trộn thép với ngân hàng trên 20 ngày dữ liệu là một triệu chứng.
+- **Tỷ trọng.** Xem có cổ phiếu hay nhóm nào chiếm phần lớn danh mục không, và phần lợi được tuyên bố là ngoài mẫu chứ không chỉ trong mẫu.
+
+Tiếp theo trong series: bài Đồ thị coi cùng bảng đó như một mạng lưới, còn bài Chu kỳ thị trường hỏi khi nào chính các nhóm đổi.
+
+## Điểm rút ra (Key takeaways)
+
+- **Cái bảng là điểm yếu**: N cổ phiếu cho N(N-1)/2 tương quan, mỗi số mờ trên lịch sử ngắn, nên các bộ tối ưu nghịch đảo nó dễ dao động mạnh. *(Mục 1)*
+- **Phân cụm cần một khoảng cách**: d = √(½(1-ρ)) bằng 0 với tài sản giống hệt và 1 với tài sản đối nghịch, nên các cặp phòng hộ ở xa nhau. *(Mục 2)*
+- **Cái cây cho thấy cấu trúc ở mọi mức**: nhập dần các nhóm gần nhất và cắt ở chỗ có khoảng trống dài, nhờ đó có số cụm mà không phải đoán. *(Mục 3)*
+- **Lịch sử ngắn làm các quy tắc nối hỏng không đều**: trên 20 ngày, single linkage nối dây chuyền các ngành còn Ward tìm đúng cả ba. *(Mục 3)*
+- **Dữ liệu thật cho nhóm hợp lý**: Mantegna tìm thấy nhóm dầu và thực phẩm trong Dow, 51Labs tìm thấy nhóm thép và ngân hàng trong VN100. Các con số lợi suất là một backtest. *(Mục 4)*
+- **HRP dùng cái cây, không dùng phép nghịch đảo**: nửa êm hơn của mỗi lần chia được nhiều trọng số hơn. Trong mô phỏng của bài báo nó thắng Markowitz; trong lần chạy ở đây nó ngang nghịch đảo phương sai. *(Mục 5 và 6)*
+
+## Câu hỏi ôn tập (Review questions)
+
+1. Một rổ có 30 cổ phiếu. Bộ tối ưu cần bao nhiêu hệ số tương quan theo cặp, và chuyện gì xảy ra với ma trận hiệp phương sai nếu bạn chỉ có 25 ngày lợi suất? *(Xem Mục 1)*
+2. Hai cổ phiếu có tương quan thật là 0,3. Trên 20 ngày, các giá trị đo được nằm trong khoảng nào là hợp lý, và điều đó quan trọng gì với phân cụm? *(Xem Mục 1)*
+3. Vì sao một cặp tương quan âm mạnh lại ở xa nhau trong khoảng cách d = √(½(1-ρ))? *(Xem Mục 2)*
+4. Mã 51Labs dùng √(2(1-ρ)) còn bài HRP dùng √(½(1-ρ)). Lựa chọn đó có làm đổi cặp nào gần nhất không? *(Xem Mục 2)*
+5. k-means cần gì trước khi bắt đầu, và dendrogram cần gì thay vào đó? *(Xem Mục 3)*
+6. Trên 20 ngày dữ liệu, single linkage cho các nhóm 7, 4 và 1 còn Ward cho 4, 4 và 4. Cơ chế nào giải thích điều này? *(Xem Mục 3)*
+7. Trong thử nghiệm VN100, 51Labs không nói gì với thuật toán, và nó vẫn tìm ra gì? *(Xem Mục 4)*
+8. Trong HRP, vì sao nửa êm hơn được phần lớn hơn, và vì sao không cần nghịch đảo ma trận? *(Xem Mục 5)*
+9. Trong lần chạy 12 cổ phiếu, HRP có thắng nghịch đảo phương sai ngoài mẫu không? Điều đó nói gì về khẳng định của bài báo? *(Xem Mục 6)*
+
+## Đi sâu hơn (Go deeper)
+
+- **[51Labs: Community detection for VN100](https://51labs.vn/vi/blog/community-detection-for-vn100)**: case Việt Nam ở Mục 4, kèm mã nguồn và bảng kết quả đầy đủ.
+- **[Hudson & Thames: An Introduction to the Hierarchical Risk Parity Algorithm](https://hudsonthames.org/an-introduction-to-the-hierarchical-risk-parity-algorithm/)**: ba bước với công thức đúng nguyên.
+- **[Mantegna: Hierarchical structure in financial markets](https://arxiv.org/abs/cond-mat/9802256)**: cái cây đầu tiên dựng từ tương quan cổ phiếu.
+- **[51Labs: Machine Learning for Financial Market](https://51labs.vn/vi/courses)**: chương trình công khai, trong đó có phân cụm và một dự án hierarchical risk parity.
+
+</Vi>
