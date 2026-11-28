@@ -43,14 +43,14 @@ export const QUIZ_DOMAIN: Record<string, QuizDomain> = {
   'ai-trading-the-market': 'code',
   'ai-trading-data': 'code',
   'ai-trading-signals': 'code',
-'ai-trading-statistics': 'code',
-'ai-trading-regime': 'code',
-'ai-trading-factors': 'code',
-'ai-trading-portfolio': 'code',
-'ai-trading-prediction': 'code',
-'ai-trading-explainable-ai': 'code',
-'ai-trading-clustering': 'code',
-'ai-trading-graphs': 'code',
+  'ai-trading-statistics': 'code',
+  'ai-trading-regime': 'code',
+  'ai-trading-factors': 'code',
+  'ai-trading-portfolio': 'code',
+  'ai-trading-prediction': 'code',
+  'ai-trading-explainable-ai': 'code',
+  'ai-trading-clustering': 'code',
+  'ai-trading-graphs': 'code',
   // UI/UX series (Refactoring UI): design judgement, so no AI-output questions
   'design-before-you-prompt': 'human',
   'visual-hierarchy-rank-before-you-style': 'human',
@@ -137,12 +137,12 @@ export const QUIZ_MATRIX: Record<string, 'v1' | 'v2'> = {
   'go-profiling-pprof-flamegraphs-off-cpu-continuous': 'v2', // 40 questions
   'go-three-rs-optimization-patterns-streaming-pooling': 'v2', // 40 questions
   'go-interview-questions-output-live-coding': 'v2', // 40 questions
-'ai-trading-statistics': 'v2', // 40 questions
-'ai-trading-regime': 'v2', // 40 questions
-'ai-trading-factors': 'v2', // 40 questions
-'ai-trading-portfolio': 'v2', // 40 questions
-'ai-trading-prediction': 'v2', // 40 questions
-'ai-trading-explainable-ai': 'v2', // 40 questions
-'ai-trading-clustering': 'v2', // 40 questions
-'ai-trading-graphs': 'v2', // 40 questions
+  'ai-trading-statistics': 'v2', // 40 questions
+  'ai-trading-regime': 'v2', // 40 questions
+  'ai-trading-factors': 'v2', // 40 questions
+  'ai-trading-portfolio': 'v2', // 40 questions
+  'ai-trading-prediction': 'v2', // 40 questions
+  'ai-trading-explainable-ai': 'v2', // 40 questions
+  'ai-trading-clustering': 'v2', // 40 questions
+  'ai-trading-graphs': 'v2', // 40 questions
 };
