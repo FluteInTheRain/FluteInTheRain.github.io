@@ -59,6 +59,9 @@ export const QUIZ_DOMAIN: Record<string, QuizDomain> = {
   'ai-trading-financial-nlp': 'code',
   'ai-trading-gnn': 'code',
   'ai-trading-reinforcement-learning': 'code',
+  'ai-trading-alpha': 'code',
+  'ai-trading-agents': 'code',
+  'ai-trading-investment-os': 'code',
   // UI/UX series (Refactoring UI): design judgement, so no AI-output questions
   'design-before-you-prompt': 'human',
   'visual-hierarchy-rank-before-you-style': 'human',
@@ -161,4 +164,7 @@ export const QUIZ_MATRIX: Record<string, 'v1' | 'v2'> = {
   'ai-trading-financial-nlp': 'v2', // 40 questions
   'ai-trading-gnn': 'v2', // 40 questions
   'ai-trading-reinforcement-learning': 'v2', // 40 questions
+  'ai-trading-alpha': 'v2', // 40 questions
+  'ai-trading-agents': 'v2', // 40 questions
+  'ai-trading-investment-os': 'v2', // 40 questions
 };
