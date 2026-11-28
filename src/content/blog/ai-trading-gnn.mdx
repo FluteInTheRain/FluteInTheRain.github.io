@@ -1,0 +1,388 @@
+---
+title: "GNN"
+title_vi: "GNN"
+description: "A graph neural network lets one stock borrow from the stocks tied to it. One paper's graph helped on NYSE and hurt on NASDAQ. Post 18 of the AI-trading series."
+description_vi: "Graph neural network cho một cổ phiếu mượn thông tin từ những mã nối với nó. Graph trong một bài báo giúp ở NYSE nhưng hại ở NASDAQ. Bài 18 của series AI trong chứng khoán."
+date: 2026-11-28
+category: "ai"
+tags: ["ai", "ai-trading", "graph-neural-network", "stock-ranking"]
+cover: "../../assets/blog/ai-trading-gnn/social-network-graph.png"
+cover_alt: "A dense network drawing: hundreds of blue circles of different sizes joined by thousands of thin lines, with a few large white circles at the centre"
+draft: true
+sources:
+  - { title: "Temporal Relational Ranking for Stock Prediction (ACM Transactions on Information Systems 37:2, 2019)", author: "Fuli Feng, Xiangnan He, Xiang Wang, Cheng Luo, Yiqun Liu, Tat-Seng Chua", url: "https://arxiv.org/abs/1809.09441" }
+  - { title: "Semi-Supervised Classification with Graph Convolutional Networks (ICLR 2017)", author: "Thomas N. Kipf, Max Welling", url: "https://arxiv.org/abs/1609.02907" }
+  - { title: "Graph Attention Networks (ICLR 2018)", author: "Petar Veličković, Guillem Cucurull, Arantxa Casanova, Adriana Romero, Pietro Liò, Yoshua Bengio", url: "https://arxiv.org/abs/1710.10903" }
+  - { title: "Deeper Insights into Graph Convolutional Networks for Semi-Supervised Learning (AAAI 2018)", author: "Qimai Li, Zhichao Han, Xiao-Ming Wu", url: "https://arxiv.org/abs/1801.07606" }
+  - { title: "Exploring Graph Neural Networks for Stock Market Predictions with Rolling Window Analysis (NeurIPS 2019 Workshop on Robust AI in Financial Services)", author: "Daiki Matsunaga, Toyotaro Suzumura, Toshihiro Takahashi", url: "https://arxiv.org/abs/1909.10660" }
+  - { title: "Community detection for VN100", author: "51labs", url: "https://51labs.vn/vi/blog/community-detection-for-vn100" }
+  - { title: "Machine Learning for Financial Market — course curriculum", author: "51labs", url: "https://51labs.vn/vi/courses" }
+  - { title: "Social Network Analysis Visualization (photo, CC BY-SA 3.0)", author: "Martin Grandjean", url: "https://commons.wikimedia.org/wiki/File:Social_Network_Analysis_Visualization.png" }
+---
+
+import En from '../../components/mdx/En.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import AtP18RsrResults from '../../components/mdx/AtP18RsrResults.astro';
+import AtP18GraphKinds from '../../components/mdx/AtP18GraphKinds.astro';
+import AtP18MessagePassing from '../../components/mdx/AtP18MessagePassing.astro';
+import AtP18GnnDemo from '../../components/mdx/AtP18GnnDemo.astro';
+import AtP18Attention from '../../components/mdx/AtP18Attention.astro';
+import AtP18OverSmoothing from '../../components/mdx/AtP18OverSmoothing.astro';
+import AtP18Pipeline from '../../components/mdx/AtP18Pipeline.astro';
+import AtP18PairLoss from '../../components/mdx/AtP18PairLoss.astro';
+import AtP18Snapshot from '../../components/mdx/AtP18Snapshot.astro';
+import AtP18BacktestRules from '../../components/mdx/AtP18BacktestRules.astro';
+import heroGraph from '../../assets/blog/ai-trading-gnn/social-network-graph.png';
+
+<En>
+
+<Figure src={heroGraph} alt="A dense network drawing: hundreds of blue circles of different sizes joined by thousands of thin lines, with a few large white circles at the centre" caption="Nodes and edges: the archive of the League of Nations drawn as a social network. A stock graph has the same two parts. What an edge should say is the hard part." sourceTitle="Wikimedia Commons: Social Network Analysis Visualization (photo by Martin Grandjean, CC BY-SA 3.0)" sourceUrl="https://commons.wikimedia.org/wiki/File:Social_Network_Analysis_Visualization.png" />
+
+> "...selecting only one stock from more than 1,000 is a highly risk operation."
+> &mdash; *Feng et al.*, "Temporal Relational Ranking for Stock Prediction" (2019)
+
+### One graph, two markets, opposite results
+
+Feng and colleagues built a model that ranks stocks each day and buys the one at the top. They ran it on two US markets: 1,026 NASDAQ stocks and 1,737 NYSE stocks, trained on 2013–2015, tuned on 2016 and tested on 2017. Then they added a graph. Every stock got edges to the stocks in its own industry, and a graph layer let each stock mix in what its neighbours were doing.
+
+On NYSE the graph helped. The return ratio of the plain model was 0.56; with the graph it went to between 0.97 and 1.06. On NASDAQ the same graph, built the same way, hurt: the plain model scored 0.68 and the three graph versions scored 0.24, 0.20 and 0.23.
+
+<AtP18RsrResults />
+
+The authors' guess is that industry ties describe long-run relationships, which fit a calm market like NYSE better than a volatile one like NASDAQ. That may be right. But look at the bars: the spread printed next to each number is as large as most of the gaps. This post is about what a graph neural network (GNN) can add to a stock model, and about how to read a result like this one without being carried along by it.
+
+<Callout type="note" title="TL;DR">
+
+A GNN gives each stock a way to borrow information from the stocks connected to it. One layer replaces a stock's features with an average over its neighbourhood; attention lets the stock weight its neighbours instead of counting them equally; stack too many layers and the stocks blur into each other. The edges are a choice you make (industry label, a knowledge base, return correlation), and that choice matters more than the architecture. In the main paper of this post, the same graph raised the return ratio on one market and lowered it on the other, the back-test ignored costs, and the Wikidata relations came from a snapshot taken after the test period. Nothing here is investment advice.
+
+</Callout>
+
+<Concepts>
+
+- **Graph**: a set of nodes (here, stocks) and edges (here, a reason two stocks might move together).
+- **GNN (graph neural network)**: a neural network whose layers pass information along the edges, so each node's output depends on its neighbours.
+- **Stock ranking**: predicting the order of stocks by next-day return instead of predicting each return exactly.
+
+</Concepts>
+
+---
+
+## 1. Edges are a choice
+
+A GNN needs a graph, and the data does not come with one. You decide what an edge means. Three common choices, each from a source in this post:
+
+<AtP18GraphKinds />
+
+Feng et al. used the first two. Industry labels came from the official NASDAQ company list: 112 types of industry relation on NASDAQ and 130 on NYSE, but less than 10% of stock pairs share any. The second source was Wikidata, the open knowledge base: statements such as "owned by" or "produces", plus second-order links where two companies point at the same item. That gave 42 and 32 relation types, but only 0.21% and 0.30% of pairs are connected. Rich, and almost empty.
+
+The third choice lets the returns draw the edges. The 51labs post on VN100, the 100 largest Vietnamese stocks, computes the correlation of returns between every pair, then keeps only the strongest non-crossing edges with a filter called a planar maximally filtered graph. For 100 stocks it keeps 294 edges out of 4,950 possible pairs. Steel names (HPG, HSG, NKG) end up in one community and the big banks (VCB, BID, CTG) in another. For HPG and HSG the weekly-return correlation they quote is 0.8; for HPG and BWE it is 0.2.
+
+That graph has a cost the label graph does not: it is estimated from a window of past returns, so it moves when the market regime moves (see the post on regimes), and a graph estimated on the whole sample leaks the future into every earlier day.
+
+<Concepts>
+
+- **Adjacency**: which pairs of nodes share an edge. A stock graph is usually stored as a matrix with a 1 where two stocks are linked.
+- **Knowledge base**: a database of facts as (subject, relation, object) statements, such as Wikidata.
+- **Community**: a group of nodes more tightly linked to each other than to the rest.
+
+</Concepts>
+
+## 2. One layer is an average
+
+The simplest graph layer is an average. Every stock replaces its own number with the mean of its own number and its neighbours' numbers. Say HPG had a one-day return of 3.0%, and its neighbours were HSG at 2.4%, NKG at 2.8% and BID at −0.2%. After one layer HPG holds (3.0 + 2.4 + 2.8 − 0.2) ÷ 4 = 2.0.
+
+<AtP18MessagePassing />
+
+Do that for all stocks at once and the ranking can change. In this toy graph HPG starts first at 3.0; after one layer HSG and NKG are first at 2.73 and HPG drops to 2.0, because its neighbour BID dragged it down. A stock's score now depends on who it is connected to. The graph convolutional network of Kipf and Welling (ICLR 2017) is this idea with a slightly different normalisation and a learned weight matrix, and its cost grows linearly with the number of edges.
+
+In a real model the numbers are not returns but learned vectors, one per stock, summarising its recent history. The averaging step is the same. The next section lets the stock choose its neighbours' weights, but first try the plain version.
+
+<AtP18GnnDemo />
+
+<Concepts>
+
+- **Message passing**: each node sends its current vector to its neighbours and updates itself from what it receives. One layer, one hop.
+- **GCN**: graph convolutional network, a message-passing layer that averages over the neighbourhood and then applies a learned linear map.
+- **Embedding**: a vector of numbers a model learns to represent something, here one stock.
+
+</Concepts>
+
+## 3. Attention picks neighbours
+
+An average treats every neighbour equally. That is rarely right: BID is a bank, and HPG is a steel maker that happens to be linked to it by a cross-link. A graph attention network (GAT, Veličković et al., ICLR 2018) computes a score for each neighbour from the features of both stocks, turns the scores into weights that add up to one, and takes a weighted sum.
+
+<AtP18Attention />
+
+In the toy example above the made-up scores give HPG itself 0.710 of the weight, and the weighted sum is 2.59 instead of 2.0. 2.59 is not necessarily better. What changes is that the weights are learned, so the model can find which ties carry information, at the price of more parameters to fit on very little signal. That price is a risk, and the series has already shown how a flexible model fits noise (see the post on signals).
+
+<Concepts>
+
+- **Attention weight**: how much a node listens to one particular neighbour; the weights of one node sum to 1.
+- **Softmax**: the function that turns any list of scores into positive weights that add up to 1.
+
+</Concepts>
+
+## 4. Depth washes out the signal
+
+Each layer reaches one hop further. Two layers let HPG hear about the neighbours of its neighbours. It is tempting to stack many. Li, Han and Wu (AAAI 2018) showed why that backfires: a graph convolution is a smoothing step, and repeated smoothing makes every node look like its neighbours, until all nodes look alike.
+
+<AtP18OverSmoothing />
+
+On the toy graph, the gap between the highest and lowest number falls from 4.50 with no layers to 2.97 after one, 1.65 after eight and 1.16 after twelve. All eight lines drift toward the same value, 1.00, which is the average over the whole graph weighted by how many neighbours each stock has. In the demo above, switch to "same group only" and one layer already makes HPG, HSG and NKG identical.
+
+For ranking this is bad in a specific way. You want to know which stock will do better than which, and the differences between stocks are exactly what smoothing removes. So the number of layers is a setting to tune on validation data, not something to maximise.
+
+## 5. From embeddings to a ranking
+
+Put the pieces in order. Feng et al. run a sequence model (an LSTM, covered in the post on sequence models) on each stock's recent history to get one vector per stock. A graph layer then mixes each vector with its neighbours. A last layer turns each vector into one score, and the stocks are sorted by score.
+
+<AtP18Pipeline />
+
+The loss tells the model what to care about. Their loss adds squared error on the next-day return to a pairwise term that charges for each pair of stocks whose order is wrong. Say the model predicts returns of 0.5, 0.2 and −0.1 for HPG, HSG and VCB, but the actual returns are 0.3, 0.6 and −0.2. Squared error sums to 0.21. The only pair out of order is HPG and HSG, and the pairwise term charges max(0, −(0.5 − 0.2)(0.3 − 0.6)) = 0.09 for it.
+
+<AtP18PairLoss />
+
+This matters because what you trade on is the order, not the size of each number. The authors report that the ranking version beat the same LSTM trained to predict returns directly. The pairwise term also gives you a number to watch that is closer to money than squared error.
+
+<Concepts>
+
+- **Learning to rank**: training a model to put items in the right order rather than to predict each item's value.
+- **Pairwise loss**: a penalty counted over pairs of items, charged when the model orders a pair opposite to the truth.
+
+</Concepts>
+
+## 6. Reading the evidence
+
+Back to the opening case, and four things worth checking in any GNN result.
+
+On the spread: Every number in Table 6 comes with a ± the authors print, and the graph bars overlap the no-graph bars on both markets. The authors say so themselves: the return ratio varies a lot between runs because daily returns of the top stock can reach 0.98, so a tiny swap of the top two stocks can shift the total. They also report that on NYSE their LSTM baseline scored −0.90 with the setting that won on validation, and 0.1 to 0.2 with others; "this result indicates the potential difference between validation and testing."
+
+On the back-test rules: The headline return is built from one bet a day on a single stock out of 1,000 or more, filled at the close, with transaction costs ignored.
+
+<AtP18BacktestRules />
+
+On the snapshot: Prices are split in time order, which is correct. But the Wikidata relations come from a dump dated 5 January 2018, a month after the test period ended, and the data section does not describe how relations changed from 2013 to 2017. A link that exists in the snapshot but did not exist in 2014 gives the model information it could not have had then. The post on data has the name for this: it is not point-in-time.
+
+<AtP18Snapshot />
+
+On the abstract: The abstract reports average return ratios of 98% on NYSE and 71% on NASDAQ for the best relational models. Look at what that is: the return of a single-stock daily strategy, on one year of test data, without costs, from a graph of unknown age.
+
+Other GNN papers raise the same flags. Matsunaga, Suzumura and Takahashi (NeurIPS 2019 workshop) built a supplier-relation graph for the Nikkei 225 and tested on about 20 years with a rolling window. They report a 6.32% higher return ratio and a 1.3 times higher Sharpe ratio than an LSTM, and call the results preliminary.
+
+A public Vietnamese example is the 51labs VN100 post. It does not predict prices; it uses the correlation graph to choose one stock per community, by Sharpe ratio over the past 300 days, and rebalances every 60 days. The reported table gives the Infomap version an annual return of 22.07 and a Sharpe ratio of 0.90, against 12.53 and 0.63 for the VN-Index, with a deeper maximum drawdown (−42.85 against −40.34). The post does not mention transaction costs, and the author recommends using it with other analysis. It shows structure in the market; it is one back-test, not proof.
+
+A short checklist for any GNN claim: Which edges, from which date? Was the graph built only from data before each prediction? What is the spread across runs? How much of the gain survives costs? And does the graph version beat the same model without a graph, on the same data, by more than that spread?
+
+<Concepts>
+
+- **Point-in-time**: using only what was known on the date of the decision. A graph snapshot from after that date is not point-in-time.
+- **Return ratio (IRR)**: the paper's cumulative investment return: the sum of daily returns of the bought stock, relative to the money spent each day.
+- **Rolling window**: re-fitting the model on a moving slice of the past and testing on the slice that follows.
+
+</Concepts>
+
+## Key takeaways
+
+- **The graph is the model's biggest assumption**: industry labels, a knowledge base and return correlation draw different edges, with very different coverage (5–9%, about 0.2–0.3%, and 294 of 4,950 pairs). *(Section 1)*
+- **One layer is an average over the neighbourhood**: a stock's score changes with the company it keeps, and the ranking can change after a single layer. *(Section 2)*
+- **Attention learns the weights**: more flexible, and more parameters to fit on a faint signal. *(Section 3)*
+- **Depth over-smooths**: stacking layers shrinks the differences between stocks that a ranking needs. *(Section 4)*
+- **Rank, do not regress**: a pairwise loss charges for wrong order, which is what a top-of-list strategy trades on. *(Section 5)*
+- **Read graph results with a checklist**: the spread across runs, the back-test rules, and the date of the graph matter as much as the headline return. *(Section 6)*
+
+## Review questions
+
+1. In Feng et al., the same industry graph moved the return ratio in opposite directions on NASDAQ and NYSE. Which numbers show this, and how big are the spreads next to them? *(See Section 6)*
+2. Industry labels connect 5.00% of NASDAQ pairs and Wikidata only 0.21%. What does each source miss? *(See Section 1)*
+3. Compute one layer for a stock with value 3.0 and neighbours at 2.4, 2.8 and −0.2. *(See Section 2)*
+4. How does attention differ from a plain average, and what does it cost? *(See Section 3)*
+5. Why do twelve stacked layers make a bad ranking model? *(See Section 4)*
+6. Two stocks are predicted 0.5 and 0.2 but happened at 0.3 and 0.6. What does the pairwise term charge, and what does squared error say? *(See Section 5)*
+7. The Wikidata dump is dated after the test period. What goes wrong, and what is the fix? *(See Section 6)*
+8. A paper reports a 98% average return ratio from a graph model. Which four questions do you ask before believing it? *(See Section 6)*
+
+## Go deeper
+
+- **[Feng et al. — Temporal Relational Ranking for Stock Prediction](https://arxiv.org/abs/1809.09441)**: the paper behind the opening case; the dataset and code are linked in section 4.
+- **[Kipf and Welling — Semi-Supervised Classification with Graph Convolutional Networks](https://arxiv.org/abs/1609.02907)** and **[Veličković et al. — Graph Attention Networks](https://arxiv.org/abs/1710.10903)**: the two layers this post describes, short and readable.
+- **[51Labs — Community detection for VN100](https://51labs.vn/vi/blog/community-detection-for-vn100)**: a graph on Vietnamese stocks, with the method written out step by step. The 51labs course also covers graph neural networks and stock ranking in its [public curriculum](https://51labs.vn/vi/courses).
+
+</En>
+
+<Vi>
+
+<Figure src={heroGraph} alt="Một hình mạng lưới dày đặc: hàng trăm vòng tròn xanh nhiều cỡ nối với nhau bằng hàng nghìn đường mảnh, vài vòng tròn trắng lớn ở giữa" caption="Nút và cạnh: kho lưu trữ của Hội Quốc Liên vẽ thành một mạng xã hội. Graph cổ phiếu cũng có đúng hai phần đó. Cạnh nên nói điều gì mới là phần khó." sourceTitle="Wikimedia Commons: Social Network Analysis Visualization (ảnh của Martin Grandjean, CC BY-SA 3.0)" sourceUrl="https://commons.wikimedia.org/wiki/File:Social_Network_Analysis_Visualization.png" />
+
+> "...selecting only one stock from more than 1,000 is a highly risk operation."
+> &mdash; *Feng et al.*, "Temporal Relational Ranking for Stock Prediction" (2019)
+
+### Một graph, hai thị trường, hai kết quả ngược nhau
+
+Feng và cộng sự dựng một mô hình xếp hạng cổ phiếu mỗi ngày rồi mua mã đứng đầu. Họ chạy trên hai thị trường Mỹ: 1.026 mã NASDAQ và 1.737 mã NYSE, huấn luyện trên 2013–2015, chỉnh tham số trên 2016 và kiểm tra trên 2017. Sau đó họ thêm một graph. Mỗi mã được nối với các mã cùng ngành, và một lớp graph cho mỗi mã trộn vào những gì láng giềng đang làm.
+
+Ở NYSE, graph có ích. Return ratio của mô hình trơn là 0,56; có graph thì lên khoảng 0,97 đến 1,06. Ở NASDAQ, cùng một graph dựng theo cùng một cách lại có hại: mô hình trơn đạt 0,68 còn ba phiên bản có graph đạt 0,24, 0,20 và 0,23.
+
+<AtP18RsrResults />
+
+Nhóm tác giả đoán rằng quan hệ ngành mô tả các mối liên hệ dài hạn, hợp với thị trường êm như NYSE hơn thị trường biến động như NASDAQ. Có thể đúng. Nhưng nhìn các thanh: độ lệch in cạnh mỗi con số lớn bằng phần lớn khoảng cách giữa chúng. Bài này nói về việc graph neural network (GNN) thêm được gì cho một mô hình cổ phiếu, và cách đọc một kết quả như trên mà không bị cuốn theo.
+
+<Callout type="note" title="Tóm tắt nhanh">
+
+GNN cho mỗi cổ phiếu một cách mượn thông tin từ những mã nối với nó. Một lớp thay đặc trưng của mã bằng trung bình trên vùng lân cận; attention cho mã tự đặt trọng số cho từng láng giềng thay vì đếm đều; chồng quá nhiều lớp thì các mã nhòe vào nhau. Cạnh là một lựa chọn của bạn (nhãn ngành, knowledge base, tương quan lợi suất), và lựa chọn đó quan trọng hơn kiến trúc. Trong bài báo chính của bài này, cùng một graph làm return ratio tăng ở một sàn và giảm ở sàn kia, backtest bỏ qua chi phí, và các quan hệ Wikidata lấy từ một ảnh chụp sau giai đoạn test. Không có gì ở đây là lời khuyên đầu tư.
+
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Graph (đồ thị)**: tập các nút (ở đây là cổ phiếu) và cạnh (ở đây là một lý do để hai mã có thể đi cùng nhau).
+- **GNN (graph neural network)**: mạng neural có các lớp truyền thông tin dọc theo cạnh, nên đầu ra của mỗi nút phụ thuộc vào láng giềng.
+- **Xếp hạng cổ phiếu (stock ranking)**: dự đoán thứ tự các mã theo lợi suất ngày kế tiếp thay vì dự đoán chính xác từng lợi suất.
+
+</Concepts>
+
+---
+
+## 1. Cạnh là một lựa chọn
+
+GNN cần một graph, mà dữ liệu không tự mang theo graph. Bạn quyết định cạnh nghĩa là gì. Ba lựa chọn phổ biến, mỗi cái có nguồn trong bài này:
+
+<AtP18GraphKinds />
+
+Feng và cộng sự dùng hai cái đầu. Nhãn ngành lấy từ danh sách công ty chính thức của NASDAQ: 112 loại quan hệ ngành ở NASDAQ và 130 ở NYSE, nhưng chưa tới 10% số cặp mã có chung bất kỳ quan hệ nào. Nguồn thứ hai là Wikidata, cơ sở tri thức mở: các phát biểu như "thuộc sở hữu của" hay "sản xuất", cộng thêm liên kết bậc hai khi hai công ty cùng trỏ vào một mục. Kết quả là 42 và 32 loại quan hệ, nhưng chỉ 0,21% và 0,30% số cặp được nối. Giàu thông tin mà gần như trống.
+
+Lựa chọn thứ ba để chính lợi suất vẽ cạnh. Bài VN100 của 51labs, về 100 mã lớn nhất Việt Nam, tính tương quan lợi suất giữa mọi cặp, rồi chỉ giữ các cạnh mạnh nhất không cắt nhau bằng một bộ lọc gọi là planar maximally filtered graph. Với 100 mã, nó giữ 294 cạnh trong 4.950 cặp có thể. Các mã thép (HPG, HSG, NKG) rơi vào một cộng đồng, nhóm ngân hàng lớn (VCB, BID, CTG) vào cộng đồng khác. Tương quan lợi suất tuần mà bài trích là 0,8 cho HPG và HSG, còn 0,2 cho HPG và BWE.
+
+Graph này có một cái giá mà graph theo nhãn không có: nó được ước lượng từ một cửa sổ lợi suất quá khứ, nên đổi khi chu kỳ thị trường đổi (xem bài về regime), và một graph ước lượng trên toàn bộ mẫu sẽ đưa tương lai vào mọi ngày trước đó.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Ma trận kề (adjacency)**: cho biết cặp nút nào có cạnh. Graph cổ phiếu thường lưu thành ma trận có số 1 ở nơi hai mã được nối.
+- **Knowledge base (cơ sở tri thức)**: cơ sở dữ liệu các sự kiện dạng (chủ thể, quan hệ, đối tượng), như Wikidata.
+- **Cộng đồng (community)**: nhóm nút nối với nhau chặt hơn so với phần còn lại.
+
+</Concepts>
+
+## 2. Một lớp là một phép lấy trung bình
+
+Lớp graph đơn giản nhất là một phép lấy trung bình. Mỗi mã thay con số của mình bằng trung bình của con số của chính nó và các láng giềng. Giả sử HPG có lợi suất một ngày là 3,0%, còn láng giềng là HSG 2,4%, NKG 2,8% và BID −0,2%. Sau một lớp, HPG giữ (3,0 + 2,4 + 2,8 − 0,2) ÷ 4 = 2,0.
+
+<AtP18MessagePassing />
+
+Làm điều đó cho mọi mã cùng lúc thì thứ hạng có thể đổi. Trong graph mẫu này HPG đứng đầu với 3,0; sau một lớp, HSG và NKG đứng đầu với 2,73 còn HPG tụt xuống 2,0, vì láng giềng BID kéo nó xuống. Điểm của một mã giờ phụ thuộc vào việc nó nối với ai. Graph convolutional network của Kipf và Welling (ICLR 2017) là ý tưởng này với cách chuẩn hóa hơi khác và một ma trận trọng số được học, và chi phí của nó tăng tuyến tính theo số cạnh.
+
+Trong mô hình thật, các con số không phải lợi suất mà là các vector được học, mỗi mã một vector tóm tắt lịch sử gần đây của nó. Bước lấy trung bình vẫn y như vậy. Mục sau cho mã tự chọn trọng số của láng giềng, nhưng hãy thử bản trơn trước.
+
+<AtP18GnnDemo />
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Message passing (truyền thông điệp)**: mỗi nút gửi vector hiện tại cho láng giềng và tự cập nhật từ những gì nhận được. Một lớp, một bước nhảy.
+- **GCN**: graph convolutional network, lớp truyền thông điệp lấy trung bình trên vùng lân cận rồi áp một phép biến đổi tuyến tính được học.
+- **Embedding**: một vector số mà mô hình học để biểu diễn một thứ gì đó, ở đây là một mã cổ phiếu.
+
+</Concepts>
+
+## 3. Attention chọn láng giềng
+
+Phép trung bình đối xử với mọi láng giềng như nhau. Điều đó hiếm khi đúng: BID là ngân hàng, còn HPG là nhà sản xuất thép tình cờ được nối với nó bằng một liên kết chéo. Graph attention network (GAT, Veličković và cộng sự, ICLR 2018) tính một điểm cho mỗi láng giềng từ đặc trưng của cả hai mã, biến các điểm thành trọng số cộng lại bằng một, rồi lấy tổng có trọng số.
+
+<AtP18Attention />
+
+Trong ví dụ trên, các điểm tự đặt cho HPG chính nó 0,710 trọng số, và tổng có trọng số là 2,59 thay vì 2,0. 2,59 chưa chắc tốt hơn. Cái thay đổi là trọng số được học, nên mô hình có thể tự tìm liên kết nào mang thông tin, đổi lại là thêm tham số phải khớp trên một tín hiệu rất mỏng. Đó là một rủi ro, và series đã cho thấy mô hình linh hoạt khớp vào nhiễu thế nào (xem bài về tín hiệu).
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Trọng số attention**: một nút nghe một láng giềng cụ thể nhiều đến đâu; trọng số của một nút cộng lại bằng 1.
+- **Softmax**: hàm biến một danh sách điểm bất kỳ thành các trọng số dương cộng lại bằng 1.
+
+</Concepts>
+
+## 4. Quá sâu thì tín hiệu bị rửa mất
+
+Mỗi lớp với tới xa thêm một bước nhảy. Hai lớp cho HPG nghe được láng giềng của láng giềng. Chồng thật nhiều lớp là điều dễ nghĩ tới. Li, Han và Wu (AAAI 2018) chỉ ra vì sao nó phản tác dụng: tích chập trên graph là một bước làm mượt, và làm mượt lặp đi lặp lại khiến mỗi nút giống láng giềng của nó, cho tới khi mọi nút giống hệt nhau.
+
+<AtP18OverSmoothing />
+
+Trên graph mẫu, khoảng cách giữa số cao nhất và thấp nhất giảm từ 4,50 khi chưa có lớp nào xuống 2,97 sau một lớp, 1,65 sau tám lớp và 1,16 sau mười hai lớp. Cả tám đường trôi về cùng một giá trị, 1,00, là trung bình trên toàn graph có trọng số theo số láng giềng của mỗi mã. Trong demo trên, chuyển sang "chỉ cùng nhóm" thì chỉ một lớp đã làm HPG, HSG và NKG giống hệt nhau.
+
+Với xếp hạng, điều này tệ theo một kiểu rất cụ thể. Bạn muốn biết mã nào sẽ tốt hơn mã nào, mà sự khác biệt giữa các mã chính là thứ phép làm mượt xoá đi. Vì vậy số lớp là một thiết lập để chỉnh trên dữ liệu validation, không phải thứ để tối đa hoá.
+
+## 5. Từ embedding đến bảng xếp hạng
+
+Ghép các mảnh theo thứ tự. Feng và cộng sự chạy một mô hình chuỗi (LSTM, đã nói trong bài về mô hình chuỗi) trên lịch sử gần đây của từng mã để có một vector cho mỗi mã. Một lớp graph rồi trộn từng vector với láng giềng. Lớp cuối biến mỗi vector thành một điểm, và các mã được sắp theo điểm.
+
+<AtP18Pipeline />
+
+Hàm mất mát cho mô hình biết cần quan tâm điều gì. Hàm của họ cộng sai số bình phương trên lợi suất ngày kế tiếp với một số hạng theo cặp, phạt mỗi cặp mã bị xếp sai thứ tự. Giả sử mô hình dự đoán lợi suất 0,5, 0,2 và −0,1 cho HPG, HSG và VCB, nhưng thực tế là 0,3, 0,6 và −0,2. Sai số bình phương cộng lại là 0,21. Cặp duy nhất sai thứ tự là HPG và HSG, và số hạng theo cặp phạt max(0, −(0,5 − 0,2)(0,3 − 0,6)) = 0,09 cho nó.
+
+<AtP18PairLoss />
+
+Điều này quan trọng vì thứ bạn giao dịch là thứ tự, không phải độ lớn từng con số. Các tác giả báo cáo rằng phiên bản xếp hạng thắng chính LSTM đó khi huấn luyện để dự đoán thẳng lợi suất. Số hạng theo cặp cũng cho bạn một con số để theo dõi gần với tiền hơn so với sai số bình phương.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Learning to rank**: huấn luyện mô hình để xếp các phần tử đúng thứ tự thay vì dự đoán giá trị từng phần tử.
+- **Pairwise loss (mất mát theo cặp)**: một khoản phạt tính trên các cặp phần tử, áp dụng khi mô hình xếp một cặp ngược với sự thật.
+
+</Concepts>
+
+## 6. Đọc bằng chứng cho đúng
+
+Quay lại trường hợp mở đầu, với bốn điều nên kiểm tra trong bất kỳ kết quả GNN nào.
+
+Về độ lệch: Mỗi con số ở Bảng 6 đi kèm một ± mà các tác giả in ra, và các thanh có graph chồng lên thanh không graph ở cả hai sàn. Chính các tác giả cũng nói vậy: return ratio dao động mạnh giữa các lần chạy vì lợi suất ngày của mã đứng đầu có thể lên tới 0,98, nên một lần đổi chỗ nhỏ giữa hai mã đầu có thể làm tổng lệch đi. Họ còn báo cáo rằng ở NYSE, baseline LSTM đạt −0,90 với cấu hình thắng trên validation, và 0,1 đến 0,2 với các cấu hình khác; "this result indicates the potential difference between validation and testing."
+
+Về quy ước backtest: Lợi suất chính được dựng từ một ván cược mỗi ngày vào một mã duy nhất trong hơn 1.000 mã, khớp ở giá đóng cửa, bỏ qua phí giao dịch.
+
+<AtP18BacktestRules />
+
+Về ảnh chụp: Giá được chia đúng thứ tự thời gian, điều này đúng. Nhưng các quan hệ Wikidata lấy từ một bản dump ghi ngày 5 tháng 1 năm 2018, một tháng sau khi giai đoạn test kết thúc, và mục dữ liệu không mô tả các quan hệ đã đổi thế nào từ 2013 đến 2017. Một liên kết có trong ảnh chụp nhưng chưa tồn tại năm 2014 đưa cho mô hình thông tin mà lúc đó nó không thể có. Bài về dữ liệu đã có tên cho chuyện này: đó không phải dữ liệu point-in-time.
+
+<AtP18Snapshot />
+
+Về abstract: Abstract báo cáo return ratio trung bình 98% ở NYSE và 71% ở NASDAQ cho các mô hình quan hệ tốt nhất. Hãy nhìn nó là gì: lợi suất của một chiến lược một mã mỗi ngày, trên một năm dữ liệu test, không tính phí, từ một graph không rõ tuổi.
+
+Các bài GNN khác cũng dựng cờ đỏ tương tự. Matsunaga, Suzumura và Takahashi (workshop NeurIPS 2019) dựng graph quan hệ nhà cung cấp cho Nikkei 225 và kiểm tra trên khoảng 20 năm bằng cửa sổ trượt. Họ báo cáo return ratio cao hơn LSTM 6,32% và Sharpe ratio cao hơn 1,3 lần, và gọi kết quả là sơ bộ.
+
+Một ví dụ công khai ở Việt Nam là bài VN100 của 51labs. Nó không dự đoán giá; nó dùng graph tương quan để chọn một mã mỗi cộng đồng, theo Sharpe ratio 300 ngày gần nhất, và tái cân bằng mỗi 60 ngày. Bảng kết quả cho phiên bản Infomap lợi suất năm 22,07 và Sharpe 0,90, so với 12,53 và 0,63 của VN-Index, với mức sụt giảm tối đa sâu hơn (−42,85 so với −40,34). Bài không nhắc tới phí giao dịch, và tác giả khuyên dùng kèm các phân tích khác. Nó cho thấy cấu trúc của thị trường; đó là một lần backtest, chưa phải bằng chứng.
+
+Một danh sách kiểm ngắn cho bất kỳ tuyên bố GNN nào: Cạnh nào, từ ngày nào? Graph có chỉ được dựng từ dữ liệu trước mỗi lần dự đoán không? Độ lệch giữa các lần chạy là bao nhiêu? Bao nhiêu phần lãi còn sống sau chi phí? Và phiên bản có graph có thắng chính mô hình đó không có graph, trên cùng dữ liệu, với khoảng lớn hơn độ lệch đó không?
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Point-in-time**: chỉ dùng những gì đã biết vào ngày ra quyết định. Ảnh chụp graph sau ngày đó không phải point-in-time.
+- **Return ratio (IRR)**: lợi suất đầu tư cộng dồn trong bài báo: tổng lợi suất ngày của mã đã mua, tính trên số tiền bỏ ra mỗi ngày.
+- **Cửa sổ trượt (rolling window)**: huấn luyện lại mô hình trên một lát quá khứ di chuyển và kiểm tra trên lát ngay sau đó.
+
+</Concepts>
+
+## Điểm rút ra (Key takeaways)
+
+- **Graph là giả định lớn nhất của mô hình**: nhãn ngành, knowledge base và tương quan lợi suất vẽ ra các cạnh khác nhau, với độ phủ rất khác (5–9%, khoảng 0,2–0,3%, và 294 trên 4.950 cặp). *(Mục 1)*
+- **Một lớp là trung bình trên vùng lân cận**: điểm của một mã đổi theo bạn bè nó giữ, và thứ hạng có thể đổi sau một lớp. *(Mục 2)*
+- **Attention học trọng số**: linh hoạt hơn, và thêm tham số phải khớp trên một tín hiệu mỏng. *(Mục 3)*
+- **Quá sâu thì làm mượt quá đà**: chồng lớp làm co lại sự khác biệt giữa các mã mà bảng xếp hạng cần. *(Mục 4)*
+- **Xếp hạng, đừng hồi quy**: mất mát theo cặp phạt thứ tự sai, đúng thứ mà chiến lược mua đầu danh sách giao dịch. *(Mục 5)*
+- **Đọc kết quả graph bằng danh sách kiểm**: độ lệch giữa các lần chạy, quy ước backtest và ngày của graph quan trọng ngang con số lợi suất chính. *(Mục 6)*
+
+## Câu hỏi ôn tập (Review questions)
+
+1. Ở Feng và cộng sự, cùng một graph ngành làm return ratio đi ngược chiều ở NASDAQ và NYSE. Những con số nào cho thấy điều đó, và độ lệch cạnh chúng lớn cỡ nào? *(Xem Mục 6)*
+2. Nhãn ngành nối 5,00% số cặp ở NASDAQ còn Wikidata chỉ 0,21%. Mỗi nguồn bỏ sót gì? *(Xem Mục 1)*
+3. Tính một lớp cho một mã có giá trị 3,0 và láng giềng ở 2,4, 2,8 và −0,2. *(Xem Mục 2)*
+4. Attention khác phép trung bình trơn ở chỗ nào, và cái giá là gì? *(Xem Mục 3)*
+5. Vì sao mười hai lớp chồng nhau làm một mô hình xếp hạng tệ đi? *(Xem Mục 4)*
+6. Hai mã được dự đoán 0,5 và 0,2 nhưng thực tế là 0,3 và 0,6. Số hạng theo cặp phạt bao nhiêu, và sai số bình phương nói gì? *(Xem Mục 5)*
+7. Bản dump Wikidata ghi ngày sau giai đoạn test. Hỏng ở đâu, và sửa thế nào? *(Xem Mục 6)*
+8. Một bài báo công bố return ratio trung bình 98% từ mô hình graph. Bốn câu hỏi nào bạn đặt ra trước khi tin? *(Xem Mục 6)*
+
+## Đi sâu hơn (Go deeper)
+
+- **[Feng và cộng sự — Temporal Relational Ranking for Stock Prediction](https://arxiv.org/abs/1809.09441)**: bài báo của ca mở đầu; dữ liệu và code có link ở mục 4.
+- **[Kipf và Welling — Semi-Supervised Classification with Graph Convolutional Networks](https://arxiv.org/abs/1609.02907)** và **[Veličković và cộng sự — Graph Attention Networks](https://arxiv.org/abs/1710.10903)**: hai lớp mà bài này mô tả, ngắn và dễ đọc.
+- **[51Labs — Community detection for VN100](https://51labs.vn/vi/blog/community-detection-for-vn100)**: một graph trên cổ phiếu Việt Nam, phương pháp viết rõ từng bước. Khoá học của 51labs cũng có graph neural network và xếp hạng cổ phiếu trong [chương trình công khai](https://51labs.vn/vi/courses).
+
+</Vi>

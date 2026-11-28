@@ -1,0 +1,495 @@
+---
+title: "Backtest"
+title_vi: "Backtest"
+description: "Why a strategy that shines on past data often fails live: peeking, too many tries, free trades. And the walk-forward tests and honest metrics that help. Post 12 of the series."
+description_vi: "Vì sao chiến lược đẹp trên dữ liệu quá khứ hay hỏng khi chạy thật: nhìn trước, thử quá nhiều, giao dịch miễn phí. Cùng cách kiểm tra walk-forward và số đo trung thực. Bài 12 của series."
+date: 2026-11-28
+category: "ai"
+tags: ["ai", "ai-trading", "backtest", "validation"]
+cover: "../../assets/blog/ai-trading-backtest/rear-view-mirror.jpg"
+cover_alt: "A blue jeep on a country road with palm-covered hills behind it, seen through a car's rear-view mirror"
+draft: true
+sources:
+  - { title: "All that Glitters Is Not Gold: Comparing Backtest and Out-of-Sample Performance on a Large Cohort of Trading Algorithms", author: "Thomas Wiecki, Andrew Campbell, Justin Lent, Jessica Stauth (Quantopian)", url: "https://ssrn.com/abstract=2745220" }
+  - { title: "The Deflated Sharpe Ratio: Correcting for Selection Bias, Backtest Overfitting and Non-Normality (Journal of Portfolio Management)", author: "David H. Bailey & Marcos López de Prado", url: "https://www.davidhbailey.com/dhbpapers/deflated-sharpe.pdf" }
+  - { title: "The Probability of Backtest Overfitting", author: "David H. Bailey, Jonathan M. Borwein, Marcos López de Prado & Qiji Jim Zhu", url: "https://www.davidhbailey.com/dhbpapers/backtest-prob.pdf" }
+  - { title: "... and the Cross-Section of Expected Returns (NBER Working Paper 20592; Review of Financial Studies, 2016)", author: "Campbell R. Harvey, Yan Liu & Heqing Zhu", url: "https://www.nber.org/papers/w20592" }
+  - { title: "Time series momentum - A traditional approach (tested on the Vietnamese market)", author: "51labs", url: "https://51labs.vn/vi/blog/time-series-momentum-a-traditional-approach" }
+  - { title: "Cổ phiếu tăng trần liên tiếp, vì sao nhà đầu tư khó mua được? (MoneyF)", author: "Vương Anh", url: "https://moneyf.vn/co-phieu-tang-tran-lien-tiep-vi-sao-nha-dau-tu-kho-wkw1j2qo" }
+  - { title: "TimeSeriesSplit (scikit-learn documentation)", author: "scikit-learn developers", url: "https://scikit-learn.org/stable/modules/generated/sklearn.model_selection.TimeSeriesSplit.html" }
+  - { title: "Machine Learning for Financial Market: course curriculum (Backtesting and strategy evaluation, Modern backtest protocol)", author: "51labs", url: "https://51labs.vn/vi/courses" }
+  - { title: "Green rear-view mirror (Unsplash) (photo, CC0)", author: "Dan Gold", url: "https://commons.wikimedia.org/wiki/File:Green_rear-view_mirror_(Unsplash).jpg" }
+---
+
+import En from '../../components/mdx/En.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import AtP12Replay from '../../components/mdx/AtP12Replay.astro';
+import AtP12Lookahead from '../../components/mdx/AtP12Lookahead.astro';
+import AtP12BestOfN from '../../components/mdx/AtP12BestOfN.astro';
+import AtP12TrialsSim from '../../components/mdx/AtP12TrialsSim.astro';
+import AtP12Quantopian from '../../components/mdx/AtP12Quantopian.astro';
+import AtP12Costs from '../../components/mdx/AtP12Costs.astro';
+import AtP12Queue from '../../components/mdx/AtP12Queue.astro';
+import AtP12WalkForward from '../../components/mdx/AtP12WalkForward.astro';
+import AtP12Purge from '../../components/mdx/AtP12Purge.astro';
+import AtP12SharpeBand from '../../components/mdx/AtP12SharpeBand.astro';
+import AtP12Deflate from '../../components/mdx/AtP12Deflate.astro';
+import AtP12Checklist from '../../components/mdx/AtP12Checklist.astro';
+import heroMirror from '../../assets/blog/ai-trading-backtest/rear-view-mirror.jpg';
+
+<En>
+
+<Figure src={heroMirror} alt="A blue jeep on a country road with palm-covered hills behind it, seen through a car's rear-view mirror" caption="A backtest is driving while looking in the rear-view mirror. The road behind you is perfectly clear. Nothing in the mirror says what the road ahead will do." sourceTitle="Wikimedia Commons: Green rear-view mirror (Unsplash), photo by Dan Gold, CC0" sourceUrl="https://commons.wikimedia.org/wiki/File:Green_rear-view_mirror_(Unsplash).jpg" />
+
+> "When automated trading strategies are developed and evaluated using backtests on historical pricing data, there exists a tendency to overfit to the past."
+> &mdash; *Wiecki, Campbell, Lent and Stauth*, Quantopian (2016)
+
+### A test that cannot lose
+
+Quantopian was a platform where anyone could write a trading algorithm and backtest it. By 2016, its users had run more than 800,000 backtests. Its data team then took 888 algorithms that had at least six months of live record and asked a plain question: how well does the backtest result predict the live result?
+
+The answer was close to nothing. For the Sharpe ratio, the number most people quote first, the link between backtest and live had an R² below 0.025. Less than 2.5% of the differences between live results could be explained by the backtest. The team also found that the more backtests a person ran on one strategy, the wider the gap between backtest and live.
+
+A backtest replays a strategy on past data. It is the cheapest test in finance and the easiest to cheat without meaning to. This post goes through three ways it lies, then the protocol and the numbers that make it lie less:
+
+1. **Peeking**: the signal quietly uses information that did not exist yet.
+2. **Trying until it works**: the version you see is the best of many, and the best of many is partly luck.
+3. **Free trades**: the replay ignores what a trade costs and whether it could have been filled.
+
+<Callout type="note" title="TL;DR">
+
+A backtest only measures how a strategy would have done if every assumption in the replay were true, and most of the common assumptions are false in the strategy's favour. Peeking at future data, trying many versions and keeping the best, and pretending trades are free all inflate the result. In one study of 888 real algorithms, the in-sample Sharpe ratio explained under 2.5% of the live Sharpe ratio. The fixes are simple to state: lag every input, count every version you tried, charge realistic costs, test on days the model never saw (walk-forward, with purging), and report Sharpe with its uncertainty and a haircut for the number of trials. Nothing here is investment advice.
+
+</Callout>
+
+<Concepts>
+
+- **Backtest**: replaying a trading strategy on historical data to see what it would have earned.
+- **In-sample and out-of-sample**: in-sample days are the ones you used to build or tune the strategy. Out-of-sample days are ones it never saw. Only the second kind says anything about the future.
+- **Sharpe ratio**: the average daily return divided by how much it bounces around, scaled up to a year. Higher is better. A value near 1 looks decent, and section 6 shows how shaky that reading is.
+
+</Concepts>
+
+---
+
+## 1. What a backtest is
+
+Plain version: a backtest walks through history one day at a time. At the end of each day, the strategy looks at the data it would have had, decides a position, and holds it through the next day. You add up the daily results, subtract costs, and read off the numbers.
+
+<AtP12Replay />
+
+The one rule that matters is in the figure. The decision at the close of day t may use data up to day t and nothing later. Every bug in this post is a way of breaking that rule, or of making the rest of the loop too kind.
+
+Here is a real backtest to keep in mind. 51labs tested time-series momentum on Vietnamese stocks: go long when a stock's last six weeks of returns were positive, scale the position to a target volatility, charge a 0.1% commission per side. On HPG they report an annual return of 29.23% against 23.63% for buy and hold, and a Sharpe ratio of 1.01 against 0.70. The universe is the 60 stocks with the highest trading value that have been listed since 2014. Their code multiplies the previous week's position by this week's return, which is exactly the one-day lag in the figure.
+
+It is a clear, honest teaching example. We will keep coming back to it, because it shows what a reader should ask of any backtest: how was the universe picked, how many versions were tried, and how did the strategy do on data it was not tuned on.
+
+<Concepts>
+
+- **Position**: how much of a stock the strategy holds at a given moment: long (own it), short (bet against it) or flat (nothing).
+- **Equity curve**: the running total of the strategy's results over time. A backtest is judged by its shape and by numbers computed from it.
+
+</Concepts>
+
+## 2. Lie one: peeking at the future
+
+The crudest version is easy to see. Say a strategy goes long on days when the stock is about to rise and short when it is about to fall, and its "signal" is the sign of that same day's return. Here is that strategy on 1,260 days of random returns (five years, 1% daily standard deviation, nothing to find):
+
+<AtP12Lookahead />
+
+Strategy A earns a Sharpe ratio of 20.6 on noise. Strategy B differs by one day: it trades on yesterday's sign, and it earns 0.56 on this draw and, averaged over 1,000 draws, about zero. Nobody would publish A. Real lookahead is quieter.
+
+- **Normalising with the whole sample.** A feature turned into a z-score with the mean and standard deviation of the entire dataset has seen the future average. It is easy to write by accident, in your own code or in code an assistant gives you, because the one-line version is the full-sample one.
+- **Data that was revised.** A price adjusted for a split that happened next year, or a financial statement keyed to its period end instead of the day it was published. The [Data post](/blog/ai-trading-data/) shows why you need the date each fact became known.
+- **Same-bar execution.** The signal uses the close, and the trade is filled at that same close. In real life the close has already happened by the time you know it.
+
+A cheap check catches most of this. Delay every signal by one more day and run again. A strategy that rests on real information loses a little. A strategy that rested on peeking collapses.
+
+<Concepts>
+
+- **Lookahead bias**: using information in a backtest that was not available at the time of the decision.
+- **Point-in-time data**: a dataset that records each fact with the date it became known, so a replay sees only what was knowable.
+
+</Concepts>
+
+## 3. Lie two: trying until it works
+
+Peeking is a bug. This one needs no bug at all, only effort. Suppose you test 100 strategies and every one of them is a coin flip with no edge. By luck, some will look good. If you keep the best and forget the other 99, you are showing the reader the luckiest coin.
+
+The best of N pure-noise strategies has an expected Sharpe ratio that rises with N. For 1,260 daily observations, the formula from the Deflated Sharpe paper gives 0.70 at N = 10, 1.13 at N = 100 and 1.37 at N = 500. A simulation of 2,000 repeats lands on the same numbers. The same winners, followed for another year, average about zero.
+
+<AtP12BestOfN />
+
+Try it yourself. Each strategy below is random returns with no edge. Slide N up and watch the winner's backtest Sharpe ratio climb while its next-year result goes nowhere.
+
+<AtP12TrialsSim />
+
+This is the pattern in real research too. Harvey, Liu and Zhu counted hundreds of published return factors and argued that a newly proposed factor should clear a much higher hurdle, a t-ratio above 3.0, because so many have been tried. Bailey and co-authors showed that standard hold-out testing tends to be unreliable for backtests when many configurations have been searched.
+
+The Quantopian study measured the same thing on real people's work.
+
+<AtP12Quantopian />
+
+The Sharpe ratio, the number you most want to trust, carried over worst. Risk numbers such as volatility and maximum drawdown carried over much better. A backtest tells you more about how bumpy a strategy will be than about how much it will earn.
+
+<Concepts>
+
+- **Overfitting**: tuning a strategy until it fits the noise in the past data. It looks excellent on those days and has nothing to say about new ones.
+- **Multiple testing**: when you run many tests, some pass by luck. The more you run, the higher the bar a result must clear.
+- **Selection bias**: reporting only the winners. The Sharpe ratio of the best version is not the Sharpe ratio of the idea.
+
+</Concepts>
+
+## 4. Lie three: trades that cost nothing
+
+A backtest that charges nothing for a trade can turn a dead strategy into a star. Say a strategy earns 12% a year before costs and every round trip costs 0.2% of the portfolio (0.1% in, 0.1% out, the commission the 51labs backtest assumes). Here is what the same strategy keeps at four trading speeds:
+
+<AtP12Costs />
+
+Trading once a month keeps 9.6%. Trading daily loses 38.4% a year, from a strategy that looked fine on paper. Your real fee depends on your broker, and a backtest should use a number you checked rather than zero.
+
+Cost is only half of it. The other half is whether the order would have been filled at all. On the Vietnamese market a stock can be stuck at its ceiling price. HOSE limits a stock to 7% above or below its reference price in a session. MoneyF gives an example: a stock with a 20,000 reference price has a ceiling of 21,400, and 2 million shares are already queued to buy. Orders fill by price, then by time, so a new order for 10,000 shares waits behind all of them.
+
+<AtP12Queue />
+
+A backtest that buys at the close of a limit-up day fills in full. The real order may never fill. Any strategy that tends to buy what just surged, as momentum strategies do, is exposed to this.
+
+<Concepts>
+
+- **Slippage**: the gap between the price your backtest assumed and the price you actually got.
+- **Turnover**: how much of the portfolio you trade over a period. High turnover multiplies every cost.
+- **Ceiling price (giá trần)**: the highest price a stock may trade at in a session. At the ceiling there are often far more buyers than sellers.
+
+</Concepts>
+
+## 5. Testing without fooling yourself
+
+The remedy for overfitting is to judge the strategy on days it never touched. The simplest version is a single split: build on the first years, test on the last. A single split wastes data and gives one answer. Walk-forward testing repeats it through time. Train on the past, test on the next block, slide forward, and repeat.
+
+<AtP12WalkForward />
+
+Say you have ten years of daily data. Start with 756 days of training and test the next 126. Slide forward 126 days at a time and you get 14 folds, and the stitched test windows give 1,764 days of results that no fold tuned on. Scikit-learn's `TimeSeriesSplit` does this: each training set contains all earlier folds, and the test fold always comes after it.
+
+There is a subtler leak. Many labels look ahead: "return over the next 20 days" at day t overlaps with day t+1's label, and so on. A training day just before the test block has a label that already contains the first days of the test block. The remedy is to purge those days and add an embargo after the test block. The `gap` option of `TimeSeriesSplit` removes samples between train and test for the same reason.
+
+<AtP12Purge />
+
+The numbers show how large the effect is. On pure noise, a predictor that averages the labels of nearby training days scores a correlation of 0.94 under shuffled 5-fold validation, and −0.01 under blocks with purging and an embargo. Anything above zero in that test is leakage, since the truth is zero.
+
+One more rule. The final holdout, the last stretch of data, is used once. Each time you look at it and adjust, it turns into a training set.
+
+<Concepts>
+
+- **Walk-forward**: repeatedly training on a window of the past and testing on the block that follows, then moving the window forward.
+- **Purging and embargo**: removing training samples whose labels overlap the test block, and a short buffer after the test block, so information does not leak across the cut.
+- **Holdout**: data kept aside and looked at once, at the end.
+
+</Concepts>
+
+## 6. Honest numbers
+
+A Sharpe ratio is an estimate, and it has error bars. For normal returns, the standard error of a yearly Sharpe ratio after T daily observations is roughly sqrt((1 + SR²/2) / (T − 1)) × sqrt(252), with SR measured per day. Say the true value is 1.0. Here is where the measured value lands:
+
+<AtP12SharpeBand />
+
+After one year the 95% range runs from −0.97 to 2.97. After five years it still spans 0.12 to 1.88. A strategy with a true Sharpe of 1.0 needs about 2.75 years of daily data before the measured value reliably clears zero at the one-sided 95% level, and a true Sharpe of 0.5 needs about 11 years.
+
+The second correction is for how many versions you tried. The Deflated Sharpe Ratio compares your best Sharpe with what luck alone is expected to produce after N trials. Say you observed 1.5 over five years of daily data, and the trials' Sharpe ratios spread like pure noise. How likely is the true Sharpe to be above zero?
+
+<AtP12Deflate />
+
+If it was the only idea you tried, the answer is a near-certain yes. After 100 tries it falls to 0.79, and after 1,000 it is 0.54, close to a coin flip. This is why a good report states how many versions were tested. Without N, the number is unreadable.
+
+Report more than Sharpe. Maximum drawdown is the deepest fall from a previous peak, and it is what you would have had to sit through. Turnover and cost-adjusted return tell you whether the strategy survives the real world. The Quantopian study found that drawdown and volatility carried over from backtest to live far better than Sharpe did, which is one more reason to read them.
+
+<Concepts>
+
+- **Standard error**: how much a measured number would wander if you could repeat the experiment. A Sharpe ratio of 1.0 with a standard error of 0.45 is a wide range.
+- **Deflated Sharpe Ratio**: a Sharpe ratio corrected for the number of trials behind it and for non-normal returns.
+- **Maximum drawdown**: the largest peak-to-trough fall of the equity curve.
+
+</Concepts>
+
+## 7. Reading a backtest someone else wrote
+
+Many backtests you will read now come from an AI assistant, either code it wrote or a summary of results it was handed: "The strategy delivered a Sharpe ratio of 1.5 over five years." The sentence is fine. What it leaves out is the part you need.
+
+<AtP12Checklist />
+
+Take the 51labs momentum post as a practice case. It states its universe (60 liquid stocks listed since 2014), its costs (0.1% per side) and its lag. Questions a careful reader would still put to it: was that universe chosen using knowledge from after the start of the sample? Was the six-week lookback picked before or after looking at the same sample's regression table? Is there a window the strategy was never tuned on? That is a teaching post, and the questions are the point. Ask them of every backtest, your own first.
+
+An AI summary tends to drop exactly these answers. When an assistant reports a result, ask it for the count of versions tried, the lag between signal and fill, the cost model, and the out-of-sample period. If it cannot answer, the number has no weight.
+
+<Callout type="warning" title="Not investment advice">
+
+Nothing in this series recommends buying or selling anything. The simulated data here is random on purpose, and real strategies can lose money even when every check above passes.
+
+</Callout>
+
+<Concepts>
+
+- **Out-of-sample record**: results from days the strategy was never tuned on, ideally live trading.
+- **Universe**: the list of stocks a strategy is allowed to trade on each day.
+
+</Concepts>
+
+## Key takeaways
+
+- **A backtest is a replay with rules**: the signal at the close of day t may use only what was known then. A one-day delay test catches most peeking. *(Section 2)*
+- **The best of many is partly luck**: the best of 100 no-edge strategies shows a Sharpe ratio near 1.13, and the same strategy earns about zero the next year. Always ask how many versions were tried. *(Section 3)*
+- **Backtests flatter the return**: in 888 real algorithms, the in-sample Sharpe ratio explained under 2.5% of the live one, while volatility and drawdown carried over far better. *(Section 3)*
+- **Trades cost money and may not fill**: 12% gross minus 0.2% per round trip leaves −38.4% at daily trading, and a limit-up queue can swallow an order. *(Section 4)*
+- **Test on days the model never saw**: walk-forward with purging and an embargo; a shuffled split on overlapping labels showed 0.94 correlation on pure noise. *(Section 5)*
+- **Sharpe has error bars and a trial count**: five years of data leave a 95% range of 0.12 to 1.88 around a true 1.0, and 100 trials drag an observed 1.5 down to a 0.79 chance of being real. *(Section 6)*
+- **Read every backtest, especially an AI summary, with seven questions** about trials, timing, universe, cost, unseen data, record length and bad stretches. *(Section 7)*
+
+## Review questions
+
+1. In a backtest loop, what may the decision at the close of day t use, and what happens to a strategy that trades on the same day's return? *(See Section 2)*
+2. You delay every signal by one extra day and the Sharpe ratio drops from 2.1 to 0.1. What does this suggest? *(See Section 2)*
+3. Why does the best of 100 strategies that all have no edge still show a Sharpe ratio near 1.1 in the backtest, and what does it show the next year? *(See Section 3)*
+4. The Quantopian study found the in-sample Sharpe ratio explained under 2.5% of the live Sharpe ratio. Which measures carried over better, and what does that suggest to read first in a backtest? *(See Section 3)*
+5. A strategy earns 12% gross and pays 0.2% per round trip. What does it keep at 12 round trips a year, and at 252? *(See Section 4)*
+6. Why can a backtest that buys at a limit-up close overstate what a real account would get on the Vietnamese market? *(See Section 4)*
+7. What does purging remove, why does it matter when labels look 20 days ahead, and what should the correlation be on pure noise? *(See Section 5)*
+8. After five years of daily data, what range does a true Sharpe ratio of 1.0 produce, and how does the number of trials change how much to believe an observed 1.5? *(See Section 6)*
+
+## Go deeper
+
+- **[51Labs: Machine Learning for Financial Market](https://51labs.vn/vi/courses)**: the public curriculum has a class on backtesting and strategy evaluation, including a modern backtest protocol.
+- **[Bailey and López de Prado: The Deflated Sharpe Ratio](https://www.davidhbailey.com/dhbpapers/deflated-sharpe.pdf)**: the formulas behind Section 6, with a worked example.
+- **[Wiecki and colleagues: All that Glitters Is Not Gold](https://ssrn.com/abstract=2745220)**: the 888-algorithm study from the hook, short and readable.
+- **[scikit-learn: TimeSeriesSplit](https://scikit-learn.org/stable/modules/generated/sklearn.model_selection.TimeSeriesSplit.html)**: expanding-window splits with a `gap`, ready to use.
+- **[51Labs: Time series momentum, a traditional approach](https://51labs.vn/vi/blog/time-series-momentum-a-traditional-approach)**: the case from Section 1 with its full code, a good one to run the seven questions on.
+
+</En>
+
+<Vi>
+
+<Figure src={heroMirror} alt="Một chiếc xe jeep xanh trên con đường quê, phía sau là những ngọn đồi phủ cọ, nhìn qua gương chiếu hậu của ô tô" caption="Backtest là lái xe trong lúc chỉ nhìn gương chiếu hậu. Con đường phía sau rất rõ. Gương không nói gì về đoạn đường phía trước." sourceTitle="Wikimedia Commons: Green rear-view mirror (Unsplash), ảnh của Dan Gold, CC0" sourceUrl="https://commons.wikimedia.org/wiki/File:Green_rear-view_mirror_(Unsplash).jpg" />
+
+> "When automated trading strategies are developed and evaluated using backtests on historical pricing data, there exists a tendency to overfit to the past."
+> &mdash; *Wiecki, Campbell, Lent và Stauth*, Quantopian (2016)
+
+### Bài kiểm tra không bao giờ thua
+
+Quantopian là nền tảng nơi ai cũng viết được thuật toán giao dịch và backtest nó. Tới 2016, người dùng đã chạy hơn 800.000 lần backtest. Nhóm dữ liệu của họ lấy 888 thuật toán có ít nhất sáu tháng chạy thật và hỏi một câu đơn giản: kết quả backtest dự đoán được kết quả chạy thật tới đâu?
+
+Câu trả lời là gần như không. Với Sharpe ratio, con số mà ai cũng nói tới đầu tiên, mối liên hệ giữa backtest và chạy thật có R² dưới 0,025. Backtest giải thích được chưa tới 2,5% sự khác biệt giữa các kết quả chạy thật. Nhóm này còn thấy: một người càng chạy nhiều backtest cho một chiến lược thì khoảng cách giữa backtest và chạy thật càng rộng.
+
+Backtest là phát lại một chiến lược trên dữ liệu quá khứ. Đây là phép thử rẻ nhất trong tài chính, và cũng dễ gian lận nhất mà bản thân không hề cố ý. Bài này đi qua ba cách backtest nói dối, rồi tới quy trình và các con số giúp nó bớt nói dối:
+
+1. **Nhìn trước**: tín hiệu âm thầm dùng thông tin mà lúc đó chưa tồn tại.
+2. **Thử tới khi được**: phiên bản bạn thấy là cái tốt nhất trong nhiều cái, và cái tốt nhất trong nhiều cái một phần là may.
+3. **Giao dịch miễn phí**: bản phát lại bỏ qua chi phí một lệnh và việc lệnh có khớp được hay không.
+
+<Callout type="note" title="Tóm tắt nhanh">
+
+Backtest chỉ đo xem chiến lược sẽ làm được gì nếu mọi giả định trong bản phát lại đều đúng, và phần lớn giả định thông dụng đều sai theo hướng có lợi cho chiến lược. Nhìn dữ liệu tương lai, thử nhiều phiên bản rồi giữ cái tốt nhất, và coi giao dịch là miễn phí đều làm kết quả phồng lên. Trong một nghiên cứu trên 888 thuật toán thật, Sharpe in-sample giải thích được chưa tới 2,5% Sharpe chạy thật. Cách sửa nói ra thì đơn giản: trễ mọi đầu vào, đếm mọi phiên bản đã thử, tính chi phí thực tế, kiểm tra trên những ngày mô hình chưa thấy (walk-forward, có purging), và báo Sharpe kèm độ bất định cùng mức giảm theo số lần thử. Không có gì ở đây là lời khuyên đầu tư.
+
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Backtest**: phát lại một chiến lược giao dịch trên dữ liệu lịch sử để xem nó sẽ kiếm được bao nhiêu.
+- **In-sample và out-of-sample**: ngày in-sample là những ngày bạn đã dùng để xây hoặc chỉnh chiến lược. Ngày out-of-sample là những ngày nó chưa từng thấy. Chỉ loại thứ hai mới nói được điều gì về tương lai.
+- **Sharpe ratio**: lợi suất trung bình mỗi ngày chia cho mức độ dao động của nó, quy ra một năm. Càng cao càng tốt. Giá trị gần 1 trông khá ổn, và mục 6 cho thấy cách đọc đó mong manh thế nào.
+
+</Concepts>
+
+---
+
+## 1. Backtest là gì
+
+Nói thẳng trước: backtest đi qua lịch sử từng ngày một. Cuối mỗi ngày, chiến lược nhìn dữ liệu mà lúc đó nó có thể có, quyết định một vị thế, rồi giữ nó suốt ngày kế tiếp. Bạn cộng kết quả các ngày, trừ chi phí, rồi đọc các con số.
+
+<AtP12Replay />
+
+Luật quan trọng nhất nằm ngay trong hình. Quyết định lúc đóng cửa ngày t chỉ được dùng dữ liệu tới ngày t và không gì muộn hơn. Mọi lỗi trong bài này đều là cách phá luật đó, hoặc làm phần còn lại của vòng lặp dễ dãi quá mức.
+
+Đây là một backtest thật để ghi nhớ. 51labs thử time-series momentum trên cổ phiếu Việt Nam: mua khi lợi suất sáu tuần gần nhất của cổ phiếu dương, chỉnh vị thế theo mức biến động mục tiêu, tính phí hoa hồng 0,1% mỗi chiều. Trên HPG họ báo lợi suất 29,23% một năm so với 23,63% của mua và giữ, và Sharpe 1,01 so với 0,70. Universe là 60 cổ phiếu có giá trị giao dịch cao nhất và niêm yết từ 2014. Code của họ nhân vị thế của tuần trước với lợi suất của tuần này, đúng là độ trễ một ngày trong hình.
+
+Đây là một ví dụ giảng dạy rõ ràng và trung thực. Chúng ta sẽ quay lại nó nhiều lần, vì nó cho thấy người đọc nên hỏi gì ở bất kỳ backtest nào: universe được chọn thế nào, đã thử bao nhiêu phiên bản, và chiến lược làm được gì trên dữ liệu chưa từng dùng để chỉnh.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Vị thế (position)**: lượng cổ phiếu chiến lược đang giữ tại một thời điểm: long (đang sở hữu), short (đặt cược giá giảm) hoặc đứng ngoài.
+- **Đường vốn (equity curve)**: tổng kết quả của chiến lược cộng dồn theo thời gian. Người ta đánh giá backtest qua hình dạng của nó và các số tính từ nó.
+
+</Concepts>
+
+## 2. Lỗi một: nhìn trước tương lai
+
+Dạng thô nhất thì dễ thấy. Giả sử một chiến lược mua khi cổ phiếu sắp tăng và bán khống khi sắp giảm, còn "tín hiệu" của nó là dấu của chính lợi suất ngày hôm đó. Đây là chiến lược ấy trên 1.260 ngày lợi suất ngẫu nhiên (năm năm, độ lệch chuẩn ngày 1%, chẳng có gì để tìm):
+
+<AtP12Lookahead />
+
+Chiến lược A đạt Sharpe 20,6 trên nhiễu. Chiến lược B chỉ khác một ngày: nó giao dịch theo dấu của hôm qua, và được 0,56 ở lần rút này, còn trung bình trên 1.000 lần rút là quanh số không. Không ai công bố A. Lỗi nhìn trước ngoài đời kín đáo hơn nhiều.
+
+- **Chuẩn hoá bằng cả mẫu.** Một feature đổi thành z-score bằng trung bình và độ lệch chuẩn của toàn bộ dataset đã thấy mức trung bình của tương lai. Lỗi này dễ mắc phải mà không để ý, trong code của bạn hay trong code trợ lý đưa cho, vì bản một dòng chính là bản dùng cả mẫu.
+- **Dữ liệu bị điều chỉnh về sau.** Giá được điều chỉnh theo đợt chia tách của năm sau, hoặc báo cáo tài chính gắn vào ngày cuối kỳ thay vì ngày công bố. [Bài Dữ liệu](/blog/ai-trading-data/) cho thấy vì sao bạn cần biết ngày mà mỗi sự kiện bắt đầu được biết.
+- **Khớp lệnh cùng nến.** Tín hiệu dùng giá đóng cửa, và lệnh khớp đúng ở giá đóng cửa đó. Ngoài đời, lúc bạn biết giá đóng cửa thì phiên đã xong.
+
+Một phép thử rẻ bắt được phần lớn lỗi này. Trễ mọi tín hiệu thêm một ngày rồi chạy lại. Chiến lược dựa trên thông tin thật chỉ mất một chút. Chiến lược dựa vào việc nhìn trước sẽ sụp.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Lookahead bias (thiên lệch nhìn trước)**: dùng trong backtest thông tin chưa có sẵn vào lúc đưa ra quyết định.
+- **Dữ liệu point-in-time**: bộ dữ liệu ghi mỗi sự kiện kèm ngày nó bắt đầu được biết, để bản phát lại chỉ thấy những gì lúc đó biết được.
+
+</Concepts>
+
+## 3. Lỗi hai: thử tới khi được
+
+Nhìn trước là một lỗi lập trình. Lỗi này không cần lỗi nào cả, chỉ cần công sức. Giả sử bạn thử 100 chiến lược, và cái nào cũng chỉ là tung đồng xu, không có lợi thế gì. Do may mắn, vài cái sẽ trông đẹp. Nếu bạn giữ cái tốt nhất và quên 99 cái kia, bạn đang đưa người đọc xem đồng xu may mắn nhất.
+
+Sharpe kỳ vọng của cái tốt nhất trong N chiến lược nhiễu thuần tăng theo N. Với 1.260 quan sát ngày, công thức trong bài Deflated Sharpe cho 0,70 ở N = 10, 1,13 ở N = 100 và 1,37 ở N = 500. Mô phỏng 2.000 lần lặp ra cùng những số đó. Cũng những người thắng ấy, theo dõi thêm một năm, trung bình quanh số không.
+
+<AtP12BestOfN />
+
+Bạn thử xem. Mỗi chiến lược bên dưới là lợi suất ngẫu nhiên không có lợi thế. Kéo N lên và nhìn Sharpe backtest của người thắng leo lên trong khi kết quả năm kế tiếp chẳng đi đâu.
+
+<AtP12TrialsSim />
+
+Nghiên cứu thật cũng theo đúng mẫu này. Harvey, Liu và Zhu đếm hàng trăm factor lợi suất đã công bố và lập luận rằng một factor mới đề xuất phải vượt một ngưỡng cao hơn hẳn, t-ratio trên 3,0, vì đã có quá nhiều thứ được thử. Bailey cùng đồng tác giả chỉ ra rằng kiểm tra hold-out thông thường hay không đáng tin với backtest khi đã tìm kiếm trên nhiều cấu hình.
+
+Nghiên cứu của Quantopian đo đúng chuyện đó trên công việc thật của người thật.
+
+<AtP12Quantopian />
+
+Sharpe ratio, con số bạn muốn tin nhất, lại là cái mang sang chạy thật tệ nhất. Các số đo rủi ro như độ biến động và mức sụt giảm tối đa thì mang sang tốt hơn nhiều. Backtest cho bạn biết về độ gập ghềnh của chiến lược nhiều hơn là về việc nó sẽ kiếm được bao nhiêu.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Overfitting**: chỉnh chiến lược tới khi nó khớp với nhiễu trong dữ liệu quá khứ. Nó trông xuất sắc trên những ngày đó và chẳng nói được gì về ngày mới.
+- **Kiểm định nhiều lần (multiple testing)**: khi chạy nhiều phép thử, vài cái qua được nhờ may. Chạy càng nhiều, ngưỡng một kết quả phải vượt càng cao.
+- **Selection bias**: chỉ báo cáo người thắng. Sharpe của phiên bản tốt nhất không phải Sharpe của ý tưởng.
+
+</Concepts>
+
+## 4. Lỗi ba: giao dịch không tốn tiền
+
+Backtest không tính phí cho mỗi lệnh có thể biến một chiến lược chết thành ngôi sao. Giả sử một chiến lược lãi 12% một năm trước chi phí, và mỗi vòng mua bán tốn 0,2% danh mục (0,1% lúc vào, 0,1% lúc ra, đúng mức phí hoa hồng mà backtest của 51labs giả định). Đây là phần chiến lược ấy giữ lại ở bốn tốc độ giao dịch:
+
+<AtP12Costs />
+
+Giao dịch mỗi tháng một lần giữ lại 9,6%. Giao dịch hằng ngày lỗ 38,4% một năm, từ một chiến lược trên giấy trông vẫn ổn. Phí thật của bạn phụ thuộc công ty chứng khoán, và backtest nên dùng một con số bạn đã kiểm tra thay vì số không.
+
+Chi phí chỉ là một nửa. Nửa còn lại là lệnh có khớp được hay không. Trên thị trường Việt Nam, một cổ phiếu có thể kẹt ở giá trần. HOSE giới hạn cổ phiếu trong biên 7% trên hoặc dưới giá tham chiếu mỗi phiên. MoneyF nêu một ví dụ: cổ phiếu có giá tham chiếu 20.000 thì giá trần là 21.400, và đã có 2 triệu cổ phiếu xếp hàng mua. Lệnh khớp theo giá rồi theo thời gian, nên một lệnh mới mua 10.000 cổ phiếu phải chờ sau tất cả số đó.
+
+<AtP12Queue />
+
+Backtest mua ở giá đóng cửa của một ngày tăng trần thì khớp đủ. Lệnh thật có thể chẳng bao giờ khớp. Mọi chiến lược hay mua đúng thứ vừa bứt lên, như các chiến lược momentum, đều chịu rủi ro này.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Slippage (trượt giá)**: chênh lệch giữa giá backtest giả định và giá bạn thật sự nhận được.
+- **Turnover (vòng quay danh mục)**: bạn giao dịch bao nhiêu phần danh mục trong một khoảng thời gian. Turnover cao nhân mọi chi phí lên.
+- **Giá trần**: mức giá cao nhất một cổ phiếu được giao dịch trong phiên. Ở giá trần thường có bên mua nhiều hơn hẳn bên bán.
+
+</Concepts>
+
+## 5. Kiểm tra mà không tự lừa mình
+
+Thuốc chữa overfitting là chấm chiến lược trên những ngày nó chưa từng chạm tới. Cách đơn giản nhất là chia một lần: xây trên những năm đầu, kiểm tra trên những năm cuối. Chia một lần phí dữ liệu và chỉ cho một đáp án. Walk-forward lặp lại việc đó dọc theo thời gian. Huấn luyện trên quá khứ, kiểm tra trên khối kế tiếp, trượt tới, rồi lặp.
+
+<AtP12WalkForward />
+
+Giả sử bạn có mười năm dữ liệu ngày. Bắt đầu với 756 ngày huấn luyện và kiểm tra 126 ngày kế. Trượt tới mỗi lần 126 ngày thì được 14 lần, và các đoạn test ghép lại cho 1.764 ngày kết quả mà không lần nào được chỉnh tham số trên đó. `TimeSeriesSplit` của scikit-learn làm đúng việc này: mỗi tập huấn luyện chứa mọi fold trước đó, và fold kiểm tra luôn nằm sau.
+
+Còn một chỗ rò rỉ tinh tế hơn. Nhiều nhãn nhìn về phía trước: "lợi suất 20 ngày kế tiếp" của ngày t chồng lên nhãn của ngày t+1, và cứ thế. Một ngày huấn luyện sát trước khối kiểm tra có nhãn đã chứa những ngày đầu của khối kiểm tra. Cách chữa là purge (loại bỏ) các ngày đó và thêm embargo (vùng cách ly) sau khối kiểm tra. Tuỳ chọn `gap` của `TimeSeriesSplit` bỏ các mẫu giữa train và test vì cùng lý do.
+
+<AtP12Purge />
+
+Các con số cho thấy hiệu ứng lớn cỡ nào. Trên nhiễu thuần, một bộ dự đoán lấy trung bình nhãn của các ngày huấn luyện gần đó đạt tương quan 0,94 khi kiểm định 5-fold xáo trộn, và −0,01 khi dùng khối có purge và embargo. Bất cứ giá trị nào trên 0 ở phép thử này đều là rò rỉ, vì đáp án đúng là 0.
+
+Thêm một luật nữa. Holdout cuối cùng, đoạn dữ liệu sau chót, chỉ được dùng một lần. Mỗi lần bạn nhìn nó rồi chỉnh, nó biến thành một tập huấn luyện.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Walk-forward**: lặp đi lặp lại việc huấn luyện trên một cửa sổ quá khứ rồi kiểm tra trên khối ngay sau, sau đó dịch cửa sổ tới.
+- **Purging và embargo**: loại các mẫu huấn luyện có nhãn chồng lấn với khối kiểm tra, cộng một vùng đệm ngắn sau khối kiểm tra, để thông tin không rò qua đường cắt.
+- **Holdout**: dữ liệu để riêng, chỉ nhìn một lần ở cuối.
+
+</Concepts>
+
+## 6. Con số trung thực
+
+Sharpe ratio là một ước lượng, và nó có sai số. Với lợi suất chuẩn, sai số chuẩn của Sharpe quy năm sau T quan sát ngày xấp xỉ sqrt((1 + SR²/2) / (T − 1)) × sqrt(252), trong đó SR tính theo ngày. Giả sử giá trị thật là 1,0. Đây là nơi giá trị đo được rơi vào:
+
+<AtP12SharpeBand />
+
+Sau một năm, khoảng 95% chạy từ −0,97 tới 2,97. Sau năm năm nó vẫn trải từ 0,12 tới 1,88. Một chiến lược có Sharpe thật 1,0 cần khoảng 2,75 năm dữ liệu ngày thì giá trị đo được mới vượt số không một cách đáng tin ở mức 95% một phía, còn Sharpe thật 0,5 cần khoảng 11 năm.
+
+Hiệu chỉnh thứ hai là theo số phiên bản bạn đã thử. Deflated Sharpe Ratio so Sharpe tốt nhất của bạn với mức mà riêng may mắn được kỳ vọng tạo ra sau N lần thử. Giả sử bạn quan sát được 1,5 trên năm năm dữ liệu ngày, và Sharpe của các lần thử phân tán như nhiễu thuần. Khả năng Sharpe thật lớn hơn không là bao nhiêu?
+
+<AtP12Deflate />
+
+Nếu đó là ý tưởng duy nhất bạn thử, câu trả lời gần như chắc chắn là có. Sau 100 lần thử nó giảm còn 0,79, và sau 1.000 lần là 0,54, gần như tung đồng xu. Vì vậy một báo cáo tốt nêu rõ đã thử bao nhiêu phiên bản. Thiếu N thì con số không đọc nổi.
+
+Hãy báo nhiều hơn Sharpe. Maximum drawdown là cú rơi sâu nhất từ một đỉnh trước đó, và đó là thứ bạn đã phải ngồi chịu. Turnover và lợi suất sau chi phí cho biết chiến lược có sống sót ngoài đời hay không. Nghiên cứu của Quantopian thấy drawdown và độ biến động mang từ backtest sang chạy thật tốt hơn Sharpe nhiều, thêm một lý do để đọc chúng.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Sai số chuẩn (standard error)**: một con số đo được sẽ lang thang bao nhiêu nếu bạn lặp lại thí nghiệm. Sharpe 1,0 với sai số chuẩn 0,45 là một khoảng rộng.
+- **Deflated Sharpe Ratio**: Sharpe được hiệu chỉnh theo số lần thử đứng sau nó và theo lợi suất không chuẩn.
+- **Maximum drawdown**: mức rơi lớn nhất từ đỉnh xuống đáy của đường vốn.
+
+</Concepts>
+
+## 7. Đọc backtest do người khác viết
+
+Nhiều backtest bạn đọc bây giờ tới từ trợ lý AI, hoặc là code nó viết hoặc là bản tóm tắt kết quả được đưa cho nó: "Chiến lược đạt Sharpe ratio 1,5 trong năm năm." Câu đó không sai. Cái nó bỏ qua lại chính là phần bạn cần.
+
+<AtP12Checklist />
+
+Lấy bài momentum của 51labs làm ca thực hành. Bài nêu rõ universe (60 cổ phiếu thanh khoản niêm yết từ 2014), chi phí (0,1% mỗi chiều) và độ trễ. Những câu một người đọc kỹ vẫn sẽ hỏi: universe có được chọn bằng hiểu biết từ sau thời điểm bắt đầu của mẫu không? Cửa sổ sáu tuần được chọn trước hay sau khi nhìn bảng hồi quy trên cùng mẫu đó? Có đoạn nào mà chiến lược chưa từng được chỉnh không? Đó là một bài giảng dạy, và những câu hỏi mới là điều đáng giá. Hỏi chúng với mọi backtest, backtest của chính bạn trước tiên.
+
+Bản tóm tắt do AI viết hay bỏ đúng những câu trả lời này. Khi một trợ lý báo kết quả, hãy hỏi nó số phiên bản đã thử, độ trễ giữa tín hiệu và lúc khớp, mô hình chi phí và giai đoạn out-of-sample. Nếu nó không trả lời được, con số đó không có trọng lượng.
+
+<Callout type="warning" title="Không phải lời khuyên đầu tư">
+
+Không có gì trong series này khuyên bạn mua hay bán thứ gì. Dữ liệu mô phỏng ở đây cố ý là ngẫu nhiên, và chiến lược thật vẫn có thể lỗ ngay cả khi mọi phép kiểm tra phía trên đều qua.
+
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Hồ sơ out-of-sample**: kết quả từ những ngày chiến lược chưa từng được chỉnh, tốt nhất là giao dịch thật.
+- **Universe**: danh sách cổ phiếu mà chiến lược được phép giao dịch mỗi ngày.
+
+</Concepts>
+
+## Điểm rút ra (Key takeaways)
+
+- **Backtest là bản phát lại có luật**: tín hiệu lúc đóng cửa ngày t chỉ được dùng thứ đã biết lúc đó. Phép thử trễ một ngày bắt được phần lớn lỗi nhìn trước. *(Mục 2)*
+- **Cái tốt nhất trong nhiều cái một phần là may**: cái tốt nhất trong 100 chiến lược không có lợi thế có Sharpe quanh 1,13, và chính nó năm sau kiếm quanh số không. Luôn hỏi đã thử bao nhiêu phiên bản. *(Mục 3)*
+- **Backtest làm đẹp lợi suất**: trong 888 thuật toán thật, Sharpe in-sample giải thích được chưa tới 2,5% Sharpe chạy thật, còn độ biến động và drawdown mang sang tốt hơn nhiều. *(Mục 3)*
+- **Giao dịch tốn tiền và có thể không khớp**: lãi gộp 12% trừ 0,2% mỗi vòng còn −38,4% nếu giao dịch hằng ngày, và hàng chờ tăng trần có thể nuốt mất lệnh. *(Mục 4)*
+- **Kiểm tra trên những ngày mô hình chưa thấy**: walk-forward có purging và embargo; chia xáo trộn trên nhãn chồng lấn cho tương quan 0,94 trên nhiễu thuần. *(Mục 5)*
+- **Sharpe có sai số và có số lần thử**: năm năm dữ liệu để lại khoảng 95% từ 0,12 tới 1,88 quanh giá trị thật 1,0, và 100 lần thử kéo 1,5 quan sát được xuống còn 0,79 khả năng là thật. *(Mục 6)*
+- **Đọc mọi backtest, nhất là bản tóm tắt của AI, bằng bảy câu hỏi** về số lần thử, thời điểm, universe, chi phí, dữ liệu chưa thấy, độ dài hồ sơ và giai đoạn xấu. *(Mục 7)*
+
+## Câu hỏi ôn tập (Review questions)
+
+1. Trong vòng lặp backtest, quyết định lúc đóng cửa ngày t được dùng gì, và điều gì xảy ra với chiến lược giao dịch theo lợi suất của chính ngày đó? *(Xem Mục 2)*
+2. Bạn trễ mọi tín hiệu thêm một ngày và Sharpe tụt từ 2,1 xuống 0,1. Điều này gợi ý gì? *(Xem Mục 2)*
+3. Vì sao cái tốt nhất trong 100 chiến lược đều không có lợi thế vẫn cho Sharpe quanh 1,1 trong backtest, và năm kế tiếp nó cho gì? *(Xem Mục 3)*
+4. Nghiên cứu Quantopian thấy Sharpe in-sample giải thích được chưa tới 2,5% Sharpe chạy thật. Số đo nào mang sang tốt hơn, và điều đó gợi ý nên đọc gì trước trong một backtest? *(Xem Mục 3)*
+5. Một chiến lược lãi gộp 12% và trả 0,2% mỗi vòng mua bán. Nó giữ lại bao nhiêu ở 12 vòng một năm, và ở 252 vòng? *(Xem Mục 4)*
+6. Vì sao backtest mua ở giá đóng cửa tăng trần có thể phóng đại những gì một tài khoản thật nhận được trên thị trường Việt Nam? *(Xem Mục 4)*
+7. Purging loại bỏ cái gì, vì sao nó quan trọng khi nhãn nhìn trước 20 ngày, và tương quan nên bằng bao nhiêu trên nhiễu thuần? *(Xem Mục 5)*
+8. Sau năm năm dữ liệu ngày, một Sharpe thật 1,0 cho khoảng giá trị nào, và số lần thử làm mức đáng tin của con số 1,5 quan sát được thay đổi ra sao? *(Xem Mục 6)*
+
+## Đi sâu hơn (Go deeper)
+
+- **[51Labs: Machine Learning for Financial Market](https://51labs.vn/vi/courses)**: chương trình công khai có một buổi về backtesting và đánh giá chiến lược, gồm cả modern backtest protocol.
+- **[Bailey và López de Prado: The Deflated Sharpe Ratio](https://www.davidhbailey.com/dhbpapers/deflated-sharpe.pdf)**: các công thức đứng sau Mục 6, kèm ví dụ giải sẵn.
+- **[Wiecki và đồng tác giả: All that Glitters Is Not Gold](https://ssrn.com/abstract=2745220)**: nghiên cứu 888 thuật toán ở phần mở đầu, ngắn và dễ đọc.
+- **[scikit-learn: TimeSeriesSplit](https://scikit-learn.org/stable/modules/generated/sklearn.model_selection.TimeSeriesSplit.html)**: chia theo cửa sổ mở rộng có `gap`, dùng được ngay.
+- **[51Labs: Time series momentum, a traditional approach](https://51labs.vn/vi/blog/time-series-momentum-a-traditional-approach)**: case ở Mục 1 cùng toàn bộ code, một bài hợp để áp bảy câu hỏi lên.
+
+</Vi>

@@ -1,0 +1,517 @@
+---
+title: "Production"
+title_vi: "Triển khai"
+description: "From notebook to live: the pipeline, a deployment that missed one server, slippage, HOSE's cancel rules, monitoring and a kill switch, with Knight Capital's 45 minutes as the case."
+description_vi: "Từ notebook tới chạy thật: pipeline, một lần triển khai sót một server, slippage, một ngày giao dịch HOSE và luật huỷ lệnh, giám sát và công tắc dừng. Lấy 45 phút của Knight Capital làm ca thật."
+date: 2026-11-28
+category: "ai"
+tags: ["ai", "ai-trading", "deployment", "risk-controls"]
+cover: "../../assets/blog/ai-trading-production/emergency-stop-button.jpg"
+cover_alt: "A big red emergency stop button on a wooden post, with a sign reading emergency stop, press and hold"
+draft: true
+sources:
+  - { title: "51Labs — Machine Learning for Financial Market (curriculum: Full trading pipeline, Trading strategy deployment, Optimizing data pipeline for trading)", url: "https://51labs.vn/vi/courses" }
+  - { title: "In the Matter of Knight Capital Americas LLC — Order Instituting Administrative and Cease-and-Desist Proceedings, Release No. 34-70694, File No. 3-15570", author: "U.S. Securities and Exchange Commission, 16 Oct 2013", url: "https://www.sec.gov/files/litigation/admin/2013/34-70694.pdf" }
+  - { title: "Hidden Technical Debt in Machine Learning Systems", author: "D. Sculley, G. Holt, D. Golovin, E. Davydov, T. Phillips, D. Ebner, V. Chaudhary, M. Young, J.-F. Crespo & D. Dennison", chapters: "Advances in Neural Information Processing Systems 28 (NIPS 2015), 2494–2502", url: "https://papers.nips.cc/paper_files/paper/2015/file/86df7dcfd896fcaf2674f757a2463eba-Paper.pdf" }
+  - { title: "Trading Costs of Asset Pricing Anomalies (preliminary and incomplete draft, 5 December 2012)", author: "Andrea Frazzini, Ronen Israel & Tobias J. Moskowitz", url: "https://conference.nber.org/conf_papers/f68262/f68262.pdf" }
+  - { title: "Các quy định cần biết khi giao dịch chứng khoán tại Sở Giao dịch Chứng khoán Thành phố Hồ Chí Minh (February 2026)", author: "HOSE", url: "https://staticfile.hsx.vn/Uploads/UploadDocuments/2453338/HTGD_Quy%20dinh%20can%20biet%20khi%20GDCK%20tren%20HOSE_T2.2026.pdf" }
+  - { title: "Big red emergency stop button (photo, CC BY 2.0)", author: "Angus Fraser — Wikimedia Commons", url: "https://commons.wikimedia.org/wiki/File:Big_red_emergency_stop_button_(2972000481).jpg" }
+---
+
+import En from '../../components/mdx/En.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import AtP13KnightClock from '../../components/mdx/AtP13KnightClock.astro';
+import AtP13Pipeline from '../../components/mdx/AtP13Pipeline.astro';
+import AtP13EightServers from '../../components/mdx/AtP13EightServers.astro';
+import AtP13Shortfall from '../../components/mdx/AtP13Shortfall.astro';
+import AtP13CostGrid from '../../components/mdx/AtP13CostGrid.astro';
+import AtP13HoseDay from '../../components/mdx/AtP13HoseDay.astro';
+import AtP13Monitors from '../../components/mdx/AtP13Monitors.astro';
+import AtP13Luck from '../../components/mdx/AtP13Luck.astro';
+import AtP13Controls from '../../components/mdx/AtP13Controls.astro';
+import AtP13CapDemo from '../../components/mdx/AtP13CapDemo.astro';
+import figStop from '../../assets/blog/ai-trading-production/emergency-stop-button.jpg';
+import figSec from '../../assets/blog/ai-trading-production/sec-order-paragraph-17.png';
+
+<En>
+
+<Figure src={figStop} alt="A big red emergency stop button mounted on a wooden post, with a printed sign below it: emergency stop, press and hold" caption="The oldest control in engineering: one button that stops the machine. Most trading systems do not have one. Photo: Angus Fraser, CC BY 2.0." sourceTitle="Wikimedia Commons: Big red emergency stop button (Angus Fraser, CC BY 2.0)" sourceUrl="https://commons.wikimedia.org/wiki/File:Big_red_emergency_stop_button_(2972000481).jpg" />
+
+> "In the absence of appropriate controls, the speed with which automated trading systems enter orders into the marketplace can turn an otherwise manageable error into an extreme event with potentially wide-spread impact."
+> &mdash; *SEC order against Knight Capital Americas LLC (2013), paragraph 3*
+
+### 45 minutes, one server
+
+At about 8:01 on the morning of 1 August 2012, an internal system at Knight Capital began sending e-mails that said "Power Peg disabled". It sent 97 of them before the US market opened at 9:30. Knight had not built them as alerts, and the SEC records that people generally did not read them.
+
+At 9:30 the market opened, and one of Knight's eight order-routing servers started sending orders it should never have sent. In about 45 minutes, 212 incoming orders turned into 4 million executions in 154 stocks, more than 397 million shares. Knight ended with roughly $3.5 billion of unwanted long positions and $3.15 billion of unwanted short positions, and a realised loss of $460 million. Knight's trading was about a tenth of all trading in listed US equities, and in 75 of those stocks its executions were more than 20 percent of the volume in those minutes.
+
+<AtP13KnightClock />
+
+No model was wrong that morning. The failure sat in the part of the system that turns a decision into an order: a deployment that missed one server, an old feature that was still callable, and no control that could say stop. The SEC's order is the best public postmortem of how a trading system fails, and every number above comes from it.
+
+<Figure src={figSec} alt="Cropped page of the SEC order: paragraph 17, stating 212 parent orders, 4 million executions in 154 stocks, more than 397 million shares in approximately 45 minutes, and a 460 million dollar realised loss" caption="Paragraph 17 of the SEC order, the source of the numbers in the figure above. US government document." sourceTitle="SEC Release 34-70694, In the Matter of Knight Capital Americas LLC" sourceUrl="https://www.sec.gov/files/litigation/admin/2013/34-70694.pdf" />
+
+This is the post that follows [Backtest](/blog/ai-trading-backtest/). A backtest tells you whether an idea could have made money. Production asks whether the system around it can make that money without losing more by accident. Six questions drive it:
+
+1. **What a live pipeline contains** beyond the notebook.
+2. **How code reaches the servers**, and how one missed copy lost $460 million.
+3. **Slippage**: the cost your backtest never paid.
+4. **The Vietnamese trading day**: what HOSE lets you cancel, and when.
+5. **Monitoring**: what to watch, and how fast it can warn you.
+6. **Limits and the kill switch**: the controls Knight did not have.
+
+<Callout type="note" title="TL;DR">
+A live strategy is a pipeline of seven steps, and the model is only the third. Knight Capital lost $460 million in about 45 minutes because new code never reached one of eight servers, an old feature woke up, and nothing compared orders going out with orders coming in or stopped the router. Real trading also costs money your backtest ignored: a large institutional dataset puts the average implementation shortfall at 13 basis points per dollar traded, which takes 1.95 points a year off an 8% edge for a strategy that trades its capital 15 times. Watch for faults you can see directly (data, orders, positions) because profit and loss needs months to say anything. Put limits before the order leaves, because on HOSE you cannot cancel during the auctions. Nothing here is investment advice or a recommendation to trade.
+</Callout>
+
+<Concepts>
+
+- **Production**: the environment where the system runs on real data and real money, as opposed to a notebook or a backtest.
+- **Slippage**: the gap between the price you expected when you decided and the price you got.
+- **Kill switch**: a control that stops the system from sending new orders (and, where the market allows, cancels open ones) without anyone having to debug first.
+- **Parent and child orders**: a large order (parent) is cut into many small orders (children) sent to the market over time.
+
+</Concepts>
+
+---
+
+## 1. From notebook to live: the pipeline
+
+A notebook reads a file, computes features, fits a model and draws an equity curve. A live strategy has to do the same thing every day without you, and then turn the result into orders and look after them until they are filled.
+
+<AtP13Pipeline />
+
+Read the boxes from left to right. Data must arrive on time and complete. Features must be computed exactly as they were in training, or the model sees inputs it has never met. The model needs a version number, so you know which one traded on a given day. Target weights say what you want to hold, orders are the difference between that and what you hold now, and pre-trade checks decide whether each order may leave. After the broker and the exchange come the fills, and a daily reconciliation of what you hold against what you meant to hold. Monitoring and the kill switch sit at the end of the loop, which is where Knight had none that worked.
+
+Sculley and colleagues at Google describe how this part of an ML system rots. Data preparation grows "organically, as new signals are identified and new information sources added" into what they call a pipeline jungle, "a jungle of scrapes, joins, and sampling steps, often with intermediate files output". Their advice is to think about data collection and feature extraction as a whole, before the jungle forms. The [Data](/blog/ai-trading-data/) post has the starting point: one honest table with a `known_at` column. In production, add a log of every input each decision used, so a bad day can be replayed.
+
+Data failures cost real money too. The SEC order records an event from October 2011. Knight ran a weekend disaster-recovery test with test data, and when trading began on Monday its market-making desk kept generating automated quotes from that test data. The loss was nearly $7.5 million. The SEC adds that Knight "did not have a mechanism to test whether their systems were relying on stale data."
+
+A course like 51Labs' Machine Learning for Financial Market lists "Full trading pipeline", "Trading strategy deployment" and "Optimizing data pipeline for trading" as separate sessions. They are separate because each one fails in its own way.
+
+<Concepts>
+
+- **Pipeline**: the chain of steps that turns raw data into orders. Every step needs an owner and a check.
+- **Target weights (tỉ trọng mục tiêu)**: how much of the portfolio the model wants in each stock. Orders are target minus current holdings.
+- **Reconciliation (đối chiếu)**: comparing what the system believes it holds with the broker's statement.
+
+</Concepts>
+
+---
+
+## 2. Deployment: eight servers, one missed
+
+Knight was preparing for a new NYSE programme scheduled to start on 1 August 2012. It had to put new code in its order router, called SMARS, which cuts each parent order into child orders. The new code reused a flag that once switched on an older feature called Power Peg. Knight stopped using Power Peg in 2003. In 2005 it moved the piece of Power Peg that counted how many shares had been filled, and the SEC says Knight did not retest Power Peg after the move.
+
+Starting 27 July the new code went out in stages, a few servers per day. One technician did not copy it to one of the eight servers. A second technician did not review the deployment, and Knight had no written procedure that required one. On 1 August the flag arrived at the eighth server, which woke the old Power Peg code. Without its fill counter it kept sending child orders for each parent order, whatever had already been executed.
+
+<AtP13EightServers />
+
+At that point the people on site did what many of us would do. They removed the new code from the seven good servers. The SEC records that this made the problem worse: those servers also ran Power Peg when they received the flag.
+
+The Google authors name this pattern. When experiments live as conditional branches inside production code, they write, the accumulated codepaths create "a growing debt", and they cite Knight as the famous example of obsolete experimental codepaths. (They quote $465 million; the SEC order says more than $460 million and realised $460 million. Use the SEC number.)
+
+A few habits follow from the order, and none is exotic:
+
+- **Check what is running.** After every deployment, ask each server which version it runs and compare the list. Knight's staged rollout was a good idea, but nothing confirmed what each stage had delivered.
+- **Two pairs of eyes.** A second person reviews a deployment, and it is written down.
+- **Delete code you no longer use,** and never give an old flag a new meaning.
+- **Rehearse the rollback.** Knight's rollback made things worse because nobody had checked what the old code would do.
+
+<Callout type="tip" title="Before real money">
+Run the new system next to the old one first, sending nothing or sending tiny orders, and compare what each wanted to do. This is common practice, not something the SEC order requires. It would have turned Knight's eighth server into a mismatch on a screen.
+</Callout>
+
+<Concepts>
+
+- **Staged rollout (triển khai theo đợt)**: putting new code on a few machines first, then more. It limits the damage only if each stage is checked.
+- **Dead code (code chết)**: code that nothing is meant to run any more but that is still present and callable.
+- **Rollback**: returning to the previous version after a bad release. It is a deployment too, and it can fail.
+
+</Concepts>
+
+---
+
+## 3. Slippage: the cost the backtest never paid
+
+A backtest usually trades at a clean price at the instant of the signal. A live order has to be sent, travel, wait in a queue and be filled, while its own buying moves the price.
+
+Take one buy. Say the model decides to buy at 100.00. By the time the order reaches the market the price is 100.03, and across several fills the average price is 100.13. That is 13 cents on 100, or 13 basis points (one basis point is 0.01%). The gap from decision price to what you actually paid is called **implementation shortfall**. Three cents came from waiting, ten from your own buying.
+
+<AtP13Shortfall />
+
+Real numbers exist. Frazzini, Israel and Moskowitz studied nearly a trillion dollars of live trades from a large institutional money manager (two of the authors work at AQR Capital Management) across 19 developed markets from 1998 to 2011. The dataset holds both the trade that was intended and the trade that happened, so shortfall can be measured directly. The mean implementation shortfall was 13 basis points, the median 10.34, and weighted by dollars 20.2: the largest trades cost the most. They also found that real costs were less than a tenth of what earlier studies had estimated. The authors read this as good news for the strategies they studied. A small trader on HOSE faces other costs, so treat 13 as one data point rather than a promise.
+
+Whatever the cost per trade, it gets multiplied by how often you trade. Say a backtest shows 8% a year before costs. Python gives these net returns:
+
+<AtP13CostGrid />
+
+A strategy that trades its capital twice a year survives 60 basis points of cost with 6.8% left. One that trades 15 times a year drops to 6.05% at 13 basis points, and loses money at 60. The break-even cost is 8% divided by turnover: 400 basis points at 2 times, 133 at 6 times, 53 at 15 times.
+
+HOSE adds a floor to the cost. The tick size for stocks priced between 10,000 and 49,950 dong is 50 dong. On a stock at 25,000 that is 20 basis points of price. If the best bid and offer sit one tick apart, buying at the offer costs half of that, 10 basis points against the midpoint, before any price impact. The check takes one line of Python: 25 / 25,000 x 10,000 = 10.
+
+<Concepts>
+
+- **Implementation shortfall**: the difference between the price when you decided and the average price you paid (or received), usually in basis points.
+- **Basis point (bps, điểm cơ bản)**: one hundredth of a percent. 13 bps = 0.13%.
+- **Turnover (vòng quay vốn)**: the value you trade in a year divided by your capital. 6x means you trade six times your capital.
+- **Price impact (tác động giá)**: how much your own order moves the price against you.
+
+</Concepts>
+
+---
+
+## 4. A HOSE day: when an order can still be cancelled
+
+Everything above assumes you can change your mind. On HOSE you cannot always. The exchange's own guide for investors says that in the opening auction (9:00 to 9:15) and the closing auction (14:30 to 14:45) limit orders and ATO/ATC orders cannot be amended or cancelled, and that nobody can amend or cancel during the lunch break (11:30 to 13:00). Only the two continuous sessions allow it.
+
+<AtP13HoseDay />
+
+Add it up: 15 + 90 + 15 = 120 of the 345 minutes between 9:00 and 14:45 are locked. A script that goes wrong at 14:31 sends orders that nothing can pull back. That changes where the safeguards belong. They have to be in front of the order, as checks and limits, because the kill switch cannot take it back afterwards.
+
+The same guide gives the rest of the rules your pipeline has to encode:
+
+- **Price band.** A normal session allows ±7% around the reference price. Say a stock has a reference price of 25,000 dong: the ceiling is 25,000 + 25,000 x 7% = 26,750 and the floor 23,250, before rounding to the tick. A target price outside the band is an order that cannot trade.
+- **Lot sizes.** A round lot is 100 shares, the biggest single order is 500,000 shares, and an odd lot is 1 to 99 shares. A target of 1,200,000 shares needs at least three orders.
+- **Tick size.** 10 dong below 10,000, 50 dong from 10,000 to 49,950, 100 dong from 50,000.
+- **Stock status.** The exchange flags stocks as warned, controlled, restricted or suspended. A restricted stock trades only in 15-minute periodic auctions, and in the last 5 minutes of each you cannot amend or cancel. Your data feed should carry these flags, as the [Data](/blog/ai-trading-data/) post argued for delistings.
+
+<Concepts>
+
+- **ATO / ATC**: orders executed at the opening (ATO) or closing (ATC) auction price. They cannot be cancelled once the auction has begun.
+- **Reference price (giá tham chiếu)**: the price the daily band is computed from. Ceiling and floor sit 7% above and below it.
+- **Round lot (lô chẵn)**: the standard trading unit on HOSE, 100 shares.
+
+</Concepts>
+
+---
+
+## 5. Monitoring: what to watch, and how fast
+
+Unit tests tell you the code did what it was written to do. A live system lives in a world that changes, and the Google paper says plainly that such tests "are not sufficient": comprehensive live monitoring of system behaviour, with automated response, is critical. They suggest three things to watch. **Prediction bias**: the distribution of predicted labels should match what is observed. **Action limits**: the system should have limits on what it does, "broad enough not to trigger spuriously", and hitting one should fire an alert. **Up-stream producers**: monitor the data that feeds the model.
+
+For a trading system that becomes five monitors, which differ mostly in how fast they can speak.
+
+<AtP13Monitors />
+
+The three fastest have a clear failure to look for: orders per minute above the usual, a price file that has not updated since yesterday, holdings that differ from target. Each can be a simple number with a threshold, checked by a program that pages a person. Knight's position monitor, PMON, did the opposite. According to the SEC it showed positions after the fact, sent no automated alerts about exposure, and did not display the limits. A person had to know them and notice that one was exceeded.
+
+The slowest monitor is the one beginners rely on, profit and loss. Say a strategy truly earns a Sharpe ratio of 1 with 10% yearly volatility. Python gives the chance that it shows a loss anyway:
+
+<AtP13Luck />
+
+About four months in ten, and a quarter of half-years, end in the red for a strategy that is working. And a rough rule says the statistical test on the average return grows with the Sharpe ratio times the square root of the years of data. For a Sharpe of 1 that reaches 2 only after 4 years. So a drawdown in the first quarter says very little about whether the model has broken. A data feed that stopped updating says a lot, and says it the same day.
+
+<Concepts>
+
+- **Prediction bias**: the model's average prediction drifting away from what really happens.
+- **Action limit (hạn mức hành động)**: a cap on what the system may do in a period, such as orders per minute or notional sent.
+- **Sharpe ratio**: average return divided by its volatility. Higher means more return for each unit of ups and downs.
+
+</Concepts>
+
+---
+
+## 6. Limits and the kill switch
+
+The SEC adopted Rule 15c3-5 in November 2010. It requires US brokers with market access to keep controls "reasonably designed to prevent the entry of erroneous orders" and orders that exceed pre-set capital thresholds, and the CEO must certify them each year. The Knight order is the case in which the SEC applied it. It found that Knight had a control that capped the limit price at 9.5% from the best bid or offer, but it did not apply to orders received before the open. Beyond that, five layers were missing or partial.
+
+<AtP13Controls />
+
+Two of the gaps are the easiest to copy for your own system. First, count what comes out against what went in. The SEC notes Knight had no control comparing orders leaving SMARS with those that entered it, so an order that was already filled could keep generating children. Second, tie a limit to the sending of orders. Knight had position limits for some groups and a monitor that showed exposure, but no firm-wide threshold that stopped new orders automatically. The account holding the runaway positions had a $2 million gross limit that was not linked to any automated control.
+
+The rule binds brokers, not people running a script at home. The reasoning transfers: the machine is faster than you, so the limits go into the machine.
+
+Here is how much a limit matters. The demo spreads Knight's real totals evenly over its 45 minutes. At that average pace the router built about $2.46 million of gross position every second. With a cap of $100 million, it stops after 40.6 seconds and about 6 million shares. A person who notices after five minutes lets $739 million through. Nobody noticing gives the real result.
+
+<AtP13CapDemo />
+
+A kill switch is useful when it is boring. It lives outside the code it stops, so it works when that code is broken. It does two things: stop new orders, and cancel the open ones where the market allows it (on HOSE, remember the locked windows). Someone has tested it recently. And a short written procedure says who presses it and what happens next, since the SEC found Knight had no procedure to guide employees through an incident like this one.
+
+<Callout type="warning" title="Not advice">
+None of this is a recommendation to trade or a claim that these controls would make a strategy profitable. They limit how much a mistake can cost. A strategy with no edge still loses money, in production or anywhere else.
+</Callout>
+
+<Concepts>
+
+- **Pre-trade check (kiểm tra trước lệnh)**: a test applied to each order before it leaves, such as size, price against the market, or duplicates.
+- **Exposure cap / gross position**: a limit on the total value held, longs and shorts added together.
+- **Runbook (sổ tay xử lý sự cố)**: a short document that says who does what, in what order, when an incident happens.
+
+</Concepts>
+
+---
+
+## Key takeaways
+
+- **The model is one box of seven.** Data, features, orders, checks, reconciliation and monitoring decide whether a good model makes money.
+- **Verify what is deployed.** Knight's new code missed one of eight servers; no second person checked and no procedure required it.
+- **Remove dead code and never reuse a flag.** The failure came from a feature unused since 2003.
+- **Put slippage in the backtest.** Break-even cost is gross return divided by turnover: 53 bps for 15x, 400 bps for 2x on an 8% edge.
+- **On HOSE, safeguards go before the order.** 120 of the 345 minutes from 9:00 to 14:45 allow no cancel, and the price band is ±7%.
+- **Alert on faults you can see.** A Sharpe-1 strategy loses money in about a quarter of half-years, so P&L alone cannot tell broken from unlucky.
+- **A limit that does not stop orders is a report.** Link caps and checks to order entry, and test the kill switch.
+
+## Review questions
+
+1. In the Knight incident, which of the eight servers ran the old code, and why did nobody notice before the open? *(See Section 2)*
+2. Why did removing the new code from the seven working servers make things worse? *(See Section 2)*
+3. A decision price of 100.00 and an average fill of 100.13: what is the shortfall in basis points, and how much came from waiting if the order reached the market at 100.03? *(See Section 3)*
+4. A strategy earns 8% gross and trades its capital 6 times a year. What cost per dollar traded makes it break even? *(See Section 3)*
+5. Why is a kill switch that cancels open orders not enough on HOSE? *(See Section 4)*
+6. A stock has a reference price of 25,000 dong. What are the ceiling and floor of a normal session before rounding to the tick? *(See Section 4)*
+7. Why does a Sharpe-1 strategy show a loss over a quarter almost a third of the time, and what does that say about using P&L as an alarm? *(See Section 5)*
+8. Name two controls the SEC found missing at Knight and say where in the pipeline each belongs. *(See Section 6)*
+
+## Go deeper
+
+- **[SEC order against Knight Capital Americas LLC (Release 34-70694)](https://www.sec.gov/files/litigation/admin/2013/34-70694.pdf)**: 18 pages, readable without a legal background. Paragraphs 13 to 27 are the incident.
+- **[Hidden Technical Debt in Machine Learning Systems (Sculley et al., NIPS 2015)](https://papers.nips.cc/paper_files/paper/2015/file/86df7dcfd896fcaf2674f757a2463eba-Paper.pdf)**: the sections on pipeline jungles, dead experimental codepaths and changes in the external world.
+- **[Trading Costs of Asset Pricing Anomalies (Frazzini, Israel, Moskowitz)](https://conference.nber.org/conf_papers/f68262/f68262.pdf)**: how implementation shortfall is measured on live trades.
+- **[51Labs: Machine Learning for Financial Market](https://51labs.vn/vi/courses)**: the course sessions on the full trading pipeline and strategy deployment.
+
+</En>
+
+<Vi>
+
+<Figure src={figStop} alt="Một nút dừng khẩn cấp màu đỏ lớn gắn trên cột gỗ, bên dưới có tấm biển in chữ emergency stop, press and hold" caption="Chốt chặn lâu đời nhất của ngành kỹ thuật: một nút bấm để dừng máy. Phần lớn hệ thống giao dịch không có nút đó. Ảnh: Angus Fraser, CC BY 2.0." sourceTitle="Wikimedia Commons: Big red emergency stop button (Angus Fraser, CC BY 2.0)" sourceUrl="https://commons.wikimedia.org/wiki/File:Big_red_emergency_stop_button_(2972000481).jpg" />
+
+> "Nếu thiếu các chốt kiểm soát phù hợp, tốc độ mà hệ thống giao dịch tự động đưa lệnh ra thị trường có thể biến một lỗi vốn xử lý được thành một sự cố cực đoan với tác động lan rộng."
+> &mdash; *Lệnh của SEC đối với Knight Capital Americas LLC (2013), đoạn 3*
+
+### 45 phút, một server
+
+Khoảng 8:01 sáng ngày 1/8/2012, một hệ thống nội bộ của Knight Capital bắt đầu gửi e-mail với dòng báo lỗi "Power Peg disabled". Nó gửi 97 e-mail như vậy trước 9:30, lúc thị trường Mỹ mở cửa. Knight không thiết kế chúng làm cảnh báo, và SEC ghi lại rằng nhân viên nhìn chung không đọc.
+
+9:30 thị trường mở, và một trong tám server định tuyến lệnh của Knight bắt đầu gửi những lệnh lẽ ra không bao giờ được gửi. Trong khoảng 45 phút, 212 lệnh đầu vào biến thành 4 triệu lần khớp ở 154 mã, hơn 397 triệu cổ phiếu. Knight kết thúc với khoảng 3,5 tỷ USD vị thế mua ngoài ý muốn và 3,15 tỷ USD vị thế bán khống ngoài ý muốn, thua lỗ đã chốt 460 triệu USD. Giao dịch của Knight chiếm khoảng một phần mười toàn bộ giao dịch cổ phiếu niêm yết ở Mỹ, và ở 75 trong số các mã đó, lệnh của Knight chiếm hơn 20% khối lượng trong những phút ấy.
+
+<AtP13KnightClock />
+
+Sáng hôm đó không có mô hình nào sai. Cái hỏng nằm ở phần biến một quyết định thành một lệnh: một lần triển khai sót một server, một tính năng cũ vẫn gọi được, và không có chốt kiểm soát nào nói được chữ dừng. Lệnh của SEC là bản postmortem công khai tốt nhất về cách một hệ thống giao dịch hỏng, và mọi con số ở trên đều lấy từ đó.
+
+<Figure src={figSec} alt="Trang cắt từ lệnh của SEC: đoạn 17 nêu 212 lệnh mẹ, 4 triệu lần khớp ở 154 mã, hơn 397 triệu cổ phiếu trong khoảng 45 phút, và khoản lỗ đã chốt 460 triệu USD" caption="Đoạn 17 trong lệnh của SEC, nguồn của các con số ở hình trên. Văn bản của chính phủ Mỹ." sourceTitle="SEC Release 34-70694, In the Matter of Knight Capital Americas LLC" sourceUrl="https://www.sec.gov/files/litigation/admin/2013/34-70694.pdf" />
+
+Bài này tiếp nối [Backtest](/blog/ai-trading-backtest/). Backtest cho biết một ý tưởng có thể đã kiếm tiền hay không. Triển khai hỏi: hệ thống bao quanh ý tưởng đó có kiếm được số tiền ấy mà không vô tình mất nhiều hơn không. Sáu câu hỏi dẫn dắt bài:
+
+1. **Pipeline chạy thật gồm những gì** ngoài notebook.
+2. **Code tới server bằng cách nào**, và một bản chép sót làm mất 460 triệu USD ra sao.
+3. **Slippage**: chi phí mà backtest chưa từng trả.
+4. **Một ngày giao dịch ở Việt Nam**: HOSE cho huỷ lệnh khi nào.
+5. **Giám sát**: theo dõi cái gì, và nó cảnh báo nhanh tới đâu.
+6. **Hạn mức và công tắc dừng**: những chốt chặn Knight không có.
+
+<Callout type="note" title="TL;DR">
+Một chiến lược chạy thật là pipeline bảy bước, và mô hình mới chỉ là bước thứ ba. Knight Capital mất 460 triệu USD trong khoảng 45 phút vì code mới không tới được một trong tám server, một tính năng cũ thức dậy, và không có gì so lệnh đi ra với lệnh đi vào hay dừng được router. Giao dịch thật còn tốn một khoản mà backtest bỏ qua: trong một bộ dữ liệu lớn của quỹ tổ chức, implementation shortfall trung bình là 13 điểm cơ bản trên mỗi đồng giao dịch, tức mất 1,95 điểm phần trăm mỗi năm của lợi thế 8% với chiến lược giao dịch gấp 15 lần vốn. Hãy canh những lỗi nhìn thấy trực tiếp (dữ liệu, lệnh, vị thế), vì lãi lỗ phải mất nhiều tháng mới nói được điều gì. Đặt hạn mức trước khi lệnh rời đi, vì ở HOSE bạn không huỷ được trong các phiên định kỳ. Nội dung ở đây không phải lời khuyên đầu tư hay khuyến nghị giao dịch.
+</Callout>
+
+<Concepts>
+
+- **Production (chạy thật)**: môi trường hệ thống chạy trên dữ liệu thật và tiền thật, khác với notebook hay backtest.
+- **Slippage (trượt giá)**: khoảng cách giữa giá bạn kỳ vọng lúc quyết định và giá bạn nhận được.
+- **Kill switch (công tắc dừng)**: chốt chặn dừng việc gửi lệnh mới (và huỷ các lệnh đang chờ, nếu thị trường cho phép) mà không cần ai phải debug trước.
+- **Lệnh mẹ và lệnh con**: một lệnh lớn (lệnh mẹ) được cắt thành nhiều lệnh nhỏ (lệnh con) gửi ra thị trường theo thời gian.
+
+</Concepts>
+
+---
+
+## 1. Từ notebook tới chạy thật: pipeline
+
+Notebook đọc một file, tính feature, fit mô hình rồi vẽ đường vốn. Một chiến lược chạy thật phải làm đúng chừng đó mỗi ngày mà không có bạn, rồi biến kết quả thành lệnh và trông chừng lệnh cho tới khi khớp.
+
+<AtP13Pipeline />
+
+Đọc các ô từ trái sang phải. Dữ liệu phải về đúng giờ và đủ. Feature phải được tính y như lúc train, nếu không mô hình nhận những đầu vào nó chưa từng gặp. Mô hình cần số phiên bản, để biết phiên bản nào đã giao dịch vào ngày nào. Tỉ trọng mục tiêu cho biết bạn muốn giữ gì, lệnh là phần chênh giữa đó và cái đang giữ, kiểm tra trước lệnh quyết định mỗi lệnh có được đi hay không. Sau broker và sàn là kết quả khớp, rồi việc đối chiếu hằng ngày giữa cái đang giữ và cái định giữ. Giám sát và công tắc dừng nằm ở cuối vòng, và đó là chỗ Knight không có cái nào chạy được.
+
+Sculley và các đồng tác giả ở Google mô tả phần này của một hệ thống ML mục ra sao. Khâu chuẩn bị dữ liệu mọc lên "một cách tự nhiên, khi có tín hiệu mới và nguồn thông tin mới" thành thứ họ gọi là pipeline jungle, "một khu rừng gồm scrape, join và các bước lấy mẫu, thường kèm file trung gian". Lời khuyên của họ là nghĩ về thu thập dữ liệu và trích xuất feature như một tổng thể, trước khi khu rừng kịp mọc. Bài [Dữ liệu](/blog/ai-trading-data/) đã có điểm xuất phát: một bảng trung thực với cột `known_at`. Khi chạy thật, thêm một bản log mọi đầu vào mà mỗi quyết định đã dùng, để một ngày xấu có thể phát lại được.
+
+Lỗi dữ liệu cũng tốn tiền thật. Lệnh của SEC ghi lại một sự kiện tháng 10/2011. Knight chạy thử khôi phục thảm hoạ vào cuối tuần bằng dữ liệu test, và khi giao dịch bắt đầu vào thứ Hai, bàn tạo lập thị trường của họ vẫn tiếp tục sinh báo giá tự động từ dữ liệu test đó. Khoản lỗ gần 7,5 triệu USD. SEC nói thêm rằng Knight "không có cơ chế kiểm tra xem các hệ thống có đang dựa vào dữ liệu cũ hay không".
+
+Một khoá học như Machine Learning for Financial Market của 51Labs liệt kê "Full trading pipeline", "Trading strategy deployment" và "Optimizing data pipeline for trading" thành các buổi riêng. Chúng tách riêng vì mỗi cái hỏng theo kiểu của nó.
+
+<Concepts>
+
+- **Pipeline**: chuỗi bước biến dữ liệu thô thành lệnh. Mỗi bước cần một người chịu trách nhiệm và một phép kiểm tra.
+- **Target weights (tỉ trọng mục tiêu)**: mô hình muốn giữ bao nhiêu phần danh mục ở mỗi mã. Lệnh là mục tiêu trừ cái đang giữ.
+- **Reconciliation (đối chiếu)**: so cái hệ thống tin là đang giữ với sao kê của broker.
+
+</Concepts>
+
+---
+
+## 2. Triển khai: tám server, sót một
+
+Knight đang chuẩn bị cho một chương trình mới của NYSE dự kiến bắt đầu ngày 1/8/2012. Họ phải đưa code mới vào bộ định tuyến lệnh tên SMARS, nơi cắt mỗi lệnh mẹ thành các lệnh con. Code mới dùng lại một cờ từng bật một tính năng cũ tên Power Peg. Knight ngừng dùng Power Peg từ 2003. Năm 2005, họ chuyển đoạn đếm số cổ phiếu đã khớp trong Power Peg sang chỗ khác, và theo SEC thì Knight không test lại Power Peg sau lần chuyển đó.
+
+Từ 27/7, code mới được đưa lên theo đợt, vài server mỗi ngày. Một kỹ thuật viên không chép nó sang một trong tám server. Không có kỹ thuật viên thứ hai xem lại lần triển khai, và Knight không có quy trình bằng văn bản nào đòi việc đó. Ngày 1/8, cờ tới server thứ tám, đánh thức đoạn code Power Peg cũ. Thiếu bộ đếm lệnh đã khớp, nó cứ gửi lệnh con cho từng lệnh mẹ, bất kể đã khớp được bao nhiêu.
+
+<AtP13EightServers />
+
+Lúc đó, những người có mặt làm điều nhiều người trong chúng ta sẽ làm. Họ gỡ code mới khỏi bảy server đang chạy đúng. SEC ghi rằng việc này làm sự cố nặng hơn: các server đó cũng chạy Power Peg khi nhận cờ.
+
+Nhóm tác giả Google gọi tên kiểu lỗi này. Khi các thử nghiệm sống dưới dạng nhánh điều kiện trong code production, họ viết, những codepath tích tụ lại tạo thành "một khoản nợ ngày càng lớn", và họ dẫn Knight làm ví dụ nổi tiếng về codepath thử nghiệm lỗi thời. (Họ ghi 465 triệu USD; lệnh của SEC ghi hơn 460 triệu USD và khoản lỗ đã chốt là 460 triệu USD. Hãy dùng con số của SEC.)
+
+Từ lệnh xử phạt rút ra vài thói quen, không cái nào xa lạ:
+
+- **Kiểm tra cái đang chạy.** Sau mỗi lần triển khai, hỏi từng server nó chạy phiên bản nào rồi đối chiếu danh sách. Triển khai theo đợt của Knight là ý hay, nhưng không có gì xác nhận mỗi đợt đã giao được gì.
+- **Hai cặp mắt.** Người thứ hai xem lại lần triển khai, và việc đó được ghi ra.
+- **Xoá code không dùng nữa,** và đừng bao giờ gán ý nghĩa mới cho một cờ cũ.
+- **Diễn tập rollback.** Rollback của Knight làm mọi thứ tệ hơn vì không ai kiểm tra code cũ sẽ làm gì.
+
+<Callout type="tip" title="Trước khi dùng tiền thật">
+Chạy hệ thống mới song song với hệ thống cũ trước, không gửi gì hoặc chỉ gửi lệnh rất nhỏ, rồi so xem mỗi bên định làm gì. Đây là thông lệ phổ biến, không phải điều lệnh của SEC yêu cầu. Nó sẽ biến server thứ tám của Knight thành một chỗ lệch hiện ngay trên màn hình.
+</Callout>
+
+<Concepts>
+
+- **Staged rollout (triển khai theo đợt)**: đưa code mới lên vài máy trước, rồi mới tới nhiều máy hơn. Nó chỉ giới hạn được thiệt hại khi mỗi đợt đều được kiểm tra.
+- **Dead code (code chết)**: code không còn ai định chạy nhưng vẫn nằm đó và vẫn gọi được.
+- **Rollback**: quay về phiên bản trước sau một bản phát hành xấu. Nó cũng là một lần triển khai, và cũng có thể hỏng.
+
+</Concepts>
+
+---
+
+## 3. Slippage: chi phí backtest chưa từng trả
+
+Backtest thường giao dịch ở một mức giá sạch đúng lúc có tín hiệu. Lệnh thật phải được gửi đi, chạy qua đường truyền, xếp hàng chờ rồi mới khớp, trong lúc chính việc mua của bạn đẩy giá lên.
+
+Lấy một lệnh mua. Giả sử mô hình quyết định mua ở 100,00. Khi lệnh tới thị trường thì giá đã là 100,03, và qua nhiều lần khớp, giá trung bình là 100,13. Đó là 13 xu trên 100, tức 13 điểm cơ bản (một điểm cơ bản là 0,01%). Khoảng cách từ giá lúc quyết định tới giá bạn thực sự trả gọi là **implementation shortfall**. Ba xu do chờ, mười xu do chính việc mua của bạn.
+
+<AtP13Shortfall />
+
+Có số liệu thật. Frazzini, Israel và Moskowitz nghiên cứu gần một nghìn tỷ USD giao dịch thật của một quỹ tổ chức lớn (hai trong ba tác giả làm ở AQR Capital Management) trên 19 thị trường phát triển, từ 1998 tới 2011. Bộ dữ liệu có cả lệnh dự định lẫn lệnh đã xảy ra, nên đo shortfall trực tiếp được. Implementation shortfall trung bình là 13 điểm cơ bản, trung vị 10,34, và tính theo trọng số tiền là 20,2: lệnh lớn nhất tốn nhiều nhất. Họ cũng thấy chi phí thật thấp hơn một phần mười so với các nghiên cứu trước ước tính. Các tác giả coi đó là tin tốt cho những chiến lược họ nghiên cứu. Nhà giao dịch nhỏ trên HOSE đối mặt các chi phí khác, nên hãy coi 13 là một điểm dữ liệu chứ đừng coi là lời hứa.
+
+Chi phí mỗi lệnh là bao nhiêu thì cũng bị nhân với mức độ bạn giao dịch dày. Giả sử backtest cho lãi 8% một năm trước chi phí. Python cho ra lợi nhuận ròng như sau:
+
+<AtP13CostGrid />
+
+Chiến lược quay vòng vốn hai lần một năm chịu được chi phí 60 điểm cơ bản và còn 6,8%. Chiến lược quay 15 lần còn 6,05% ở mức 13 điểm cơ bản, và lỗ ở mức 60. Chi phí hoà vốn bằng 8% chia cho số vòng quay: 400 điểm cơ bản ở 2 lần, 133 ở 6 lần, 53 ở 15 lần.
+
+HOSE còn đặt một mức sàn cho chi phí. Bước giá của cổ phiếu trong khoảng 10.000 tới 49.950 đồng là 50 đồng. Với cổ phiếu giá 25.000, đó là 20 điểm cơ bản của giá. Nếu giá mua tốt nhất và giá bán tốt nhất cách nhau một bước giá, mua ở giá bán tốt nhất tốn một nửa, tức 10 điểm cơ bản so với giá giữa, chưa tính tác động giá. Một dòng Python là kiểm được: 25 / 25.000 x 10.000 = 10.
+
+<Concepts>
+
+- **Implementation shortfall**: chênh lệch giữa giá lúc bạn quyết định và giá trung bình bạn đã trả (hoặc nhận), thường tính bằng điểm cơ bản.
+- **Basis point (bps, điểm cơ bản)**: một phần trăm của một phần trăm. 13 bps = 0,13%.
+- **Turnover (vòng quay vốn)**: giá trị bạn giao dịch trong một năm chia cho vốn. 6x nghĩa là bạn giao dịch gấp sáu lần vốn.
+- **Price impact (tác động giá)**: lệnh của chính bạn đẩy giá đi ngược lại với bạn bao nhiêu.
+
+</Concepts>
+
+---
+
+## 4. Một ngày ở HOSE: khi nào còn huỷ được lệnh
+
+Mọi thứ ở trên đều giả định bạn đổi ý được. Ở HOSE, không phải lúc nào cũng vậy. Tài liệu hướng dẫn nhà đầu tư của chính sàn nói rằng trong phiên khớp lệnh định kỳ mở cửa (9:00 tới 9:15) và đóng cửa (14:30 tới 14:45), lệnh giới hạn và lệnh ATO/ATC không được sửa hay huỷ, và trong giờ nghỉ trưa (11:30 tới 13:00) không ai được sửa hay huỷ lệnh khớp. Chỉ hai phiên khớp lệnh liên tục cho phép.
+
+<AtP13HoseDay />
+
+Cộng lại: 15 + 90 + 15 = 120 trong 345 phút từ 9:00 tới 14:45 bị khoá. Một script hỏng lúc 14:31 gửi ra những lệnh mà không gì kéo lại được. Điều đó đổi chỗ đặt các chốt an toàn. Chúng phải nằm trước lệnh, dưới dạng kiểm tra và hạn mức, vì công tắc dừng không rút lại được sau đó.
+
+Cũng tài liệu đó cho các quy định còn lại mà pipeline phải mã hoá:
+
+- **Biên độ giá.** Phiên thông thường cho phép ±7% quanh giá tham chiếu. Giả sử một cổ phiếu có giá tham chiếu 25.000 đồng: giá trần là 25.000 + 25.000 x 7% = 26.750 và giá sàn 23.250, chưa làm tròn theo bước giá. Mức giá mục tiêu nằm ngoài biên độ là một lệnh không thể khớp.
+- **Đơn vị giao dịch.** Lô chẵn là 100 cổ phiếu, một lệnh đặt tối đa 500.000 cổ phiếu, lô lẻ là 1 tới 99 cổ phiếu. Mục tiêu 1.200.000 cổ phiếu cần ít nhất ba lệnh.
+- **Bước giá.** 10 đồng dưới 10.000, 50 đồng từ 10.000 tới 49.950, 100 đồng từ 50.000.
+- **Trạng thái cổ phiếu.** Sàn gắn cờ cổ phiếu bị cảnh báo, kiểm soát, hạn chế hoặc đình chỉ. Cổ phiếu bị hạn chế chỉ giao dịch trong các đợt khớp lệnh định kỳ 15 phút, và 5 phút cuối của mỗi đợt không được sửa hay huỷ. Nguồn dữ liệu của bạn nên mang các cờ này, như bài [Dữ liệu](/blog/ai-trading-data/) đã nói về chuyện huỷ niêm yết.
+
+<Concepts>
+
+- **ATO / ATC**: lệnh khớp ở giá của phiên mở cửa (ATO) hoặc đóng cửa (ATC). Khi phiên đã bắt đầu thì không huỷ được.
+- **Reference price (giá tham chiếu)**: mức giá dùng để tính biên độ trong ngày. Giá trần và giá sàn nằm cao hơn và thấp hơn nó 7%.
+- **Round lot (lô chẵn)**: đơn vị giao dịch chuẩn ở HOSE, 100 cổ phiếu.
+
+</Concepts>
+
+---
+
+## 5. Giám sát: theo dõi gì, và nhanh tới đâu
+
+Unit test cho biết code đã làm đúng điều nó được viết ra để làm. Một hệ thống chạy thật sống trong một thế giới luôn đổi, và bài báo của Google nói thẳng rằng các test như vậy "không đủ": cần giám sát toàn diện hành vi hệ thống theo thời gian thực kèm phản ứng tự động. Họ gợi ý ba thứ để theo dõi. **Prediction bias**: phân phối nhãn dự đoán phải khớp với phân phối quan sát được. **Action limit**: hệ thống nên có giới hạn cho việc nó làm, "đủ rộng để không kích hoạt oan", và chạm giới hạn thì phải bắn cảnh báo. **Up-stream producers**: giám sát luồng dữ liệu nuôi mô hình.
+
+Với một hệ thống giao dịch, điều đó thành năm thứ cần theo dõi, khác nhau chủ yếu ở tốc độ lên tiếng.
+
+<AtP13Monitors />
+
+Ba thứ nhanh nhất đều có một lỗi rõ ràng để tìm: số lệnh mỗi phút vượt mức thường, file giá chưa cập nhật từ hôm qua, vị thế lệch khỏi mục tiêu. Mỗi cái có thể là một con số đơn giản với một ngưỡng, do một chương trình kiểm tra và gọi người. PMON, công cụ theo dõi vị thế của Knight, làm ngược lại. Theo SEC, nó hiện vị thế sau khi đã khớp, không gửi cảnh báo tự động về mức độ rủi ro và không hiển thị hạn mức. Một người phải tự biết hạn mức và nhận ra nó đã bị vượt.
+
+Thứ chậm nhất lại là thứ người mới hay dựa vào: lãi lỗ. Giả sử một chiến lược thật sự có Sharpe ratio bằng 1 với biến động 10% một năm. Python cho ra xác suất nó vẫn báo lỗ:
+
+<AtP13Luck />
+
+Khoảng bốn tháng trong mười, và một phần tư số nửa năm, kết thúc bằng lỗ đối với một chiến lược đang chạy tốt. Và một quy tắc xấp xỉ nói rằng thống kê kiểm định trên lợi nhuận trung bình tăng theo Sharpe nhân căn bậc hai của số năm dữ liệu. Với Sharpe bằng 1, nó chỉ chạm 2 sau 4 năm. Vì thế một đợt sụt giảm trong quý đầu nói rất ít về chuyện mô hình có hỏng không. Một nguồn dữ liệu ngừng cập nhật nói được rất nhiều, và nói ngay trong ngày.
+
+<Concepts>
+
+- **Prediction bias**: dự đoán trung bình của mô hình lệch dần khỏi những gì thực sự xảy ra.
+- **Action limit (hạn mức hành động)**: mức trần cho việc hệ thống được làm trong một khoảng thời gian, như số lệnh mỗi phút hay giá trị đã gửi.
+- **Sharpe ratio**: lợi nhuận trung bình chia cho độ biến động của nó. Càng cao thì mỗi đơn vị lên xuống cho nhiều lợi nhuận hơn.
+
+</Concepts>
+
+---
+
+## 6. Hạn mức và công tắc dừng
+
+SEC ban hành Quy tắc 15c3-5 vào tháng 11/2010. Quy tắc buộc các broker Mỹ có quyền truy cập thị trường phải giữ những chốt kiểm soát "được thiết kế hợp lý để ngăn việc đưa vào các lệnh sai" và các lệnh vượt ngưỡng vốn đặt trước, và CEO phải xác nhận mỗi năm. Lệnh xử phạt Knight là ca SEC áp dụng quy tắc đó. SEC thấy Knight có một chốt giới hạn giá ở mức 9,5% so với giá mua hoặc bán tốt nhất, nhưng nó không áp dụng cho lệnh nhận trước giờ mở cửa. Ngoài ra, năm lớp chắn còn thiếu hoặc mới có một phần.
+
+<AtP13Controls />
+
+Hai chỗ hở dễ bắt chước nhất cho hệ thống của bạn. Thứ nhất, đếm cái đi ra so với cái đi vào. SEC ghi Knight không có chốt nào so lệnh rời SMARS với lệnh đã vào, nên một lệnh đã khớp xong vẫn có thể tiếp tục sinh lệnh con. Thứ hai, nối hạn mức với việc gửi lệnh. Knight có hạn mức vị thế cho một số nhóm và một công cụ hiện mức độ rủi ro, nhưng không có ngưỡng toàn công ty nào tự dừng lệnh mới. Tài khoản giữ các vị thế chạy lỗi có hạn mức gộp 2 triệu USD không nối với bất kỳ chốt tự động nào.
+
+Quy tắc ràng buộc broker, không ràng buộc người chạy script ở nhà. Nhưng lý lẽ thì áp dụng được: máy nhanh hơn bạn, nên hạn mức phải nằm trong máy.
+
+Đây là mức độ quan trọng của một hạn mức. Demo trải đều các con số thật của Knight lên 45 phút. Ở nhịp trung bình đó, router dựng khoảng 2,46 triệu USD vị thế gộp mỗi giây. Với hạn mức 100 triệu USD, nó dừng sau 40,6 giây và khoảng 6 triệu cổ phiếu. Một người nhận ra sau năm phút thì để lọt 739 triệu USD. Không ai nhận ra thì ra kết quả thật.
+
+<AtP13CapDemo />
+
+Công tắc dừng hữu ích khi nó nhàm chán. Nó nằm ngoài đoạn code mà nó dừng, nên vẫn chạy khi đoạn code đó hỏng. Nó làm hai việc: dừng lệnh mới, và huỷ các lệnh đang chờ nếu thị trường cho phép (ở HOSE, nhớ các khung giờ bị khoá). Gần đây đã có người thử nó. Và một quy trình ngắn bằng văn bản nói ai bấm, bấm xong làm gì, vì SEC thấy Knight không có quy trình nào hướng dẫn nhân viên xử lý một sự cố như thế này.
+
+<Callout type="warning" title="Không phải lời khuyên">
+Không điều nào ở đây là khuyến nghị giao dịch hay khẳng định rằng các chốt chặn này khiến chiến lược có lãi. Chúng chỉ giới hạn một sai sót có thể tốn bao nhiêu. Một chiến lược không có lợi thế vẫn thua tiền, dù chạy thật hay ở bất cứ đâu.
+</Callout>
+
+<Concepts>
+
+- **Pre-trade check (kiểm tra trước lệnh)**: phép thử áp cho từng lệnh trước khi nó rời đi, như cỡ lệnh, giá so với thị trường, hay lệnh trùng.
+- **Exposure cap / gross position (hạn mức / vị thế gộp)**: giới hạn tổng giá trị đang giữ, cộng cả vị thế mua và bán khống.
+- **Runbook (sổ tay xử lý sự cố)**: một tài liệu ngắn ghi ai làm gì, theo thứ tự nào, khi sự cố xảy ra.
+
+</Concepts>
+
+---
+
+## Điểm rút ra (Key takeaways)
+
+- **Mô hình chỉ là một trong bảy ô.** Dữ liệu, feature, lệnh, kiểm tra, đối chiếu và giám sát quyết định việc một mô hình tốt có kiếm ra tiền hay không.
+- **Xác minh cái đang được triển khai.** Code mới của Knight sót một trong tám server; không ai kiểm tra lại và không quy trình nào đòi hỏi.
+- **Xoá code chết và đừng dùng lại cờ cũ.** Sự cố đến từ một tính năng không dùng từ 2003.
+- **Đưa slippage vào backtest.** Chi phí hoà vốn bằng lợi nhuận gộp chia vòng quay: 53 bps cho 15 lần, 400 bps cho 2 lần với lợi thế 8%.
+- **Ở HOSE, chốt an toàn nằm trước lệnh.** 120 trong 345 phút từ 9:00 tới 14:45 không cho huỷ, và biên độ giá là ±7%.
+- **Báo động theo lỗi nhìn thấy được.** Chiến lược Sharpe 1 lỗ trong khoảng một phần tư số nửa năm, nên chỉ nhìn lãi lỗ thì không phân biệt được hỏng hay xui.
+- **Hạn mức không chặn được lệnh thì chỉ là một bản báo cáo.** Nối hạn mức và các phép kiểm tra với việc đặt lệnh, và thử công tắc dừng.
+
+## Câu hỏi ôn tập (Review questions)
+
+1. Trong vụ Knight, server nào trong tám server chạy code cũ, và tại sao không ai phát hiện trước giờ mở cửa? *(Xem Phần 2)*
+2. Tại sao việc gỡ code mới khỏi bảy server đang chạy đúng lại làm mọi thứ tệ hơn? *(Xem Phần 2)*
+3. Giá lúc quyết định 100,00 và giá khớp trung bình 100,13: shortfall là bao nhiêu điểm cơ bản, và bao nhiêu trong đó do chờ nếu lệnh tới thị trường ở mức 100,03? *(Xem Phần 3)*
+4. Một chiến lược lãi gộp 8% và quay vòng vốn 6 lần một năm. Chi phí trên mỗi đồng giao dịch bao nhiêu thì hoà vốn? *(Xem Phần 3)*
+5. Tại sao công tắc dừng chỉ biết huỷ lệnh đang chờ là chưa đủ ở HOSE? *(Xem Phần 4)*
+6. Một cổ phiếu có giá tham chiếu 25.000 đồng. Giá trần và giá sàn của phiên thông thường, chưa làm tròn theo bước giá, là bao nhiêu? *(Xem Phần 4)*
+7. Tại sao một chiến lược Sharpe 1 lại lỗ trong một quý gần một phần ba số lần, và điều đó nói gì về việc dùng lãi lỗ làm chuông báo động? *(Xem Phần 5)*
+8. Kể tên hai chốt kiểm soát mà SEC thấy thiếu ở Knight và nói mỗi cái thuộc chỗ nào của pipeline. *(Xem Phần 6)*
+
+## Đi sâu hơn (Go deeper)
+
+- **[Lệnh của SEC đối với Knight Capital Americas LLC (Release 34-70694)](https://www.sec.gov/files/litigation/admin/2013/34-70694.pdf)**: 18 trang, đọc được mà không cần nền tảng pháp lý. Đoạn 13 tới 27 là diễn biến sự cố.
+- **[Hidden Technical Debt in Machine Learning Systems (Sculley và cộng sự, NIPS 2015)](https://papers.nips.cc/paper_files/paper/2015/file/86df7dcfd896fcaf2674f757a2463eba-Paper.pdf)**: các phần về pipeline jungle, codepath thử nghiệm chết và thay đổi của thế giới bên ngoài.
+- **[Trading Costs of Asset Pricing Anomalies (Frazzini, Israel, Moskowitz)](https://conference.nber.org/conf_papers/f68262/f68262.pdf)**: cách đo implementation shortfall trên lệnh thật.
+- **[51Labs: Machine Learning for Financial Market](https://51labs.vn/vi/courses)**: các buổi học về full trading pipeline và triển khai chiến lược.
+
+</Vi>

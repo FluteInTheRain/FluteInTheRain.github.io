@@ -1,0 +1,415 @@
+---
+title: "Order Flow"
+title_vi: "Dòng lệnh"
+description: "Inside the order book: queues, spread, order flow imbalance, price impact and DeepLOB, and why a good forecast score is not yet a trade. Post 16 of the AI-trading series."
+description_vi: "Bên trong sổ lệnh: hàng chờ, spread, mất cân bằng dòng lệnh, tác động giá và DeepLOB, và vì sao điểm dự báo đẹp chưa phải một lệnh có lời. Bài 16 của series AI trong chứng khoán."
+date: 2026-11-28
+category: "finance"
+tags: ["ai", "ai-trading", "microstructure", "order-book"]
+cover: "../../assets/blog/ai-trading-order-flow/hose-exchange-night.jpg"
+cover_alt: "The Ho Chi Minh Stock Exchange building at night, lit up under the glowing Exchange Tower sign"
+draft: true
+sources:
+  - { title: "The Price Impact of Order Book Events (Journal of Financial Econometrics 12(1), 2014)", author: "Rama Cont, Arseniy Kukanov & Sasha Stoikov", url: "https://arxiv.org/abs/1011.6402" }
+  - { title: "DeepLOB: Deep Convolutional Neural Networks for Limit Order Books (IEEE Transactions on Signal Processing 67(11), 2019)", author: "Zihao Zhang, Stefan Zohren & Stephen Roberts", url: "https://arxiv.org/abs/1808.03668" }
+  - { title: "Benchmark Dataset for Mid-Price Forecasting of Limit Order Book Data with Machine Learning Methods", author: "Adamantios Ntakaris, Martin Magris, Juho Kanniainen, Moncef Gabbouj & Alexandros Iosifidis", url: "https://arxiv.org/abs/1705.03233" }
+  - { title: "Deep limit order book forecasting: a microstructural guide (Quantitative Finance 25(7), 2025)", author: "Antonio Briola, Silvia Bartolucci & Tomaso Aste", url: "https://arxiv.org/abs/2403.09267" }
+  - { title: "Quy định giao dịch đăng website HOSE (worked examples 1 to 3, trading hours, price steps, order types; April 2025)", author: "Sở Giao dịch Chứng khoán TP.HCM (HOSE)", url: "https://static2.vietstock.vn/vietstock/2025/4/29/20250429_20250429___hose___quy_dinh_giao_dich_dang_website_hose.pdf" }
+  - { title: "Các quy định cần biết khi giao dịch chứng khoán trên HOSE (hours, price steps, ±7% band; February 2026)", author: "Sở Giao dịch Chứng khoán TP.HCM (HOSE)", url: "https://staticfile.hsx.vn/Uploads/UploadDocuments/2453338/HTGD_Quy%20dinh%20can%20biet%20khi%20GDCK%20tren%20HOSE_T2.2026.pdf" }
+  - { title: "Machine Learning for Financial Market — course curriculum (projects: order flow imbalance prediction; DeepLOB)", author: "51labs", url: "https://51labs.vn/vi/courses" }
+  - { title: "Ho Chi Minh stock exchange at night (photo, CC0)", author: "Syced — Wikimedia Commons", url: "https://commons.wikimedia.org/wiki/File:Ho_Chi_Minh_stock_exchange_at_night.jpg" }
+---
+
+import En from '../../components/mdx/En.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import AtP16BookAnatomy from '../../components/mdx/AtP16BookAnatomy.astro';
+import AtP16MarketBuy from '../../components/mdx/AtP16MarketBuy.astro';
+import AtP16HoseDay from '../../components/mdx/AtP16HoseDay.astro';
+import AtP16SnapshotVsFlow from '../../components/mdx/AtP16SnapshotVsFlow.astro';
+import AtP16OfiEvents from '../../components/mdx/AtP16OfiEvents.astro';
+import AtP16OfiDemo from '../../components/mdx/AtP16OfiDemo.astro';
+import AtP16Depth from '../../components/mdx/AtP16Depth.astro';
+import AtP16CkR2 from '../../components/mdx/AtP16CkR2.astro';
+import AtP16TickMcc from '../../components/mdx/AtP16TickMcc.astro';
+import AtP16DeepLob from '../../components/mdx/AtP16DeepLob.astro';
+import AtP16Cost from '../../components/mdx/AtP16Cost.astro';
+import heroNight from '../../assets/blog/ai-trading-order-flow/hose-exchange-night.jpg';
+
+<En>
+
+<Figure src={heroNight} alt="The Ho Chi Minh Stock Exchange building at night, lit up under the glowing Exchange Tower sign" caption="HOSE at night. The matching engine behind this façade keeps one queue of buyers and one queue of sellers for every stock, and the rest of this post is about reading those queues." sourceTitle="Wikimedia Commons: Ho Chi Minh stock exchange at night (Syced, CC0)" sourceUrl="https://commons.wikimedia.org/wiki/File:Ho_Chi_Minh_stock_exchange_at_night.jpg" />
+
+> "...it is linear, requires the estimation of a single parameter and it is robust across stocks and across timescales."
+> &mdash; *Cont, Kukanov & Stoikov*, "The Price Impact of Order Book Events" (2014)
+
+### A price is where two queues meet
+
+HOSE's own trading rules contain a worked example of a stock called C. Three buyers wait at 40,650, 40,600 and 40,550 dong. Sellers wait at 40,800, 40,850 and 40,900. Then someone sends a buy order for 1,000 shares with a limit of 40,850. The engine fills 900 shares at 40,800 and 100 at 40,850, and the cheapest seller is gone. Nobody decided that the price should rise. The best ask moved up one step because the queue in front of it ran out, and the midpoint between the best bid and the best ask went from 40,725 to 40,750.
+
+Earlier posts treated a price as a number in a column. Here it is the visible edge of two queues, and a model that can read the queues sees something a model on daily closes never gets: who is waiting, how many, and what just changed. The post follows the line a short-horizon researcher walks. First the order book and the HOSE rules around it, then order flow imbalance, then price impact, and finally the deep-learning model that reads the whole book (DeepLOB), with a check on what its score is worth. Nothing here is investment advice or a recommendation to trade.
+
+<Callout type="note" title="TL;DR">
+
+The order book is two queues of limit orders, and the price you see is where they touch. Order flow imbalance (OFI) counts, at the best prices, how much demand was added or supply removed in an interval. Over 10-second windows in 50 US stocks it explained about 65% of the mid-price change on average, but it was measured in the same window as the move it explains, so it describes the move and does not forecast it. DeepLOB feeds the last 100 book states to a convolutional and recurrent network and predicts the next direction. A later study of 15 NASDAQ stocks found that this kind of model scores well on stocks with large price steps, drops to near coin-flip on small-step stocks at the longest horizon, and that a good score still does not guarantee a profitable trade. On HOSE, a stock priced between 25,000 and 100,000 dong has a price step of 10 to 20 basis points, so the spread is a large cost next to the moves a model can predict.
+
+</Callout>
+
+<Concepts>
+
+- **Limit order**: an order to buy or sell at a stated price or better. It waits in the order book until someone trades against it or it is cancelled.
+- **Market order**: an order to trade now at the best price available. It removes limit orders from the other side of the order book.
+- **Bid and ask**: the bid is the highest price a buyer is waiting at; the ask is the lowest price a seller is waiting at.
+- **Mid-price**: the average of the best bid and the best ask. It is the usual "price" in microstructure research because it does not jump between the two sides.
+
+</Concepts>
+
+---
+
+## 1. The order book is a queue
+
+Plain version first: for each stock the exchange keeps two lists. Buyers who have not yet found a seller wait on one list, sellers who have not yet found a buyer wait on the other. Each entry says a price and a quantity. The highest buy price and the lowest sell price are the best bid and the best ask, and the gap between them is the spread.
+
+<AtP16BookAnatomy />
+
+Two rules decide who trades first. A better price goes first: a higher bid or a lower ask. At the same price, the order that arrived earlier goes first. HOSE states both rules in its trading rules for continuous matching. That second rule matters for a model, because a queue position has value, and cancelling or changing an order changes it: reducing the size keeps the place in line, while raising the size or changing the price sends the order to the back.
+
+Now replay the example from the opening. A buy order walks up the sell side, taking the cheapest sellers first, and stops when it is filled.
+
+<AtP16MarketBuy />
+
+The order did not need to be large to move the midpoint. The spread here is three steps wide, so removing the best ask pushed the mid-price up by half a step even though no new buyer appeared on the bid side. Price impact starts as plain arithmetic on queues. The rest of the post asks how much of it a model can use.
+
+<Concepts>
+
+- **Spread**: best ask minus best bid. Anyone who buys at the ask and sells at the bid pays it.
+- **Price-time priority**: better price first, and earlier order first at the same price.
+- **Depth**: how many shares wait at each price level. A deep book absorbs an order with little price change.
+
+</Concepts>
+
+## 2. HOSE draws the grid
+
+The shape of the order book depends on the exchange's rules, and HOSE's rules make the grid coarse. For ordinary stocks the price step is 10 dong below 10,000, 50 dong from 10,000 to 49,950, and 100 dong from 50,000 up, and the daily band is plus or minus 7% around the reference price. The day has a call auction at the open (ATO, 09:00 to 09:15), continuous matching until 11:30 and from 13:00 to 14:30, and a call auction at the close (ATC, 14:30 to 14:45). Orders cannot be cancelled during the two auctions.
+
+<AtP16HoseDay />
+
+Look at the lower half of the figure. I computed each step as a share of its price. A stock at 25,000 dong has a step of 20 basis points (0.2%), and a stock at 10,000 dong has a step of 50 basis points. At 9,990 the step is 10 dong, which is 10 basis points, and one dong higher it jumps fivefold. The tightest the spread can ever be is one step, so for a stock priced between 25,000 and 100,000 dong, crossing the spread costs at least 10 to 20 basis points. The study in Section 6 sorts stocks into small-tick and large-tick groups. I did not test where HOSE stocks fall, but a step that wide is coarse, and it is worth keeping in mind when the forecast scores arrive.
+
+There is also a data question. The papers below use ten levels per side or best-quote updates. I did not verify what depth Vietnamese data vendors publish, so check that before planning a project like this one.
+
+<Concepts>
+
+- **Tick (price step)**: the smallest allowed price change. HOSE sets it by price band.
+- **Basis point (bp)**: one hundredth of a percent, 0.01%. A step of 50 dong on a 40,725 dong stock is about 12 bp.
+- **Call auction (ATO, ATC)**: a moment when all orders are matched at one price, instead of one by one.
+
+</Concepts>
+
+## 3. A snapshot is not a flow
+
+The first feature anyone builds from a book is queue imbalance: take the best bid size and the best ask size, and compute (bid minus ask) divided by (bid plus ask). It runs from minus one (only sellers at the top) to plus one (only buyers). It is a photograph, and it ignores how the queues got there.
+
+<AtP16SnapshotVsFlow />
+
+The figure replays four events from the same HOSE book: the buy of 1,000, a new sell order of 300 at the best ask, a cancelled buy of 100 at the best bid, and a new buy order of 500 inside the spread. At every step the photograph says the ask side is heavier, from minus 0.80 to minus 0.17. The flow says something else: demand was added, supply was removed, and the mid-price ended 25 dong higher. Four events say little about the future. They do show that the snapshot and the flow are two different measurements, and the second one needs the history of events.
+
+## 4. Order flow imbalance
+
+Cont, Kukanov and Stoikov built the flow measure. They looked at every change in the best bid and ask: if the bid queue grows or the ask queue shrinks, demand went up; if the bid queue shrinks or the ask queue grows, supply went up. Each event contributes plus or minus the size involved, and the order flow imbalance over a window is the sum.
+
+<AtP16OfiEvents />
+
+One feature of the definition surprises beginners. A market sell and a cancelled buy of the same size count the same, because both shorten the bid queue by the same amount. The measure sees the queue, not the intention. Another one is the treatment of a price that moves. When the best ask rises because its queue was consumed, the event contributes the size of the old queue that disappeared. In the example the buy of 1,000 contributes plus 900, not plus 1,000, because the 100 shares bought at the next step belong to the new best queue.
+
+Try it. The order book below starts with the HOSE example. Click events and watch the cumulative OFI, the mid-price and the queue imbalance move.
+
+<AtP16OfiDemo />
+
+<Concepts>
+
+- **Order flow imbalance (OFI)**: the sum, over a time window, of the signed best-queue changes caused by limit orders, market orders and cancellations.
+- **Queue imbalance**: (bid size minus ask size) divided by (bid size plus ask size) at one moment.
+- **Cancellation**: removing a waiting order. Most orders in modern markets end this way; DeepLOB's authors cite more than 90%.
+
+</Concepts>
+
+## 5. Price impact and depth
+
+The authors' first finding is a relation simple enough to say in one line: over a short window, the mid-price change is about proportional to the order flow imbalance, and the proportionality shrinks as the order book gets deeper. Their stylised model gives the price move in steps as OFI divided by twice the depth D, the number of shares waiting at each level.
+
+<AtP16Depth />
+
+Say 1,000 more shares are bought than sold at the best prices. If 250 shares wait at every level, the midpoint moves two steps. If 1,000 wait at every level, it moves half a step. Four times the depth cuts the move to a quarter. That is why the same order that rattles a thin stock leaves a liquid one almost untouched.
+
+The empirical side comes from one month of data: April 2010, 50 stocks drawn at random from the S&P 500, with price changes and OFI computed over 10-second windows. In their data the quote updates outnumbered the trades by roughly 40 to 1, which is why the authors wanted the quotes and not only the trades. Averaged over stocks, OFI explained 65% of the mid-price change, and adding a quadratic term moved it to 68%.
+
+<AtP16CkR2 />
+
+The authors flagged a weakness themselves. OFI contains the price-changing events, so part of the fit could be a tautology: an event that moves the price is counted in the number that explains the price move. When they removed those events, the fit dropped to between 35% and 60%. It was still large, and it was still a fit within the same window.
+
+<Concepts>
+
+- **Price impact**: how much the price moves when an order, or a burst of orders, hits the order book.
+- **R-squared**: the share of the variation in one quantity that a simple formula explains. 65% means about two thirds.
+- **Contemporaneous**: measured in the same window. A contemporaneous relation describes; a forecast has to use only information from before.
+
+</Concepts>
+
+## 6. Explaining a move is not forecasting one
+
+Everything in Section 5 uses the imbalance and the price change from the same interval. A trader needs the opposite: imbalance now, price change later. Briola, Bartolucci and Aste tested exactly that for the deep-learning route, with a DeepLOB-type model on 15 NASDAQ stocks from 2017 to 2019 (45 training days, 5 validation days and 10 test days each year). They sorted the stocks by tick size and measured agreement between the predicted and the actual direction with the Matthews correlation coefficient, where 0 is a coin flip.
+
+<AtP16TickMcc />
+
+Large-tick stocks scored 0.29, 0.36 and 0.26 at the three horizons (10, 50 and 100 book updates ahead), and small-tick stocks scored 0.11, 0.04 and 0.01. The authors write that at the longest horizon the small-tick results suggest the model "is producing random forecasts". Their abstract adds that high forecasting power does not necessarily correspond to actionable trading signals, and they say trading simulations are not part of that paper. The label in that study is the plain mid-price change compared with one tick, with no smoothing.
+
+I tested no HOSE stock, so I cannot say which group a given Vietnamese name falls in. What the figure shows is that predictability depends on microstructure, and that a score averaged across a mixed list hides the difference.
+
+## 7. DeepLOB: the order book as an image
+
+DeepLOB reads the last 100 states of the order book. Each state has 40 numbers: ten price levels on each side, with a price and a size for each. That table is treated like a small image. Convolutional layers first combine the price and size at a level, then neighbouring levels. An Inception module runs filters of different widths side by side, and an LSTM layer carries a memory across the 100 steps. The output is three probabilities: down, stationary, up. The previous post covers those building blocks: [Sequence Models](/blog/ai-trading-sequence-models/).
+
+<AtP16DeepLob />
+
+Beginners tend to skip the label. The authors compare the mid-price some steps ahead with the mid-price now, and call the move up or down only when it passes a threshold, α. The paper says the label definition used by the FI-2010 benchmark gave less consistent signals than the one it chose for its own data, and that inconsistent signals mean many redundant trades and higher transaction costs. FI-2010 itself comes from NASDAQ Nordic: five stocks over ten days, about four million samples. For their own test, the authors used the London Stock Exchange: Lloyds, Barclays, Tesco, BT and Vodafone through 2017, 08:30 to 16:00. Their trading simulation assumed trades at the mid-price and compared gross profits before fees, and they said so. Both choices suit a comparison between models. Neither says what the strategy would earn after paying the spread.
+
+## 8. What it costs to act
+
+Put the pieces together on a HOSE-style board. Say a stock sits in the order book from Section 1: mid 40,725, spread 150 dong, three steps. A model that predicts the mid-price will rise by 0.3 step is predicting 15 dong, about 3.7 basis points. Buying at the ask and selling at the bid later costs the whole 150 dong, 36.8 basis points, before any fee. Even a correct one-step forecast earns 50 dong against a 150 dong round trip.
+
+<AtP16Cost />
+
+A resting limit order avoids paying the spread, but it may never fill, and it tends to fill when the price is about to move against it. Whether that trade-off pays is a separate question from forecasting, and this post does not test it. The sources here measure windows of seconds or a few book updates, so that is the horizon the evidence covers, and the width of the price grid decides how much of it could be traded.
+
+<Concepts>
+
+- **Round trip**: a buy followed by a sell. Crossing the spread both ways costs the whole spread.
+- **Gross vs net**: gross profit is before costs, net is after fees and spread. Research that reports only gross can look better than a live account.
+- **Matthews correlation (MCC)**: a score for classification that stays honest when one class is much more common than the others. 0 is random, 1 is perfect.
+
+</Concepts>
+
+## Key takeaways
+
+- The price is the edge of two queues. A buy order that clears the best ask moves the mid-price without any new buyer appearing. *(Sections 1 and 3)*
+- HOSE's price step is 10 to 20 basis points of the price between 25,000 and 100,000 dong, and jumps to 50 basis points at 10,000 dong. *(Section 2)*
+- A snapshot imbalance and a flow imbalance are different numbers, and OFI needs the sequence of events, not one picture. *(Sections 3 and 4)*
+- OFI explained about 65% of 10-second price moves in 50 US stocks, and the slope falls as depth rises. *(Section 5)*
+- That fit is contemporaneous. Forecast quality of a DeepLOB-type model differs by tick-size group and horizon, and a good score is not a trading result. *(Sections 6 and 7)*
+- Compare any short-horizon forecast with the spread before believing it is useful. *(Section 8)*
+
+## Review questions
+
+Quiz for this post: [/blog/ai-trading-order-flow/quiz/](/blog/ai-trading-order-flow/quiz/)
+
+1. In HOSE's worked example a buy of 1,000 shares fills 900 at 40,800 and 100 at 40,850. Why does the mid-price rise by 25 dong? *(See Section 1)*
+2. What does price-time priority say, and what happens to queue position when an order's size is raised? *(See Section 1)*
+3. Why is the tightest possible spread on HOSE a larger share of a 10,000 dong stock than of a 9,990 dong stock? *(See Section 2)*
+4. A queue imbalance of minus 0.8 and a rising mid-price can happen together. How? *(See Section 3)*
+5. Why do a market sell and a cancelled buy of the same size add the same amount to OFI? *(See Section 4)*
+6. With OFI of plus 1,000 shares, how far does the mid-price move if 500 shares wait at each level? *(See Section 5)*
+7. Why can the 65% fit in Cont, Kukanov and Stoikov not be used as a forecast as it stands? *(See Section 5)*
+8. Which stocks did a DeepLOB-type model predict best in the 15-stock NASDAQ study, and what happened to the small-tick group at 100 updates ahead? *(See Section 6)*
+9. DeepLOB's trading simulation used mid-price fills and gross profit. What does that leave out? *(See Section 7)*
+10. A model predicts a one-step rise on a stock with a three-step spread. Why is acting on it a loss before fees? *(See Section 8)*
+
+## Go deeper
+
+- **[Cont, Kukanov & Stoikov, The Price Impact of Order Book Events](https://arxiv.org/abs/1011.6402)**: the source of the OFI definition, the depth relation and the 65% figure.
+- **[Zhang, Zohren & Roberts, DeepLOB](https://arxiv.org/abs/1808.03668)**: the architecture, the labelling choices and the London Stock Exchange test.
+- **[Briola, Bartolucci & Aste, Deep limit order book forecasting: a microstructural guide](https://arxiv.org/abs/2403.09267)**: the tick-size study and the case for evaluating forecasts by what they would let you trade.
+- **[51labs, Machine Learning for Financial Market](https://51labs.vn/vi/courses)**: the public curriculum lists a project on order flow imbalance prediction and another on DeepLOB. This post builds only the background for them.
+- **Related in this series:** [Sequence Models](/blog/ai-trading-sequence-models/) for the layers DeepLOB reuses, and [Vietnam order types, the order book, ATO and ATC](/blog/vietnam-order-types-order-book-ato-atc/) for HOSE order types from a trader's side.
+
+</En>
+
+<Vi>
+
+<Figure src={heroNight} alt="Toà nhà Sở Giao dịch Chứng khoán TP.HCM về đêm, sáng đèn dưới biển hiệu Exchange Tower" caption="HOSE về đêm. Bộ máy khớp lệnh phía sau mặt tiền này giữ một hàng chờ người mua và một hàng chờ người bán cho từng mã, và phần còn lại của bài là cách đọc những hàng chờ đó." sourceTitle="Wikimedia Commons: Ho Chi Minh stock exchange at night (Syced, CC0)" sourceUrl="https://commons.wikimedia.org/wiki/File:Ho_Chi_Minh_stock_exchange_at_night.jpg" />
+
+> "...it is linear, requires the estimation of a single parameter and it is robust across stocks and across timescales."
+> &mdash; *Cont, Kukanov & Stoikov*, "The Price Impact of Order Book Events" (2014)
+
+### Giá là chỗ hai hàng chờ gặp nhau
+
+Quy định giao dịch của chính HOSE có một ví dụ về cổ phiếu C. Ba người mua chờ ở 40.650, 40.600 và 40.550 đồng. Người bán chờ ở 40.800, 40.850 và 40.900. Rồi có người gửi lệnh mua 1.000 cổ phiếu, giá giới hạn 40.850. Bộ máy khớp 900 cổ phiếu ở 40.800 và 100 ở 40.850, và người bán rẻ nhất biến mất. Không ai quyết định rằng giá phải tăng. Giá bán tốt nhất nhích lên một bước vì hàng chờ phía trước nó đã cạn, và điểm giữa giá mua tốt nhất với giá bán tốt nhất đi từ 40.725 lên 40.750.
+
+Các bài trước coi giá là một con số trong một cột. Ở đây giá là phần nhìn thấy được của hai hàng chờ, và một mô hình đọc được các hàng chờ sẽ thấy thứ mà mô hình chạy trên giá đóng cửa ngày không bao giờ thấy: ai đang chờ, bao nhiêu, và vừa có gì thay đổi. Bài đi theo con đường của một nhà nghiên cứu ngắn hạn. Trước hết là sổ lệnh và luật HOSE bao quanh nó, rồi mất cân bằng dòng lệnh, rồi tác động giá, và cuối cùng là mô hình học sâu đọc cả sổ lệnh (DeepLOB), kèm một phép kiểm tra xem điểm số của nó đáng giá bao nhiêu. Không có gì ở đây là lời khuyên đầu tư hay khuyến nghị giao dịch.
+
+<Callout type="note" title="Tóm tắt nhanh">
+
+Sổ lệnh là hai hàng chờ các lệnh giới hạn, và giá bạn thấy là chỗ chúng chạm nhau. Mất cân bằng dòng lệnh (OFI) đếm, ở các giá tốt nhất, trong một khoảng thời gian đã có bao nhiêu cầu được thêm vào hoặc cung bị rút đi. Trên cửa sổ 10 giây ở 50 cổ phiếu Mỹ, nó giải thích trung bình khoảng 65% thay đổi của giá giữa, nhưng nó được đo trong cùng cửa sổ với cú dịch giá mà nó giải thích, nên nó mô tả cú dịch chuyển chứ không dự báo. DeepLOB đưa 100 trạng thái gần nhất của sổ lệnh vào một mạng tích chập và hồi quy để đoán hướng đi kế tiếp. Một nghiên cứu sau đó trên 15 cổ phiếu NASDAQ thấy loại mô hình này cho điểm tốt ở cổ phiếu có bước giá lớn, rớt gần mức tung đồng xu ở cổ phiếu bước giá nhỏ khi nhìn xa nhất, và điểm dự báo tốt vẫn chưa bảo đảm một lệnh có lời. Trên HOSE, cổ phiếu giá từ 25.000 đến 100.000 đồng có bước giá 10 đến 20 điểm cơ bản, nên spread là một khoản chi phí lớn so với những dịch chuyển mà mô hình đoán được.
+
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Lệnh giới hạn (limit order)**: lệnh mua hoặc bán ở một mức giá nhất định hoặc tốt hơn. Nó nằm chờ trong sổ lệnh cho tới khi có người giao dịch với nó hoặc bị huỷ.
+- **Lệnh thị trường (market order)**: lệnh giao dịch ngay ở giá tốt nhất đang có. Nó rút các lệnh giới hạn ở phía đối diện khỏi sổ lệnh.
+- **Bid và ask**: bid là giá cao nhất mà một người mua đang chờ; ask là giá thấp nhất mà một người bán đang chờ.
+- **Giá giữa (mid-price)**: trung bình của bid tốt nhất và ask tốt nhất. Đây là "giá" quen dùng trong nghiên cứu vi cấu trúc vì nó không nhảy qua lại giữa hai phía.
+
+</Concepts>
+
+---
+
+## 1. Sổ lệnh là một hàng chờ
+
+Nói thẳng trước: với mỗi mã, sàn giữ hai danh sách. Người mua chưa gặp được người bán thì chờ ở một danh sách, người bán chưa gặp được người mua thì chờ ở danh sách kia. Mỗi dòng ghi một mức giá và một khối lượng. Giá mua cao nhất và giá bán thấp nhất là bid tốt nhất và ask tốt nhất, và khoảng cách giữa chúng là spread.
+
+<AtP16BookAnatomy />
+
+Hai quy tắc quyết định ai khớp trước. Giá tốt hơn đi trước: bid cao hơn hoặc ask thấp hơn. Cùng một giá thì lệnh vào sớm hơn đi trước. HOSE ghi cả hai quy tắc trong quy định khớp lệnh liên tục. Quy tắc thứ hai quan trọng với mô hình, vì vị trí trong hàng có giá trị, và huỷ hay sửa lệnh làm vị trí đổi: giảm khối lượng thì giữ nguyên chỗ, còn tăng khối lượng hoặc đổi giá thì lệnh bị đẩy xuống cuối hàng.
+
+Giờ chạy lại ví dụ ở đầu bài. Một lệnh mua đi dọc lên phía bán, lấy những người bán rẻ nhất trước, và dừng khi đã khớp đủ.
+
+<AtP16MarketBuy />
+
+Lệnh không cần lớn mới làm dịch được điểm giữa. Spread ở đây rộng ba bước giá, nên việc rút mất ask tốt nhất đẩy giá giữa lên nửa bước dù phía bid không có người mua mới nào xuất hiện. Tác động giá bắt đầu như một phép tính thuần tuý trên các hàng chờ. Phần còn lại của bài hỏi mô hình dùng được bao nhiêu trong đó.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Spread**: ask tốt nhất trừ bid tốt nhất. Ai mua ở ask rồi bán ở bid đều phải trả khoản này.
+- **Ưu tiên giá rồi thời gian (price-time priority)**: giá tốt hơn trước, cùng giá thì lệnh vào trước đi trước.
+- **Độ sâu (depth)**: có bao nhiêu cổ phiếu đang chờ ở mỗi mức giá. Sổ sâu hấp thụ một lệnh mà giá hầu như không đổi.
+
+</Concepts>
+
+## 2. HOSE vẽ lưới giá
+
+Hình dạng của sổ lệnh phụ thuộc luật của sàn, và luật của HOSE làm lưới giá khá thô. Với cổ phiếu thường, bước giá là 10 đồng dưới 10.000, 50 đồng từ 10.000 đến 49.950 và 100 đồng từ 50.000 trở lên, còn biên độ ngày là cộng trừ 7% quanh giá tham chiếu. Một ngày có phiên khớp lệnh định kỳ mở cửa (ATO, 09:00 đến 09:15), khớp lệnh liên tục đến 11:30 và từ 13:00 đến 14:30, và phiên khớp lệnh định kỳ đóng cửa (ATC, 14:30 đến 14:45). Trong hai phiên định kỳ không được huỷ lệnh.
+
+<AtP16HoseDay />
+
+Hãy nhìn nửa dưới của hình. Tôi tính mỗi bước giá theo phần trăm của chính giá đó. Cổ phiếu 25.000 đồng có bước giá 20 điểm cơ bản (0,2%), cổ phiếu 10.000 đồng có bước giá 50 điểm cơ bản. Ở 9.990 bước giá là 10 đồng, tức 10 điểm cơ bản, và chỉ cần cao hơn một đồng là nó nhảy gấp năm lần. Spread hẹp nhất có thể có là một bước, nên với cổ phiếu giá từ 25.000 đến 100.000 đồng, vượt spread tốn ít nhất 10 đến 20 điểm cơ bản. Nghiên cứu ở Mục 6 chia cổ phiếu thành nhóm bước giá nhỏ và bước giá lớn. Tôi không thử xem các mã HOSE rơi vào nhóm nào, nhưng bước giá rộng như vậy là thô, và đáng nhớ khi các điểm dự báo xuất hiện.
+
+Còn một câu hỏi về dữ liệu nữa. Các bài báo dưới đây dùng mười mức giá mỗi phía hoặc các cập nhật của giá tốt nhất. Tôi chưa kiểm chứng được các nhà cung cấp dữ liệu ở Việt Nam công bố độ sâu tới đâu, nên hãy kiểm tra điều đó trước khi lên kế hoạch cho một dự án kiểu này.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Bước giá (tick)**: mức thay đổi giá nhỏ nhất được phép. HOSE đặt nó theo từng vùng giá.
+- **Điểm cơ bản (bp)**: một phần trăm của một phần trăm, tức 0,01%.
+- **Khớp lệnh định kỳ (ATO, ATC)**: thời điểm mọi lệnh được khớp ở một giá duy nhất, thay vì từng lệnh một.
+
+</Concepts>
+
+## 3. Ảnh chụp không phải dòng chảy
+
+Đặc trưng đầu tiên ai cũng dựng từ sổ lệnh là mất cân bằng hàng chờ: lấy khối lượng bid tốt nhất và khối lượng ask tốt nhất, tính (bid trừ ask) chia (bid cộng ask). Nó chạy từ âm một (chỉ có người bán ở đỉnh) đến dương một (chỉ có người mua). Đó là một tấm ảnh chụp, và nó bỏ qua việc các hàng chờ đã đến đó bằng cách nào.
+
+<AtP16SnapshotVsFlow />
+
+Hình chạy lại bốn sự kiện trên cùng cuốn sổ HOSE: lệnh mua 1.000, một lệnh bán mới 300 ở ask tốt nhất, một lệnh mua 100 bị huỷ ở bid tốt nhất, và một lệnh mua mới 500 chen vào trong spread. Ở mọi bước, tấm ảnh đều nói phía bán nặng hơn, từ âm 0,80 đến âm 0,17. Dòng chảy nói điều khác: cầu được thêm vào, cung bị rút đi, và giá giữa kết thúc cao hơn 25 đồng. Bốn sự kiện nói được rất ít về tương lai. Chúng chỉ cho thấy ảnh chụp và dòng chảy là hai phép đo khác nhau, và phép đo thứ hai cần lịch sử các sự kiện.
+
+## 4. Mất cân bằng dòng lệnh
+
+Cont, Kukanov và Stoikov dựng ra thước đo dòng chảy. Họ nhìn mọi thay đổi ở bid và ask tốt nhất: nếu hàng chờ mua dài ra hoặc hàng chờ bán ngắn lại thì cầu tăng; nếu hàng chờ mua ngắn lại hoặc hàng chờ bán dài ra thì cung tăng. Mỗi sự kiện đóng góp cộng hoặc trừ cỡ lệnh liên quan, và mất cân bằng dòng lệnh trong một cửa sổ là tổng của chúng.
+
+<AtP16OfiEvents />
+
+Có một chi tiết trong định nghĩa làm người mới ngạc nhiên. Một lệnh bán thị trường và một lệnh mua bị huỷ cùng cỡ được tính như nhau, vì cả hai đều làm hàng chờ mua ngắn đi một lượng bằng nhau. Thước đo thấy hàng chờ, không thấy ý định. Chi tiết nữa là cách xử lý khi giá dịch chuyển. Khi ask tốt nhất tăng vì hàng chờ của nó bị quét sạch, sự kiện đóng góp bằng cỡ hàng chờ cũ đã biến mất. Trong ví dụ, lệnh mua 1.000 đóng góp cộng 900 chứ không phải cộng 1.000, vì 100 cổ phiếu mua được ở bước giá kế tiếp thuộc về hàng chờ tốt nhất mới.
+
+Hãy thử. Sổ lệnh dưới đây bắt đầu bằng ví dụ của HOSE. Bấm các sự kiện và xem OFI cộng dồn, giá giữa và mất cân bằng hàng chờ thay đổi thế nào.
+
+<AtP16OfiDemo />
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Mất cân bằng dòng lệnh (OFI)**: tổng, trong một cửa sổ thời gian, các thay đổi có dấu của hàng chờ tốt nhất do lệnh giới hạn, lệnh thị trường và việc huỷ lệnh gây ra.
+- **Mất cân bằng hàng chờ**: (khối lượng bid trừ khối lượng ask) chia (khối lượng bid cộng khối lượng ask) tại một thời điểm.
+- **Huỷ lệnh**: rút một lệnh đang chờ. Phần lớn lệnh trên thị trường hiện đại kết thúc theo cách này; các tác giả DeepLOB trích dẫn con số hơn 90%.
+
+</Concepts>
+
+## 5. Tác động giá và độ sâu
+
+Phát hiện đầu tiên của các tác giả là một quan hệ đơn giản đến mức nói được trong một câu: trên cửa sổ ngắn, thay đổi của giá giữa xấp xỉ tỉ lệ với mất cân bằng dòng lệnh, và hệ số tỉ lệ nhỏ đi khi sổ lệnh sâu hơn. Mô hình đơn giản hoá của họ cho mức dịch giá, tính theo bước giá, bằng OFI chia hai lần độ sâu D, tức số cổ phiếu đang chờ ở mỗi mức giá.
+
+<AtP16Depth />
+
+Giả sử ở các giá tốt nhất có nhiều hơn 1.000 cổ phiếu được mua so với bán. Nếu mỗi mức giá có 250 cổ phiếu chờ, điểm giữa dịch hai bước. Nếu mỗi mức có 1.000 cổ phiếu chờ, nó dịch nửa bước. Sâu gấp bốn thì mức dịch giảm còn một phần tư. Vì vậy cùng một lệnh làm rung một mã mỏng thì gần như không làm gì một mã có thanh khoản tốt.
+
+Phần thực nghiệm đến từ dữ liệu một tháng: tháng 4/2010, 50 cổ phiếu chọn ngẫu nhiên từ S&P 500, thay đổi giá và OFI tính trên cửa sổ 10 giây. Trong dữ liệu của họ, số lần cập nhật báo giá nhiều hơn số lệnh khớp khoảng 40 lần, đó là lý do các tác giả muốn dùng báo giá chứ không chỉ các lệnh khớp. Lấy trung bình trên các cổ phiếu, OFI giải thích 65% thay đổi của giá giữa, và thêm một số hạng bình phương thì lên 68%.
+
+<AtP16CkR2 />
+
+Chính các tác giả chỉ ra một điểm yếu. OFI chứa các sự kiện làm giá dịch chuyển, nên một phần độ khớp có thể là lặp vòng: một sự kiện làm giá dịch chuyển lại được đếm trong con số dùng để giải thích cú dịch giá. Khi họ bỏ các sự kiện đó đi, độ khớp rớt xuống khoảng 35% đến 60%. Vẫn lớn, và vẫn là độ khớp trong cùng một cửa sổ.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Tác động giá (price impact)**: giá dịch bao nhiêu khi một lệnh, hoặc một loạt lệnh, đập vào sổ lệnh.
+- **R bình phương (R-squared)**: phần biến động của một đại lượng mà một công thức đơn giản giải thích được. 65% nghĩa là khoảng hai phần ba.
+- **Cùng thời điểm (contemporaneous)**: đo trong cùng một cửa sổ. Quan hệ cùng thời điểm thì mô tả; dự báo thì chỉ được dùng thông tin có từ trước.
+
+</Concepts>
+
+## 6. Giải thích một cú dịch giá không phải dự báo nó
+
+Mọi thứ ở Mục 5 đều dùng mất cân bằng và thay đổi giá của cùng một khoảng thời gian. Người giao dịch cần điều ngược lại: mất cân bằng bây giờ, thay đổi giá về sau. Briola, Bartolucci và Aste kiểm tra đúng điều đó cho hướng học sâu, với một mô hình kiểu DeepLOB trên 15 cổ phiếu NASDAQ từ 2017 đến 2019 (mỗi năm 45 ngày huấn luyện, 5 ngày kiểm định và 10 ngày kiểm thử). Họ xếp các cổ phiếu theo bước giá và đo mức khớp giữa hướng dự đoán và hướng thực tế bằng hệ số tương quan Matthews, trong đó 0 là tung đồng xu.
+
+<AtP16TickMcc />
+
+Cổ phiếu bước giá lớn đạt 0,29, 0,36 và 0,26 ở ba tầm nhìn (10, 50 và 100 lần cập nhật sổ lệnh phía trước), còn cổ phiếu bước giá nhỏ đạt 0,11, 0,04 và 0,01. Các tác giả viết rằng ở tầm nhìn xa nhất kết quả nhóm bước giá nhỏ cho thấy mô hình "is producing random forecasts". Phần tóm tắt của họ nói thêm rằng sức dự báo cao không nhất thiết tương ứng với tín hiệu giao dịch dùng được, và họ nói các mô phỏng giao dịch không nằm trong bài báo đó. Nhãn trong nghiên cứu là thay đổi giá giữa thuần tuý so với một bước giá, không làm mượt.
+
+Tôi không thử mã HOSE nào, nên không thể nói một tên cụ thể của Việt Nam rơi vào nhóm nào. Điều hình vẽ cho thấy là khả năng dự đoán phụ thuộc vào vi cấu trúc, và một điểm số lấy trung bình trên một danh sách trộn lẫn che mất sự khác biệt đó.
+
+## 7. DeepLOB: sổ lệnh như một bức ảnh
+
+DeepLOB đọc 100 trạng thái gần nhất của sổ lệnh. Mỗi trạng thái có 40 số: mười mức giá ở mỗi phía, mỗi mức có một giá và một khối lượng. Bảng đó được coi như một bức ảnh nhỏ. Các lớp tích chập trước hết ghép giá với khối lượng ở một mức, rồi ghép các mức kề nhau. Một module Inception chạy các bộ lọc nhiều độ rộng song song, và một lớp LSTM mang một bộ nhớ chạy qua cả 100 bước. Đầu ra là ba xác suất: giảm, đứng yên, tăng. Bài trước nói về các khối xây dựng này: [Mô hình chuỗi](/blog/ai-trading-sequence-models/).
+
+<AtP16DeepLob />
+
+Người mới hay bỏ qua chuyện gán nhãn. Các tác giả so giá giữa sau một số bước với giá giữa hiện tại, và chỉ gọi là tăng hay giảm khi mức dịch vượt một ngưỡng α. Bài báo nói cách định nghĩa nhãn của bộ benchmark FI-2010 cho tín hiệu kém nhất quán hơn cách họ chọn cho dữ liệu của mình, và tín hiệu không nhất quán nghĩa là nhiều lệnh thừa và chi phí giao dịch cao hơn. Bản thân FI-2010 đến từ NASDAQ Nordic: năm cổ phiếu trong mười ngày, khoảng bốn triệu mẫu. Cho thử nghiệm của mình, các tác giả dùng Sở Giao dịch Chứng khoán London: Lloyds, Barclays, Tesco, BT và Vodafone trong năm 2017, từ 08:30 đến 16:00. Mô phỏng giao dịch của họ giả định khớp ở giá giữa và so sánh lợi nhuận gộp trước phí, và họ nói rõ điều đó. Cả hai lựa chọn đều hợp để so sánh các mô hình với nhau. Cả hai đều không cho biết chiến lược sẽ kiếm được bao nhiêu sau khi trả spread.
+
+## 8. Chi phí để hành động
+
+Ghép các mảnh lại trên một bảng giá kiểu HOSE. Giả sử một cổ phiếu có sổ lệnh như ở Mục 1: giá giữa 40.725, spread 150 đồng, ba bước giá. Một mô hình dự đoán giá giữa sẽ tăng 0,3 bước là đang dự đoán 15 đồng, khoảng 3,7 điểm cơ bản. Mua ở ask rồi bán ở bid sau đó tốn cả 150 đồng, 36,8 điểm cơ bản, chưa tính phí. Ngay cả một dự báo đúng một bước cũng chỉ kiếm 50 đồng so với 150 đồng cho một vòng mua bán.
+
+<AtP16Cost />
+
+Lệnh giới hạn đứng chờ tránh được spread, nhưng nó có thể không bao giờ khớp, và nó hay khớp đúng lúc giá sắp đi ngược nó. Đánh đổi đó có lời hay không là một câu hỏi khác với dự báo, và bài này không kiểm tra nó. Các nguồn ở đây đo trên cửa sổ vài giây hoặc vài lần cập nhật sổ lệnh, nên đó là tầm nhìn mà bằng chứng bao phủ, và độ rộng của lưới giá quyết định phần nào trong đó giao dịch được.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Vòng mua bán (round trip)**: một lệnh mua rồi một lệnh bán. Vượt spread cả hai chiều tốn cả spread.
+- **Gộp và ròng (gross và net)**: lợi nhuận gộp là trước chi phí, ròng là sau phí và spread. Nghiên cứu chỉ báo gộp có thể trông đẹp hơn tài khoản thật.
+- **Tương quan Matthews (MCC)**: điểm chấm cho phân loại vẫn trung thực khi một lớp phổ biến hơn hẳn các lớp khác. 0 là ngẫu nhiên, 1 là hoàn hảo.
+
+</Concepts>
+
+## Điểm rút ra (Key takeaways)
+
+- Giá là rìa của hai hàng chờ. Một lệnh mua quét sạch ask tốt nhất làm dịch giá giữa mà không cần người mua mới nào xuất hiện. *(Mục 1 và 3)*
+- Bước giá của HOSE là 10 đến 20 điểm cơ bản của giá trong khoảng 25.000 đến 100.000 đồng, và nhảy lên 50 điểm cơ bản ở mốc 10.000 đồng. *(Mục 2)*
+- Mất cân bằng dạng ảnh chụp và mất cân bằng dạng dòng chảy là hai con số khác nhau, và OFI cần chuỗi sự kiện chứ không phải một tấm ảnh. *(Mục 3 và 4)*
+- OFI giải thích khoảng 65% cú dịch giá 10 giây ở 50 cổ phiếu Mỹ, và hệ số dốc giảm khi độ sâu tăng. *(Mục 5)*
+- Độ khớp đó là cùng thời điểm. Chất lượng dự báo của mô hình kiểu DeepLOB khác nhau theo nhóm bước giá và tầm nhìn, và điểm số tốt chưa phải kết quả giao dịch. *(Mục 6 và 7)*
+- Hãy so mọi dự báo ngắn hạn với spread trước khi tin rằng nó có ích. *(Mục 8)*
+
+## Câu hỏi ôn tập (Review questions)
+
+Bài kiểm tra cho bài này: [/blog/ai-trading-order-flow/quiz/](/blog/ai-trading-order-flow/quiz/)
+
+1. Trong ví dụ của HOSE, lệnh mua 1.000 cổ phiếu khớp 900 ở 40.800 và 100 ở 40.850. Vì sao giá giữa tăng 25 đồng? *(Xem Mục 1)*
+2. Ưu tiên giá rồi thời gian nói gì, và vị trí trong hàng chờ ra sao khi tăng khối lượng của một lệnh? *(Xem Mục 1)*
+3. Vì sao spread hẹp nhất có thể có của HOSE là phần lớn hơn trong giá của mã 10.000 đồng so với mã 9.990 đồng? *(Xem Mục 2)*
+4. Mất cân bằng hàng chờ âm 0,8 và giá giữa đang tăng có thể xảy ra cùng lúc. Bằng cách nào? *(Xem Mục 3)*
+5. Vì sao một lệnh bán thị trường và một lệnh mua bị huỷ cùng cỡ cộng vào OFI một lượng như nhau? *(Xem Mục 4)*
+6. Với OFI bằng cộng 1.000 cổ phiếu, giá giữa dịch bao xa nếu mỗi mức giá có 500 cổ phiếu chờ? *(Xem Mục 5)*
+7. Vì sao độ khớp 65% của Cont, Kukanov và Stoikov không thể dùng nguyên như một dự báo? *(Xem Mục 5)*
+8. Mô hình kiểu DeepLOB đoán tốt nhất ở nhóm cổ phiếu nào trong nghiên cứu 15 mã NASDAQ, và nhóm bước giá nhỏ ra sao ở 100 lần cập nhật phía trước? *(Xem Mục 6)*
+9. Mô phỏng giao dịch của DeepLOB dùng khớp ở giá giữa và lợi nhuận gộp. Điều đó bỏ sót gì? *(Xem Mục 7)*
+10. Một mô hình dự đoán giá tăng một bước ở mã có spread ba bước. Vì sao hành động theo nó là lỗ ngay trước khi tính phí? *(Xem Mục 8)*
+
+## Đi sâu hơn (Go deeper)
+
+- **[Cont, Kukanov & Stoikov, The Price Impact of Order Book Events](https://arxiv.org/abs/1011.6402)**: nguồn của định nghĩa OFI, quan hệ với độ sâu và con số 65%.
+- **[Zhang, Zohren & Roberts, DeepLOB](https://arxiv.org/abs/1808.03668)**: kiến trúc, các lựa chọn gán nhãn và thử nghiệm trên Sở Giao dịch Chứng khoán London.
+- **[Briola, Bartolucci & Aste, Deep limit order book forecasting: a microstructural guide](https://arxiv.org/abs/2403.09267)**: nghiên cứu theo bước giá và lập luận rằng nên đánh giá dự báo bằng thứ nó cho phép bạn giao dịch.
+- **[51labs, Machine Learning for Financial Market](https://51labs.vn/vi/courses)**: chương trình công khai có một dự án dự đoán mất cân bằng dòng lệnh và một dự án về DeepLOB. Bài này chỉ dựng phần nền cho chúng.
+- **Liên quan trong series:** [Mô hình chuỗi](/blog/ai-trading-sequence-models/) cho các lớp mà DeepLOB dùng lại, và [Lệnh, sổ lệnh, ATO và ATC ở Việt Nam](/blog/vietnam-order-types-order-book-ato-atc/) cho các loại lệnh HOSE nhìn từ phía người giao dịch.
+
+</Vi>

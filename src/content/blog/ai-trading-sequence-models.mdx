@@ -1,0 +1,474 @@
+---
+title: "Sequence Models"
+title_vi: "Mô hình chuỗi"
+description: "How CNNs, LSTMs and Transformers read price and order book history, and why they must beat a plain baseline before they count. Post 15 of the AI-trading series."
+description_vi: "CNN, LSTM và Transformer đọc lịch sử giá và sổ lệnh ra sao, và vì sao chúng phải thắng một đối chứng đơn giản trước khi được tính. Bài 15 của series AI trong chứng khoán."
+date: 2026-11-28
+category: "ai"
+tags: ["ai", "ai-trading", "deep-learning", "time-series"]
+cover: "../../assets/blog/ai-trading-sequence-models/richter-seismograph-log.jpg"
+cover_alt: "Seismologist Charles Richter bends over a long strip of paper covered in wiggly lines beside a large drum seismograph with three recording pens"
+draft: true
+sources:
+  - { title: "Deep learning with long short-term memory networks for financial market predictions", author: "Thomas Fischer & Christopher Krauss", chapters: "European Journal of Operational Research 270(2), 654–669 (2018)", url: "https://econpapers.repec.org/RePEc:eee:ejores:v:270:y:2018:i:2:p:654-669" }
+  - { title: "DeepLOB: Deep Convolutional Neural Networks for Limit Order Books", author: "Zihao Zhang, Stefan Zohren & Stephen Roberts", chapters: "IEEE Transactions on Signal Processing 67(11), 2019", url: "https://arxiv.org/abs/1808.03668" }
+  - { title: "Enhancing Time Series Momentum Strategies Using Deep Neural Networks", author: "Bryan Lim, Stefan Zohren & Stephen Roberts", chapters: "The Journal of Financial Data Science, Fall 2019", url: "https://arxiv.org/abs/1904.04912" }
+  - { title: "Attention Is All You Need", author: "Ashish Vaswani et al.", chapters: "arXiv 1706.03762 (2017)", url: "https://arxiv.org/abs/1706.03762" }
+  - { title: "Are Transformers Effective for Time Series Forecasting?", author: "Ailing Zeng, Muxi Chen, Lei Zhang & Qiang Xu", chapters: "arXiv 2205.13504", url: "https://arxiv.org/abs/2205.13504" }
+  - { title: "Deep Limit Order Book Forecasting", author: "Antonio Briola, Silvia Bartolucci & Tomaso Aste", chapters: "arXiv 2403.09267 (2024)", url: "https://arxiv.org/abs/2403.09267" }
+  - { title: "Quy định giao dịch đăng website HOSE (tờ trình 51/TTr-HTGD, 26/04/2025): biên độ dao động giá ±7%, đơn vị yết giá", author: "Sở Giao dịch Chứng khoán TP.HCM", url: "https://static2.vietstock.vn/vietstock/2025/4/29/20250429_20250429___hose___quy_dinh_giao_dich_dang_website_hose.pdf" }
+  - { title: "51Labs — Machine Learning for Financial Market (curriculum: CNN, Recurrent model, LSTM; Transformer; SharpeLoss; projects DeepLOB and Deep Momentum Network)", url: "https://51labs.vn/vi/courses" }
+  - { title: "Charles Richter analyzing a seismograph log (photo, CC BY 4.0)", author: "Gil Cooper, Los Angeles Times, 1964; UCLA Library Special Collections", url: "https://commons.wikimedia.org/wiki/File:Charles_Richter_analyzing_a_seismograph_log.jpg" }
+---
+
+import En from '../../components/mdx/En.astro';
+import Vi from '../../components/mdx/Vi.astro';
+import Callout from '../../components/mdx/Callout.astro';
+import Concepts from '../../components/mdx/Concepts.astro';
+import Figure from '../../components/mdx/Figure.astro';
+import AtP15GrossNet from '../../components/mdx/AtP15GrossNet.astro';
+import AtP15Window from '../../components/mdx/AtP15Window.astro';
+import AtP15LobTensor from '../../components/mdx/AtP15LobTensor.astro';
+import AtP15DeepLobShapes from '../../components/mdx/AtP15DeepLobShapes.astro';
+import AtP15Recurrent from '../../components/mdx/AtP15Recurrent.astro';
+import AtP15LstmGates from '../../components/mdx/AtP15LstmGates.astro';
+import AtP15Memory from '../../components/mdx/AtP15Memory.astro';
+import AtP15SharpeLoss from '../../components/mdx/AtP15SharpeLoss.astro';
+import AtP15Attention from '../../components/mdx/AtP15Attention.astro';
+import AtP15Cost from '../../components/mdx/AtP15Cost.astro';
+import AtP15Ladder from '../../components/mdx/AtP15Ladder.astro';
+import heroRichter from '../../assets/blog/ai-trading-sequence-models/richter-seismograph-log.jpg';
+
+<En>
+
+<Figure src={heroRichter} alt="A man in a suit bends over a long strip of paper covered in wiggly lines beside a large drum recorder with three pens" caption="Charles Richter reads a seismograph log in 1964: a long record of wiggles that only makes sense in order. A price history is the same kind of object. Photo: Gil Cooper, Los Angeles Times, UCLA Library Special Collections, CC BY 4.0." sourceTitle="Wikimedia Commons: Charles Richter analyzing a seismograph log (CC BY 4.0)" sourceUrl="https://commons.wikimedia.org/wiki/File:Charles_Richter_analyzing_a_seismograph_log.jpg" />
+
+> "LTSF-Linear surprisingly outperforms existing sophisticated Transformer-based LTSF models in all cases, and often by a large margin."
+> &mdash; *Zeng, Chen, Zhang & Xu*, "Are Transformers Effective for Time Series Forecasting?"
+
+### The model that worked until 2010
+
+In 2018 two German researchers, Thomas Fischer and Christopher Krauss, published a test of LSTM networks on the stocks of the S&P 500. The network read each stock's recent history and predicted the direction of its next move. Over 1992 to 2015 it earned 0.46% a day with a Sharpe ratio of 5.8 before transaction costs, ahead of a random forest, a plain deep network and a logistic regression. The same abstract then reports what happened next: the outperformance is clear until 2009, and from 2010 the profit fluctuates around zero after costs. The authors trace the earlier gains to volatile stocks with a short-term reversal pattern, and say the excess returns seem to have been arbitraged away.
+
+<AtP15GrossNet />
+
+That arc runs through this post. A model built to read sequences can find real structure in the past, and the open question is always how much survives costs, new data and other people trading the same idea. This post follows the sequence family one tool at a time:
+
+1. **Windows**: how a price history becomes training examples.
+2. **Convolutions**: how DeepLOB reads an order book.
+3. **Recurrence and the LSTM**: how a network keeps a memory.
+4. **The Sharpe loss**: how to train for profit rather than for small errors.
+5. **Attention**: what Transformers add, and what a long window costs.
+6. **The baseline ladder**: how to check that any of it beats something simple.
+
+<Callout type="note" title="TL;DR">
+Sequence models read data in order. A CNN slides small filters along the series or across an order book. An LSTM carries a memory forward and edits it with gates, which keeps old information alive where a plain recurrent net loses it. A Transformer lets every step look at every other step, at a cost that grows with the square of the window. In trading the models matter less than the discipline around them: split by time, train on the objective you care about, and compare against a repeat-the-last-value baseline and a linear model before believing a number. Nothing in this post is investment advice or a recommendation to trade.
+</Callout>
+
+<Concepts>
+
+- **Sequence**: data where order carries meaning, such as daily returns or the stream of order book updates.
+- **Window (cửa sổ)**: the last N steps given to the model as one example.
+- **Hidden state / memory**: a vector a recurrent model passes from one step to the next to remember what it has seen.
+- **Sharpe ratio**: average return divided by how much the return wobbles, usually quoted per year.
+
+</Concepts>
+
+---
+
+## 1. Time as an input: windows
+
+A model that sees a single day's return cannot use order. To make it read a sequence, you cut the history into windows: the last 20 days as input, day 21 as the answer. Slide the window one day and you have the next example.
+
+<AtP15Window />
+
+Say you have 500 daily prices and use a 20-day window. You get 500 − 20 = 480 examples, and the data has three axes: samples, steps and features. Every model in this post expects that shape, whether the features are one return or the 40 numbers of an order book snapshot.
+
+Two things follow from the sliding. Neighbouring examples share 19 of their 20 days, so a random shuffle before splitting puts almost identical examples on both sides of the train and test line and the test score looks better than it is. A split by time avoids that, and the [Backtest](/blog/ai-trading-backtest/) post goes into walk-forward testing. The other consequence is that the window length is a decision. Twenty days sees a month; 100 order book updates sees a few seconds of one stock.
+
+<Concepts>
+
+- **Tensor shape**: the sizes of a model's input along each axis, written like 480 × 20 × 1.
+- **Look-back**: how many past steps the window holds.
+- **Train/test split by time**: training on the earlier part and testing on the later part, so the test never sees the future.
+
+</Concepts>
+
+---
+
+## 2. Convolutions on the order book: DeepLOB
+
+The best-known sequence model for trading data is DeepLOB, by Zihao Zhang, Stefan Zohren and Stephen Roberts. Its input is the limit order book: the waiting buy and sell orders, level by level. For each of 10 levels on each side the model gets four numbers: ask price, ask volume, bid price and bid volume. That is 40 numbers per snapshot, and the model reads the last 100 snapshots, so one example is a 100 × 40 table.
+
+<AtP15LobTensor />
+
+The authors tested on two datasets. One is the public FI-2010 benchmark, ten days of Nasdaq Nordic limit order data. The other is a year of London Stock Exchange data for Lloyds Bank, Barclays, Tesco, BT and Vodafone, from January to December 2017, with more than 134 million samples. They train on the first six months, validate on the next three and test on the last three. Their output is a three-way label for the next price move: down, flat or up.
+
+A convolution is a small filter that slides over the input and reuses the same weights everywhere. DeepLOB's first filter is 1 × 2 with a step of 2 along the columns, so it reads one (price, volume) pair at a time. Two such layers shrink the 40 columns to 20, then 10, and a 1 × 10 filter squeezes the remaining ten levels to one. An Inception module then looks at the time axis at several scales, and an LSTM with 64 units reads the 100 steps in order.
+
+<AtP15DeepLobShapes />
+
+The paper explains why the first filter works on pairs: price and volume at one level are the natural unit, and imbalance between bid and ask size is a strong indicator of the next price move, which the filters can compute at every level at once.
+
+On the Vietnamese market the order book has a different shape from what DeepLOB assumed. HOSE's trading rules set the daily price band at ±7% of the reference price and give three tick sizes: 10 VND below 10,000, 50 VND from 10,000 to 49,950, and 100 VND from 50,000. Say FPT trades at 60,000 VND. The band is 4,200 VND and a tick is 100 VND, so the order book can hold at most 42 price levels on each side of the reference in a day. Whether your data vendor delivers ten levels per side, and at what delay, decides whether the 100 × 40 input can be built at all.
+
+<Concepts>
+
+- **Limit order book (sổ lệnh)**: the list of waiting buy and sell orders, grouped by price level.
+- **Convolution**: a small filter slid along the data, applying the same weights at every position.
+- **Stride (bước nhảy)**: how far the filter jumps between positions; a stride equal to the filter width stops neighbouring pairs from overlapping.
+- **Tick size (bước giá)**: the smallest price step an order may use.
+
+</Concepts>
+
+---
+
+## 3. Memory: recurrent nets and the LSTM
+
+A convolution sees only as far as its filters reach. A recurrent network reads the series one step at a time and carries a memory vector along, so in principle the last step can depend on the first.
+
+<AtP15Recurrent />
+
+The trouble shows up in training. To learn from day 1, the error signal has to travel back through every step, and at each step it is multiplied by roughly the same number. If that number is 0.9, then after 50 steps the signal is 0.9^50 = 0.005, half a percent of what it started as. If it is 1.1, it grows to 117 times. Either way, the network cannot learn a link between events 50 steps apart. Fifty trading days is about two and a half months.
+
+The LSTM, the long short-term memory cell, gives the memory its own line and puts gates on it. A forget gate multiplies the memory by a number between 0 and 1, an input gate decides what new information to write, and an output gate decides what to show. If the forget gate sits near 0.97, the memory line keeps 0.97^50 = 22% of day 1 after 50 steps instead of half a percent.
+
+<AtP15LstmGates />
+
+<AtP15Memory />
+
+Fischer and Krauss used an LSTM for their daily forecasts, and DeepLOB puts one at the end of its convolutions. The gates do not make a model right; they only stop it from forgetting by arithmetic. Whether the remembered pattern is real is the job of the test set.
+
+<Concepts>
+
+- **Recurrent network (RNN)**: a network that reads a sequence step by step and passes a hidden state forward.
+- **Vanishing gradient**: the learning signal shrinking toward zero as it travels back through many steps.
+- **Gate**: a number between 0 and 1, computed from the data, that scales how much of something passes.
+- **Cell state**: the LSTM's long-term memory line, changed only by the forget and input gates.
+
+</Concepts>
+
+---
+
+## 4. Training for the money: the Sharpe loss
+
+Most models are trained to make small errors: guess tomorrow's return and be penalised by the squared miss. For trading, the miss is not what you care about. You care about the return of the positions the model takes, adjusted for the risk it took to get it.
+
+Bryan Lim, Stefan Zohren and Stephen Roberts built the Deep Momentum Network around that idea. An LSTM reads returns over the past day, month, three months, six months and year, and outputs a position between −1 (short) and +1 (long). The position times the next day's return is the strategy's daily return. The loss is the negative annualised Sharpe ratio of those returns, so training pushes the positions toward high average return and low wobble, directly.
+
+<AtP15SharpeLoss />
+
+They tested it on 88 continuous futures contracts with prices from 1990 to 2015, re-training from scratch every five years so that each test period lay after its training data, with positions scaled to a 15% volatility target. Without transaction costs, the Sharpe-optimised LSTM more than doubled the results of traditional methods. It kept its edge with costs up to roughly 2 to 3 basis points, and for illiquid assets the authors add a turnover penalty so the network learns about costs while training.
+
+The price of this objective is that the loss is noisy. A Sharpe ratio estimated on a few days or a few months can be large by luck, as the five-day toy shows. Every part of the setup around the DMN, from long histories to periodic retraining to cost-aware penalties, is there to keep the network from chasing that noise.
+
+A taste of the same thinking appears in 51Labs' curriculum, which lists SharpeLoss as the "financial objective function" in its deep learning module and uses a Deep Momentum Network project for trend strategies.
+
+<Concepts>
+
+- **Loss function**: the number training tries to make small.
+- **Position sizing**: how much to hold, from −1 (fully short) to +1 (fully long).
+- **Volatility target**: scaling positions so the strategy's risk stays near a chosen level, here 15% a year.
+- **Basis point**: one hundredth of a percent.
+
+</Concepts>
+
+---
+
+## 5. Attention and Transformers
+
+An LSTM reads in order, so step 100 has to wait for step 99. A Transformer lets every step look at every other step in one go. For each step it computes a score against every other step, turns the scores into weights with a softmax (positive numbers that add up to 100%), and takes the weighted mix of the other steps' values.
+
+<AtP15Attention />
+
+The 2017 paper that introduced the Transformer, "Attention Is All You Need", was about translating languages: it scored 28.4 BLEU on English-to-German and 41.8 on English-to-French, and trained in 3.5 days on eight GPUs. Nothing in it concerns markets. The idea moves over because a price history is also a sequence in which some past moments matter more than others.
+
+Two catches follow. Attention by itself has no sense of order, so a model must add position information, and Zeng and colleagues argue that this order-blindness loses temporal information in time series. And the cost: scoring every pair of steps takes T × T computations, against T steps for a recurrent net.
+
+<AtP15Cost />
+
+A window of 100 steps means 10,000 pairs, which is cheap. A whole day of order book events for one London stock, about 150,000 in DeepLOB's data, means 22.5 billion. This is why Transformers in trading are usually fed short windows, summaries or downsampled data.
+
+<Concepts>
+
+- **Attention**: a weighted mix of all steps in the window, with weights learned from the data.
+- **Softmax**: a function that turns any list of scores into positive weights that sum to 1.
+- **Positional encoding**: extra numbers added to each step so a Transformer can tell where it sits in the sequence.
+- **Transformer**: a network built from attention layers, with no recurrence.
+
+</Concepts>
+
+---
+
+## 6. The baseline ladder
+
+Every model in this post has to beat something simpler before it counts. The ladder has four rungs: repeat the last value, a linear model on lagged returns, a small CNN or LSTM, and only then a bigger model or a Transformer. You climb a rung when it wins on data it never saw, after costs.
+
+<AtP15Ladder />
+
+The evidence for the ladder is blunt. Zeng and colleagues tested one-layer linear models against Transformer forecasters on nine real datasets, among them exchange rates, and the linear models won every comparison, often by a large margin. On the exchange-rate data, plain repeating of the last value beat all the Transformer models by around 45%. They suspect the Transformers overfit sudden changes in the training data. These are time-series benchmarks, not stock-trading results, but the lesson carries: a flexible model can lose to a model with no moving parts.
+
+Briola, Bartolucci and Aste ran deep models on order book data for NASDAQ stocks and report that strong forecasting power does not always correspond to signals you can trade, and that ordinary machine learning metrics are a poor judge of order book forecasts. Fischer and Krauss showed the same gap from the other side, through time.
+
+Here is a small test you can run yourself. Say daily returns are pure noise, with a standard deviation of 1%, and you fit a 20-lag linear model on the first 70% of 3,000 days. On the remaining 894 days its R² against a forecast of zero is −0.009, yet it calls the direction right 52.3% of days. That looks like an edge. With 894 days, though, the noise in a hit rate is about 1.7 percentage points, so 52.3% is under one and a half standard errors above a coin flip. Directional accuracy alone proves little, and R² below zero says the model did worse than predicting nothing. If instead the noise carries a real autocorrelation of 0.2 between days, the same model reaches R² of 0.030 and 54.0%.
+
+<Callout type="warning" title="A short checklist before trusting a sequence model">
+Split by time. Compare with repeating the last value and with a linear model on the same split. Report results after costs. Look at the hit rate together with its standard error, and at R² against a zero forecast. Retrain on a schedule and check whether the edge shrinks in the later periods, as it did after 2010 for Fischer and Krauss.
+</Callout>
+
+<Concepts>
+
+- **Baseline**: a simple method the new model must beat to justify its complexity.
+- **Out-of-sample**: data the model never saw in training.
+- **R² against zero**: 1 − (the model's squared error ÷ the squared error of forecasting no change); negative means worse than doing nothing.
+- **Standard error**: the typical size of random noise in a measured number, which shrinks with more data.
+
+</Concepts>
+
+---
+
+## Key takeaways
+
+- Windows turn a history into examples of shape samples × steps × features, and neighbouring windows overlap, so split by time.
+- DeepLOB reads a 100 × 40 order book table with convolutions that shrink 40 columns to 1, then an LSTM; it was tested on five London stocks in 2017 and on the FI-2010 benchmark.
+- A plain recurrent net multiplies its memory by about the same number at every step, so 0.9 over 50 steps leaves half a percent; the LSTM's forget gate keeps 22% at 0.97.
+- The Sharpe loss trains a network on the return of its positions, but a Sharpe ratio from few days is mostly luck.
+- Attention scores every pair of steps, so cost grows with the square of the window: 10,000 pairs at 100 steps and 22.5 billion at 150,000.
+- Simple baselines have beaten Transformers on public time-series benchmarks, and an LSTM that earned 0.46% a day before costs hovered around zero after costs from 2010.
+
+## Review questions
+
+1. With 500 daily prices and a 20-day window, how many examples do you get, and why is a random shuffle split risky? *(See Section 1)*
+2. What are the 40 numbers in one DeepLOB snapshot, and what does the 100 stand for? *(See Section 2)*
+3. Why does the first DeepLOB filter use a step of 2? *(See Section 2)*
+4. If a recurrent net multiplies its memory by 0.9 each step, how much of day 1 is left after 50 steps? *(See Section 3)*
+5. What does the forget gate do, and why does it help? *(See Section 3)*
+6. Why is the Sharpe ratio a different training target from squared error? *(See Section 4)*
+7. How many pairs does self-attention score for a 1,000-step window? *(See Section 5)*
+8. A model hits 52.3% direction accuracy on 894 days of returns that were noise. What do you check next? *(See Section 6)*
+
+## Go deeper
+
+- **[DeepLOB (Zhang, Zohren & Roberts)](https://arxiv.org/abs/1808.03668)**: the architecture and both datasets, with a sensitivity analysis of which book levels matter.
+- **[Enhancing Time Series Momentum Strategies Using Deep Neural Networks (Lim, Zohren & Roberts)](https://arxiv.org/abs/1904.04912)**: the Deep Momentum Network, with the Sharpe loss and the cost experiments.
+- **[Are Transformers Effective for Time Series Forecasting? (Zeng et al.)](https://arxiv.org/abs/2205.13504)**: the paper behind the baseline ladder.
+- **[51Labs — Machine Learning for Financial Market](https://51labs.vn/vi/courses)**: the course whose deep learning module covers CNN, recurrent models, LSTM, Transformer and SharpeLoss.
+
+</En>
+
+<Vi>
+
+<Figure src={heroRichter} alt="Một người đàn ông mặc vest cúi xuống dải giấy dài đầy nét ngoằn ngoèo, bên cạnh một máy ghi hình trống có ba chiếc bút" caption="Charles Richter đọc một bản ghi địa chấn năm 1964: một dải nét ngoằn ngoèo dài chỉ có nghĩa khi đọc theo thứ tự. Lịch sử giá cũng là loại dữ liệu như vậy. Ảnh: Gil Cooper, Los Angeles Times, UCLA Library Special Collections, CC BY 4.0." sourceTitle="Wikimedia Commons: Charles Richter analyzing a seismograph log (CC BY 4.0)" sourceUrl="https://commons.wikimedia.org/wiki/File:Charles_Richter_analyzing_a_seismograph_log.jpg" />
+
+> "LTSF-Linear vượt các mô hình LTSF dựa trên Transformer phức tạp trong mọi trường hợp, một cách đáng ngạc nhiên, và thường vượt xa."
+> &mdash; *Zeng, Chen, Zhang & Xu*, "Are Transformers Effective for Time Series Forecasting?"
+
+### Mô hình chạy tốt cho tới năm 2010
+
+Năm 2018, hai nhà nghiên cứu người Đức là Thomas Fischer và Christopher Krauss công bố một thử nghiệm mạng LSTM trên các cổ phiếu của S&P 500. Mạng đọc lịch sử gần đây của từng cổ phiếu và dự đoán chiều đi của nó ở bước tiếp theo. Trong giai đoạn 1992 đến 2015, mô hình lãi 0,46% mỗi ngày với Sharpe 5,8 trước chi phí giao dịch, hơn random forest, mạng sâu thường và hồi quy logistic. Phần tóm tắt của chính bài báo nói tiếp chuyện sau đó: mức vượt trội rõ rệt cho tới 2009, và từ 2010 lợi nhuận dao động quanh 0 sau chi phí. Các tác giả truy phần lãi trước đó về những cổ phiếu biến động mạnh có kiểu đảo chiều ngắn hạn, và cho rằng phần lợi nhuận vượt trội dường như đã bị arbitrage mất.
+
+<AtP15GrossNet />
+
+Cái vòng cung ấy chạy xuyên suốt bài này. Một mô hình sinh ra để đọc chuỗi có thể tìm thấy cấu trúc thật trong quá khứ, và câu hỏi luôn là bao nhiêu phần còn sống sót qua chi phí, dữ liệu mới và những người khác giao dịch cùng ý tưởng. Bài đi qua họ mô hình chuỗi từng công cụ một:
+
+1. **Cửa sổ**: lịch sử giá thành ví dụ huấn luyện ra sao.
+2. **Tích chập**: DeepLOB đọc sổ lệnh thế nào.
+3. **Hồi quy và LSTM**: mạng giữ bộ nhớ bằng cách nào.
+4. **Loss Sharpe**: huấn luyện cho lợi nhuận thay vì cho sai số nhỏ.
+5. **Attention**: Transformer thêm gì, và cửa sổ dài tốn bao nhiêu.
+6. **Cái thang đối chứng**: kiểm tra xem những thứ trên có thắng một thứ đơn giản không.
+
+<Callout type="note" title="Tóm tắt nhanh">
+Mô hình chuỗi đọc dữ liệu theo thứ tự. CNN trượt các bộ lọc nhỏ dọc chuỗi hoặc ngang sổ lệnh. LSTM mang một bộ nhớ đi tiếp và chỉnh nó bằng các cổng, nhờ vậy giữ được thông tin cũ mà mạng hồi quy thường đánh mất. Transformer cho mỗi bước nhìn thẳng vào mọi bước khác, với chi phí tăng theo bình phương độ dài cửa sổ. Trong giao dịch, mô hình quan trọng ít hơn kỷ luật xung quanh nó: tách dữ liệu theo thời gian, huấn luyện theo đúng mục tiêu mình quan tâm, và so với đối chứng "lặp lại giá trị gần nhất" cùng một mô hình tuyến tính trước khi tin bất kỳ con số nào. Không có gì trong bài này là lời khuyên đầu tư hay khuyến nghị giao dịch.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Chuỗi (sequence)**: dữ liệu mà thứ tự mang ý nghĩa, như lợi suất theo ngày hay dòng cập nhật sổ lệnh.
+- **Cửa sổ (window)**: N bước gần nhất đưa cho mô hình làm một ví dụ.
+- **Hidden state / bộ nhớ**: một vector mà mô hình hồi quy truyền từ bước này sang bước sau để nhớ những gì đã thấy.
+- **Sharpe ratio**: lợi suất trung bình chia cho mức dao động của lợi suất, thường quy ra năm.
+
+</Concepts>
+
+---
+
+## 1. Thời gian là một đầu vào: cửa sổ
+
+Mô hình chỉ thấy lợi suất của một ngày thì không dùng được thứ tự. Để nó đọc một chuỗi, bạn cắt lịch sử thành các cửa sổ: 20 ngày gần nhất làm đầu vào, ngày 21 làm đáp án. Trượt cửa sổ đi một ngày là có ví dụ tiếp theo.
+
+<AtP15Window />
+
+Giả sử bạn có 500 giá đóng cửa và dùng cửa sổ 20 ngày. Bạn được 500 − 20 = 480 ví dụ, và dữ liệu có ba trục: mẫu, bước và đặc trưng. Mọi mô hình trong bài đều mong đợi dạng này, dù đặc trưng là một lợi suất hay 40 con số của một ảnh chụp sổ lệnh.
+
+Từ việc trượt cửa sổ có hai hệ quả. Các ví dụ liền kề dùng chung 19 trong 20 ngày, nên xáo ngẫu nhiên rồi mới chia sẽ đẩy những ví dụ gần như y hệt vào cả hai phía train và test, và điểm test trông đẹp hơn thực tế. Chia theo thời gian tránh được chuyện này; bài [Backtest](/blog/ai-trading-backtest/) đi sâu vào walk-forward. Hệ quả kia là độ dài cửa sổ là một quyết định. Hai mươi ngày nhìn được một tháng; 100 lần cập nhật sổ lệnh nhìn được vài giây của một mã.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Tensor shape (kích thước tensor)**: kích thước đầu vào của mô hình theo từng trục, viết như 480 × 20 × 1.
+- **Look-back**: số bước quá khứ mà cửa sổ chứa.
+- **Chia train/test theo thời gian**: huấn luyện trên phần sớm hơn và kiểm tra trên phần muộn hơn, để test không bao giờ thấy tương lai.
+
+</Concepts>
+
+---
+
+## 2. Tích chập trên sổ lệnh: DeepLOB
+
+Mô hình chuỗi nổi tiếng nhất cho dữ liệu giao dịch là DeepLOB của Zihao Zhang, Stefan Zohren và Stephen Roberts. Đầu vào của nó là sổ lệnh giới hạn: các lệnh mua và bán đang chờ, theo từng mức giá. Với mỗi mức trong 10 mức ở mỗi bên, mô hình nhận bốn số: giá bán, khối lượng bán, giá mua và khối lượng mua. Đó là 40 số cho một ảnh chụp, và mô hình đọc 100 ảnh chụp gần nhất, nên một ví dụ là bảng 100 × 40.
+
+<AtP15LobTensor />
+
+Các tác giả thử trên hai bộ dữ liệu. Một là benchmark công khai FI-2010, mười ngày dữ liệu sổ lệnh Nasdaq Nordic. Bộ kia là một năm dữ liệu Sở Giao dịch Chứng khoán London cho Lloyds Bank, Barclays, Tesco, BT và Vodafone, từ tháng 1 đến tháng 12/2017, với hơn 134 triệu mẫu. Họ huấn luyện trên sáu tháng đầu, kiểm định ba tháng kế và test ba tháng cuối. Đầu ra là nhãn ba lớp cho biến động giá tiếp theo: giảm, đi ngang hoặc tăng.
+
+Tích chập là một bộ lọc nhỏ trượt trên đầu vào và dùng lại cùng trọng số ở mọi vị trí. Bộ lọc đầu của DeepLOB là 1 × 2 với bước nhảy 2 dọc theo các cột, nên mỗi lần nó đọc đúng một cặp (giá, khối lượng). Hai lớp như vậy thu 40 cột xuống 20 rồi 10, và bộ lọc 1 × 10 nén nốt mười mức còn lại thành một. Một module Inception sau đó nhìn trục thời gian ở nhiều tỷ lệ, và một LSTM 64 đơn vị đọc 100 bước theo thứ tự.
+
+<AtP15DeepLobShapes />
+
+Bài báo giải thích vì sao bộ lọc đầu làm việc trên từng cặp: giá và khối lượng ở một mức là đơn vị tự nhiên, và độ lệch giữa khối lượng mua và bán là chỉ báo mạnh cho biến động giá kế tiếp, thứ mà các bộ lọc tính được ở mọi mức cùng lúc.
+
+Trên thị trường Việt Nam, hình dạng sổ lệnh khác với những gì DeepLOB giả định. Quy định giao dịch của HOSE đặt biên độ giá ngày ±7% so với giá tham chiếu và có ba bước giá: 10 đồng dưới 10.000, 50 đồng từ 10.000 đến 49.950, và 100 đồng từ 50.000. Giả sử FPT giao dịch ở 60.000 đồng. Biên độ là 4.200 đồng và một bước giá là 100 đồng, nên sổ lệnh có tối đa 42 mức giá ở mỗi bên của giá tham chiếu trong một ngày. Nhà cung cấp dữ liệu có đưa đủ mười mức mỗi bên hay không, và trễ bao lâu, quyết định có dựng nổi đầu vào 100 × 40 hay không.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Sổ lệnh giới hạn (limit order book)**: danh sách các lệnh mua và bán đang chờ, nhóm theo mức giá.
+- **Tích chập (convolution)**: một bộ lọc nhỏ trượt dọc dữ liệu, dùng cùng trọng số ở mọi vị trí.
+- **Stride (bước nhảy)**: khoảng bộ lọc nhảy giữa hai vị trí; stride bằng bề rộng bộ lọc giúp các cặp kề nhau không chồng lên.
+- **Bước giá (tick size)**: bước giá nhỏ nhất mà một lệnh được dùng.
+
+</Concepts>
+
+---
+
+## 3. Bộ nhớ: mạng hồi quy và LSTM
+
+Một bộ lọc tích chập chỉ thấy xa tới mức nó với tới. Mạng hồi quy đọc chuỗi từng bước một và mang theo một vector nhớ, nên về nguyên tắc bước cuối có thể phụ thuộc bước đầu.
+
+<AtP15Recurrent />
+
+Rắc rối xuất hiện lúc huấn luyện. Để học từ ngày 1, tín hiệu sai số phải đi ngược qua mọi bước, và ở mỗi bước nó bị nhân với xấp xỉ cùng một số. Nếu số đó là 0,9, sau 50 bước tín hiệu còn 0,9^50 = 0,005, nửa phần trăm so với lúc đầu. Nếu là 1,1, nó phình lên 117 lần. Dù theo hướng nào, mạng cũng không học nổi mối liên hệ giữa hai sự kiện cách nhau 50 bước. Năm mươi ngày giao dịch là khoảng hai tháng rưỡi.
+
+LSTM, ô nhớ dài-ngắn hạn (long short-term memory), cho bộ nhớ một đường riêng và đặt các cổng lên đó. Cổng quên nhân bộ nhớ với một số từ 0 đến 1, cổng vào quyết định ghi thông tin mới nào, và cổng ra quyết định phần nào được lộ ra. Nếu cổng quên ở gần 0,97, đường bộ nhớ giữ được 0,97^50 = 22% của ngày 1 sau 50 bước, thay vì nửa phần trăm.
+
+<AtP15LstmGates />
+
+<AtP15Memory />
+
+Fischer và Krauss dùng LSTM cho dự báo theo ngày, và DeepLOB đặt một LSTM ở cuối chuỗi tích chập. Các cổng không làm mô hình đúng; chúng chỉ ngăn nó quên vì phép nhân. Mẫu hình được nhớ có thật hay không là việc của tập test.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Mạng hồi quy (RNN)**: mạng đọc chuỗi từng bước và truyền một hidden state về phía trước.
+- **Vanishing gradient (gradient biến mất)**: tín hiệu học co về 0 khi đi ngược qua nhiều bước.
+- **Cổng (gate)**: một số từ 0 đến 1, tính từ dữ liệu, điều chỉnh bao nhiêu thứ gì đó được đi qua.
+- **Cell state**: đường bộ nhớ dài hạn của LSTM, chỉ bị đổi bởi cổng quên và cổng vào.
+
+</Concepts>
+
+---
+
+## 4. Huấn luyện cho lợi nhuận: loss Sharpe
+
+Phần lớn mô hình được huấn luyện để sai số nhỏ: đoán lợi suất ngày mai và bị phạt bằng bình phương độ lệch. Với giao dịch, độ lệch không phải thứ bạn quan tâm. Bạn quan tâm lợi suất của các vị thế mô hình mở, sau khi điều chỉnh theo rủi ro đã chịu để có nó.
+
+Bryan Lim, Stefan Zohren và Stephen Roberts dựng Deep Momentum Network quanh ý tưởng đó. Một LSTM đọc lợi suất của ngày, tháng, ba tháng, sáu tháng và năm gần nhất, rồi xuất ra một vị thế từ −1 (bán khống) đến +1 (mua). Vị thế nhân lợi suất ngày kế là lợi suất ngày của chiến lược. Loss là âm của Sharpe quy năm của các lợi suất đó, nên huấn luyện đẩy vị thế về phía lợi suất trung bình cao và dao động thấp, trực tiếp.
+
+<AtP15SharpeLoss />
+
+Họ thử trên 88 hợp đồng tương lai liên tục với giá từ 1990 đến 2015, huấn luyện lại từ đầu mỗi năm năm để mỗi giai đoạn test nằm sau dữ liệu huấn luyện, với vị thế được co giãn về mục tiêu biến động 15%. Khi chưa tính chi phí giao dịch, LSTM tối ưu Sharpe hơn gấp đôi kết quả của các phương pháp truyền thống. Nó vẫn giữ lợi thế khi chi phí lên tới khoảng 2 đến 3 điểm cơ bản, và với tài sản kém thanh khoản các tác giả thêm một hình phạt theo vòng quay danh mục để mạng học về chi phí ngay lúc huấn luyện.
+
+Cái giá của mục tiêu này là loss nhiễu. Sharpe ước lượng trên vài ngày hay vài tháng có thể lớn chỉ do may, như ví dụ năm ngày đã cho thấy. Mọi thứ quanh DMN, từ lịch sử dài tới huấn luyện lại định kỳ tới hình phạt chi phí, đều ở đó để mạng khỏi đuổi theo chỗ nhiễu ấy.
+
+Cùng cách nghĩ này có trong chương trình của 51Labs, nơi SharpeLoss được liệt kê là "financial objective function" trong module deep learning, kèm một project Deep Momentum Network cho chiến lược theo xu hướng.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Hàm loss**: con số mà quá trình huấn luyện cố làm nhỏ đi.
+- **Position sizing (cỡ vị thế)**: nắm giữ bao nhiêu, từ −1 (bán khống toàn bộ) đến +1 (mua toàn bộ).
+- **Mục tiêu biến động (volatility target)**: co giãn vị thế để rủi ro của chiến lược quanh một mức chọn trước, ở đây là 15% mỗi năm.
+- **Điểm cơ bản (basis point)**: một phần trăm của một phần trăm.
+
+</Concepts>
+
+---
+
+## 5. Attention và Transformer
+
+LSTM đọc theo thứ tự, nên bước 100 phải đợi bước 99. Transformer cho mỗi bước nhìn mọi bước khác trong một lượt. Với mỗi bước, nó tính điểm so với mọi bước còn lại, biến điểm thành trọng số bằng softmax (các số dương cộng lại bằng 100%), rồi lấy phép trộn có trọng số của giá trị các bước kia.
+
+<AtP15Attention />
+
+Bài báo năm 2017 giới thiệu Transformer, "Attention Is All You Need", nói về dịch ngôn ngữ: đạt 28,4 BLEU cho Anh-Đức và 41,8 cho Anh-Pháp, huấn luyện trong 3,5 ngày trên tám GPU. Trong đó không có gì về thị trường. Ý tưởng chuyển sang được vì lịch sử giá cũng là một chuỗi mà vài thời điểm quá khứ quan trọng hơn những thời điểm khác.
+
+Có hai điểm vướng. Bản thân attention không có khái niệm thứ tự, nên mô hình phải thêm thông tin vị trí, và Zeng cùng cộng sự lập luận rằng sự mù thứ tự này làm mất thông tin thời gian trong chuỗi thời gian. Còn chi phí: chấm điểm mọi cặp bước cần T × T phép tính, trong khi mạng hồi quy cần T bước.
+
+<AtP15Cost />
+
+Cửa sổ 100 bước là 10.000 cặp, rất rẻ. Cả một ngày sự kiện sổ lệnh của một mã ở London, khoảng 150.000 trong dữ liệu của DeepLOB, là 22,5 tỷ. Vì vậy Transformer trong giao dịch thường được nuôi bằng cửa sổ ngắn, dữ liệu tóm tắt hoặc đã giảm mẫu.
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Attention**: phép trộn có trọng số của mọi bước trong cửa sổ, với trọng số học từ dữ liệu.
+- **Softmax**: hàm biến một danh sách điểm bất kỳ thành các trọng số dương có tổng bằng 1.
+- **Positional encoding (mã hoá vị trí)**: các số thêm vào mỗi bước để Transformer biết nó đứng ở đâu trong chuỗi.
+- **Transformer**: mạng dựng từ các lớp attention, không có hồi quy.
+
+</Concepts>
+
+---
+
+## 6. Cái thang đối chứng
+
+Mọi mô hình trong bài này phải thắng một thứ đơn giản hơn trước khi được tính. Cái thang có bốn nấc: lặp lại giá trị gần nhất, mô hình tuyến tính trên lợi suất trễ, CNN hoặc LSTM nhỏ, và chỉ sau đó mới tới mô hình lớn hơn hay Transformer. Bạn leo lên một nấc khi nó thắng trên dữ liệu chưa từng thấy, sau chi phí.
+
+<AtP15Ladder />
+
+Bằng chứng cho cái thang khá phũ phàng. Zeng và cộng sự đặt mô hình tuyến tính một lớp cạnh các mô hình dự báo Transformer trên chín bộ dữ liệu thật, trong đó có tỷ giá, và mô hình tuyến tính thắng mọi lần so sánh, thường với khoảng cách lớn. Trên dữ liệu tỷ giá, chỉ việc lặp lại giá trị gần nhất đã thắng mọi mô hình Transformer khoảng 45%. Họ ngờ rằng Transformer overfit vào các cú đổi đột ngột trong dữ liệu huấn luyện. Đây là benchmark chuỗi thời gian, không phải kết quả giao dịch cổ phiếu, nhưng bài học vẫn đúng: một mô hình linh hoạt có thể thua một mô hình không có bộ phận chuyển động nào.
+
+Briola, Bartolucci và Aste chạy các mô hình sâu trên dữ liệu sổ lệnh của cổ phiếu NASDAQ và báo cáo rằng khả năng dự báo mạnh không phải lúc nào cũng tương ứng với tín hiệu giao dịch được, và các thước đo machine learning thông thường đánh giá kém dự báo sổ lệnh. Fischer và Krauss cho thấy cùng khoảng cách ấy từ phía kia, qua thời gian.
+
+Đây là một phép thử nhỏ bạn tự chạy được. Giả sử lợi suất ngày là nhiễu thuần với độ lệch chuẩn 1%, và bạn khớp mô hình tuyến tính 20 độ trễ trên 70% đầu của 3.000 ngày. Trên 894 ngày còn lại, R² của nó so với dự báo bằng 0 là −0,009, vậy mà nó đoán đúng chiều trong 52,3% số ngày. Trông như có lợi thế. Nhưng với 894 ngày, độ nhiễu của tỷ lệ đoán đúng cỡ 1,7 điểm phần trăm, nên 52,3% chưa tới một lần rưỡi sai số chuẩn trên mức tung đồng xu. Chỉ riêng tỷ lệ đoán đúng chiều chứng minh được rất ít, và R² âm nghĩa là mô hình tệ hơn việc không dự báo gì. Nếu nhiễu mang một tự tương quan thật 0,2 giữa các ngày, cùng mô hình đó đạt R² 0,030 và 54,0%.
+
+<Callout type="warning" title="Danh sách kiểm tra ngắn trước khi tin một mô hình chuỗi">
+Chia theo thời gian. So với việc lặp lại giá trị gần nhất và với mô hình tuyến tính trên cùng cách chia. Báo cáo kết quả sau chi phí. Nhìn tỷ lệ đoán đúng cùng sai số chuẩn của nó, và nhìn R² so với dự báo bằng 0. Huấn luyện lại theo lịch và kiểm tra xem lợi thế có co lại ở các giai đoạn sau không, như đã xảy ra sau 2010 với Fischer và Krauss.
+</Callout>
+
+<Concepts title="Giải thích nhanh mấy thuật ngữ ở trên">
+
+- **Baseline (đối chứng)**: phương pháp đơn giản mà mô hình mới phải thắng để biện minh cho độ phức tạp.
+- **Out-of-sample**: dữ liệu mô hình chưa từng thấy lúc huấn luyện.
+- **R² so với dự báo bằng 0**: 1 − (sai số bình phương của mô hình ÷ sai số bình phương của việc dự báo không đổi); âm nghĩa là tệ hơn không làm gì.
+- **Sai số chuẩn (standard error)**: độ lớn điển hình của nhiễu ngẫu nhiên trong một con số đo được, giảm khi có thêm dữ liệu.
+
+</Concepts>
+
+---
+
+## Điểm rút ra (Key takeaways)
+
+- Cửa sổ biến lịch sử thành các ví dụ dạng mẫu × bước × đặc trưng, và các cửa sổ liền kề chồng lên nhau, nên hãy chia theo thời gian.
+- DeepLOB đọc bảng sổ lệnh 100 × 40 bằng các tích chập thu 40 cột xuống 1, rồi một LSTM; được test trên năm mã ở London năm 2017 và trên benchmark FI-2010.
+- Mạng hồi quy thường nhân bộ nhớ với xấp xỉ cùng một số ở mỗi bước, nên 0,9 qua 50 bước chỉ còn nửa phần trăm; cổng quên của LSTM ở 0,97 giữ được 22%.
+- Loss Sharpe huấn luyện mạng theo lợi suất của các vị thế, nhưng Sharpe tính từ ít ngày phần lớn là may.
+- Attention chấm điểm mọi cặp bước, nên chi phí tăng theo bình phương cửa sổ: 10.000 cặp ở 100 bước và 22,5 tỷ ở 150.000.
+- Các đối chứng đơn giản từng thắng Transformer trên benchmark chuỗi thời gian công khai, và một LSTM lãi 0,46% mỗi ngày trước chi phí đã quanh mức 0 sau chi phí từ 2010.
+
+## Câu hỏi ôn tập (Review questions)
+
+1. Với 500 giá đóng cửa và cửa sổ 20 ngày, bạn được bao nhiêu ví dụ, và vì sao chia bằng xáo ngẫu nhiên lại rủi ro? *(Xem Mục 1)*
+2. 40 số trong một ảnh chụp DeepLOB là gì, và con số 100 là gì? *(Xem Mục 2)*
+3. Vì sao bộ lọc đầu tiên của DeepLOB dùng bước nhảy 2? *(Xem Mục 2)*
+4. Nếu mạng hồi quy nhân bộ nhớ với 0,9 mỗi bước, sau 50 bước còn bao nhiêu của ngày 1? *(Xem Mục 3)*
+5. Cổng quên làm gì, và vì sao nó giúp ích? *(Xem Mục 3)*
+6. Vì sao Sharpe là mục tiêu huấn luyện khác với sai số bình phương? *(Xem Mục 4)*
+7. Self-attention chấm điểm bao nhiêu cặp với cửa sổ 1.000 bước? *(Xem Mục 5)*
+8. Một mô hình đoán đúng chiều 52,3% trên 894 ngày lợi suất vốn là nhiễu. Bạn kiểm tra gì tiếp theo? *(Xem Mục 6)*
+
+## Đi sâu hơn (Go deeper)
+
+- **[DeepLOB (Zhang, Zohren & Roberts)](https://arxiv.org/abs/1808.03668)**: kiến trúc và cả hai bộ dữ liệu, kèm phân tích độ nhạy cho thấy mức nào của sổ lệnh quan trọng.
+- **[Enhancing Time Series Momentum Strategies Using Deep Neural Networks (Lim, Zohren & Roberts)](https://arxiv.org/abs/1904.04912)**: Deep Momentum Network, với loss Sharpe và các thí nghiệm về chi phí.
+- **[Are Transformers Effective for Time Series Forecasting? (Zeng và cộng sự)](https://arxiv.org/abs/2205.13504)**: bài báo đứng sau cái thang đối chứng.
+- **[51Labs — Machine Learning for Financial Market](https://51labs.vn/vi/courses)**: chương trình mà module deep learning bao gồm CNN, mô hình hồi quy, LSTM, Transformer và SharpeLoss.
+
+</Vi>
